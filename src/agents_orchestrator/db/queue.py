@@ -30,6 +30,8 @@ CHECK_FINAL = frozenset({"passed", "failed", "cancelled"})
 # First key of the two-int advisory lock, so the per-session claim lock cannot collide with
 # other advisory locks (the singleton lock) taken with a different namespace.
 _CLAIM_LOCK_NAMESPACE = 0x6F726331  # "orc1"
+# Per wrapper command id: serialises the two writers of a command message's turn link (D10).
+_COMMAND_LINK_LOCK_NAMESPACE = 0x6F726332  # "orc2"
 _SCAN_BATCH = 100
 
 
@@ -38,12 +40,13 @@ class Claim:
     message_id: int
     session_id: uuid.UUID
     text: str
+    kind: str
     attempts: int
     target_agent_id: uuid.UUID | None
     agent_id: uuid.UUID
     agent_url: str | None
     wrapper_session_id: str
-    free_since: datetime
+    free_since: datetime | None
     dispatched_at: datetime
     previous_dispatched_at: datetime | None
     sender_slug: str | None
@@ -54,7 +57,7 @@ class Pick:
     agent_id: uuid.UUID
     url: str | None
     wrapper_session_id: str
-    free_since: datetime
+    free_since: datetime | None
     last_dispatched_at: datetime | None
 
 
@@ -63,6 +66,7 @@ class Verifying:
     message_id: int
     session_id: uuid.UUID
     text: str
+    kind: str
     attempts: int
     error: str | None
     agent_id: uuid.UUID | None
@@ -133,11 +137,13 @@ async def enqueue_message(
     text: str,
     target_agent_id: uuid.UUID | None = None,
     *,
+    kind: str = "turn",
     sender_session_id: uuid.UUID | None = None,
     sender_slug: str | None = None,
     hop: int = 0,
 ) -> int:
-    """Queue a message; a session message carries its sender and hop (D8).
+    """Queue a message of `kind` 'turn' or 'command' (D1); a session message carries its sender
+    and hop (D8).
 
     A message with a sender is untargeted, so the leader routing delivers it to whoever leads
     the target session at claim time.
@@ -145,9 +151,9 @@ async def enqueue_message(
     async with conn.transaction():
         row = await _one(
             conn,
-            "INSERT INTO messages (session_id, text, target_agent_id, sender_session_id,"
-            " sender_slug, hop) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
-            (session_id, text, target_agent_id, sender_session_id, sender_slug, hop),
+            "INSERT INTO messages (session_id, text, target_agent_id, kind, sender_session_id,"
+            " sender_slug, hop) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            (session_id, text, target_agent_id, kind, sender_session_id, sender_slug, hop),
         )
         assert row is not None
         await notify(conn, "message_queued", {"session_id": str(session_id)})
@@ -278,17 +284,39 @@ LIMIT 1
 FOR UPDATE OF a SKIP LOCKED
 """
 
+# A command message (D10) goes to the wrapper's command queue, which takes it busy or idle: no
+# `state = 'idle'` and no `free_since` predicate, no lock (it writes no reservation). Untargeted
+# with no leader, an idle agent is preferred, then the one free the longest (the leadership
+# pass's free-longest order).
+_PICK_COMMAND = """
+SELECT a.id AS agent_id, a.url, a.wrapper_session_id, s.free_since, a.last_dispatched_at
+FROM agents a JOIN agent_status s ON s.agent_id = a.id
+WHERE a.session_id = %(session_id)s
+  AND a.ready
+  AND a.gone_at IS NULL
+  AND a.wrapper_session_id IS NOT NULL
+  AND (%(target)s::uuid IS NULL OR a.id = %(target)s::uuid)
+ORDER BY (s.state = 'idle') IS NOT TRUE, s.free_since ASC NULLS LAST, a.id
+LIMIT 1
+"""
+
 
 async def _pick_agent(
-    conn: psycopg.AsyncConnection, session_id: uuid.UUID, target_agent_id: uuid.UUID | None
+    conn: psycopg.AsyncConnection,
+    session_id: uuid.UUID,
+    target_agent_id: uuid.UUID | None,
+    *,
+    command: bool = False,
 ) -> Pick | None:
-    """The agent free the longest whose free_since is newer than its last dispatch, locked.
+    """For a turn, the agent free the longest whose free_since is newer than its last dispatch,
+    locked; for a command, any ready agent with a wrapper session (`_PICK_COMMAND`).
 
-    Reading `agents.last_dispatched_at` (a column the claim writes) is what makes a concurrent
-    READ COMMITTED claim recheck the predicate on the new row version instead of trusting its
-    snapshot (D23 c).
+    Reading `agents.last_dispatched_at` (a column the turn claim writes) is what makes a
+    concurrent READ COMMITTED claim recheck the predicate on the new row version instead of
+    trusting its snapshot (D23 c).
     """
-    row = await _one(conn, _PICK, {"session_id": session_id, "target": target_agent_id})
+    query = _PICK_COMMAND if command else _PICK
+    row = await _one(conn, query, {"session_id": session_id, "target": target_agent_id})
     return Pick(**row) if row is not None else None
 
 
@@ -332,20 +360,43 @@ async def _handover_pending(conn: psycopg.AsyncConnection, session_id: uuid.UUID
     return bool(row and row["pending"])
 
 
+async def _command_in_flight(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> int | None:
+    """Id of the session's oldest `dispatching` command message, if any."""
+    row = await _one(
+        conn,
+        "SELECT min(id) AS id FROM messages"
+        " WHERE session_id = %s AND kind = 'command' AND status = 'dispatching'",
+        (session_id,),
+    )
+    return row["id"] if row is not None else None
+
+
 async def _claim_in_session(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Claim | None:
-    """Scan one session's queued messages in id order; the caller holds the session lock."""
+    """Scan one session's queued messages in id order; the caller holds the session lock.
+
+    Untargeted messages are held two ways. `held` (an untargeted head in backoff, a gone leader,
+    a leader that cannot take anything) holds every later untargeted message. `prose_held` (a
+    busy leader, a pending handover) holds untargeted prose only, and `prose_stopped` (no free
+    agent and no leader) holds all later prose: a command overtakes both, since the wrapper
+    queues it busy or idle (D10).
+    """
     leader = await _one(
         conn, "SELECT agent_id FROM session_leaders WHERE session_id = %s", (session_id,)
     )
     leader_id = leader["agent_id"] if leader is not None else None
+    # Per-session order (D10): nothing after a command still in flight is claimed, so the
+    # wrapper receives a session's commands, and a command and later prose, in id order.
+    fence = await _command_in_flight(conn, session_id)
+    held = False
     # An untargeted head waits on the leader: later untargeted messages wait too. A leader whose
     # handover is pending and possible holds them from the start (D16): the pass moves it first.
-    held = leader_id is not None and await _handover_pending(conn, session_id)
+    prose_held = leader_id is not None and await _handover_pending(conn, session_id)
+    prose_stopped = False
     after = 0
     while True:
         rows = await _all(
             conn,
-            "SELECT id, target_agent_id,"
+            "SELECT id, target_agent_id, kind,"
             " (not_before IS NOT NULL AND not_before > now()) AS waiting"
             " FROM messages WHERE session_id = %s AND status = 'queued' AND id > %s"
             " ORDER BY id LIMIT %s",
@@ -355,17 +406,24 @@ async def _claim_in_session(conn: psycopg.AsyncConnection, session_id: uuid.UUID
             return None
         for row in rows:
             after = row["id"]
+            if fence is not None and row["id"] > fence:
+                return None
+            command = row["kind"] == "command"
             target = row["target_agent_id"]
+            if target is None and row["waiting"]:
+                if leader_id is None:
+                    return None  # an untargeted head in backoff holds its session (FIFO, D4)
+                held = True  # leader routing: hold untargeted, targeted messages still flow
+                continue
+            if prose_stopped and not command:
+                continue
             if target is None:
-                if row["waiting"]:
-                    if leader_id is None:
-                        return None  # an untargeted head in backoff holds its session (FIFO, D4)
-                    held = True  # leader routing: hold untargeted, targeted messages still flow
-                    continue
                 if leader_id is not None:
                     # Leader-only routing: an untargeted message is the leader's. A gone leader
                     # does not fail it; it waits for the leadership pass to elect a successor.
-                    if held or await _target_gone(conn, session_id, leader_id):
+                    if held or (prose_held and not command):
+                        continue
+                    if await _target_gone(conn, session_id, leader_id):
                         held = True
                         continue
                     target = leader_id
@@ -382,26 +440,35 @@ async def _claim_in_session(conn: psycopg.AsyncConnection, session_id: uuid.UUID
                     continue
             if not await _lock_queued(conn, row["id"]):
                 continue
-            pick = await _pick_agent(conn, session_id, target)
+            pick = await _pick_agent(conn, session_id, target, command=command)
             if pick is None:
                 if row["target_agent_id"] is None:
-                    if leader_id is None:
-                        return None  # no free agent in this session: leave it queued
-                    held = True  # the leader is busy: the untargeted FIFO holds, targeted flow
-                    continue
+                    if command:
+                        if leader_id is None:
+                            return None  # no ready agent in this session: leave it queued
+                        held = True  # the leader cannot take a command either
+                    elif leader_id is None:
+                        prose_stopped = True  # no free agent: prose waits, commands still flow
+                    else:
+                        prose_held = True  # the leader is busy: untargeted prose holds
                 continue  # a busy or booting target does not block later messages (D23 d)
-            return await _dispatch(conn, row["id"], pick)
+            return await _dispatch(conn, row["id"], pick, command=command)
 
 
-async def _dispatch(conn: psycopg.AsyncConnection, message_id: int, pick: Pick) -> Claim:
-    await conn.execute(
-        "UPDATE agents SET last_dispatched_at = now() WHERE id = %s", (pick.agent_id,)
-    )
+async def _dispatch(
+    conn: psycopg.AsyncConnection, message_id: int, pick: Pick, *, command: bool
+) -> Claim:
+    # A command takes no turn slot: it neither needs nor writes the reservation (D10).
+    if not command:
+        await conn.execute(
+            "UPDATE agents SET last_dispatched_at = now() WHERE id = %s", (pick.agent_id,)
+        )
     msg = await _one(
         conn,
         "UPDATE messages SET status = 'dispatching', agent_id = %s, dispatched_at = now(),"
         " heartbeat_at = now() WHERE id = %s AND status = 'queued'"
-        " RETURNING id, session_id, text, attempts, target_agent_id, dispatched_at, sender_slug",
+        " RETURNING id, session_id, text, kind, attempts, target_agent_id, dispatched_at,"
+        " sender_slug",
         (pick.agent_id, message_id),
     )
     assert msg is not None  # the row is locked and was queued
@@ -410,6 +477,7 @@ async def _dispatch(conn: psycopg.AsyncConnection, message_id: int, pick: Pick) 
         message_id=msg["id"],
         session_id=msg["session_id"],
         text=msg["text"],
+        kind=msg["kind"],
         attempts=msg["attempts"],
         target_agent_id=msg["target_agent_id"],
         agent_id=pick.agent_id,
@@ -484,6 +552,74 @@ async def mark_sent(conn: psycopg.AsyncConnection, id: int, turn_id: str) -> boo
         "UPDATE messages SET status = 'sent', turn_id = %(turn_id)s, error = NULL"
         " WHERE id = %(id)s AND status = 'dispatching' RETURNING session_id",
         {"id": id, "turn_id": turn_id},
+    )
+    return row is not None
+
+
+async def mark_sent_command(
+    conn: psycopg.AsyncConnection, id: int, wrapper_command_id: str
+) -> bool:
+    """202 on a command message: the wrapper queued it as `wrapper_command_id` (D10).
+
+    When the ingester already stored this command's `command_completed` with `result = 'turn'`
+    (the event beat this 202), the same guarded update links the promoted turn (D10 hop guard).
+    The command's link lock is taken in its own statement first, so the UPDATE's snapshot sees
+    an event whose ingester transaction committed while this one waited for the lock.
+    """
+    async with conn.transaction():
+        await _lock_command_link(conn, wrapper_command_id)
+        row = await _transition(
+            conn,
+            "UPDATE messages SET status = 'sent', wrapper_command_id = %(cmd)s, error = NULL,"
+            " turn_id = (SELECT NULLIF(e.data -> 'record' ->> 'turn_id', '') FROM events e"
+            " WHERE e.agent_id = messages.agent_id AND e.type = 'command_completed'"
+            " AND e.data -> 'record' ->> 'id' = %(cmd)s"
+            " AND e.data -> 'record' ->> 'result' = 'turn' ORDER BY e.id LIMIT 1)"
+            " WHERE id = %(id)s AND status = 'dispatching' AND kind = 'command'"
+            " RETURNING session_id",
+            {"id": id, "cmd": wrapper_command_id},
+        )
+    return row is not None
+
+
+async def _lock_command_link(conn: psycopg.AsyncConnection, wrapper_command_id: str) -> None:
+    """Until the transaction ends, hold the lock both writers of a command's turn link take
+    first (D10 hop guard): whichever commits second sees the other's write."""
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock(%s, hashtext(%s::text))",
+        (_COMMAND_LINK_LOCK_NAMESPACE, wrapper_command_id),
+    )
+
+
+async def link_command_turn(
+    conn: psycopg.AsyncConnection, wrapper_command_id: str, turn_id: str
+) -> bool:
+    """The one writer of "sent command, no turn -> linked turn" (D10 hop guard): a command that
+    the wrapper promoted to a turn keeps that turn id on its message, so `turn_hop` finds it and
+    a send from the promoted turn counts the command's hop plus one. Never overwrites. Takes
+    the command's link lock first, so a `mark_sent_command` in flight commits before this
+    UPDATE reads the row."""
+    async with conn.transaction():
+        await _lock_command_link(conn, wrapper_command_id)
+        row = await _transition(
+            conn,
+            "UPDATE messages SET turn_id = %(turn_id)s"
+            " WHERE kind = 'command' AND status = 'sent' AND wrapper_command_id = %(cmd)s"
+            " AND turn_id IS NULL RETURNING session_id",
+            {"turn_id": turn_id, "cmd": wrapper_command_id},
+        )
+    return row is not None
+
+
+async def requeue_later(conn: psycopg.AsyncConnection, id: int, seconds: float) -> bool:
+    """Not now (a booting or dead wrapper, a full command queue): back to queued with
+    `not_before = now() + seconds`, no attempt counted (D10)."""
+    row = await _transition(
+        conn,
+        "UPDATE messages SET status = 'queued', heartbeat_at = NULL,"
+        " not_before = now() + make_interval(secs => %(secs)s::float8)"
+        " WHERE id = %(id)s AND status = 'dispatching' RETURNING session_id",
+        {"id": id, "secs": seconds},
     )
     return row is not None
 
@@ -584,7 +720,8 @@ async def mark_verifying(conn: psycopg.AsyncConnection, id: int, reason: str) ->
 async def list_verifying(conn: psycopg.AsyncConnection, limit: int) -> list[Verifying]:
     rows = await _all(
         conn,
-        "SELECT m.id AS message_id, m.session_id, m.text, m.attempts, m.error, m.agent_id,"
+        "SELECT m.id AS message_id, m.session_id, m.text, m.kind, m.attempts, m.error,"
+        " m.agent_id,"
         " a.url AS agent_url, a.wrapper_session_id, m.dispatched_at, m.ambiguous_at,"
         " extract(epoch from now() - m.ambiguous_at)::float8 AS age_seconds"
         " FROM messages m LEFT JOIN agents a ON a.id = m.agent_id"

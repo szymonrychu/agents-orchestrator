@@ -11,6 +11,8 @@ import httpx
 from agents_orchestrator.wrapper.models import (
     Ambiguous,
     Busy,
+    CommandAccepted,
+    CommandOutcome,
     ConfigError,
     Envelope,
     Gone,
@@ -34,18 +36,50 @@ NoteOutcome = Literal["ok", "disabled", "failed"]
 DEFAULT_TIMEOUT = 30.0
 
 
-def _error_parts(resp: httpx.Response) -> tuple[str, str]:
+def _envelope(resp: httpx.Response) -> tuple[str | None, str]:
+    """(code, message) of the wrapper's error envelope; code None when it sent none."""
     try:
         err = resp.json()["error"]
         return str(err["code"]), str(err.get("message", ""))
     except (ValueError, KeyError, TypeError):
-        return f"http_{resp.status_code}", resp.text[:200]
+        return None, resp.text[:200]
+
+
+def _error_parts(resp: httpx.Response) -> tuple[str, str]:
+    code, message = _envelope(resp)
+    return code or f"http_{resp.status_code}", message
 
 
 def _raise_for_error(resp: httpx.Response) -> None:
     if resp.status_code >= 300:
         code, message = _error_parts(resp)
         raise WrapperError(resp.status_code, code, message)
+
+
+def _reason(resp: httpx.Response) -> str:
+    code, message = _error_parts(resp)
+    return f"{resp.status_code} {code}: {message}"
+
+
+def _map_refusal(
+    resp: httpx.Response,
+) -> Busy | Gone | ConfigError | Rejected | Unavailable | Ambiguous:
+    """A non-2xx answer to a send: what it means and whether it may be retried."""
+    status = resp.status_code
+    code = _envelope(resp)[0] or ""
+    reason = _reason(resp)
+    if status == 409:
+        return Busy(code, reason)
+    if status in (404, 410):
+        return Gone(reason)
+    if status == 401:
+        return ConfigError(reason)
+    if status in (500, 502):
+        # the wrapper may have recorded the request before failing: never resend blindly
+        return Ambiguous(reason)
+    if status >= 500:
+        return Unavailable(reason)
+    return Rejected(code, reason)
 
 
 class WrapperClient:
@@ -140,47 +174,36 @@ class WrapperClient:
 
     # turns
 
+    async def _send(
+        self, path: str, body: dict[str, Any]
+    ) -> httpx.Response | Unavailable | Ambiguous:
+        """POST under the send timeout; a transport failure maps to whether it may have landed."""
+        try:
+            return await self._http.post(
+                self._url(path), json=body, headers=self._headers, timeout=self.send_timeout
+            )
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
+            return Unavailable(f"{type(exc).__name__}: {exc}")
+        except httpx.HTTPError as exc:  # read timeout, reset, write failure: may be delivered
+            return Ambiguous(f"{type(exc).__name__}: {exc}")
+
     async def submit_turn(
         self, session_id: str, text: str, metadata: dict[str, Any] | None = None
     ) -> SubmitOutcome:
         body: dict[str, Any] = {"text": text}
         if metadata is not None:
             body["metadata"] = metadata
-        try:
-            resp = await self._http.post(
-                self._url(f"/sessions/{session_id}/turns"),
-                json=body,
-                headers=self._headers,
-                timeout=self.send_timeout,
-            )
-        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
-            return Unavailable(f"{type(exc).__name__}: {exc}")
-        except httpx.HTTPError as exc:  # read timeout, reset, write failure: may be delivered
-            return Ambiguous(f"{type(exc).__name__}: {exc}")
-        return self._map_submit(resp)
-
-    @staticmethod
-    def _map_submit(resp: httpx.Response) -> SubmitOutcome:
-        status = resp.status_code
-        if 200 <= status < 300:
+        resp = await self._send(f"/sessions/{session_id}/turns", body)
+        if not isinstance(resp, httpx.Response):
+            return resp
+        if 200 <= resp.status_code < 300:
             try:
                 return TurnAccepted(str(resp.json()["turn_id"]))
             except (ValueError, KeyError, TypeError):
-                return Ambiguous(f"{status} without a turn_id")
-        code, message = _error_parts(resp)
-        reason = f"{status} {code}: {message}"
-        if status == 409:
-            return Busy()
-        if status in (404, 410):
-            return Gone(reason)
-        if status in (401, 403):
-            return ConfigError(reason)
-        if status in (500, 502):
-            # the wrapper may have recorded the turn before failing: never resend blindly
-            return Ambiguous(reason)
-        if status >= 500:
-            return Unavailable(reason)
-        return Rejected(reason)
+                return Ambiguous(f"{resp.status_code} without a turn_id")
+        if resp.status_code == 403:
+            return ConfigError(_reason(resp))
+        return _map_refusal(resp)
 
     async def list_turns(self, session_id: str) -> list[TurnSummary]:
         resp = await self._request("GET", f"/sessions/{session_id}/turns")
@@ -195,9 +218,24 @@ class WrapperClient:
     async def interrupt(self, session_id: str) -> dict[str, Any]:
         return (await self._request("POST", f"/sessions/{session_id}/interrupt")).json()
 
-    async def command(self, session_id: str, name: str) -> dict[str, Any]:
-        resp = await self._request("POST", f"/sessions/{session_id}/commands", json={"name": name})
-        return resp.json()
+    async def command(self, session_id: str, name: str, args: str = "") -> CommandOutcome:
+        """Queue the slash command `/name args` on the session (design D10).
+
+        202 is CommandAccepted with the wrapper's record; 409 (booting, dead) and 429
+        (command_queue_full) are Busy; 403 and 422 Rejected with the wrapper's code. Never raises.
+        """
+        resp = await self._send(f"/sessions/{session_id}/commands", {"name": name, "args": args})
+        if not isinstance(resp, httpx.Response):
+            return resp
+        if 200 <= resp.status_code < 300:
+            try:
+                record = resp.json()
+                return CommandAccepted(str(record["id"]), record)
+            except (ValueError, KeyError, TypeError):
+                return Ambiguous(f"{resp.status_code} without a command id")
+        if resp.status_code == 429:
+            return Busy(_envelope(resp)[0] or "", _reason(resp))
+        return _map_refusal(resp)
 
     async def post_note(
         self,

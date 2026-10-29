@@ -212,14 +212,27 @@ class TurnView(BaseModel):
     usage: dict[str, Any] | None = None
 
 
+class CommandOutcomeView(BaseModel):
+    """A command message's outcome, read from the agent's newest `command_completed` or
+    `command_failed` event for its `wrapper_command_id` (D19); `at` is that event's `ts`."""
+
+    state: Literal["completed", "failed", "cancelled"]
+    result: str | None
+    error: str | None
+    turn_id: str | None
+    at: datetime
+
+
 class MessageView(BaseModel):
     id: int
     session_id: uuid.UUID
     text: str
+    kind: Literal["turn", "command"]
     status: MessageStatus
     target_agent_id: uuid.UUID | None
     agent_id: uuid.UUID | None
     turn_id: str | None
+    wrapper_command_id: str | None
     attempts: int
     max_attempts: int
     next_attempt_at: datetime | None
@@ -227,6 +240,7 @@ class MessageView(BaseModel):
     created_at: datetime
     dispatched_at: datetime | None
     turn: TurnView | None
+    command: CommandOutcomeView | None  # null for a turn and for a command with no outcome yet
 
 
 class CommandAccepted(BaseModel):

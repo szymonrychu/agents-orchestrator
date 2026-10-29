@@ -28,9 +28,9 @@ dev = [
     "pytest-asyncio",
     "testcontainers[postgres]",
     "ruff",
-    "claude-code-wrapper @ git+https://github.com/szymonrychu/claude-code-wrapper@5fd93ff52236790a7131755141d328b25826213a",
+    "claude-code-wrapper @ git+https://github.com/szymonrychu/claude-code-wrapper@cdc786ac45ece51edc2300907c9579b2ed9fdc4b",
     "moto[server]>=5.2.4",
-    "any-mcp-tatara-orchestrator @ git+https://github.com/szymonrychu/any-mcp-tatara-plugins@v0.4.0#subdirectory=orchestration/orchestrator",
+    "any-mcp-tatara-orchestrator @ git+https://github.com/szymonrychu/any-mcp-tatara-plugins@v0.5.1#subdirectory=orchestration/orchestrator",
 ]
 
 [tool.uv]

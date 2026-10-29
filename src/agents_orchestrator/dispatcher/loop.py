@@ -1,7 +1,9 @@
 """Dispatcher loop: leadership, claim, send, map the outcome, run commands, verify stale rows.
 
 The dispatcher never writes agent_status (free_since moves only through the ingester) and never
-re-sends an ambiguous or stale turn: those go to `verifying` and the verifier decides (D24).
+re-sends an ambiguous or stale turn: those go to `verifying` and the verifier decides (D24). A
+kind=command message goes to the wrapper's command queue instead of a turn, unframed; an
+ambiguous command send fails `ambiguous` at once (D10).
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from typing import Any
 import httpx
 from psycopg_pool import AsyncConnectionPool
 
+from agents_orchestrator import slash
 from agents_orchestrator.db import leadership, queue
 from agents_orchestrator.db.pool import listen
 from agents_orchestrator.dispatcher import hive
@@ -25,6 +28,7 @@ from agents_orchestrator.wrapper.client import WrapperClient
 from agents_orchestrator.wrapper.models import (
     Ambiguous,
     Busy,
+    CommandAccepted,
     ConfigError,
     Gone,
     Rejected,
@@ -211,12 +215,17 @@ class Dispatcher:
             async with self.pool.connection() as conn:
                 await queue.heartbeat_dispatching(conn, message_id)
 
-    async def _send(self, claim: queue.Claim) -> None:
-        s = self.settings
-        if not claim.agent_url:
-            outcome: Any = Unavailable("agent has no url")
-        else:
-            client = self._client(claim.session_id, claim.agent_url)
+    async def _post(self, claim: queue.Claim, client: WrapperClient) -> Any:
+        """Send the claim: a command to the wrapper's command queue, unframed, with the name and
+        args `slash.parse` reads from the stored text (a trailing run marker excluded, D2), or a
+        turn, framed for a session message. Heartbeats the row while the send is in flight."""
+        heartbeat = asyncio.create_task(self._heartbeat(claim.message_id))
+        try:
+            if claim.kind == "command":
+                parsed = slash.parse(claim.text)
+                if parsed is None:  # the api stores kind=command only for a parsed text
+                    return Rejected("invalid_command", "the stored text is no slash command")
+                return await client.command(claim.wrapper_session_id, *parsed)
             text = claim.text
             metadata: dict[str, Any] = {
                 "orch_message_id": claim.message_id,
@@ -225,47 +234,81 @@ class Dispatcher:
             if claim.sender_slug is not None:
                 text = frame(claim.text, claim.sender_slug, claim.message_id)
                 metadata["orch_sender_session"] = claim.sender_slug
-            heartbeat = asyncio.create_task(self._heartbeat(claim.message_id))
-            try:
-                outcome = await client.submit_turn(claim.wrapper_session_id, text, metadata)
-            finally:
-                heartbeat.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await heartbeat
+            return await client.submit_turn(claim.wrapper_session_id, text, metadata)
+        finally:
+            heartbeat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat
 
+    async def _send(self, claim: queue.Claim) -> None:
+        if not claim.agent_url:
+            outcome: Any = Unavailable("agent has no url")
+        else:
+            outcome = await self._post(claim, self._client(claim.session_id, claim.agent_url))
         async with self.pool.connection() as conn:
-            mid = claim.message_id
-            if isinstance(outcome, TurnAccepted):
-                await queue.mark_sent(conn, mid, outcome.turn_id)
-                return
-            if isinstance(outcome, Ambiguous):
-                # The turn may be running: keep the reservation, never re-send here.
-                await queue.mark_verifying(conn, mid, "ambiguous")
-                return
-            await queue.release_agent(
-                conn, claim.agent_id, claim.previous_dispatched_at, claimed_at=claim.dispatched_at
-            )
-            if isinstance(outcome, Busy):
-                await queue.requeue(conn, mid)
-            elif isinstance(outcome, ConfigError):
-                await queue.fail_message(conn, mid, "config_error")
-            elif isinstance(outcome, Rejected):
-                await queue.fail_message(conn, mid, "rejected")
-            elif isinstance(outcome, Unavailable | Gone):
-                max_attempts = await session_max_attempts(conn, claim.session_id)
-                error = "session_gone" if isinstance(outcome, Gone) else "unavailable"
-                await queue.record_failure(
-                    conn,
-                    mid,
-                    error,
-                    max_attempts,
-                    s.retry_backoff_base_seconds,
-                    s.retry_backoff_max_seconds,
-                )
-                if isinstance(outcome, Gone):
-                    await queue.enqueue_command(conn, claim.agent_id, "rebootstrap")
-            else:  # pragma: no cover - SubmitOutcome is exhaustive
-                log.error("unmapped outcome %r for message %s", outcome, mid)
+            if claim.kind == "command":
+                await self._command_outcome(conn, claim, outcome)
+            else:
+                await self._turn_outcome(conn, claim, outcome)
+
+    async def _turn_outcome(self, conn: Any, claim: queue.Claim, outcome: Any) -> None:
+        mid = claim.message_id
+        if isinstance(outcome, TurnAccepted):
+            await queue.mark_sent(conn, mid, outcome.turn_id)
+            return
+        if isinstance(outcome, Ambiguous):
+            # The turn may be running: keep the reservation, never re-send here.
+            await queue.mark_verifying(conn, mid, "ambiguous")
+            return
+        await queue.release_agent(
+            conn, claim.agent_id, claim.previous_dispatched_at, claimed_at=claim.dispatched_at
+        )
+        if isinstance(outcome, Busy):
+            await queue.requeue(conn, mid)
+        elif isinstance(outcome, ConfigError):
+            await queue.fail_message(conn, mid, "config_error")
+        elif isinstance(outcome, Rejected):
+            await queue.fail_message(conn, mid, "rejected")
+        elif isinstance(outcome, Unavailable | Gone):
+            await self._count_failure(conn, claim, outcome)
+        else:  # pragma: no cover - SubmitOutcome is exhaustive
+            log.error("unmapped outcome %r for message %s", outcome, mid)
+
+    async def _command_outcome(self, conn: Any, claim: queue.Claim, outcome: Any) -> None:
+        """Map a command send (D10). Nothing was reserved, so nothing is released."""
+        mid = claim.message_id
+        if isinstance(outcome, CommandAccepted):
+            await queue.mark_sent_command(conn, mid, outcome.command_id)
+        elif isinstance(outcome, Busy):
+            # booting, dead or a full command queue: an immediate requeue would spin on it
+            await queue.requeue_later(conn, mid, self.settings.retry_backoff_base_seconds)
+        elif isinstance(outcome, Ambiguous):
+            # The wrapper may have queued it, and no turn carries its id for the verifier to
+            # find: only the user's Retry resends it.
+            await queue.fail_message(conn, mid, "ambiguous")
+        elif isinstance(outcome, ConfigError):
+            await queue.fail_message(conn, mid, "config_error")
+        elif isinstance(outcome, Rejected):
+            await queue.fail_message(conn, mid, outcome.code or "rejected")
+        elif isinstance(outcome, Unavailable | Gone):
+            await self._count_failure(conn, claim, outcome)
+        else:  # pragma: no cover - CommandOutcome is exhaustive
+            log.error("unmapped outcome %r for message %s", outcome, mid)
+
+    async def _count_failure(self, conn: Any, claim: queue.Claim, outcome: Any) -> None:
+        """Nothing was delivered: count an attempt with backoff; a gone session rebootstraps."""
+        s = self.settings
+        gone = isinstance(outcome, Gone)
+        await queue.record_failure(
+            conn,
+            claim.message_id,
+            "session_gone" if gone else "unavailable",
+            await session_max_attempts(conn, claim.session_id),
+            s.retry_backoff_base_seconds,
+            s.retry_backoff_max_seconds,
+        )
+        if gone:
+            await queue.enqueue_command(conn, claim.agent_id, "rebootstrap")
 
     # ------------------------------------------------------------------ commands
 
@@ -283,11 +326,13 @@ class Dispatcher:
         if not cmd.agent_url or not cmd.wrapper_session_id:
             return "failed", {"error": "agent has no session"}
         client = self._client(cmd.session_id, cmd.agent_url)
-        try:
-            if cmd.kind == "interrupt":
+        if cmd.kind == "interrupt":
+            try:
                 response = await client.interrupt(cmd.wrapper_session_id)
-            else:
-                response = await client.command(cmd.wrapper_session_id, cmd.kind)
-        except Exception as exc:
-            return "failed", {"error": f"{type(exc).__name__}: {exc}"}
-        return "done", {"response": response}
+            except Exception as exc:
+                return "failed", {"error": f"{type(exc).__name__}: {exc}"}
+            return "done", {"response": response}
+        outcome = await client.command(cmd.wrapper_session_id, cmd.kind)
+        if isinstance(outcome, CommandAccepted):
+            return "done", {"response": outcome.record}
+        return "failed", {"error": outcome.reason}

@@ -39,7 +39,7 @@ from typing import Any
 
 from psycopg_pool import AsyncConnectionPool
 
-from agents_orchestrator.db import events, leadership, status
+from agents_orchestrator.db import events, leadership, queue, status
 from agents_orchestrator.db.pool import notify
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.tokens import tokens_for
@@ -265,6 +265,16 @@ class _AgentStream:
                 )
                 await status.clear_current_turn(conn, ref.agent_id, turn_id)
                 await status.notify_status(conn, ref.session_id, ref.agent_id)
+        elif env.type == "command_completed":
+            record = data.get("record")
+            # a prompt command promoted to a turn: its message keeps the turn id (D10)
+            if (
+                isinstance(record, dict)
+                and record.get("result") == "turn"
+                and record.get("id")
+                and record.get("turn_id")
+            ):
+                await queue.link_command_turn(conn, str(record["id"]), str(record["turn_id"]))
         # user_message and every other type: stored as an events row only
         return _Projected()
 

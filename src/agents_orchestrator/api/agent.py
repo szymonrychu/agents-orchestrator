@@ -17,6 +17,7 @@ from xml.sax.saxutils import escape
 from fastapi import APIRouter, Depends, Header, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from agents_orchestrator import slash
 from agents_orchestrator.api import schemas
 from agents_orchestrator.api import sessions as sessions_api
 from agents_orchestrator.api.errors import ApiError
@@ -440,8 +441,16 @@ async def session_send(
             raise ApiError(
                 409, "target_queue_full", f"session {slug} holds {cap} queued session messages"
             )
+        # Only a superleader's slash text runs as a command; any other sender's stays a framed turn.
+        kind = "command" if own.spec.session_messaging and slash.parse(body.text) else "turn"
         message_id = await q.enqueue_message(
-            conn, target.id, body.text, sender_session_id=own.id, sender_slug=own.slug, hop=hop
+            conn,
+            target.id,
+            body.text,
+            sender_session_id=own.id,
+            sender_slug=own.slug,
+            hop=hop,
+            kind=kind,
         )
     return SessionMessageQueued(message_id=message_id)
 

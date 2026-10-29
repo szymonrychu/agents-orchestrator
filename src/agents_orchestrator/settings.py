@@ -159,7 +159,7 @@ class Settings(BaseSettings):
     any_mcp_repo: str = "https://github.com/szymonrychu/any-mcp"
     any_mcp_ref: str = "v0.5.0"
     any_mcp_plugins_repo: str = "https://github.com/szymonrychu/any-mcp-tatara-plugins"
-    any_mcp_plugins_ref: str = "v0.4.0"
+    any_mcp_plugins_ref: str = "v0.5.1"
     on_start_timeout_seconds: float = 600
 
     cache_s3_endpoint: str = ""

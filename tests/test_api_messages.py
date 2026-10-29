@@ -11,6 +11,7 @@ from factories import (
     insert_agent,
     insert_check,
     insert_command,
+    insert_event,
     insert_message,
     insert_session,
     insert_turn,
@@ -51,6 +52,188 @@ async def test_post_message_queues_202(http, pool):
     assert r.status_code == 202
     got = (await http.get(f"/api/v1/messages/{r.json()['message_id']}")).json()
     assert got["target_agent_id"] == str(ag["id"])
+
+
+async def _stored(pool, message_id: int) -> tuple:
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT text, kind, wrapper_command_id FROM messages WHERE id = %s", (message_id,)
+        )
+        return await cur.fetchone()
+
+
+async def test_slash_text_enqueues_command_kind(http, pool):
+    cl = await insert_session(pool)
+    url = f"/api/v1/sessions/{cl['id']}/messages"
+    for text in ("/reload-plugins", "  /compact keep the plan\nand the tests ", "/"):
+        r = await http.post(url, json={"text": text})
+        assert r.status_code == 202, r.text
+        assert await _stored(pool, r.json()["message_id"]) == (text, "command", None)
+
+
+async def test_message_view_has_kind(http, pool):
+    cl = await insert_session(pool)
+    url = f"/api/v1/sessions/{cl['id']}/messages"
+    kinds = {}
+    for text in ("please reload the plugins", "/etc/hosts is a path", "/compact"):
+        r = await http.post(url, json={"text": text})
+        assert r.status_code == 202, r.text
+        got = (await http.get(f"/api/v1/messages/{r.json()['message_id']}")).json()
+        assert got["text"] == text
+        assert got["wrapper_command_id"] is None
+        kinds[text] = got["kind"]
+    assert kinds == {
+        "please reload the plugins": "turn",
+        "/etc/hosts is a path": "turn",
+        "/compact": "command",
+    }
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE messages SET wrapper_command_id = 'cmd_1' WHERE text = '/compact'"
+        )
+    listed = (await http.get(url)).json()
+    assert {(m["text"], m["kind"], m["wrapper_command_id"]) for m in listed} == {
+        ("please reload the plugins", "turn", None),
+        ("/etc/hosts is a path", "turn", None),
+        ("/compact", "command", "cmd_1"),
+    }
+
+
+async def _sent_command(pool, session_id, agent_id, wrapper_command_id: str) -> int:
+    """A command message the dispatcher marked sent as `wrapper_command_id` on `agent_id`."""
+    m = await insert_message(pool, session_id, text="/compact", status="sent", agent_id=agent_id)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE messages SET kind = 'command', wrapper_command_id = %s WHERE id = %s",
+            (wrapper_command_id, m["id"]),
+        )
+    return m["id"]
+
+
+async def _command_event(pool, session_id, agent_id, type: str, **record) -> datetime:
+    """Store a `command_*` event as the ingester does: the wrapper's record under `record`."""
+    full = {"name": "compact", "args": "", "origin": "client", "turn_id": None, "error": None}
+    full.update(record)
+    row = await insert_event(pool, session_id, agent_id, type=type, data={"record": full})
+    return row["ts"]
+
+
+async def _command_of(http, session_id, message_id: int) -> tuple[dict | None, dict | None]:
+    """The message's `command` from GET /messages/{id} and from the session's message list."""
+    one = (await http.get(f"/api/v1/messages/{message_id}")).json()
+    listed = (await http.get(f"/api/v1/sessions/{session_id}/messages")).json()
+    (row,) = [m for m in listed if m["id"] == message_id]
+    return one["command"], row["command"]
+
+
+async def test_message_command_outcome_completed(http, pool):
+    cl = await insert_session(pool)
+    ag = await insert_agent(pool, cl["id"])
+    mid = await _sent_command(pool, cl["id"], ag["id"], "cmd_ok")
+    await _command_event(pool, cl["id"], ag["id"], "command_started", id="cmd_ok", state="running")
+    at = await _command_event(
+        pool, cl["id"], ag["id"], "command_completed", id="cmd_ok", state="completed", result="ok"
+    )
+    one, listed = await _command_of(http, cl["id"], mid)
+    assert one == listed
+    assert datetime.fromisoformat(one.pop("at")) == at
+    assert one == {"state": "completed", "result": "ok", "error": None, "turn_id": None}
+    got = (await http.get(f"/api/v1/messages/{mid}")).json()
+    assert (got["status"], got["kind"], got["wrapper_command_id"]) == ("sent", "command", "cmd_ok")
+
+
+async def test_message_command_outcome_failed_unknown_command(http, pool):
+    cl = await insert_session(pool)
+    ag = await insert_agent(pool, cl["id"])
+    other = await insert_agent(pool, cl["id"], ordinal=1)
+    mid = await _sent_command(pool, cl["id"], ag["id"], "cmd_bad")
+    await _command_event(
+        pool, cl["id"], ag["id"], "command_failed", id="cmd_bad", state="failed", error="timeout"
+    )
+    at = await _command_event(
+        pool,
+        cl["id"],
+        ag["id"],
+        "command_failed",
+        id="cmd_bad",
+        state="failed",
+        error="unknown_command",
+    )
+    # another agent's command with the same wrapper id is a different command
+    await _command_event(
+        pool,
+        cl["id"],
+        other["id"],
+        "command_completed",
+        id="cmd_bad",
+        state="completed",
+        result="ok",
+    )
+    one, listed = await _command_of(http, cl["id"], mid)
+    assert one == listed
+    assert datetime.fromisoformat(one.pop("at")) == at
+    assert one == {"state": "failed", "result": None, "error": "unknown_command", "turn_id": None}
+
+
+async def test_message_command_outcome_cancelled(http, pool):
+    cl = await insert_session(pool)
+    ag = await insert_agent(pool, cl["id"])
+    mid = await _sent_command(pool, cl["id"], ag["id"], "cmd_cancel")
+    at = await _command_event(
+        pool, cl["id"], ag["id"], "command_failed", id="cmd_cancel", state="cancelled"
+    )
+    one, listed = await _command_of(http, cl["id"], mid)
+    assert one == listed
+    assert datetime.fromisoformat(one.pop("at")) == at
+    assert one == {"state": "cancelled", "result": None, "error": None, "turn_id": None}
+
+
+async def test_message_command_outcome_promoted_turn(http, pool):
+    cl = await insert_session(pool)
+    ag = await insert_agent(pool, cl["id"])
+    mid = await _sent_command(pool, cl["id"], ag["id"], "cmd_turn")
+    at = await _command_event(
+        pool,
+        cl["id"],
+        ag["id"],
+        "command_completed",
+        id="cmd_turn",
+        state="completed",
+        result="turn",
+        turn_id="turn_abc",
+    )
+    one, listed = await _command_of(http, cl["id"], mid)
+    assert one == listed
+    assert datetime.fromisoformat(one.pop("at")) == at
+    assert one == {"state": "completed", "result": "turn", "error": None, "turn_id": "turn_abc"}
+
+
+async def test_message_command_none_for_turns_and_pending(http, pool):
+    cl = await insert_session(pool)
+    ag = await insert_agent(pool, cl["id"])
+    t = await insert_turn(pool, ag["id"], status="completed", final_text="answer")
+    turn = await insert_message(
+        pool, cl["id"], status="sent", agent_id=ag["id"], turn_id=t["turn_id"]
+    )
+    queued = (
+        await http.post(f"/api/v1/sessions/{cl['id']}/messages", json={"text": "/compact"})
+    ).json()["message_id"]
+    pending = await _sent_command(pool, cl["id"], ag["id"], "cmd_pending")
+    await _command_event(
+        pool, cl["id"], ag["id"], "command_started", id="cmd_pending", state="running"
+    )
+    # an outcome event never attaches to a turn message, whatever ids it carries
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE messages SET wrapper_command_id = 'cmd_turn' WHERE id = %s", (turn["id"],)
+        )
+    await _command_event(
+        pool, cl["id"], ag["id"], "command_completed", id="cmd_turn", state="completed", result="ok"
+    )
+    for mid in (turn["id"], queued, pending):
+        assert await _command_of(http, cl["id"], mid) == (None, None), mid
+    got = (await http.get(f"/api/v1/messages/{turn['id']}")).json()
+    assert got["turn"]["final_text"] == "answer"
 
 
 async def test_post_message_validation(http, pool):

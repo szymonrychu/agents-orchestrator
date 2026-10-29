@@ -349,3 +349,71 @@ def test_readme_documents_delivery_and_retries():
         "settle window",
     ):
         assert needle in body, needle
+
+
+async def test_stale_command_row_fails_ambiguous(env):
+    """A command has no turn to look for: a stale or verifying command row fails `ambiguous` at
+    once and is never resent (D10)."""
+    agent = await env.agent()
+    m = await insert_message(
+        env.pool, env.cid, text="/compact", status="dispatching", agent_id=agent["id"]
+    )
+    await env.exec(
+        "UPDATE messages SET kind = 'command', dispatched_at = now() - interval '1 hour',"
+        " heartbeat_at = NULL WHERE id=%s",
+        (m["id"],),
+    )
+    d = env.dispatcher()
+    await d.drain()
+    row = await env.message(m["id"])
+    assert row["ambiguous_at"] is not None  # handed to the verifier, which failed it
+    assert (row["status"], row["error"], row["attempts"]) == ("failed", "ambiguous", 0)
+    await d.drain()
+    await d.aclose()
+    assert (await env.message(m["id"]))["status"] == "failed"
+    assert env.fake.sessions[agent["wrapper_session_id"]].commands == []
+    assert env.fake.received_turns == 0
+
+    # a verifying command row fails inside the settle window, with no wrapper lookup
+    v = await env.verifying(agent, age=0)
+    await env.exec("UPDATE messages SET kind = 'command' WHERE id=%s", (v["id"],))
+    await env.fake.set_unreachable(True)
+    assert await env.verifier().verify_once() == 1
+    row = await env.message(v["id"])
+    assert (row["status"], row["error"]) == ("failed", "ambiguous")
+
+
+def test_readme_documents_command_dispatch():
+    import re
+    from pathlib import Path
+
+    readme = (Path(__file__).parent.parent / "README.md").read_text()
+
+    def section(title: str) -> str:
+        match = re.search(rf"^## {re.escape(title)}\s*$", readme, re.MULTILINE)
+        assert match, f"README has no '## {title}' section"
+        return re.split(r"^## ", readme[match.end() :], maxsplit=1, flags=re.MULTILINE)[0]
+
+    delivery = section("Delivery and retries")
+    for needle in (
+        "`/commands`",
+        "`wrapper_command_id`",
+        "`command_queue_full`",
+        "`command_denied`",
+        "`command_not_allowed`",
+        "`invalid_command`",
+        "`config_error`",
+        "`ambiguous`",
+        "run marker",
+        "Retry",
+    ):
+        assert needle in delivery, needle
+    architecture = section("Architecture").lower()
+    for needle in ("`last_dispatched_at`", "per-session order", "`dispatching`", "overtake"):
+        assert needle in architecture, needle
+    api = section("API")
+    post = api.split("### `POST /api/v1/sessions/{session_id}/messages`", 1)[1].split("\n### ")[0]
+    assert "`kind`" in post and "slash" in post
+    listing = api.split("### `GET /api/v1/sessions/{session_id}/messages`", 1)[1].split("\n### ")[0]
+    for field in ("`kind`", "`wrapper_command_id`"):
+        assert field in listing, field

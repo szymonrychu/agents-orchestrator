@@ -12,6 +12,8 @@ agent's wrapper is asked whether a turn whose `metadata.orch_message_id` is this
   window): nothing changes and the next pass checks again.
 - Deadline: no definite answer by `ambiguous_deadline_seconds` fails it with `ambiguous`; only
   the user's explicit Retry re-sends it.
+- A command message (kind=command, D10) fails `ambiguous` at once: no turn carries its id, so a
+  lookup could only ever answer "not started" and resend it blindly.
 
 The wrapper records a turn, metadata included, before it answers 202, so a missing record after
 the settle window means the request never reached its router. Every write is a guarded queue
@@ -94,6 +96,14 @@ class Verifier:
 
     async def _verify(self, msg: queue.Verifying) -> int:
         s = self.settings
+        if msg.kind == "command":
+            async with self.pool.connection() as conn:
+                won = await queue.fail_ambiguous(conn, msg.message_id)
+            if won:
+                log.warning(
+                    "command message %s may have reached the wrapper: failed", msg.message_id
+                )
+            return int(won)
         found = await self._lookup(msg)
         async with self.pool.connection() as conn:
             if found.answer is Answer.STARTED:

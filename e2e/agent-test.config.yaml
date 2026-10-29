@@ -39,3 +39,6 @@ notes:
 
 sessions:
   max_sessions: 8
+  # The contract suite's real leg sends any slash command name through the client route.
+  commands:
+    client: ["*"]

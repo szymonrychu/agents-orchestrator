@@ -10,6 +10,7 @@ import pytest
 from agents_orchestrator.wrapper import (
     Ambiguous,
     Busy,
+    CommandAccepted,
     ConfigError,
     Gone,
     Rejected,
@@ -340,6 +341,8 @@ async def test_sessions_and_control_methods():
             )
         if r.url.path == "/v1/sessions":
             return httpx.Response(201, json=SNAP)
+        if r.url.path.endswith("/commands"):
+            return httpx.Response(202, json={**COMMAND_RECORD, "name": "compact", "args": ""})
         return httpx.Response(202, json={})
 
     c = client(h)
@@ -355,10 +358,96 @@ async def test_sessions_and_control_methods():
     await c.create_session("b", "/w")
     assert json.loads(seen[2][2]) == {"name": "b", "workdir": "/w"}
     await c.interrupt("s")
-    await c.command("s", "compact")
+    out = await c.command("s", "compact")
     assert seen[3][:2] == ("POST", "/v1/sessions/s/interrupt")
     assert seen[4][:2] == ("POST", "/v1/sessions/s/commands")
-    assert json.loads(seen[4][2]) == {"name": "compact"}
+    assert json.loads(seen[4][2]) == {"name": "compact", "args": ""}
+    assert out == CommandAccepted(
+        COMMAND_RECORD["id"], {**COMMAND_RECORD, "name": "compact", "args": ""}
+    )
+
+
+COMMAND_RECORD = {
+    "id": "cmd_0123456789ab",
+    "name": "model",
+    "args": "opus",
+    "origin": "client",
+    "turn_id": None,
+    "state": "queued",
+    "result": None,
+    "error": None,
+    "output": None,
+    "created_at": "2026-10-27T09:00:00.000Z",
+    "started_at": None,
+    "finished_at": None,
+}
+
+
+async def test_command_outcomes():
+    seen = []
+
+    def accept(r):
+        seen.append((r.method, r.url.path, json.loads(r.content), r.extensions["timeout"]))
+        return httpx.Response(202, json=COMMAND_RECORD)
+
+    out = await client(accept, send_timeout=3.0).command("s", "model", "opus")
+    assert out == CommandAccepted("cmd_0123456789ab", COMMAND_RECORD)
+    method, path, body, timeout = seen[0]
+    assert (method, path, body) == (
+        "POST",
+        "/v1/sessions/s/commands",
+        {"name": "model", "args": "opus"},
+    )
+    assert timeout["read"] == 3.0 and timeout["connect"] == 3.0
+
+    def err(status, code):
+        return lambda r: httpx.Response(status, json={"error": {"code": code, "message": "m"}})
+
+    cases = [
+        (409, "booting", Busy),
+        (409, "dead", Busy),
+        (429, "command_queue_full", Busy),
+        (401, "unauthorized", ConfigError),
+        (403, "command_denied", Rejected),
+        (403, "command_not_allowed", Rejected),
+        (422, "invalid_command", Rejected),
+        (422, "invalid_request", Rejected),
+        (404, "not_found", Gone),
+        (410, "gone", Gone),
+        (500, "internal", Ambiguous),
+        (502, "bad_gateway", Ambiguous),
+        (503, "unavailable", Unavailable),
+        (504, "timeout", Unavailable),
+    ]
+    for status, code, cls in cases:
+        got = await client(err(status, code)).command("s", "x")
+        assert type(got) is cls, (status, code)
+        assert got.reason == f"{status} {code}: m", (status, code)
+        if cls in (Busy, Rejected):
+            assert got.code == code, (status, code)
+
+    # no envelope: the outcome carries no wrapper code
+    bare = await client(lambda r: httpx.Response(403, text="nope")).command("s", "x")
+    assert bare == Rejected("", "403 http_403: nope")
+    no_id = await client(lambda r: httpx.Response(202, json={"state": "queued"})).command("s", "x")
+    assert isinstance(no_id, Ambiguous)
+    not_json = await client(lambda r: httpx.Response(202, text="ok")).command("s", "x")
+    assert isinstance(not_json, Ambiguous)
+
+    transport = [
+        (httpx.ConnectError("refused"), Unavailable),
+        (httpx.ConnectTimeout("t"), Unavailable),
+        (httpx.ReadTimeout("t"), Ambiguous),
+        (httpx.ReadError("reset"), Ambiguous),
+    ]
+    for exc, cls in transport:
+
+        def boom(r, exc=exc):
+            raise exc
+
+        got = await client(boom).command("s", "x")
+        assert type(got) is cls, exc
+        assert got.reason
 
 
 async def test_request_json_passthrough():

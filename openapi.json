@@ -472,6 +472,67 @@
         "title": "CommandHook",
         "type": "object"
       },
+      "CommandOutcomeView": {
+        "description": "A command message's outcome, read from the agent's newest `command_completed` or\n`command_failed` event for its `wrapper_command_id` (D19); `at` is that event's `ts`.",
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "title": "At",
+            "type": "string"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "state": {
+            "enum": [
+              "completed",
+              "failed",
+              "cancelled"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "turn_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Turn Id"
+          }
+        },
+        "required": [
+          "state",
+          "result",
+          "error",
+          "turn_id",
+          "at"
+        ],
+        "title": "CommandOutcomeView",
+        "type": "object"
+      },
       "CommandView": {
         "properties": {
           "agent_id": {
@@ -1652,6 +1713,16 @@
             "title": "Attempts",
             "type": "integer"
           },
+          "command": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CommandOutcomeView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "created_at": {
             "format": "date-time",
             "title": "Created At",
@@ -1683,6 +1754,14 @@
           "id": {
             "title": "Id",
             "type": "integer"
+          },
+          "kind": {
+            "enum": [
+              "turn",
+              "command"
+            ],
+            "title": "Kind",
+            "type": "string"
           },
           "max_attempts": {
             "title": "Max Attempts",
@@ -1753,23 +1832,37 @@
               }
             ],
             "title": "Turn Id"
+          },
+          "wrapper_command_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Wrapper Command Id"
           }
         },
         "required": [
           "id",
           "session_id",
           "text",
+          "kind",
           "status",
           "target_agent_id",
           "agent_id",
           "turn_id",
+          "wrapper_command_id",
           "attempts",
           "max_attempts",
           "next_attempt_at",
           "error",
           "created_at",
           "dispatched_at",
-          "turn"
+          "turn",
+          "command"
         ],
         "title": "MessageView",
         "type": "object"
@@ -3246,13 +3339,7 @@
             "anyOf": [
               {
                 "items": {
-                  "enum": [
-                    "compact",
-                    "context",
-                    "mcp",
-                    "reload-plugins",
-                    "reload-skills"
-                  ],
+                  "pattern": "^(\\*|[a-zA-Z0-9_][a-zA-Z0-9:_-]*)$",
                   "type": "string"
                 },
                 "type": "array"

@@ -134,7 +134,8 @@ def test_hook_rules_refused(hooks: dict[str, Any], path: str) -> None:
             "wrapper.plugins.install.0.plugin",
         ),
         ({"plugins": {"install": [{"plugin": "nomarket"}]}}, "wrapper.plugins.install.0.plugin"),
-        ({"agent_commands": ["compact", "rm"]}, "wrapper.agent_commands"),
+        ({"agent_commands": ["compact", "rm -rf"]}, "wrapper.agent_commands"),
+        ({"agent_commands": ["notes.txt"]}, "wrapper.agent_commands"),
         ({"system_append": "x" * 16385}, "wrapper.system_append"),
         ({"max_restarts": 11}, "wrapper.max_restarts"),
         ({"turn_stall_seconds": -1}, "wrapper.turn_stall_seconds"),
@@ -144,6 +145,15 @@ def test_hook_rules_refused(hooks: dict[str, Any], path: str) -> None:
 )
 def test_wrapper_value_rules_refused(block: dict[str, Any], path: str) -> None:
     assert path in refused({"wrapper": block})
+
+
+@pytest.mark.parametrize(
+    "names", [["rm"], ["_x", "my-plugin:do_it", "Review2"], ["*"], ["compact", "*"]]
+)
+def test_agent_commands_accept_names_and_wildcard(names: list[str]) -> None:
+    spec = SessionSpec.model_validate({"wrapper": {"agent_commands": names}})
+    assert spec.wrapper is not None
+    assert spec.wrapper.agent_commands == names
 
 
 def _settings(monkeypatch: pytest.MonkeyPatch, **env: str) -> Settings:

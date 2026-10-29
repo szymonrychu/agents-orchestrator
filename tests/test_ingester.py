@@ -22,6 +22,7 @@ from factories import (
 )
 from fakes.fake_wrapper import FakeWrapper
 from psycopg import sql
+from psycopg.types.json import Jsonb
 
 from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import queue, status
@@ -1085,3 +1086,171 @@ async def test_peers_view_recorded(harness, pool) -> None:
     assert status.peer_count({"enabled": False}) == 0
     assert status.peer_count({"enabled": False, "members": members}) == 0
     assert status.peer_count({"enabled": True, "members": members}) == 2
+
+
+async def _command_message(
+    pool, h: Harness, command_id: str, *, status: str = "sent"
+) -> dict[str, Any]:
+    """A command message of the agent's session in `status`, carrying `command_id` once sent."""
+    row = await insert_message(pool, h.session_id, status=status, agent_id=h.agent_id)
+    sent = status == "sent"
+    return (
+        await fetch(
+            pool,
+            "UPDATE messages SET kind = 'command', wrapper_command_id = %s WHERE id = %s"
+            " RETURNING *",
+            (command_id if sent else None, row["id"]),
+        )
+    )[0]
+
+
+def _command_record(command_id: str, result: str, turn_id: str | None) -> dict[str, Any]:
+    return {
+        "record": {
+            "id": command_id,
+            "name": "x",
+            "args": "",
+            "origin": "client",
+            "turn_id": turn_id,
+            "state": "completed",
+            "result": result,
+        }
+    }
+
+
+async def _message_turn(pool, message_id: int) -> str | None:
+    return (await fetch(pool, "SELECT turn_id FROM messages WHERE id=%s", (message_id,)))[0][
+        "turn_id"
+    ]
+
+
+async def test_command_completed_turn_links_message(harness, pool) -> None:
+    h = await harness()
+    await h.start()
+    await h.stored_through(h.last_fake_seq())
+    promoted = await _command_message(pool, h, "cmd_turn")
+    plain = await _command_message(pool, h, "cmd_ok")
+    other = await _command_message(pool, h, "cmd_other")
+
+    h.fake.emit("command_completed", _command_record("cmd_ok", "ok", "turn-ignored"))
+    h.fake.emit("command_completed", _command_record("cmd_turn", "turn", "turn-promoted"))
+    await h.stored_through(h.last_fake_seq())
+    assert await _message_turn(pool, promoted["id"]) == "turn-promoted"
+    assert await _message_turn(pool, plain["id"]) is None
+    assert await _message_turn(pool, other["id"]) is None
+
+    # a second event for the same command never overwrites the linked turn
+    h.fake.emit("command_completed", _command_record("cmd_turn", "turn", "turn-again"))
+    await h.stored_through(h.last_fake_seq())
+    assert await _message_turn(pool, promoted["id"]) == "turn-promoted"
+
+    # a turn result without a turn id links nothing
+    h.fake.emit("command_completed", _command_record("cmd_other", "turn", None))
+    await h.stored_through(h.last_fake_seq())
+    assert await _message_turn(pool, other["id"]) is None
+
+
+async def test_command_turn_linked_when_event_precedes_sent(harness, pool) -> None:
+    h = await harness()
+    await h.start()
+    await h.stored_through(h.last_fake_seq())
+    promoted = await _command_message(pool, h, "cmd_early", status="dispatching")
+    plain = await _command_message(pool, h, "cmd_early_ok", status="dispatching")
+
+    # the events are stored while both messages are still dispatching: nothing to link yet
+    h.fake.emit("command_completed", _command_record("cmd_early", "turn", "turn-early"))
+    h.fake.emit("command_completed", _command_record("cmd_early_ok", "ok", "turn-ignored"))
+    await h.stored_through(h.last_fake_seq())
+    assert await _message_turn(pool, promoted["id"]) is None
+
+    async with pool.connection() as conn:
+        assert await queue.mark_sent_command(conn, promoted["id"], "cmd_early")
+        assert await queue.mark_sent_command(conn, plain["id"], "cmd_early_ok")
+    rows = await fetch(pool, "SELECT id, status, turn_id FROM messages ORDER BY id")
+    assert [(r["status"], r["turn_id"]) for r in rows] == [("sent", "turn-early"), ("sent", None)]
+
+
+async def _lock_waiting(pool, pid: int | None = None, *, advisory: bool) -> bool:
+    """A backend (`pid`, or any backend of this database) waits on a heavyweight lock: an
+    advisory lock when `advisory`, otherwise a row or transaction lock."""
+    rows = await fetch(
+        pool,
+        "SELECT 1 FROM pg_stat_activity WHERE datname = current_database()"
+        " AND wait_event_type = 'Lock' AND (wait_event = 'advisory') = %s"
+        " AND (%s::int IS NULL OR pid = %s::int)",
+        (advisory, pid, pid),
+    )
+    return bool(rows)
+
+
+async def test_command_turn_linked_when_event_commits_during_mark_sent(harness, pool, dsn) -> None:
+    """The event is stored while mark_sent_command's UPDATE is already running: either the
+    UPDATE or the ingester's link must see the other's write (D10 hop guard, both orders)."""
+    h = await harness()
+    await h.start()
+    await h.stored_through(h.last_fake_seq())
+    msg = await _command_message(pool, h, "cmd_race", status="dispatching")
+    blocker = await psycopg.AsyncConnection.connect(dsn)
+    sender = await psycopg.AsyncConnection.connect(dsn)
+    send: asyncio.Task[bool] | None = None
+    try:
+        # the row lock holds mark_sent_command's UPDATE after its statement snapshot is taken
+        await blocker.execute("SELECT 1 FROM messages WHERE id = %s FOR UPDATE", (msg["id"],))
+        send = asyncio.create_task(queue.mark_sent_command(sender, msg["id"], "cmd_race"))
+        await wait_until(lambda: _lock_waiting(pool, sender.info.backend_pid, advisory=False))
+
+        h.fake.emit("command_completed", _command_record("cmd_race", "turn", "turn-race"))
+        seq = h.last_fake_seq()
+
+        async def ingested_or_held() -> bool:
+            row = await status_row(pool, h.agent_id)
+            stored = row is not None and (row["last_seq"] or 0) >= seq
+            return stored or await _lock_waiting(pool, advisory=True)
+
+        await wait_until(ingested_or_held)
+        await blocker.commit()
+        assert await asyncio.wait_for(send, 20)
+        await h.stored_through(seq)
+        assert await _message_turn(pool, msg["id"]) == "turn-race"
+    finally:
+        if send is not None and not send.done():
+            send.cancel()
+        await blocker.close()
+        await sender.close()
+
+
+async def test_command_turn_linked_when_mark_sent_starts_before_event_commits(
+    harness, pool, dsn
+) -> None:
+    """mark_sent_command starts while the ingester's transaction (event stored, link found a
+    dispatching row) is still open: the ingester commits before the UPDATE runs, so the
+    UPDATE must read the event with a snapshot taken after that commit."""
+    h = await harness()
+    msg = await _command_message(pool, h, "cmd_race2", status="dispatching")
+    ingest = await psycopg.AsyncConnection.connect(dsn)
+    sender = await psycopg.AsyncConnection.connect(dsn)
+    send: asyncio.Task[bool] | None = None
+    try:
+        await ingest.execute(
+            "INSERT INTO events (session_id, agent_id, wrapper_session_id, seq, ts, type, data)"
+            " VALUES (%s, %s, %s, 1, now(), 'command_completed', %s)",
+            (
+                h.session_id,
+                h.agent_id,
+                h.wrapper_session_id,
+                Jsonb(_command_record("cmd_race2", "turn", "turn-race2")),
+            ),
+        )
+        assert not await queue.link_command_turn(ingest, "cmd_race2", "turn-race2")
+        send = asyncio.create_task(queue.mark_sent_command(sender, msg["id"], "cmd_race2"))
+        await wait_until(
+            lambda: send.done() or _lock_waiting(pool, sender.info.backend_pid, advisory=True)
+        )
+        await ingest.commit()
+        assert await asyncio.wait_for(send, 20)
+        assert await _message_turn(pool, msg["id"]) == "turn-race2"
+    finally:
+        if send is not None and not send.done():
+            send.cancel()
+        await ingest.close()
+        await sender.close()

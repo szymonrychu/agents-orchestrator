@@ -1199,6 +1199,88 @@ def test_hive_notes_delivered(api: httpx.Client, session: dict[str, Any]) -> Non
     assert unkeyed == [], unkeyed
 
 
+COMMAND_EVENT_TYPES = "command_queued,command_started,command_completed,command_failed"
+
+
+def agent_state(api: httpx.Client, cid: str, agent_id: str) -> str:
+    return next(a for a in agents_of(api, cid) if a["id"] == agent_id)["state"]
+
+
+def command_records(
+    api: httpx.Client, cid: str, agent_id: str, event_type: str = COMMAND_EVENT_TYPES
+) -> list[dict[str, Any]]:
+    """The wrapper command records of the agent's command_* events, oldest first."""
+    resp = api.get(
+        f"/sessions/{cid}/events",
+        params={"agent_id": agent_id, "types": event_type, "limit": 500},
+    )
+    resp.raise_for_status()
+    return [e["data"]["record"] for e in resp.json()["events"]]
+
+
+def test_slash_command_from_chat_keeps_session_responsive(
+    api: httpx.Client, session: dict[str, Any]
+) -> None:
+    """The reported case: a chat "/reload-plugins" must not leave the session busy (G3)."""
+    cid = session["id"]
+    agent = sorted(agents_of(api, cid), key=lambda a: a["ordinal"])[0]
+    wait_for(
+        "the agent to be idle", lambda: agent_state(api, cid, agent["id"]) == "idle", TURN_TIMEOUT
+    )
+
+    # the chat text runs as a wrapper command, never as a turn
+    mid = post_message(api, cid, "/reload-plugins", agent["id"])
+
+    def command_sent() -> dict[str, Any] | None:
+        view = message(api, mid)
+        return view if view["status"] == "sent" and view["wrapper_command_id"] else None
+
+    sent = wait_for("the /reload-plugins command to be sent", command_sent, TURN_TIMEOUT, 1)
+    assert sent["kind"] == "command" and sent["agent_id"] == agent["id"], sent
+    command_id = sent["wrapper_command_id"]
+
+    def completed() -> dict[str, Any] | None:
+        records = command_records(api, cid, agent["id"], "command_completed")
+        return next((r for r in records if r["id"] == command_id), None)
+
+    record = wait_for("command_completed for /reload-plugins", completed, TURN_TIMEOUT, 1)
+    assert record["name"] == "reload-plugins" and record["state"] == "completed", record
+
+    # the command does not hold the agent busy
+    wait_for(
+        "the agent to return idle after the command",
+        lambda: agent_state(api, cid, agent["id"]) == "idle",
+        TURN_TIMEOUT,
+        1,
+    )
+
+    # prose still runs a whole turn afterwards
+    prose = post_message(api, cid, "say hello after the command", agent["id"])
+    wait_for(
+        "the prose message's turn to complete",
+        lambda: turn_completed(message(api, prose)),
+        TURN_TIMEOUT,
+        1,
+    )
+
+    # a command that would end the session is refused with the wrapper's own error code
+    exit_mid = post_message(api, cid, "/exit", agent["id"])
+
+    def refused() -> dict[str, Any] | None:
+        view = api.get(f"/messages/{exit_mid}").json()
+        return view if view["status"] == "failed" else None
+
+    failed = wait_for("the /exit message to fail", refused, TURN_TIMEOUT, 1)
+    assert failed["kind"] == "command" and failed["error"] == "command_denied", failed
+    assert [r for r in command_records(api, cid, agent["id"]) if r["name"] == "exit"] == []
+    wait_for(
+        "the agent to stay idle after the refused command",
+        lambda: agent_state(api, cid, agent["id"]) == "idle",
+        TURN_TIMEOUT,
+        1,
+    )
+
+
 def test_alone_session_has_no_hive_tools(api: httpx.Client, session: dict[str, Any]) -> None:
     resp = api.post(
         "/sessions",

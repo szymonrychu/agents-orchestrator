@@ -23,7 +23,9 @@ from fakes.real_wrapper import RealWrapper
 from agents_orchestrator.wrapper import (
     Ambiguous,
     Busy,
+    CommandAccepted,
     ConfigError,
+    Envelope,
     Gone,
     Rejected,
     TurnAccepted,
@@ -1076,3 +1078,203 @@ async def test_fake_notes_disabled_and_stopped_session(fake_leg: Leg, fake: Fake
     stopped = await leg.http.post(f"/v1/sessions/{sid}/notes", json={"text": "x"})
     assert stopped.status_code == 409 and stopped.json()["error"]["code"] == "invalid_state"
     assert fake.notes.get(sid) is None
+
+
+# ---------------------------------------------------------------- slash commands
+
+COMMAND_RECORD_KEYS = {
+    "id",
+    "name",
+    "args",
+    "origin",
+    "turn_id",
+    "state",
+    "result",
+    "error",
+    "output",
+    "created_at",
+    "started_at",
+    "finished_at",
+}
+
+
+def test_fake_deny_mirrors_wrapper_default() -> None:
+    """The fake's COMMAND_DENY is the pinned wrapper's DEFAULT_COMMAND_DENY, lower-cased."""
+    from claude_code_wrapper.config import DEFAULT_COMMAND_DENY
+    from fakes.fake_wrapper import COMMAND_DENY
+
+    assert {name.lower() for name in DEFAULT_COMMAND_DENY} == COMMAND_DENY
+    assert len(COMMAND_DENY) == 64
+
+
+async def test_commands_any_name_and_denied(leg: Leg) -> None:
+    sid = await leg.create()
+    url = f"/v1/sessions/{sid}/commands"
+    for name, args in (("context", ""), ("my-plugin:do_it", "one two\nthree")):
+        resp = await leg.http.post(url, json={"name": name, "args": args})
+        assert resp.status_code == 202, resp.text
+        record = resp.json()
+        assert set(record) >= COMMAND_RECORD_KEYS
+        assert isinstance(record["id"], str) and record["id"]
+        assert (record["name"], record["args"]) == (name, args)
+        assert record["state"] == "queued" and record["origin"] == "client"
+    denied_names = (
+        "exit",
+        "Reset",
+        "plugin",
+        "Marketplace",
+        "routines",
+        "memory",
+        "usage-credits",
+        "ultrareview",
+        "MCP",
+        "allowed-tools",
+        "remote",
+        "settings",
+    )
+    for name in denied_names:
+        denied = await leg.http.post(url, json={"name": name})
+        assert denied.status_code == 403, name
+        assert denied.json()["error"]["code"] == "command_denied"
+    empty = await leg.http.post(url, json={"name": ""})
+    assert empty.status_code == 422
+    assert empty.json()["error"]["code"] == "invalid_command"
+    client = leg.client()
+    try:
+        refused = await client.command(sid, "EXIT", "now")
+        assert isinstance(refused, Rejected) and refused.code == "command_denied"
+        assert isinstance(await client.command(sid, ""), Rejected)
+        assert isinstance(await client.command("ses_nope", "context"), Gone)
+    finally:
+        await client.aclose()
+
+
+def _command_marks(events: list[Any]) -> list[str]:
+    """Command events and state changes, as `type` or `state:<state>`."""
+    return [
+        f"state:{e.data['state']}" if e.type == "session_state" else e.type
+        for e in events
+        if e.type.startswith("command_") or e.type in ("session_state", "turn_completed")
+    ]
+
+
+async def test_fake_command_events_and_turn_ordering(fake_leg: Leg, fake: FakeWrapper) -> None:
+    leg = fake_leg
+    sid = await leg.create()
+    start = (await leg.history(sid, limit=1000)).json()["next_seq"]
+    client = leg.client()
+    try:
+        idle = await client.command(sid, "model", "opus")
+        assert isinstance(idle, CommandAccepted)
+        assert idle.record["state"] == "queued" and idle.record["turn_id"] is None
+        events = (await leg.history(sid, after_seq=start, limit=1000)).json()["events"]
+        typed = [Envelope.model_validate(e) for e in events]
+        assert _command_marks(typed) == [
+            "command_queued",
+            "state:busy",
+            "command_started",
+            "command_completed",
+            "state:ready",
+        ]
+        records = [e.data["record"] for e in typed if e.type.startswith("command_")]
+        assert {r["id"] for r in records} == {idle.command_id}
+        assert [r["state"] for r in records] == ["queued", "running", "completed"]
+        done = records[-1]
+        assert done["result"] == "ok" and done["started_at"] and done["finished_at"]
+        assert (done["name"], done["args"], done["origin"]) == ("model", "opus", "client")
+        echo = [e.data for e in typed if e.type == "user_message"]
+        assert echo == [{"turn_id": None, "origin": "command", "text": "/model opus", "files": []}]
+        assert (await client.get_session(sid)).state == "ready"
+
+        turn = (await leg.submit(sid, "work")).json()["turn_id"]
+        mid = (await leg.history(sid, limit=1000)).json()["next_seq"]
+        queued = await client.command(sid, "reload-plugins")
+        assert isinstance(queued, CommandAccepted) and queued.record["turn_id"] == turn
+        events = (await leg.history(sid, after_seq=mid, limit=1000)).json()["events"]
+        assert [e["type"] for e in events] == ["command_queued"]
+        assert (await client.get_session(sid)).state == "busy"
+        await fake.complete_turn(turn)
+        events = (await leg.history(sid, after_seq=mid, limit=1000)).json()["events"]
+        typed = [Envelope.model_validate(e) for e in events]
+        assert _command_marks(typed) == [
+            "command_queued",
+            "state:ready",
+            "turn_completed",
+            "state:busy",
+            "command_started",
+            "command_completed",
+            "state:ready",
+        ]
+        last = typed[-2].data["record"]
+        assert last["id"] == queued.command_id and last["state"] == "completed"
+        assert (await client.get_session(sid)).state == "ready"
+    finally:
+        await client.aclose()
+
+
+async def test_fake_command_refusals(fake_leg: Leg, fake: FakeWrapper) -> None:
+    leg = fake_leg
+    sid = await leg.create()
+    url = f"/v1/sessions/{sid}/commands"
+
+    async def post(body: dict[str, Any]) -> tuple[int, str]:
+        resp = await leg.http.post(url, json=body)
+        code = resp.json()["error"]["code"] if resp.status_code >= 300 else ""
+        return resp.status_code, code
+
+    # the wrapper's DEFAULT_COMMAND_DENY, any letter case, before the allowlist
+    for name in ("exit", "QUIT", "Clear", "new", "resume", "cd", "bg", "tp", "rc", "update"):
+        assert await post({"name": name}) == (403, "command_denied"), name
+    for name in ("logout", "setup-bedrock", "web-setup", "design-login", "remote-control"):
+        assert await post({"name": name}) == (403, "command_denied"), name
+    for name in ("", "/x", "a.b", "-x", "a b", "notes.txt"):
+        assert await post({"name": name}) == (422, "invalid_command"), name
+    assert await post({"name": "_x" + "a" * 100}) == (202, "")
+    for body in ({}, {"name": 1}, {"name": "x", "args": 1}, {"name": "x", "extra": 1}):
+        assert (await post(body))[0] == 422, body
+    for args in ("a\x1bb", "a\rb", "a\x00", "a b", "x" * 20001):
+        assert await post({"name": "x", "args": args}) == (422, "invalid_command"), args
+    ok = await leg.http.post(url, json={"name": "x", "args": "a\r\nb\tc"})
+    assert ok.status_code == 202 and ok.json()["args"] == "a\nb\tc"
+
+    fake.commands_client = ["compact"]
+    assert await post({"name": "context"}) == (403, "command_not_allowed")
+    assert await post({"name": "exit"}) == (403, "command_denied")
+    assert await post({"name": "compact"}) == (202, "")
+    fake.commands_client = ["*"]
+
+    # queued during a turn: an identical one coalesces, the fifth distinct one is refused
+    turn = (await leg.submit(sid, "work")).json()["turn_id"]
+    first = (await leg.http.post(url, json={"name": "a", "args": "1"})).json()
+    again = (await leg.http.post(url, json={"name": "a", "args": "1"})).json()
+    assert again["id"] == first["id"]
+    for name in ("b", "c", "d"):
+        assert (await post({"name": name}))[0] == 202
+    assert await post({"name": "e"}) == (429, "command_queue_full")
+    client = leg.client()
+    try:
+        full = await client.command(sid, "e")
+        assert isinstance(full, Busy) and full.code == "command_queue_full"
+        # an interrupted turn cancels the commands queued for it
+        mid = (await leg.history(sid, limit=1000)).json()["next_seq"]
+        await leg.http.post(f"/v1/sessions/{sid}/interrupt")
+        events = (await leg.history(sid, after_seq=mid, limit=1000)).json()["events"]
+        failed = [e["data"]["record"] for e in events if e["type"] == "command_failed"]
+        assert [(r["name"], r["state"]) for r in failed] == [
+            ("a", "cancelled"),
+            ("b", "cancelled"),
+            ("c", "cancelled"),
+            ("d", "cancelled"),
+        ]
+        assert not any(e["type"] == "command_started" for e in events)
+        assert {r["turn_id"] for r in failed} == {turn}
+
+        fake.set_booting(True)
+        booting = await client.command(sid, "context")
+        assert isinstance(booting, Busy) and booting.code == "booting"
+        fake.set_booting(False)
+        fake.set_session_state("dead")
+        dead = await client.command(sid, "context")
+        assert isinstance(dead, Busy) and dead.code == "dead"
+    finally:
+        await client.aclose()

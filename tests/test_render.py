@@ -97,9 +97,18 @@ def test_golden_single_without_peers():
 
 
 def test_rendered_ccw_config_validates(tmp_path, monkeypatch):
-    for peers in (True, False):
+    cases = [
+        (True, None),
+        (False, None),
+        (True, ["*"]),
+        (False, ["_x", "my-plugin:do_it"]),
+    ]
+    for peers, agent_commands in cases:
+        wrapper = None if agent_commands is None else {"agent_commands": agent_commands}
         objs = render.render_session(
-            make_session(replicas=3, peers=peers, env={"FOO": "bar"}), make_settings(), TOKENS
+            make_session(replicas=3, peers=peers, env={"FOO": "bar"}, wrapper=wrapper),
+            make_settings(),
+            TOKENS,
         )
         monkeypatch.setenv("CCW_AUTH_TOKEN", TOKENS.auth)
         monkeypatch.setenv("CCW_PEER_TOKEN", TOKENS.peer)
@@ -112,6 +121,19 @@ def test_rendered_ccw_config_validates(tmp_path, monkeypatch):
         assert cfg.hooks.onStart
         assert cfg.peers.enabled is peers
         assert cfg.claude.env.claude_autocompact_pct_override == 95
+        assert cfg.sessions.commands.client == ["*"]
+        assert cfg.sessions.commands.agent == (agent_commands or [])
+
+
+def test_commands_client_wildcard_rendered():
+    for wrapper in (None, {"system_append": "Be terse."}):
+        session = make_session(wrapper=wrapper)
+        cfg = config_of(render.render_session(session, make_settings(), TOKENS))
+        assert cfg["sessions"]["commands"] == {"client": ["*"]}
+    for names in (["compact", "context"], ["*"], ["_x"]):
+        session = make_session(wrapper={"agent_commands": names})
+        cfg = config_of(render.render_session(session, make_settings(), TOKENS))
+        assert cfg["sessions"]["commands"] == {"client": ["*"], "agent": names}
 
 
 def test_all_objects_labelled():
@@ -748,7 +770,7 @@ def test_wrapper_settings_mapped():
     assert s["turn_stall_seconds"] == 90
     assert s["max_restarts"] == 3
     assert s["restart_continue_prompt"] == "continue please"
-    assert s["commands"] == {"agent": ["compact", "context"]}
+    assert s["commands"] == {"client": ["*"], "agent": ["compact", "context"]}
     assert (s["max_sessions"], s["resume_on_start"], s["idle_timeout_seconds"]) == (1, True, 0)
     assert s["ask_user_question"] == "deny"
     assert cfg["limits"]["turn_max_seconds"] == 600
@@ -790,6 +812,7 @@ def test_no_wrapper_block_renders_unchanged():
         "idle_timeout_seconds": 0,
         "ask_user_question": "deny",
         "restart_continue_prompt": "Claude was restarted. Continue the task where you left off.",
+        "commands": {"client": ["*"]},
     }
     assert cfg["claude"]["permissions"] == {
         "deny": ["EnterPlanMode", "ExitPlanMode", "AskUserQuestion"]

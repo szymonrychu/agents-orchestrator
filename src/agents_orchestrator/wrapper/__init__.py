@@ -4,6 +4,8 @@ from agents_orchestrator.wrapper.client import WrapperClient
 from agents_orchestrator.wrapper.models import (
     Ambiguous,
     Busy,
+    CommandAccepted,
+    CommandOutcome,
     ConfigError,
     Context,
     Envelope,
@@ -25,6 +27,8 @@ from agents_orchestrator.wrapper.sse import SSEEvent, SSEParser
 __all__ = [
     "Ambiguous",
     "Busy",
+    "CommandAccepted",
+    "CommandOutcome",
     "ConfigError",
     "Context",
     "Envelope",

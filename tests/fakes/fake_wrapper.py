@@ -20,6 +20,7 @@ import shutil
 import socket
 import stat
 import tempfile
+import unicodedata
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -54,6 +55,83 @@ TERMINAL_SCROLLBACK_BYTES = 262144
 TERMINAL_MAX_FRAME_BYTES = 65536
 TERMINAL_SIZE = range(1, 1001)
 ACTIVE_STATES = ("ready", "busy")
+
+# the wrapper's slash command rules (design D2, D4, D5)
+# Copied from claude_code_wrapper.config.DEFAULT_COMMAND_DENY (claude-code-wrapper v0.4.2, 64 names;
+# test_fake_deny_mirrors_wrapper_default pins the two together). Names that end, replace or move the
+# claude session, touch the account, install or change plugins, rewrite the session's mcp,
+# permission, config and hook settings, or open ui/ide surfaces; matched case-insensitively.
+COMMAND_DENY = frozenset(
+    {
+        "exit",
+        "quit",
+        "clear",
+        "reset",
+        "new",
+        "resume",
+        "continue",
+        "branch",
+        "fork",
+        "cd",
+        "background",
+        "bg",
+        "teleport",
+        "tp",
+        "stop",
+        "remote-control",
+        "rc",
+        "restart",
+        "update",
+        "login",
+        "logout",
+        "upgrade",
+        "setup-bedrock",
+        "setup-vertex",
+        "web-setup",
+        "design-login",
+        "add-dir",
+        "app",
+        "bug",
+        "daemon",
+        "design-consent",
+        "design-revoke",
+        "desktop",
+        "export",
+        "extra-usage",
+        "feedback",
+        "heapdump",
+        "ide",
+        "import",
+        "install",
+        "install-github-app",
+        "install-slack-app",
+        "marketplace",
+        "memory",
+        "plugin",
+        "plugins",
+        "remote-env",
+        "routines",
+        "schedule",
+        "terminal-setup",
+        "usage-credits",
+        "allowed-tools",
+        "autofix-pr",
+        "cloud-plugins",
+        "config",
+        "hooks",
+        "mcp",
+        "permissions",
+        "privacy-settings",
+        "remote",
+        "session",
+        "settings",
+        "ultraplan",
+        "ultrareview",
+    }
+)
+COMMAND_NAME_RE = re.compile(r"[a-zA-Z0-9_][a-zA-Z0-9:_-]*")
+MAX_COMMAND_ARGS = 20000
+MAX_QUEUED_COMMANDS = 4
 
 
 def _now() -> str:
@@ -109,6 +187,24 @@ def _content_disposition(name: str) -> str:
 class _Err(Exception):
     def __init__(self, status: int, code: str, message: str = "") -> None:
         self.status, self.code, self.message = status, code, message or code
+
+
+def _command_body(body: dict[str, Any]) -> tuple[str, str]:
+    """The wrapper's command body `{name, args: str = ""}`: a D2 name, args with newlines and
+    tabs (`\\r\\n` normalised) but no other control character, at most MAX_COMMAND_ARGS."""
+    name, args = body.get("name"), body.get("args", "")
+    if set(body) - {"name", "args"} or not isinstance(name, str) or not isinstance(args, str):
+        raise _Err(422, "invalid_request", "body must be {name: str, args: str}")
+    if not COMMAND_NAME_RE.fullmatch(name):
+        raise _Err(422, "invalid_command", f"invalid command name {name!r}")
+    args = args.replace("\r\n", "\n")
+    if len(args) > MAX_COMMAND_ARGS:
+        raise _Err(422, "invalid_command", f"args are over {MAX_COMMAND_ARGS} characters")
+    if any(
+        c in "\u2028\u2029" or (unicodedata.category(c) == "Cc" and c not in "\n\t") for c in args
+    ):
+        raise _Err(422, "invalid_command", "args hold a control character")
+    return name, args
 
 
 def _write_body(body: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
@@ -201,6 +297,7 @@ class _Session:
     context: dict[str, Any] | None = None
     current_turn_id: str | None = None
     turns: dict[str, _Turn] = field(default_factory=dict)
+    commands: list[dict[str, Any]] = field(default_factory=list)  # CommandRecords, oldest first
     events: list[dict[str, Any]] = field(default_factory=list)
     next_seq: int = 1
     turns_completed: int = 0
@@ -304,6 +401,8 @@ class FakeWrapper:
         self.notes_max_chars = 2000
         self._notes_delay = 0.0
         self.requests: list[tuple[str, str]] = []  # (method, path) of every authenticated call
+        # sessions.commands.client: the names a client may queue, or "*" for any
+        self.commands_client: list[str] = ["*"]
         self.app = self._build_app()
 
     # ------------------------------------------------------------------ lifecycle
@@ -414,9 +513,33 @@ class FakeWrapper:
             # the real wrapper logs the idle transition before turn_completed
             self._set_state(ses, "ready")
             self.emit("turn_completed", {"record": turn.record(ses.session_id)}, ses.session_id)
+            self._run_commands(ses)
             await asyncio.sleep(0)
             return
         raise KeyError(turn_id)
+
+    def _emit_command(self, type: str, record: dict[str, Any], session_id: str) -> None:
+        self.emit(type, {"record": dict(record)}, session_id)
+
+    def _run_commands(self, ses: _Session) -> None:
+        """Run every queued command at once on the ready session, as one busy span."""
+        pending = [r for r in ses.commands if r["state"] == "queued"]
+        if not pending:
+            return
+        sid = ses.session_id
+        self._set_state(ses, "busy")
+        for rec in pending:
+            rec.update(state="running", started_at=_now())
+            self._emit_command("command_started", rec, sid)
+            line = f"/{rec['name']} {rec['args']}".rstrip()
+            self.emit(
+                "user_message",
+                {"turn_id": None, "origin": "command", "text": line, "files": []},
+                sid,
+            )
+            rec.update(state="completed", result="ok", finished_at=_now())
+            self._emit_command("command_completed", rec, sid)
+        self._set_state(ses, "ready")
 
     def set_context(
         self,
@@ -729,19 +852,54 @@ class FakeWrapper:
                 turn.state, turn.completed_at = "interrupted", _now()
                 ses.current_turn_id = None
                 self.emit("turn_failed", {"record": turn.record(session_id)}, session_id)
+                # an interrupted turn never resumes: the commands queued for it are cancelled
+                for rec in ses.commands:
+                    if rec["state"] == "queued" and rec["turn_id"] == turn.turn_id:
+                        rec.update(state="cancelled", finished_at=_now())
+                        self._emit_command("command_failed", rec, session_id)
                 self._set_state(ses, "ready")
             return ses.snapshot()
 
         @app.post("/v1/sessions/{session_id}/commands", status_code=202)
         async def commands(session_id: str, request: Request) -> dict[str, Any]:
+            """Queue `/name args`: idle, it runs at once; during a turn, after that turn."""
             self._auth(request)
-            self._get(session_id)
-            body = await self._json_body(request)
-            name = body.get("name") or body.get("command")
-            if name not in ("compact", "context", "mcp", "reload-plugins", "reload-skills"):
-                raise _Err(422, "invalid_request", f"unknown command {name}")
-            self.emit("command_queued", {"name": name}, session_id)
-            return {"command_id": self._new_id("cmd-"), "state": "queued"}
+            ses = self._get(session_id)
+            name, args = _command_body(await self._json_body(request))
+            if self._booting or ses.state == "creating":
+                raise _Err(409, "booting", "session is booting")
+            if ses.state not in ACTIVE_STATES:
+                raise _Err(409, "dead", f"session is {ses.state}")
+            if name.lower() in COMMAND_DENY:
+                raise _Err(403, "command_denied", f"/{name} is denied")
+            if "*" not in self.commands_client and name not in self.commands_client:
+                raise _Err(403, "command_not_allowed", f"/{name} is not allowed for client")
+            pending = [r for r in ses.commands if r["state"] == "queued"]
+            for rec in pending:
+                if (rec["name"], rec["args"]) == (name, args):
+                    return dict(rec)  # an identical queued command coalesces
+            if len(pending) >= MAX_QUEUED_COMMANDS:
+                raise _Err(429, "command_queue_full", f"{MAX_QUEUED_COMMANDS} commands are queued")
+            rec = {
+                "id": f"cmd_{secrets.token_hex(6)}",
+                "name": name,
+                "args": args,
+                "origin": "client",
+                "turn_id": ses.current_turn_id,
+                "state": "queued",
+                "result": None,
+                "error": None,
+                "output": None,
+                "created_at": _now(),
+                "started_at": None,
+                "finished_at": None,
+            }
+            ses.commands.append(rec)
+            self._emit_command("command_queued", rec, session_id)
+            reply = dict(rec)
+            if ses.state == "ready" and ses.current_turn_id is None:
+                self._run_commands(ses)
+            return reply
 
         @app.post("/v1/sessions/{session_id}/notes", status_code=202)
         async def push_note(session_id: str, request: Request) -> dict[str, Any]:

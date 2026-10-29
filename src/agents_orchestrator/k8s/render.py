@@ -132,7 +132,7 @@ def _apply_wrapper(cfg: dict[str, Any], wrapper: WrapperSettings) -> None:
         if key in user:
             sessions[key] = user[key]
     if "agent_commands" in user:
-        sessions["commands"] = {"agent": user["agent_commands"]}
+        sessions["commands"]["agent"] = user["agent_commands"]
     if "turn_max_seconds" in user:
         cfg["limits"]["turn_max_seconds"] = user["turn_max_seconds"]
     if "plugins" in user:
@@ -186,6 +186,8 @@ def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
             "idle_timeout_seconds": 0,
             "ask_user_question": "deny",
             "restart_continue_prompt": _escape(settings.default_restart_continue_prompt),
+            # The orchestrator is the wrapper's only client: every client command is allowed.
+            "commands": {"client": ["*"]},
         },
         "prompts": {"system_append": ASK_IN_WRITING_PROMPT},
         "limits": {

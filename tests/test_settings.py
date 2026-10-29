@@ -52,7 +52,7 @@ def test_defaults():
     assert s.any_mcp_repo == "https://github.com/szymonrychu/any-mcp"
     assert s.any_mcp_ref == "v0.5.0"
     assert s.any_mcp_plugins_repo == "https://github.com/szymonrychu/any-mcp-tatara-plugins"
-    assert s.any_mcp_plugins_ref == "v0.4.0"
+    assert s.any_mcp_plugins_ref == "v0.5.1"
     assert s.on_start_timeout_seconds == 600
     assert s.discard_hook() is None
 

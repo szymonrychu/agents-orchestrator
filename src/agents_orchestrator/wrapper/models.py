@@ -101,8 +101,19 @@ class TurnAccepted:
 
 
 @dataclass(frozen=True)
+class CommandAccepted:
+    """202: the wrapper queued the command; `record` is its CommandRecord as sent."""
+
+    command_id: str
+    record: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class Busy:
-    pass
+    """Not now, nothing was taken: `code` is the wrapper's envelope code ("" when none)."""
+
+    code: str = ""
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -117,6 +128,9 @@ class ConfigError:
 
 @dataclass(frozen=True)
 class Rejected:
+    """Refused for good: `code` is the wrapper's envelope code ("" when none)."""
+
+    code: str = ""
     reason: str = ""
 
 
@@ -135,6 +149,7 @@ class Ambiguous:
 
 
 SubmitOutcome = TurnAccepted | Busy | Gone | ConfigError | Rejected | Unavailable | Ambiguous
+CommandOutcome = CommandAccepted | Busy | ConfigError | Rejected | Gone | Unavailable | Ambiguous
 
 
 class WrapperError(Exception):

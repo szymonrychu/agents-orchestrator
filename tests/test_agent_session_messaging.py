@@ -16,6 +16,7 @@ from test_api_agent import AGENT_PORT, client_for, headers, make_settings, set_i
 from test_api_sessions import assert_error
 
 from agents_orchestrator.api.app import create_app
+from agents_orchestrator.db import queue
 
 _ips = itertools.count(1)
 
@@ -402,3 +403,85 @@ async def test_session_tools_parity(pool, dsn):
     assert row["text"] == "from the plugin"
     assert row["sender_session_id"] == plain.id
     assert row["status"] == "queued"
+
+
+async def test_session_send_slash_is_command_kind(pool, dsn):
+    app = _app(pool, dsn)
+    boss = await hive(pool, "c-boss", superleader=True)
+    plain = await alone(pool, "c-plain")
+    r = await _send(app, boss, plain.slug, "/compact")
+    assert r.status_code == 202, r.text
+    (row,) = await _rows(pool, "id = %s", (r.json()["message_id"],))
+    assert row["kind"] == "command"
+    assert row["text"] == "/compact"
+    assert row["session_id"] == plain.id
+    assert row["sender_session_id"] == boss.id
+    assert row["sender_slug"] == boss.slug
+    assert row["hop"] == 1
+    # plain prose and a path-like text from a superleader stay turns
+    for text in ("compact", "/etc/hosts"):
+        r = await _send(app, boss, plain.slug, text)
+        assert r.status_code == 202, r.text
+        (row,) = await _rows(pool, "id = %s", (r.json()["message_id"],))
+        assert row["kind"] == "turn"
+
+
+async def test_session_send_slash_from_non_superleader_stays_turn(pool, dsn):
+    app = _app(pool, dsn)
+    boss = await alone(pool, "n-boss", superleader=True)
+    worker = await hive(pool, "n-worker")
+    lone = await alone(pool, "n-lone")
+    for caller in (worker, lone):
+        r = await _send(app, caller, boss.slug, "/compact")
+        assert r.status_code == 202, r.text
+        (row,) = await _rows(pool, "id = %s", (r.json()["message_id"],))
+        assert row["kind"] == "turn"
+        assert row["text"] == "/compact"
+        assert row["sender_session_id"] == caller.id
+        assert row["session_id"] == boss.id
+
+
+async def test_session_send_slash_keeps_refusals(pool, dsn):
+    app = _app(pool, dsn, session_message_rate_per_minute=2)
+    boss = await hive(pool, "k-boss", superleader=True)
+    plain = await hive(pool, "k-plain")
+    other = await alone(pool, "k-other")
+    # not_leader comes before not_found and the kind decision
+    assert_error(
+        await _send(app, boss, other.slug, "/compact", ip=boss.member_ip), 403, "not_leader"
+    )
+    assert_error(await _send(app, plain, other.slug, "/compact"), 403, "target_not_superleader")
+    assert await _rows(pool) == []
+    for _ in range(2):
+        assert (await _send(app, boss, other.slug, "/compact")).status_code == 202
+    assert_error(await _send(app, boss, other.slug, "/compact"), 429, "rate_limited")
+    assert len(await _rows(pool)) == 2
+    assert {r["kind"] for r in await _rows(pool)} == {"command"}
+
+
+async def test_promoted_command_turn_keeps_hop_count(pool, dsn):
+    boss = await hive(pool, "p-boss", superleader=True)
+    target = await alone(pool, "p-target")
+    sent = await _send(_app(pool, dsn, session_message_max_hops=3), boss, target.slug, "/x")
+    assert sent.status_code == 202, sent.text
+    message_id = sent.json()["message_id"]
+    # the dispatcher sent it to the target's leader, which promoted it to the turn "turn-p"
+    await _exec(
+        pool,
+        "UPDATE messages SET status = 'sent', agent_id = %s, wrapper_command_id = 'cmd_p'"
+        " WHERE id = %s",
+        (target.leader_id, message_id),
+    )
+    async with pool.connection() as conn:
+        assert await queue.link_command_turn(conn, "cmd_p", "turn-p")
+    await set_agent_status(pool, target.leader_id, state="busy", current_turn_id="turn-p")
+
+    reply = await _send(_app(pool, dsn, session_message_max_hops=3), target, boss.slug)
+    assert reply.status_code == 202, reply.text
+    (row,) = await _rows(pool, "id = %s", (reply.json()["message_id"],))
+    assert row["hop"] == 2
+
+    before = len(await _rows(pool))
+    strict = _app(pool, dsn, session_message_max_hops=1)
+    assert_error(await _send(strict, target, boss.slug), 409, "hop_limit")
+    assert len(await _rows(pool)) == before

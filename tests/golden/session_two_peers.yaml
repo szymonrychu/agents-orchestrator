@@ -48,15 +48,16 @@
       \ true\n    on_error: allow\n    timeout_seconds: 600.0\nsessions:\n  max_sessions:\
       \ 1\n  resume_on_start: true\n  idle_timeout_seconds: 0\n  ask_user_question:\
       \ deny\n  restart_continue_prompt: Claude was restarted. Continue the task where\
-      \ you left\n    off.\nprompts:\n  system_append: 'The AskUserQuestion tool is\
-      \ disabled and nobody answers interactive\n    questions. When you need a decision\
-      \ or information from the user, ask in writing\n    in your reply: write a numbered\
-      \ list of questions, and after each question give\n    your recommended answer,\
-      \ worded so that replying \"yes\" accepts it. Then stop and\n    wait for the\
-      \ reply. Never wait on an interactive question tool.'\nlimits:\n  shutdown_timeout_seconds:\
-      \ 80\nnotes:\n  enabled: true\npeers:\n  enabled: true\n  name: ${POD_NAME}\n\
-      \  advertise_url: ${CCW_PEER_URL}\n  token: ${CCW_PEER_TOKEN}\n  static:\n \
-      \ - http://agent-alpha-0.agent-alpha.agents.svc.cluster.local:8080\n  - http://agent-alpha-1.agent-alpha.agents.svc.cluster.local:8080\n"
+      \ you left\n    off.\n  commands:\n    client:\n    - '*'\nprompts:\n  system_append:\
+      \ 'The AskUserQuestion tool is disabled and nobody answers interactive\n   \
+      \ questions. When you need a decision or information from the user, ask in writing\n\
+      \    in your reply: write a numbered list of questions, and after each question\
+      \ give\n    your recommended answer, worded so that replying \"yes\" accepts\
+      \ it. Then stop and\n    wait for the reply. Never wait on an interactive question\
+      \ tool.'\nlimits:\n  shutdown_timeout_seconds: 80\nnotes:\n  enabled: true\n\
+      peers:\n  enabled: true\n  name: ${POD_NAME}\n  advertise_url: ${CCW_PEER_URL}\n\
+      \  token: ${CCW_PEER_TOKEN}\n  static:\n  - http://agent-alpha-0.agent-alpha.agents.svc.cluster.local:8080\n\
+      \  - http://agent-alpha-1.agent-alpha.agents.svc.cluster.local:8080\n"
     on-start.sh: "#!/bin/sh\nset -eu\nREF=v0.5.0\nok=1\ninstall() {\n  step=$1\n \
       \ shift\n  [ \"$ok\" = 1 ] || return 0\n  \"$@\" && return 0\n  echo \"on-start:\
       \ $step failed (exit $?)\" >&2\n  ok=0\n}\nif ! grep -qxF -- \"$REF\" /opt/any-mcp/.ref\
@@ -110,7 +111,7 @@
           agents.szymonrichert.pl/session: alpha
           app.kubernetes.io/managed-by: agents-orchestrator
         annotations:
-          agents.szymonrichert.pl/config-hash: c761ff0e1b4425b4d04576065c9af539d7952342702180b6b8cb676dda858555
+          agents.szymonrichert.pl/config-hash: 191da3fed9110290d45cf49948d5cfbd7de5619284edf3b41a314b1e6c8244d6
       spec:
         imagePullSecrets:
         - name: regcred
