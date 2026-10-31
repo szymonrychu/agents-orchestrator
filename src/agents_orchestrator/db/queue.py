@@ -138,6 +138,7 @@ async def enqueue_message(
     sender_slug: str | None = None,
     hop: int = 0,
     lane: str = "regular",
+    carries_start_prompt: bool = False,
 ) -> int:
     """Queue a message; a session message carries its sender and hop (D8).
 
@@ -148,8 +149,18 @@ async def enqueue_message(
         row = await _one(
             conn,
             "INSERT INTO messages (session_id, text, target_agent_id, sender_session_id,"
-            " sender_slug, hop, lane) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
-            (session_id, text, target_agent_id, sender_session_id, sender_slug, hop, lane),
+            " sender_slug, hop, lane, carries_start_prompt)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            (
+                session_id,
+                text,
+                target_agent_id,
+                sender_session_id,
+                sender_slug,
+                hop,
+                lane,
+                carries_start_prompt,
+            ),
         )
         assert row is not None
         await notify(conn, "message_queued", {"session_id": str(session_id)})
@@ -160,11 +171,12 @@ async def enqueue_message(
 _FIRST_MESSAGE_LOCK_NAMESPACE = 0x6F726332  # "orc2"
 
 
-async def lock_first_message(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> bool:
-    """True when the session has no message yet; call inside a transaction.
+async def start_prompt_pending(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> bool:
+    """True when no live message carries the session's start prompt; call inside a transaction.
 
-    Takes a transaction-level advisory lock so two concurrent first posts cannot both see an
-    empty session: the second waits for the first to commit and then sees its row.
+    A carrier that failed or was cancelled no longer counts, so the next user message takes the
+    prompt over; peer messages never carry it. The transaction-level advisory lock makes two
+    concurrent posts agree: the second waits for the first to commit and then sees its row.
     """
     await conn.execute(
         "SELECT pg_advisory_xact_lock(%s, hashtext(%s::text))",
@@ -172,11 +184,12 @@ async def lock_first_message(conn: psycopg.AsyncConnection, session_id: uuid.UUI
     )
     row = await _one(
         conn,
-        "SELECT NOT EXISTS (SELECT 1 FROM messages WHERE session_id = %s) AS first",
+        "SELECT NOT EXISTS (SELECT 1 FROM messages WHERE session_id = %s"
+        " AND carries_start_prompt AND status NOT IN ('failed', 'cancelled')) AS pending",
         (session_id,),
     )
     assert row is not None
-    return row["first"]
+    return row["pending"]
 
 
 async def _count(conn: psycopg.AsyncConnection, query: str, params: Any) -> int:
@@ -550,13 +563,27 @@ async def mark_sent(conn: psycopg.AsyncConnection, id: int, turn_id: str) -> boo
     return row is not None
 
 
-async def requeue(conn: psycopg.AsyncConnection, id: int) -> bool:
-    """409 busy: back to queued at once, no attempt counted, no backoff."""
+async def requeue(
+    conn: psycopg.AsyncConnection,
+    id: int,
+    backoff_base: float = 0.0,
+    backoff_max: float = 0.0,
+) -> bool:
+    """409 busy/booting: back to queued, no attempt counted.
+
+    A regular or priority message is not gated by agent_free, so it also waits a bounded
+    exponential backoff (`backoff_base * 2^requeues`, at most `backoff_max`) and cannot be
+    re-claimed in a hot loop. An idle message is gated by agent_free and gets none.
+    """
     row = await _transition(
         conn,
-        "UPDATE messages SET status = 'queued', not_before = NULL, heartbeat_at = NULL"
+        "UPDATE messages SET status = 'queued', heartbeat_at = NULL,"
+        " not_before = CASE WHEN lane = 'idle' OR %(base)s <= 0 THEN NULL ELSE now() +"
+        " make_interval(secs => least(%(base)s * power(2, least(busy_requeues, 20)), %(max)s))"
+        " END,"
+        " busy_requeues = CASE WHEN lane = 'idle' THEN busy_requeues ELSE busy_requeues + 1 END"
         " WHERE id = %(id)s AND status = 'dispatching' RETURNING session_id",
-        {"id": id},
+        {"id": id, "base": backoff_base, "max": backoff_max},
     )
     return row is not None
 

@@ -63,7 +63,7 @@ async def _require_open_session(conn, session_id: uuid.UUID) -> repo.Session:
 
 
 async def _with_start_prompt(session: repo.Session, text: str) -> str:
-    """The first message of a session: the rendered preset start prompt, a blank line, then `text`.
+    """The text of the message that carries the start prompt: it, a blank line, then `text`.
 
     One message, applied here for every caller (user, webhook, schedule, Matrix connector). The
     connector's preamble is part of `text`, so the start prompt precedes it and nothing repeats.
@@ -92,12 +92,18 @@ async def post_message(
             if agent["gone_at"] is not None:
                 raise ApiError(422, "target_gone", "target agent is gone")
         text = body.text
-        if session.spec.start_prompt is not None and await queue.lock_first_message(
+        carries = session.spec.start_prompt is not None and await queue.start_prompt_pending(
             conn, session_id
-        ):
+        )
+        if carries:
             text = await _with_start_prompt(session, text)
         mid = await queue.enqueue_message(
-            conn, session_id, text, body.target_agent_id, lane=body.lane
+            conn,
+            session_id,
+            text,
+            body.target_agent_id,
+            lane=body.lane,
+            carries_start_prompt=carries,
         )
     return schemas.MessageAccepted(message_id=mid)
 

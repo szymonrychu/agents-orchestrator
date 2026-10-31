@@ -39,7 +39,7 @@ def session_context(surface: Surface, session: Session) -> dict[str, Any]:
     ctx: dict[str, Any] = {
         "session_slug": session.slug,
         "preset_name": session.preset_name or "",
-        "user": "",  # the api has no end-user identity to offer
+        "user": session.created_by_service or "",  # the api has no end-user identity
         "env": dict(session.spec.env),
         "now": session.created_at.isoformat(),
     }

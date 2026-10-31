@@ -567,3 +567,37 @@ async def test_dead_409_is_retried_with_backoff(env):
     await d.aclose()
     row = await env.message(m["id"])
     assert (row["status"], row["attempts"]) == ("queued", 1)
+
+
+async def test_live_lane_409_requeue_backs_off_exponentially_and_is_bounded(env):
+    await env.agent()
+    m = await env.msg(lane="priority")
+    env.fake.set_turn_status(409, "busy")
+    d = env.dispatcher(retry_backoff_base_seconds=1.0, retry_backoff_max_seconds=3.0)
+    gaps = []
+    for _ in range(4):
+        await env.exec("UPDATE messages SET not_before = NULL WHERE id=%s", (m["id"],))
+        await d.drain()
+        row = (
+            await env.rows(
+                "SELECT status, attempts, extract(epoch FROM not_before - now()) AS gap"
+                " FROM messages WHERE id=%s",
+                (m["id"],),
+            )
+        )[0]
+        assert (row["status"], row["attempts"]) == ("queued", 0)
+        gaps.append(round(float(row["gap"])))
+    await d.drain()  # inside the backoff: not claimed again
+    await d.aclose()
+    assert gaps == [1, 2, 3, 3]
+    assert env.fake.received_turns == 0
+
+
+async def test_idle_lane_409_requeue_has_no_backoff(env):
+    await env.agent()
+    m = await env.msg(lane="idle")
+    env.fake.set_turn_status(409)
+    d = env.dispatcher()
+    await d.drain()
+    await d.aclose()
+    assert (await env.message(m["id"]))["not_before"] is None

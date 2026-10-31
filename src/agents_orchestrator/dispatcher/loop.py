@@ -249,7 +249,9 @@ class Dispatcher:
                 conn, claim.agent_id, claim.previous_dispatched_at, claimed_at=claim.dispatched_at
             )
             if isinstance(outcome, Busy):
-                await queue.requeue(conn, mid)
+                await queue.requeue(
+                    conn, mid, s.retry_backoff_base_seconds, s.retry_backoff_max_seconds
+                )
             elif isinstance(outcome, ConfigError):
                 await queue.fail_message(conn, mid, "config_error")
             elif isinstance(outcome, DialogOpen):
