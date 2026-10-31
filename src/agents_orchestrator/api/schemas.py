@@ -177,6 +177,15 @@ class MetaKubeAccess(BaseModel):
     available: bool
 
 
+class MetaHookEvent(BaseModel):
+    name: str
+    can_veto: bool
+    supports_matcher: bool
+    supports_when: bool
+    supports_interval: bool
+    interval_required: bool
+
+
 class Meta(BaseModel):
     defaults: MetaDefaults
     agent_image: str
@@ -187,6 +196,7 @@ class Meta(BaseModel):
     discard_hook: Literal["none", "command", "url"]
     cache: MetaCache
     kube_access: MetaKubeAccess
+    hook_events: list[MetaHookEvent]
 
 
 Lane = Literal["idle", "regular", "priority"]

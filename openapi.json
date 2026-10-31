@@ -1822,6 +1822,13 @@
             "title": "Efforts",
             "type": "array"
           },
+          "hook_events": {
+            "items": {
+              "$ref": "#/components/schemas/MetaHookEvent"
+            },
+            "title": "Hook Events",
+            "type": "array"
+          },
           "kube_access": {
             "$ref": "#/components/schemas/MetaKubeAccess"
           },
@@ -1842,7 +1849,8 @@
           "caps",
           "discard_hook",
           "cache",
-          "kube_access"
+          "kube_access",
+          "hook_events"
         ],
         "title": "Meta",
         "type": "object"
@@ -1954,6 +1962,44 @@
           "max_attempts"
         ],
         "title": "MetaDefaults",
+        "type": "object"
+      },
+      "MetaHookEvent": {
+        "properties": {
+          "can_veto": {
+            "title": "Can Veto",
+            "type": "boolean"
+          },
+          "interval_required": {
+            "title": "Interval Required",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "supports_interval": {
+            "title": "Supports Interval",
+            "type": "boolean"
+          },
+          "supports_matcher": {
+            "title": "Supports Matcher",
+            "type": "boolean"
+          },
+          "supports_when": {
+            "title": "Supports When",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "can_veto",
+          "supports_matcher",
+          "supports_when",
+          "supports_interval",
+          "interval_required"
+        ],
+        "title": "MetaHookEvent",
         "type": "object"
       },
       "MetaKubeAccess": {

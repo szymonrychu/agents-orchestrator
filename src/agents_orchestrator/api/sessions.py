@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import asdict
 from datetime import datetime, timedelta
 from typing import Annotated
 
@@ -19,6 +20,7 @@ from agents_orchestrator.db import leadership, presets, views
 from agents_orchestrator.db import sessions as repo
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import (
+    HOOK_EVENT_SPECS,
     INIT_DIR,
     WORKDIR_ROOT,
     SessionSpec,
@@ -196,6 +198,7 @@ async def meta(settings: Cfg) -> schemas.Meta:
             available=settings.cache_available, max_bytes=settings.cache_max_bytes
         ),
         kube_access=schemas.MetaKubeAccess(available=settings.kube_access_available),
+        hook_events=[schemas.MetaHookEvent(**asdict(e)) for e in HOOK_EVENT_SPECS],
     )
 
 

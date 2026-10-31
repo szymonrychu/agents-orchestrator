@@ -1,0 +1,170 @@
+[
+  {
+    "name": "onCreate",
+    "can_veto": true,
+    "supports_matcher": false,
+    "supports_when": false,
+    "supports_interval": false,
+    "interval_required": false
+  },
+  {
+    "name": "onResume",
+    "can_veto": true,
+    "supports_matcher": false,
+    "supports_when": false,
+    "supports_interval": false,
+    "interval_required": false
+  },
+  {
+    "name": "onDestroy",
+    "can_veto": false,
+    "supports_matcher": false,
+    "supports_when": false,
+    "supports_interval": false,
+    "interval_required": false
+  },
+  {
+    "name": "onTurn",
+    "can_veto": true,
+    "supports_matcher": false,
+    "supports_when": false,
+    "supports_interval": false,
+    "interval_required": false
+  },
+  {
+    "name": "onTurnComplete",
+    "can_veto": false,
+    "supports_matcher": false,
+    "supports_when": false,
+    "supports_interval": false,
+    "interval_required": false
+  },
+  {
+    "name": "onStop",
+    "can_veto": false,
+    "supports_matcher": false,
+    "supports_when": false,
+    "supports_interval": false,
+    "interval_required": false
+  },
+  {
+    "name": "onTick",
+    "can_veto": false,
+    "supports_matcher": false,
+    "supports_when": true,
+    "supports_interval": true,
+    "interval_required": true
+  },
+  {
+    "name": "onAgentResponse",
+    "can_veto": false,
+    "supports_matcher": false,
+    "supports_when": false,
+    "supports_interval": false,
+    "interval_required": false
+  },
+  {
+    "name": "onAgentToolCall",
+    "can_veto": true,
+    "supports_matcher": true,
+    "supports_when": false,
+    "supports_interval": false,
+    "interval_required": false
+  },
+  {
+    "name": "onToolResult",
+    "can_veto": false,
+    "supports_matcher": true,
+    "supports_when": false,
+    "supports_interval": false,
+    "interval_required": false
+  },
+  {
+    "name": "onSubagentStart",
+    "can_veto": false,
+    "supports_matcher": false,
+    "supports_when": false,
+    "supports_interval": false,
+    "interval_required": false
+  },
+  {
+    "name": "onSubagentStop",
+    "can_veto": false,
+    "supports_matcher": false,
+    "supports_when": false,
+    "supports_interval": false,
+    "interval_required": false
+  },
+  {
+    "name": "onInterrupt",
+    "can_veto": false,
+    "supports_matcher": false,
+    "supports_when": false,
+    "supports_interval": false,
+    "interval_required": false
+  },
+  {
+    "name": "onCommand",
+    "can_veto": true,
+    "supports_matcher": false,
+    "supports_when": false,
+    "supports_interval": false,
+    "interval_required": false
+  },
+  {
+    "name": "onCommandComplete",
+    "can_veto": false,
+    "supports_matcher": false,
+    "supports_when": false,
+    "supports_interval": false,
+    "interval_required": false
+  },
+  {
+    "name": "onError",
+    "can_veto": false,
+    "supports_matcher": false,
+    "supports_when": false,
+    "supports_interval": false,
+    "interval_required": false
+  },
+  {
+    "name": "preJoin",
+    "can_veto": true,
+    "supports_matcher": false,
+    "supports_when": false,
+    "supports_interval": false,
+    "interval_required": false
+  },
+  {
+    "name": "postJoin",
+    "can_veto": false,
+    "supports_matcher": false,
+    "supports_when": false,
+    "supports_interval": false,
+    "interval_required": false
+  },
+  {
+    "name": "preLeave",
+    "can_veto": false,
+    "supports_matcher": false,
+    "supports_when": false,
+    "supports_interval": false,
+    "interval_required": false
+  },
+  {
+    "name": "postLeave",
+    "can_veto": false,
+    "supports_matcher": false,
+    "supports_when": false,
+    "supports_interval": false,
+    "interval_required": false
+  },
+  {
+    "name": "onStart",
+    "can_veto": true,
+    "supports_matcher": false,
+    "supports_when": false,
+    "supports_interval": false,
+    "interval_required": false
+  }
+]
