@@ -12,6 +12,7 @@ from agents_orchestrator.wrapper.models import (
     Ambiguous,
     Busy,
     ConfigError,
+    DialogOpen,
     Envelope,
     Gone,
     PeersView,
@@ -141,9 +142,13 @@ class WrapperClient:
     # turns
 
     async def submit_turn(
-        self, session_id: str, text: str, metadata: dict[str, Any] | None = None
+        self,
+        session_id: str,
+        text: str,
+        metadata: dict[str, Any] | None = None,
+        lane: str = "regular",
     ) -> SubmitOutcome:
-        body: dict[str, Any] = {"text": text}
+        body: dict[str, Any] = {"text": text, "lane": lane}
         if metadata is not None:
             body["metadata"] = metadata
         try:
@@ -170,7 +175,11 @@ class WrapperClient:
         code, message = _error_parts(resp)
         reason = f"{status} {code}: {message}"
         if status == 409:
-            return Busy()
+            if code == "dialog_open":
+                return DialogOpen(reason)
+            if code == "dead":
+                return Unavailable(reason)  # nothing delivered; the rebootstrap path recovers
+            return Busy()  # busy, booting (or an unknown 409): requeue without an attempt
         if status in (404, 410):
             return Gone(reason)
         if status in (401, 403):

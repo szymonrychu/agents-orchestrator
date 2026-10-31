@@ -167,14 +167,14 @@ async def test_turn_lifecycle_events(leg: Leg) -> None:
 
 async def test_busy_session_returns_409(leg: Leg) -> None:
     sid = await leg.create()
-    first = await leg.submit(sid, SLOW)
+    first = await leg.submit(sid, SLOW, lane="idle")
     assert first.status_code == 202
     turn_id = first.json()["turn_id"]
     assert first.json()["state"] == "running"
-    second = await leg.submit(sid, "again")
+    second = await leg.submit(sid, "again", lane="idle")
     assert second.status_code == 409
     assert second.json()["error"]["code"] == "busy"
-    assert isinstance(await leg.client().submit_turn(sid, "again"), Busy)
+    assert isinstance(await leg.client().submit_turn(sid, "again", lane="idle"), Busy)
     await leg.finish(sid, turn_id)
 
 

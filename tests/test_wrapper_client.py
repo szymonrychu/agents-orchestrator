@@ -304,9 +304,15 @@ async def test_turn_metadata_and_turn_records():
 
     c = client(h)
     await c.submit_turn("s", "hi", metadata={"message_id": "m-1"})
-    assert json.loads(reqs[0].content) == {"text": "hi", "metadata": {"message_id": "m-1"}}
+    assert json.loads(reqs[0].content) == {
+        "text": "hi",
+        "lane": "regular",
+        "metadata": {"message_id": "m-1"},
+    }
     await c.submit_turn("s", "hi")
-    assert json.loads(reqs[1].content) == {"text": "hi"}
+    assert json.loads(reqs[1].content) == {"text": "hi", "lane": "regular"}
+    await c.submit_turn("s", "hi", lane="priority")
+    assert json.loads(reqs[2].content)["lane"] == "priority"
     turns = await c.list_turns("s")
     assert turns[0].turn_id == "t1" and turns[0].state == "running"
     t = await c.get_turn("s", "t1")

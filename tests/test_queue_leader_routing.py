@@ -45,7 +45,7 @@ async def _lead(pool, session_id, agent_id, epoch: int = 1) -> None:
 
 async def _enqueue(pool, session_id, text: str = "hi", target=None) -> int:
     async with pool.connection() as conn:
-        return await q.enqueue_message(conn, session_id, text, target)
+        return await q.enqueue_message(conn, session_id, text, target, lane="idle")
 
 
 async def _claim(pool):

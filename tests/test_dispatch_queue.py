@@ -58,7 +58,7 @@ async def _agent(pool, agent_id) -> dict:
 
 async def _enqueue(pool, session_id, text: str = "hi", target=None) -> int:
     async with pool.connection() as conn:
-        return await q.enqueue_message(conn, session_id, text, target)
+        return await q.enqueue_message(conn, session_id, text, target, lane="idle")
 
 
 async def _claim(pool):

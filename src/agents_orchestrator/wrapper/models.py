@@ -106,6 +106,13 @@ class Busy:
 
 
 @dataclass(frozen=True)
+class DialogOpen:
+    """409 dialog_open: a dialog is waiting for the user, the typed message was refused."""
+
+    reason: str = ""
+
+
+@dataclass(frozen=True)
 class Gone:
     reason: str = ""
 
@@ -134,7 +141,9 @@ class Ambiguous:
     reason: str = ""
 
 
-SubmitOutcome = TurnAccepted | Busy | Gone | ConfigError | Rejected | Unavailable | Ambiguous
+SubmitOutcome = (
+    TurnAccepted | Busy | DialogOpen | Gone | ConfigError | Rejected | Unavailable | Ambiguous
+)
 
 
 class WrapperError(Exception):
