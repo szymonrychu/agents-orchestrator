@@ -7,10 +7,12 @@ from dataclasses import asdict
 from datetime import datetime, timedelta
 from typing import Annotated
 
+from agents_common.templating import TemplateError
 from fastapi import APIRouter, Depends, Request
 from psycopg_pool import AsyncConnectionPool
 from pydantic import ValidationError
 
+from agents_orchestrator import rendering
 from agents_orchestrator.api import schemas
 from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.service_auth import calling_service
@@ -56,7 +58,11 @@ def _init_edited(session: repo.Session) -> bool:
     init = session.status.get("init")
     if not isinstance(init, dict) or init.get("state") in (None, "skipped"):
         return False
-    return init.get("scripts_hash") != init_scripts_hash(session.spec.init_scripts)
+    try:
+        rendered = rendering.render_init_scripts(session)
+    except TemplateError:
+        return True
+    return init.get("scripts_hash") != init_scripts_hash(session.spec.init_scripts, rendered)
 
 
 def _closes_at(session: repo.Session) -> datetime | None:
@@ -358,6 +364,14 @@ async def edit_init_scripts(
     except ValidationError as exc:
         msg = "; ".join(e["msg"].removeprefix("Value error, ") for e in exc.errors())
         raise ApiError(422, "invalid_request", msg) from None
+    current = await repo.get(conn, session_id)
+    if current is None:
+        raise not_found("session")
+    for i, script in enumerate(scripts):
+        error, _ = rendering.problem(script, "init_script", current.spec.env)
+        if error is not None:
+            hint = rendering.ESCAPE_HINT
+            raise ApiError(422, "invalid_request", f"init_scripts[{i}]: {error} ({hint})")
     try:
         session, preset_updated = await repo.set_init_scripts(conn, session_id, scripts)
     except repo.SessionNotFound:

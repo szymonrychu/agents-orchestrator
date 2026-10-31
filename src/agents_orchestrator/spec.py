@@ -187,9 +187,15 @@ CACHE_MAX_BYTES_LIMIT = 5368709120
 INIT_SCRIPT_MAX_CHARS = 16384
 
 
-def init_scripts_hash(scripts: list[str]) -> str:
-    """sha256 hex of the compact JSON list; the identity of an init script set."""
-    return hashlib.sha256(json.dumps(scripts, separators=(",", ":")).encode()).hexdigest()
+def init_scripts_hash(scripts: list[str], rendered: list[str] | None = None) -> str:
+    """sha256 hex of the compact JSON list; the identity of an init script set.
+
+    Scripts are templates: when `rendered` differs from them, the hash covers both, so an edit of
+    a template and a change of what it renders to (the session env) each move it. Without
+    templating the payload is the plain list, as before.
+    """
+    payload = scripts if rendered is None or rendered == scripts else [scripts, rendered]
+    return hashlib.sha256(json.dumps(payload, separators=(",", ":")).encode()).hexdigest()
 
 
 @dataclass(frozen=True)

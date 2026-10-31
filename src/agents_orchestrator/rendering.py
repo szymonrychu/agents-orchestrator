@@ -52,6 +52,27 @@ def render_text(template: str, context: dict[str, Any]) -> str:
     return templating.render(template, context)
 
 
+ESCAPE_HINT = "write a literal '{{' as {{ '{{' }}"
+
+
+def render_init_scripts(session: Session) -> list[str]:
+    """The session's init scripts rendered with the `init_script` context.
+
+    Raises TemplateError naming the script; a script written before templating existed that
+    contains `{{` or `{%` surfaces here (and at save time) with the escape rule in the message.
+    """
+    context = session_context("init_script", session)
+    rendered: list[str] = []
+    for i, script in enumerate(session.spec.init_scripts):
+        try:
+            rendered.append(render_text(script, context))
+        except TemplateError as exc:
+            raise TemplateError(
+                f"init_scripts[{i}]: {exc.message} ({ESCAPE_HINT})", exc.line
+            ) from exc
+    return rendered
+
+
 def problem(template: str, surface: Surface, env: dict[str, str]) -> tuple[str | None, str | None]:
     """(error, rendered) for a template as a spec field: allowed variables, syntax, a trial render.
 
