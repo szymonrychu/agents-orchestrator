@@ -98,10 +98,12 @@ async def _list(app, caller: Sess, ip: str | None = None):
         return await http.get("/agent/v1/sessions", headers=headers(caller.id))
 
 
-async def _send(app, caller: Sess, slug: str, text: str = "hello", ip: str | None = None):
+async def _send(app, caller: Sess, slug: str, text: str = "hello", ip: str | None = None, **extra):
     async with client_for(app, ip or caller.leader_ip) as http:
         return await http.post(
-            f"/agent/v1/sessions/{slug}/messages", json={"text": text}, headers=headers(caller.id)
+            f"/agent/v1/sessions/{slug}/messages",
+            json={"text": text, **extra},
+            headers=headers(caller.id),
         )
 
 
@@ -204,6 +206,22 @@ async def test_send_queues_with_sender(pool, dsn):
         assert row["target_agent_id"] is None
         assert row["status"] == "queued"
     assert len(await _rows(pool)) == len(sends)
+
+
+async def test_send_lane_defaults_to_regular_and_is_stored(pool, dsn):
+    app = _app(pool, dsn)
+    boss = await hive(pool, "s-boss", superleader=True)
+    plain = await alone(pool, "s-alone")
+    lanes = {}
+    for lane in (None, "idle", "regular", "priority"):
+        extra = {} if lane is None else {"lane": lane}
+        r = await _send(app, boss, plain.slug, f"m {lane}", **extra)
+        assert r.status_code == 202, r.text
+        (row,) = await _rows(pool, "id = %s", (r.json()["message_id"],))
+        lanes[lane] = row["lane"]
+    assert lanes == {None: "regular", "idle": "idle", "regular": "regular", "priority": "priority"}
+    bad = await _send(app, boss, plain.slug, "x", lane="urgent")
+    assert bad.status_code == 422
 
 
 async def test_send_refusals_for_sender(pool, dsn):

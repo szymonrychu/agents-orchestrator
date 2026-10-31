@@ -2436,6 +2436,16 @@
       "SessionMessageIn": {
         "additionalProperties": false,
         "properties": {
+          "lane": {
+            "default": "regular",
+            "enum": [
+              "idle",
+              "regular",
+              "priority"
+            ],
+            "title": "Lane",
+            "type": "string"
+          },
           "text": {
             "maxLength": 16000,
             "minLength": 1,

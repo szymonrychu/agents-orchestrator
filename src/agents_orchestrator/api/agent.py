@@ -353,6 +353,7 @@ class SessionMessageIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     text: str = Field(min_length=1, max_length=SESSION_MESSAGE_MAX_CHARS)
+    lane: schemas.Lane = "regular"
 
 
 class SessionMessageQueued(BaseModel):
@@ -441,7 +442,13 @@ async def session_send(
                 409, "target_queue_full", f"session {slug} holds {cap} queued session messages"
             )
         message_id = await q.enqueue_message(
-            conn, target.id, body.text, sender_session_id=own.id, sender_slug=own.slug, hop=hop
+            conn,
+            target.id,
+            body.text,
+            sender_session_id=own.id,
+            sender_slug=own.slug,
+            hop=hop,
+            lane=body.lane,
         )
     return SessionMessageQueued(message_id=message_id)
 
