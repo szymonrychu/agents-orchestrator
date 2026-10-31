@@ -3,26 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Literal
+from typing import Any
 
 from agents_common import templating
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict
 
+from agents_orchestrator.rendering import SAMPLES, Surface
+
 router = APIRouter(prefix="/api/v1")
-
-Surface = Literal["web_chat_start", "preset_text", "init_script"]
-
-_COMMON: dict[str, Any] = {"session_slug": "sample-session", "preset_name": "Default"}
-_ENV: dict[str, str] = {"TZ": "UTC", "LANG": "C.UTF-8"}
-_NOW = "2026-01-01T00:00:00Z"
-
-# Keys per surface follow plan.md "Context variables per surface"; `user` is a plain string.
-SAMPLES: dict[str, dict[str, Any]] = {
-    "web_chat_start": {**_COMMON, "user": "sample-user", "now": _NOW},
-    "preset_text": {**_COMMON, "env": _ENV, "now": _NOW},
-    "init_script": {**_COMMON, "env": _ENV},
-}
 
 
 class PreviewIn(BaseModel):

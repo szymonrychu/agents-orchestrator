@@ -2794,6 +2794,17 @@
             ],
             "title": "Session Messaging"
           },
+          "start_prompt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Prompt"
+          },
           "static": {
             "default": false,
             "title": "Static",
