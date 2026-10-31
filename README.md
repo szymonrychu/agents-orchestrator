@@ -738,7 +738,7 @@ List of agent views: `id`, `ordinal`, `pod_name`, `ready`, `state`, `free_since`
 
 ### `POST /api/v1/sessions/{session_id}/messages`
 
-Body `{"text": "<non-empty>", "target_agent_id": "<uuid, optional>"}`. Queues a message for round-robin dispatch (or for one agent). Response 202 `{"message_id": <int>, "status": "queued"}`. Errors: 404 `not_found`, 409 `session_deleting`, 422 `invalid_request` (empty text, target not in this session), 422 `target_gone`.
+Body `{"text": "<non-empty>", "target_agent_id": "<uuid, optional>"}`. Queues a message for round-robin dispatch (or for one agent). Response 202 `{"message_id": <int>, "status": "queued"}`. Errors: 404 `not_found`, 409 `session_deleting`, 422 `invalid_request` (empty text, target not in this session), 422 `target_gone`. The first message a session ever receives is the rendered spec `start_prompt` (if set), a blank line, then `text`, as one message; later messages are unchanged. This holds for every caller, so a chat preamble in `text` follows the start prompt.
 
 ### `GET /api/v1/sessions/{session_id}/messages`
 

@@ -31,7 +31,7 @@ _MARKERS = ("{{", "{%", "{#")
 
 
 def session_context(surface: Surface, session: Session) -> dict[str, Any]:
-    """The render context of `surface` for a stored session (`web_chat_start` is built by D6).
+    """The render context of `surface` for a stored session.
 
     `now` is the session's creation time, not the wall clock: the rendered wrapper config is
     hashed into the pod template, so a clock value would roll the pods on every reconcile.
@@ -39,6 +39,7 @@ def session_context(surface: Surface, session: Session) -> dict[str, Any]:
     ctx: dict[str, Any] = {
         "session_slug": session.slug,
         "preset_name": session.preset_name or "",
+        "user": "",  # the api has no end-user identity to offer
         "env": dict(session.spec.env),
         "now": session.created_at.isoformat(),
     }

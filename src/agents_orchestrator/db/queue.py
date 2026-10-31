@@ -157,6 +157,28 @@ async def enqueue_message(
         return row["id"]
 
 
+_FIRST_MESSAGE_LOCK_NAMESPACE = 0x6F726332  # "orc2"
+
+
+async def lock_first_message(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> bool:
+    """True when the session has no message yet; call inside a transaction.
+
+    Takes a transaction-level advisory lock so two concurrent first posts cannot both see an
+    empty session: the second waits for the first to commit and then sees its row.
+    """
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock(%s, hashtext(%s::text))",
+        (_FIRST_MESSAGE_LOCK_NAMESPACE, session_id),
+    )
+    row = await _one(
+        conn,
+        "SELECT NOT EXISTS (SELECT 1 FROM messages WHERE session_id = %s) AS first",
+        (session_id,),
+    )
+    assert row is not None
+    return row["first"]
+
+
 async def _count(conn: psycopg.AsyncConnection, query: str, params: Any) -> int:
     row = await _one(conn, query, params)
     assert row is not None
