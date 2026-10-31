@@ -691,6 +691,10 @@ Deletes the preset. Sessions made from it keep their spec; their `preset_id` bec
 
 Optional body `{"name": "<name>"}`. Creates a new, non-default preset holding the source's stored spec verbatim. Without a name it is `<source name> copy`, then `<source name> copy 2`, `copy 3` and so on until free; the source part is cut to fit 40 characters and right-trimmed before ` copy`. Response 201 with the new preset view. Errors: 404 `not_found` (unknown source), 409 `conflict` (an explicit name is taken), 422 `invalid_request` (bad explicit name).
 
+### `POST /api/v1/templates/preview`
+
+Renders a Jinja2 template for an editor against a fixed sample context. Body `{"template": "<text>", "surface": "web_chat_start" | "preset_text" | "init_script", "context": {...}}`; `context` is optional and replaces the sample's top-level keys. Response 200 `{rendered, error, variables}`: `rendered` is the text (null on error), `error` is `{line, message}` or null, `variables` the sorted names the template reads. A template error (syntax, undefined variable, over the 16 KiB limit) is a 200 with `error` set. Errors: 422 `invalid_request` (unknown surface).
+
 ### `GET /api/v1/sessions`
 
 All sessions as a list of session views. Response 200.

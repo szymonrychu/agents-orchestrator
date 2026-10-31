@@ -1,0 +1,77 @@
+"""POST /templates/preview: sandboxed render with a fixed sample context per surface."""
+
+from __future__ import annotations
+
+import pytest_asyncio
+from test_api_sessions import client_for, make_settings
+
+from agents_orchestrator.api import templates
+from agents_orchestrator.api.app import create_app
+
+URL = "/api/v1/templates/preview"
+
+
+@pytest_asyncio.fixture
+async def http(pool, dsn):
+    app = create_app(make_settings(dsn), pool)
+    async with client_for(app) as c:
+        yield c
+
+
+async def post(http, template, surface="web_chat_start", **extra):
+    return await http.post(URL, json={"template": template, "surface": surface, **extra})
+
+
+async def test_preview_renders_with_sample_context(http):
+    r = await post(http, "hi {{ session.name }}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["error"] is None
+    assert body["rendered"] == "hi " + templates.SAMPLES["web_chat_start"]["session"]["name"]
+    assert body["variables"] == ["session"]
+
+
+async def test_undeclared_variables_listed_sorted(http):
+    r = await post(http, "{{ session.name }} {{ zeta }} {{ alpha }}")
+    assert r.json()["variables"] == ["alpha", "session", "zeta"]
+    assert r.json()["error"]["message"]
+
+
+async def test_syntax_error_reports_line(http):
+    r = await post(http, "ok\n{% if %}\n")
+    body = r.json()
+    assert r.status_code == 200
+    assert body["rendered"] is None
+    assert body["error"]["line"] == 2
+    assert body["variables"] == []
+
+
+async def test_unknown_surface_is_422(http):
+    r = await post(http, "x", surface="nope")
+    assert r.status_code == 422
+
+
+async def test_every_surface_has_a_sample(http):
+    for surface in ("web_chat_start", "preset_text", "init_script"):
+        r = await post(http, "plain", surface=surface)
+        assert r.json() == {"rendered": "plain", "error": None, "variables": []}
+
+
+async def test_sample_context_is_deterministic(http):
+    a = await post(http, "{{ session.id }}", surface="init_script")
+    b = await post(http, "{{ session.id }}", surface="init_script")
+    assert a.json() == b.json()
+    assert a.json()["rendered"]
+
+
+async def test_context_overrides_sample(http):
+    r = await post(http, "{{ session.name }}", context={"session": {"name": "mine"}})
+    assert r.json()["rendered"] == "mine"
+
+
+async def test_oversized_template_is_an_error(http):
+    r = await post(http, "x" * (16 * 1024 + 1))
+    body = r.json()
+    assert r.status_code == 200
+    assert body["rendered"] is None
+    assert "limit" in body["error"]["message"]

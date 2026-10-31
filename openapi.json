@@ -2205,6 +2205,106 @@
         "title": "PresetView",
         "type": "object"
       },
+      "PreviewError": {
+        "properties": {
+          "line": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "line",
+          "message"
+        ],
+        "title": "PreviewError",
+        "type": "object"
+      },
+      "PreviewIn": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context"
+          },
+          "surface": {
+            "enum": [
+              "web_chat_start",
+              "preset_text",
+              "init_script"
+            ],
+            "title": "Surface",
+            "type": "string"
+          },
+          "template": {
+            "title": "Template",
+            "type": "string"
+          }
+        },
+        "required": [
+          "template",
+          "surface"
+        ],
+        "title": "PreviewIn",
+        "type": "object"
+      },
+      "PreviewOut": {
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PreviewError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rendered": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rendered"
+          },
+          "variables": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Variables",
+            "type": "array"
+          }
+        },
+        "required": [
+          "rendered",
+          "error",
+          "variables"
+        ],
+        "title": "PreviewOut",
+        "type": "object"
+      },
       "Resources": {
         "additionalProperties": false,
         "properties": {
@@ -6555,6 +6655,45 @@
           }
         },
         "summary": "Stream Status"
+      }
+    },
+    "/api/v1/templates/preview": {
+      "post": {
+        "description": "Render `template` with the surface's sample context, `context` overriding top-level keys.",
+        "operationId": "preview_api_v1_templates_preview_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreviewIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreviewOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Preview"
       }
     }
   }
