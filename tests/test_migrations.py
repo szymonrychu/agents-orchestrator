@@ -802,3 +802,22 @@ def test_escape_template_tokens_migration(empty_dsn, tmp_path):
             )
         ]
     assert again == stored
+
+
+def test_escape_template_tokens_migration_never_aborts_at_the_limit(empty_dsn, tmp_path):
+    for path in MIGRATIONS_DIR.glob("*.sql"):
+        if path.name < "0013":
+            shutil.copy(path, tmp_path)
+    run_migrations(empty_dsn, tmp_path)
+    near = "{{" + "a" * 16382  # 16384 chars; escaping adds 10
+    spec = {"init_scripts": [near, "{{ok"], "wrapper": {"system_append": near}}
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        c.execute(
+            "INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), 'big', %s)",
+            (json.dumps(spec),),
+        )
+    assert run_migrations(empty_dsn) == ["0013", "0014"]
+    with psycopg.connect(empty_dsn) as c:
+        got = c.execute("SELECT spec FROM sessions WHERE slug='big'").fetchone()[0]
+    assert got["init_scripts"] == [near, "{{ '{{' }}ok"]
+    assert got["wrapper"]["system_append"] == near
