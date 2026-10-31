@@ -13,18 +13,15 @@ router = APIRouter(prefix="/api/v1")
 
 Surface = Literal["web_chat_start", "preset_text", "init_script"]
 
-_SESSION: dict[str, Any] = {
-    "id": "00000000-0000-0000-0000-0000000000aa",
-    "name": "sample-session",
-    "slug": "sample-session",
-    "namespace": "agents",
-    "replicas": 1,
-}
+_COMMON: dict[str, Any] = {"session_slug": "sample-session", "preset_name": "Default"}
+_ENV: dict[str, str] = {"TZ": "UTC", "LANG": "C.UTF-8"}
+_NOW = "2026-01-01T00:00:00Z"
 
+# Keys per surface follow plan.md "Context variables per surface"; `user` is a plain string.
 SAMPLES: dict[str, dict[str, Any]] = {
-    "web_chat_start": {"session": _SESSION, "user": {"name": "sample-user"}},
-    "preset_text": {"session": _SESSION, "preset": {"name": "Default"}},
-    "init_script": {"session": _SESSION, "workdir": "/workspace"},
+    "web_chat_start": {**_COMMON, "user": "sample-user", "now": _NOW},
+    "preset_text": {**_COMMON, "env": _ENV, "now": _NOW},
+    "init_script": {**_COMMON, "env": _ENV},
 }
 
 

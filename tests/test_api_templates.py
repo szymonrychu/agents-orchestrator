@@ -23,17 +23,18 @@ async def post(http, template, surface="web_chat_start", **extra):
 
 
 async def test_preview_renders_with_sample_context(http):
-    r = await post(http, "hi {{ session.name }}")
+    r = await post(http, "hi {{ session_slug }} {{ user }}")
     assert r.status_code == 200
     body = r.json()
+    sample = templates.SAMPLES["web_chat_start"]
     assert body["error"] is None
-    assert body["rendered"] == "hi " + templates.SAMPLES["web_chat_start"]["session"]["name"]
-    assert body["variables"] == ["session"]
+    assert body["rendered"] == f"hi {sample['session_slug']} {sample['user']}"
+    assert body["variables"] == ["session_slug", "user"]
 
 
 async def test_undeclared_variables_listed_sorted(http):
-    r = await post(http, "{{ session.name }} {{ zeta }} {{ alpha }}")
-    assert r.json()["variables"] == ["alpha", "session", "zeta"]
+    r = await post(http, "{{ session_slug }} {{ zeta }} {{ alpha }}")
+    assert r.json()["variables"] == ["alpha", "session_slug", "zeta"]
     assert r.json()["error"]["message"]
 
 
@@ -46,26 +47,49 @@ async def test_syntax_error_reports_line(http):
     assert body["variables"] == []
 
 
+PLAN_KEYS = {
+    "web_chat_start": {"session_slug", "preset_name", "user", "now"},
+    "preset_text": {"session_slug", "preset_name", "env", "now"},
+    "init_script": {"session_slug", "preset_name", "env"},
+}
+
+
+def test_samples_have_exactly_the_plan_keys():
+    assert {k: set(v) for k, v in templates.SAMPLES.items()} == PLAN_KEYS
+
+
+async def test_env_and_now_render_per_surface(http):
+    r = await post(
+        http,
+        "{% for k, v in env.items() %}{{ k }}={{ v }};{% endfor %}{{ now }}",
+        surface="preset_text",
+    )
+    assert r.json()["error"] is None
+    assert r.json()["rendered"].endswith("2026-01-01T00:00:00Z")
+    r = await post(http, "{{ now }}", surface="init_script")
+    assert r.json()["error"] is not None
+
+
 async def test_unknown_surface_is_422(http):
     r = await post(http, "x", surface="nope")
     assert r.status_code == 422
 
 
 async def test_every_surface_has_a_sample(http):
-    for surface in ("web_chat_start", "preset_text", "init_script"):
+    for surface in PLAN_KEYS:
         r = await post(http, "plain", surface=surface)
         assert r.json() == {"rendered": "plain", "error": None, "variables": []}
 
 
 async def test_sample_context_is_deterministic(http):
-    a = await post(http, "{{ session.id }}", surface="init_script")
-    b = await post(http, "{{ session.id }}", surface="init_script")
+    a = await post(http, "{{ session_slug }} {{ now }}", surface="web_chat_start")
+    b = await post(http, "{{ session_slug }} {{ now }}", surface="web_chat_start")
     assert a.json() == b.json()
     assert a.json()["rendered"]
 
 
 async def test_context_overrides_sample(http):
-    r = await post(http, "{{ session.name }}", context={"session": {"name": "mine"}})
+    r = await post(http, "{{ session_slug }}", context={"session_slug": "mine"})
     assert r.json()["rendered"] == "mine"
 
 
