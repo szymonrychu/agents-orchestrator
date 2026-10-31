@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import asdict
 from datetime import datetime, timedelta
 from typing import Annotated
 
+from agents_common.templating import TemplateError
 from fastapi import APIRouter, Depends, Request
+from fastapi.concurrency import run_in_threadpool
 from psycopg_pool import AsyncConnectionPool
 from pydantic import ValidationError
 
+from agents_orchestrator import rendering
 from agents_orchestrator.api import schemas
 from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.service_auth import calling_service
@@ -19,6 +23,7 @@ from agents_orchestrator.db import leadership, presets, views
 from agents_orchestrator.db import sessions as repo
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import (
+    HOOK_EVENT_SPECS,
     INIT_DIR,
     WORKDIR_ROOT,
     SessionSpec,
@@ -54,7 +59,11 @@ def _init_edited(session: repo.Session) -> bool:
     init = session.status.get("init")
     if not isinstance(init, dict) or init.get("state") in (None, "skipped"):
         return False
-    return init.get("scripts_hash") != init_scripts_hash(session.spec.init_scripts)
+    try:
+        rendered = rendering.render_init_scripts(session)
+    except TemplateError:
+        return True
+    return init.get("scripts_hash") != init_scripts_hash(session.spec.init_scripts, rendered)
 
 
 def _closes_at(session: repo.Session) -> datetime | None:
@@ -196,6 +205,7 @@ async def meta(settings: Cfg) -> schemas.Meta:
             available=settings.cache_available, max_bytes=settings.cache_max_bytes
         ),
         kube_access=schemas.MetaKubeAccess(available=settings.kube_access_available),
+        hook_events=[schemas.MetaHookEvent(**asdict(e)) for e in HOOK_EVENT_SPECS],
     )
 
 
@@ -221,7 +231,7 @@ async def create_session(
             raise ApiError(422, "invalid_request", "slug is required with spec")
         if body.spec.cache is not None and body.spec.cache.key is None:
             raise ApiError(422, "invalid_request", "cache.key is required without a preset")
-        spec = check_spec(body.spec, settings)
+        spec = await run_in_threadpool(check_spec, body.spec, settings)
     if body.slug is not None:
         try:
             validate_slug(body.slug)
@@ -268,7 +278,8 @@ async def _create_from_preset(
     raw = dict(preset.spec)
     raw.setdefault("replicas", settings.default_replicas)
     try:
-        spec = check_spec(
+        spec = await run_in_threadpool(
+            check_spec,
             SessionSpec.model_validate(raw),
             settings,
             derived_cache_key=default_cache_key(preset.id),
@@ -355,6 +366,16 @@ async def edit_init_scripts(
     except ValidationError as exc:
         msg = "; ".join(e["msg"].removeprefix("Value error, ") for e in exc.errors())
         raise ApiError(422, "invalid_request", msg) from None
+    current = await repo.get(conn, session_id)
+    if current is None:
+        raise not_found("session")
+    for i, script in enumerate(scripts):
+        error, _ = await run_in_threadpool(
+            rendering.problem, script, "init_script", current.spec.env
+        )
+        if error is not None:
+            hint = rendering.ESCAPE_HINT
+            raise ApiError(422, "invalid_request", f"init_scripts[{i}]: {error} ({hint})")
     try:
         session, preset_updated = await repo.set_init_scripts(conn, session_id, scripts)
     except repo.SessionNotFound:

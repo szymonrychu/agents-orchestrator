@@ -278,6 +278,8 @@ class FakeWrapper:
         self.received_turns = 0
         self.turn_texts: list[str] = []
         self.turn_metadata: list[dict[str, Any]] = []
+        self.turn_lanes: list[str] = []
+        self._status_code: str | None = None
         self.last_turn_id = ""
         self._ids = 0
         self._booting = False
@@ -455,9 +457,13 @@ class FakeWrapper:
     def set_booting(self, booting: bool) -> None:
         self._booting = booting
 
-    def set_turn_status(self, code: int | None) -> None:
-        """Answer every turn submission with this status (None restores normal behaviour)."""
+    def set_turn_status(self, code: int | None, error_code: str | None = None) -> None:
+        """Answer every turn submission with this status (None restores normal behaviour).
+
+        `error_code` overrides the wrapper error code (409 dialog_open, dead, ...).
+        """
         self._status = code
+        self._status_code = error_code
 
     def delay_turn_response(self, seconds: float) -> None:
         """Record the turn, then answer after `seconds` (a client timeout sees a started turn)."""
@@ -670,12 +676,16 @@ class FakeWrapper:
                 return JSONResponse({}, status_code=500)
             if self._status is not None:
                 code = self._status
-                raise _Err(code, {409: "busy", 503: "booting"}.get(code, f"http_{code}"))
+                raise _Err(
+                    code,
+                    self._status_code or {409: "busy", 503: "booting"}.get(code, f"http_{code}"),
+                )
             if self._booting or ses.state == "creating":
                 raise _Err(503, "booting", "the session is still booting")
             if ses.state != "ready" and ses.state != "busy":
                 raise _Err(503, "dead", f"the session is {ses.state}")
-            if ses.state == "busy":
+            lane = body.get("lane", "regular")
+            if ses.state == "busy" and lane == "idle":
                 raise _Err(409, "busy", "a turn is already running")
             text, metadata = body.get("text"), body.get("metadata", {})
             if not isinstance(text, str) or not isinstance(metadata, dict):
@@ -687,6 +697,7 @@ class FakeWrapper:
             self.received_turns += 1
             self.turn_texts.append(text)
             self.turn_metadata.append(metadata)
+            self.turn_lanes.append(lane)
             self.last_turn_id = turn.turn_id
             self._set_state(ses, "busy")
             sid = ses.session_id

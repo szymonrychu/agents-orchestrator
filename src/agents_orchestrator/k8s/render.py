@@ -9,6 +9,7 @@ from typing import Any
 
 import yaml
 
+from agents_orchestrator import rendering
 from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.dispatcher.hive import compact_pct
 from agents_orchestrator.k8s.labels import object_names, prefix, selector, session_labels
@@ -113,9 +114,24 @@ def _escape(value: Any) -> Any:
     return value
 
 
-def _apply_wrapper(cfg: dict[str, Any], wrapper: WrapperSettings) -> None:
+def _render_texts(user: dict[str, Any], session: Session) -> None:
+    """Render the Jinja text fields of the dumped `spec.wrapper` in place (before `_escape`)."""
+    context = rendering.session_context("preset_text", session)
+    compact = user.get("auto_compact", {})
+    for holder, key in (
+        (compact, "instructions"),
+        (user, "system_append"),
+        (user, "restart_continue_prompt"),
+    ):
+        if key in holder:
+            holder[key] = rendering.render_text(holder[key], context)
+
+
+def _apply_wrapper(cfg: dict[str, Any], wrapper: WrapperSettings, session: Session) -> None:
     """Merge `spec.wrapper` into the config after the reserved entries, which stay first."""
-    user = _escape(wrapper.model_dump(mode="json", exclude_none=True))
+    user = wrapper.model_dump(mode="json", exclude_none=True)
+    _render_texts(user, session)
+    user = _escape(user)
     hooks = cfg["hooks"]
     for event, actions in user.get("hooks", {}).items():
         hooks.setdefault(event, []).extend(actions)
@@ -207,7 +223,7 @@ def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
             ],
         }
     if spec.wrapper:
-        _apply_wrapper(cfg, spec.wrapper)
+        _apply_wrapper(cfg, spec.wrapper, session)
     return cfg
 
 

@@ -528,3 +528,36 @@ async def test_job_lifecycle_and_not_an_agent(env):
     assert not env.kube.has("Job", "agent-gamma-init")
     async with env.pool.connection() as conn:
         assert await sessions.get(conn, g.id) is None
+
+
+async def test_scripts_are_rendered_into_the_job_and_hash(env):
+    tpl = ["echo {{ session_slug }} {{ env.FOO }}", "echo {{ preset_name }}|"]
+    c = await env.session("alpha", env={"FOO": "bar"}, init_scripts=tpl)
+    await env.tick()
+    job = env.kube.get("Job", "agent-alpha-init")
+    command = job["spec"]["template"]["spec"]["containers"][0]["command"]
+    init_sh = "".join(command[4:])
+    assert "echo alpha bar\n" in init_sh and "echo |\n" in init_sh
+    assert "{{" not in init_sh
+    rendered = ["echo alpha bar", "echo |"]
+    assert (await env.init(c.id))["scripts_hash"] == init_scripts_hash(tpl, rendered)
+
+
+async def test_hash_changes_with_template_or_env(env, pool):
+    a = await env.session("alpha", env={"FOO": "1"}, init_scripts=["echo {{ env.FOO }}"])
+    b = await env.session("beta", env={"FOO": "2"}, init_scripts=["echo {{ env.FOO }}"])
+    c = await env.session("gamma", env={"FOO": "1"}, init_scripts=["echo {{ env.FOO }} x"])
+    await env.tick()
+    hashes = [(await env.init(s.id))["scripts_hash"] for s in (a, b, c)]
+    assert len(set(hashes)) == 3
+
+
+async def test_legacy_braces_fail_init_with_a_clear_reason(env):
+    c = await env.session("alpha", init_scripts=["echo ok"])
+    await env.set_scripts(c.id, ["awk '{{print $1}}'"])  # stored before templating existed
+    await env.tick(2)
+    init = await env.init(c.id)
+    assert init["state"] == "failed"
+    assert init["reason"].startswith("template_error:")
+    assert "{{ '{{' }}" in init["reason"]
+    assert env.creates("agent-alpha-init") == 0

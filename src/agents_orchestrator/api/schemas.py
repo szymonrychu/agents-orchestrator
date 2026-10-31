@@ -177,6 +177,15 @@ class MetaKubeAccess(BaseModel):
     available: bool
 
 
+class MetaHookEvent(BaseModel):
+    name: str
+    can_veto: bool
+    supports_matcher: bool
+    supports_when: bool
+    supports_interval: bool
+    interval_required: bool
+
+
 class Meta(BaseModel):
     defaults: MetaDefaults
     agent_image: str
@@ -187,8 +196,10 @@ class Meta(BaseModel):
     discard_hook: Literal["none", "command", "url"]
     cache: MetaCache
     kube_access: MetaKubeAccess
+    hook_events: list[MetaHookEvent]
 
 
+Lane = Literal["idle", "regular", "priority"]
 MessageStatus = Literal["queued", "dispatching", "verifying", "sent", "failed", "cancelled"]
 
 
@@ -197,6 +208,7 @@ class PostMessage(BaseModel):
 
     text: str = Field(min_length=1)
     target_agent_id: uuid.UUID | None = None
+    lane: Lane = "regular"
 
 
 class MessageAccepted(BaseModel):
@@ -217,6 +229,7 @@ class MessageView(BaseModel):
     session_id: uuid.UUID
     text: str
     status: MessageStatus
+    lane: Lane
     target_agent_id: uuid.UUID | None
     agent_id: uuid.UUID | None
     turn_id: str | None

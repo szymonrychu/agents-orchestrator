@@ -27,8 +27,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from agents_common.templating import TemplateError
 from psycopg_pool import AsyncConnectionPool
 
+from agents_orchestrator import rendering
 from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.k8s.kube import KubeApi, KubeError, Obj, is_owned
 from agents_orchestrator.k8s.labels import object_names, prefix, session_labels
@@ -101,10 +103,13 @@ def render_init_sh(slug: str, scripts: list[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def render_init_job(session: Session, settings: Settings) -> Obj:
+def render_init_job(session: Session, settings: Settings, scripts: list[str] | None = None) -> Obj:
+    """The Job; `scripts` are the rendered scripts (rendered here when not given)."""
     spec, slug = session.spec, session.slug
     labels = init_labels(slug)
-    init_sh = render_init_sh(slug, spec.init_scripts)
+    if scripts is None:
+        scripts = rendering.render_init_scripts(session)
+    init_sh = render_init_sh(slug, scripts)
     chunks = [init_sh[i : i + ARG_CHUNK_CHARS] for i in range(0, len(init_sh), ARG_CHUNK_CHARS)]
     container: dict[str, Any] = {
         "name": "init",
@@ -220,13 +225,22 @@ class InitRunner:
                 return await self._finish(session, init, "failed", reason="foreign_object")
         else:
             try:
-                await self.kube.create_job(render_init_job(session, self.settings))
+                scripts = rendering.render_init_scripts(session)
+            except TemplateError as exc:
+                return await self._finish(
+                    session, init, "failed", reason=f"template_error: {exc.message}"[:REASON_MAX]
+                )
+            try:
+                await self.kube.create_job(render_init_job(session, self.settings, scripts))
             except Exception as exc:
                 log.exception("creating the init Job of session %s failed", session.slug)
                 reason = f"job_create_failed: {exc}"[:REASON_MAX]
                 return await self._finish(session, init, "failed", reason=reason)
             # what was rendered is what runs: a create retried after an edit runs the edit
-            init = {**init, "scripts_hash": init_scripts_hash(session.spec.init_scripts)}
+            init = {
+                **init,
+                "scripts_hash": init_scripts_hash(session.spec.init_scripts, scripts),
+            }
         init = {**init, "job": name}
         await self._write(session, init)
         return init

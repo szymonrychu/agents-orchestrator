@@ -47,6 +47,7 @@ class Claim:
     dispatched_at: datetime
     previous_dispatched_at: datetime | None
     sender_slug: str | None
+    lane: str = "regular"
 
 
 @dataclass(frozen=True)
@@ -136,6 +137,8 @@ async def enqueue_message(
     sender_session_id: uuid.UUID | None = None,
     sender_slug: str | None = None,
     hop: int = 0,
+    lane: str = "regular",
+    carries_start_prompt: bool = False,
 ) -> int:
     """Queue a message; a session message carries its sender and hop (D8).
 
@@ -146,13 +149,47 @@ async def enqueue_message(
         row = await _one(
             conn,
             "INSERT INTO messages (session_id, text, target_agent_id, sender_session_id,"
-            " sender_slug, hop) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
-            (session_id, text, target_agent_id, sender_session_id, sender_slug, hop),
+            " sender_slug, hop, lane, carries_start_prompt)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            (
+                session_id,
+                text,
+                target_agent_id,
+                sender_session_id,
+                sender_slug,
+                hop,
+                lane,
+                carries_start_prompt,
+            ),
         )
         assert row is not None
         await notify(conn, "message_queued", {"session_id": str(session_id)})
         await _status(conn, session_id)
         return row["id"]
+
+
+_FIRST_MESSAGE_LOCK_NAMESPACE = 0x6F726332  # "orc2"
+
+
+async def start_prompt_pending(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> bool:
+    """True when no live message carries the session's start prompt; call inside a transaction.
+
+    A carrier that failed or was cancelled no longer counts, so the next user message takes the
+    prompt over; peer messages never carry it. The transaction-level advisory lock makes two
+    concurrent posts agree: the second waits for the first to commit and then sees its row.
+    """
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock(%s, hashtext(%s::text))",
+        (_FIRST_MESSAGE_LOCK_NAMESPACE, session_id),
+    )
+    row = await _one(
+        conn,
+        "SELECT NOT EXISTS (SELECT 1 FROM messages WHERE session_id = %s"
+        " AND carries_start_prompt AND status NOT IN ('failed', 'cancelled')) AS pending",
+        (session_id,),
+    )
+    assert row is not None
+    return row["pending"]
 
 
 async def _count(conn: psycopg.AsyncConnection, query: str, params: Any) -> int:
@@ -279,8 +316,28 @@ FOR UPDATE OF a SKIP LOCKED
 """
 
 
+# The regular and priority lanes bypass agent_free (D2): any ready agent of the session, an idle
+# one first (longest free), because the wrapper takes the message mid-turn and answers 409
+# booting, dead, busy or dialog_open itself.
+_PICK_LIVE = """
+SELECT a.id AS agent_id, a.url, a.wrapper_session_id, s.free_since, a.last_dispatched_at
+FROM agents a JOIN agent_status s ON s.agent_id = a.id
+WHERE a.session_id = %(session_id)s
+  AND a.ready
+  AND a.gone_at IS NULL
+  AND a.wrapper_session_id IS NOT NULL
+  AND (%(target)s::uuid IS NULL OR a.id = %(target)s::uuid)
+ORDER BY (s.state = 'idle') DESC, s.free_since ASC, a.id
+LIMIT 1
+FOR UPDATE OF a SKIP LOCKED
+"""
+
+
 async def _pick_agent(
-    conn: psycopg.AsyncConnection, session_id: uuid.UUID, target_agent_id: uuid.UUID | None
+    conn: psycopg.AsyncConnection,
+    session_id: uuid.UUID,
+    target_agent_id: uuid.UUID | None,
+    lane: str = "idle",
 ) -> Pick | None:
     """The agent free the longest whose free_since is newer than its last dispatch, locked.
 
@@ -288,7 +345,8 @@ async def _pick_agent(
     READ COMMITTED claim recheck the predicate on the new row version instead of trusting its
     snapshot (D23 c).
     """
-    row = await _one(conn, _PICK, {"session_id": session_id, "target": target_agent_id})
+    query = _PICK if lane == "idle" else _PICK_LIVE
+    row = await _one(conn, query, {"session_id": session_id, "target": target_agent_id})
     return Pick(**row) if row is not None else None
 
 
@@ -332,20 +390,29 @@ async def _handover_pending(conn: psycopg.AsyncConnection, session_id: uuid.UUID
     return bool(row and row["pending"])
 
 
+def _lane_class(lane: str) -> str:
+    """Idle messages wait for agent_free; regular and priority bypass it (D2): FIFO per class."""
+    return "idle" if lane == "idle" else "live"
+
+
 async def _claim_in_session(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Claim | None:
     """Scan one session's queued messages in id order; the caller holds the session lock."""
     leader = await _one(
         conn, "SELECT agent_id FROM session_leaders WHERE session_id = %s", (session_id,)
     )
     leader_id = leader["agent_id"] if leader is not None else None
-    # An untargeted head waits on the leader: later untargeted messages wait too. A leader whose
-    # handover is pending and possible holds them from the start (D16): the pass moves it first.
-    held = leader_id is not None and await _handover_pending(conn, session_id)
+    # An untargeted head waits on the leader: later untargeted messages of its lane class wait
+    # too. A leader whose handover is pending and possible holds them from the start (D16): the
+    # pass moves it first. `stalled` is the leaderless form: no free agent or a backoff head
+    # holds the rest of its lane class (FIFO, D4).
+    pending = leader_id is not None and await _handover_pending(conn, session_id)
+    held = {"idle": pending, "live": pending}
+    stalled: set[str] = set()
     after = 0
     while True:
         rows = await _all(
             conn,
-            "SELECT id, target_agent_id,"
+            "SELECT id, target_agent_id, lane,"
             " (not_before IS NOT NULL AND not_before > now()) AS waiting"
             " FROM messages WHERE session_id = %s AND status = 'queued' AND id > %s"
             " ORDER BY id LIMIT %s",
@@ -356,17 +423,22 @@ async def _claim_in_session(conn: psycopg.AsyncConnection, session_id: uuid.UUID
         for row in rows:
             after = row["id"]
             target = row["target_agent_id"]
+            lane = row["lane"]
+            cls = _lane_class(lane)
+            if cls in stalled:
+                continue
             if target is None:
                 if row["waiting"]:
                     if leader_id is None:
-                        return None  # an untargeted head in backoff holds its session (FIFO, D4)
-                    held = True  # leader routing: hold untargeted, targeted messages still flow
+                        stalled.add(cls)  # an untargeted head in backoff holds its lane class
+                    else:
+                        held[cls] = True  # leader routing: hold untargeted, targeted still flow
                     continue
                 if leader_id is not None:
                     # Leader-only routing: an untargeted message is the leader's. A gone leader
                     # does not fail it; it waits for the leadership pass to elect a successor.
-                    if held or await _target_gone(conn, session_id, leader_id):
-                        held = True
+                    if held[cls] or await _target_gone(conn, session_id, leader_id):
+                        held[cls] = True
                         continue
                     target = leader_id
             else:
@@ -382,12 +454,13 @@ async def _claim_in_session(conn: psycopg.AsyncConnection, session_id: uuid.UUID
                     continue
             if not await _lock_queued(conn, row["id"]):
                 continue
-            pick = await _pick_agent(conn, session_id, target)
+            pick = await _pick_agent(conn, session_id, target, lane)
             if pick is None:
                 if row["target_agent_id"] is None:
                     if leader_id is None:
-                        return None  # no free agent in this session: leave it queued
-                    held = True  # the leader is busy: the untargeted FIFO holds, targeted flow
+                        stalled.add(cls)  # no free agent in this session: leave it queued
+                    else:
+                        held[cls] = True  # the leader is busy: the untargeted FIFO holds
                     continue
                 continue  # a busy or booting target does not block later messages (D23 d)
             return await _dispatch(conn, row["id"], pick)
@@ -401,7 +474,8 @@ async def _dispatch(conn: psycopg.AsyncConnection, message_id: int, pick: Pick) 
         conn,
         "UPDATE messages SET status = 'dispatching', agent_id = %s, dispatched_at = now(),"
         " heartbeat_at = now() WHERE id = %s AND status = 'queued'"
-        " RETURNING id, session_id, text, attempts, target_agent_id, dispatched_at, sender_slug",
+        " RETURNING id, session_id, text, attempts, target_agent_id, dispatched_at, sender_slug,"
+        " lane",
         (pick.agent_id, message_id),
     )
     assert msg is not None  # the row is locked and was queued
@@ -419,6 +493,7 @@ async def _dispatch(conn: psycopg.AsyncConnection, message_id: int, pick: Pick) 
         dispatched_at=msg["dispatched_at"],
         previous_dispatched_at=pick.last_dispatched_at,
         sender_slug=msg["sender_slug"],
+        lane=msg["lane"],
     )
 
 
@@ -488,13 +563,27 @@ async def mark_sent(conn: psycopg.AsyncConnection, id: int, turn_id: str) -> boo
     return row is not None
 
 
-async def requeue(conn: psycopg.AsyncConnection, id: int) -> bool:
-    """409 busy: back to queued at once, no attempt counted, no backoff."""
+async def requeue(
+    conn: psycopg.AsyncConnection,
+    id: int,
+    backoff_base: float = 0.0,
+    backoff_max: float = 0.0,
+) -> bool:
+    """409 busy/booting: back to queued, no attempt counted.
+
+    A regular or priority message is not gated by agent_free, so it also waits a bounded
+    exponential backoff (`backoff_base * 2^requeues`, at most `backoff_max`) and cannot be
+    re-claimed in a hot loop. An idle message is gated by agent_free and gets none.
+    """
     row = await _transition(
         conn,
-        "UPDATE messages SET status = 'queued', not_before = NULL, heartbeat_at = NULL"
+        "UPDATE messages SET status = 'queued', heartbeat_at = NULL,"
+        " not_before = CASE WHEN lane = 'idle' OR %(base)s <= 0 THEN NULL ELSE now() +"
+        " make_interval(secs => least(%(base)s * power(2, least(busy_requeues, 20)), %(max)s))"
+        " END,"
+        " busy_requeues = CASE WHEN lane = 'idle' THEN busy_requeues ELSE busy_requeues + 1 END"
         " WHERE id = %(id)s AND status = 'dispatching' RETURNING session_id",
-        {"id": id},
+        {"id": id, "base": backoff_base, "max": backoff_max},
     )
     return row is not None
 

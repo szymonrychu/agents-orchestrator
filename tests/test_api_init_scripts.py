@@ -176,3 +176,27 @@ async def test_session_view_edited_flag(http, pool):
         c = await repo.get(conn, uuid.UUID(cid))
     snap = _view(c, None, Settings(database_url="postgresql://x/y")).model_dump(mode="json")
     assert snap["init_edited_since_run"] is True
+
+
+async def test_put_rejects_a_bad_template_and_keeps_edited_flag_stable(http, pool):
+    r = await http.post("/api/v1/presets", json={"name": "tpl", "spec": {"env": {"A": "1"}}})
+    cl = await session_from_preset(http, r.json()["id"])
+    cid = cl["id"]
+    r = await http.put(url(cid), json={"scripts": ["echo {{ nope }}"]})
+    assert r.status_code == 422 and "nope" in r.text
+    r = await http.put(url(cid), json={"scripts": ["awk '{{print}}'"]})
+    assert r.status_code == 422 and "init_scripts[0]" in r.text
+    r = await http.put(url(cid), json={"scripts": ["echo {{ env.A }} {{ session_slug }}"]})
+    assert r.status_code == 200, r.text
+    rendered = [f"echo 1 {cl['slug']}"]
+    status = {
+        "init": {
+            "state": "succeeded",
+            "scripts_hash": init_scripts_hash(["echo {{ env.A }} {{ session_slug }}"], rendered),
+        }
+    }
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE sessions SET status = %s WHERE id = %s", (Jsonb(status), uuid.UUID(cid))
+        )
+    assert (await http.get(url(cid))).json()["edited_since_run"] is False

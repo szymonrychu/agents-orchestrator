@@ -1684,6 +1684,15 @@
             "title": "Id",
             "type": "integer"
           },
+          "lane": {
+            "enum": [
+              "idle",
+              "regular",
+              "priority"
+            ],
+            "title": "Lane",
+            "type": "string"
+          },
           "max_attempts": {
             "title": "Max Attempts",
             "type": "integer"
@@ -1760,6 +1769,7 @@
           "session_id",
           "text",
           "status",
+          "lane",
           "target_agent_id",
           "agent_id",
           "turn_id",
@@ -1812,6 +1822,13 @@
             "title": "Efforts",
             "type": "array"
           },
+          "hook_events": {
+            "items": {
+              "$ref": "#/components/schemas/MetaHookEvent"
+            },
+            "title": "Hook Events",
+            "type": "array"
+          },
           "kube_access": {
             "$ref": "#/components/schemas/MetaKubeAccess"
           },
@@ -1832,7 +1849,8 @@
           "caps",
           "discard_hook",
           "cache",
-          "kube_access"
+          "kube_access",
+          "hook_events"
         ],
         "title": "Meta",
         "type": "object"
@@ -1944,6 +1962,44 @@
           "max_attempts"
         ],
         "title": "MetaDefaults",
+        "type": "object"
+      },
+      "MetaHookEvent": {
+        "properties": {
+          "can_veto": {
+            "title": "Can Veto",
+            "type": "boolean"
+          },
+          "interval_required": {
+            "title": "Interval Required",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "supports_interval": {
+            "title": "Supports Interval",
+            "type": "boolean"
+          },
+          "supports_matcher": {
+            "title": "Supports Matcher",
+            "type": "boolean"
+          },
+          "supports_when": {
+            "title": "Supports When",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "can_veto",
+          "supports_matcher",
+          "supports_when",
+          "supports_interval",
+          "interval_required"
+        ],
+        "title": "MetaHookEvent",
         "type": "object"
       },
       "MetaKubeAccess": {
@@ -2112,6 +2168,16 @@
       "PostMessage": {
         "additionalProperties": false,
         "properties": {
+          "lane": {
+            "default": "regular",
+            "enum": [
+              "idle",
+              "regular",
+              "priority"
+            ],
+            "title": "Lane",
+            "type": "string"
+          },
           "target_agent_id": {
             "anyOf": [
               {
@@ -2203,6 +2269,106 @@
           "updated_at"
         ],
         "title": "PresetView",
+        "type": "object"
+      },
+      "PreviewError": {
+        "properties": {
+          "line": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "line",
+          "message"
+        ],
+        "title": "PreviewError",
+        "type": "object"
+      },
+      "PreviewIn": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context"
+          },
+          "surface": {
+            "enum": [
+              "web_chat_start",
+              "preset_text",
+              "init_script"
+            ],
+            "title": "Surface",
+            "type": "string"
+          },
+          "template": {
+            "title": "Template",
+            "type": "string"
+          }
+        },
+        "required": [
+          "template",
+          "surface"
+        ],
+        "title": "PreviewIn",
+        "type": "object"
+      },
+      "PreviewOut": {
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PreviewError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rendered": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rendered"
+          },
+          "variables": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Variables",
+            "type": "array"
+          }
+        },
+        "required": [
+          "rendered",
+          "error",
+          "variables"
+        ],
+        "title": "PreviewOut",
         "type": "object"
       },
       "Resources": {
@@ -2316,6 +2482,16 @@
       "SessionMessageIn": {
         "additionalProperties": false,
         "properties": {
+          "lane": {
+            "default": "regular",
+            "enum": [
+              "idle",
+              "regular",
+              "priority"
+            ],
+            "title": "Lane",
+            "type": "string"
+          },
           "text": {
             "maxLength": 16000,
             "minLength": 1,
@@ -2617,6 +2793,17 @@
               }
             ],
             "title": "Session Messaging"
+          },
+          "start_prompt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Prompt"
           },
           "static": {
             "default": false,
@@ -6555,6 +6742,45 @@
           }
         },
         "summary": "Stream Status"
+      }
+    },
+    "/api/v1/templates/preview": {
+      "post": {
+        "description": "Render `template` with the surface's sample context, `context` overriding top-level keys.",
+        "operationId": "preview_api_v1_templates_preview_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreviewIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreviewOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Preview"
       }
     }
   }

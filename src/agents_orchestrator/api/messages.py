@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Annotated
 
+from agents_common.templating import TemplateError
 from fastapi import APIRouter, Query, Response
 
+from agents_orchestrator import rendering
 from agents_orchestrator.api import schemas
 from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.sessions import Pool
@@ -36,6 +39,7 @@ def _message_view(r: dict) -> schemas.MessageView:
         session_id=r["session_id"],
         text=r["text"],
         status=r["status"],
+        lane=r["lane"],
         target_agent_id=r["target_agent_id"],
         agent_id=r["agent_id"],
         turn_id=r["turn_id"],
@@ -58,21 +62,49 @@ async def _require_open_session(conn, session_id: uuid.UUID) -> repo.Session:
     return session
 
 
+async def _with_start_prompt(session: repo.Session, text: str) -> str:
+    """The text of the message that carries the start prompt: it, a blank line, then `text`.
+
+    One message, applied here for every caller (user, webhook, schedule, Matrix connector). The
+    connector's preamble is part of `text`, so the start prompt precedes it and nothing repeats.
+    """
+    assert session.spec.start_prompt is not None
+    context = rendering.session_context("web_chat_start", session)
+    try:
+        start = await asyncio.to_thread(rendering.render_text, session.spec.start_prompt, context)
+    except TemplateError as exc:
+        raise ApiError(422, "invalid_request", f"start_prompt: {exc.message}") from exc
+    return f"{start}\n\n{text}" if start else text
+
+
 @router.post(
     "/sessions/{session_id}/messages", status_code=202, response_model=schemas.MessageAccepted
 )
 async def post_message(
     session_id: uuid.UUID, body: schemas.PostMessage, pool: Pool
 ) -> schemas.MessageAccepted:
-    async with pool.connection() as conn:
-        await _require_open_session(conn, session_id)
+    async with pool.connection() as conn, conn.transaction():
+        session = await _require_open_session(conn, session_id)
         if body.target_agent_id is not None:
             agent = await views.get_agent_ref(conn, body.target_agent_id)
             if agent is None or agent["session_id"] != session_id:
                 raise ApiError(422, "invalid_request", "target agent is not in this session")
             if agent["gone_at"] is not None:
                 raise ApiError(422, "target_gone", "target agent is gone")
-        mid = await queue.enqueue_message(conn, session_id, body.text, body.target_agent_id)
+        text = body.text
+        carries = session.spec.start_prompt is not None and await queue.start_prompt_pending(
+            conn, session_id
+        )
+        if carries:
+            text = await _with_start_prompt(session, text)
+        mid = await queue.enqueue_message(
+            conn,
+            session_id,
+            text,
+            body.target_agent_id,
+            lane=body.lane,
+            carries_start_prompt=carries,
+        )
     return schemas.MessageAccepted(message_id=mid)
 
 

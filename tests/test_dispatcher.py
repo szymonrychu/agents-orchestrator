@@ -484,3 +484,120 @@ async def test_at_most_eight_sends_in_flight(env):
     assert state["timeouts"] == 0, "cap never reached 8 concurrent sends"
     assert state["peak"] == 8
     assert env.fake.received_turns + sum(f.received_turns for f in fakes) == 10
+
+
+# ---------------------------------------------------------------- lanes (D2)
+
+
+async def test_idle_lane_waits_for_agent_free(env):
+    await env.agent(state="busy")
+    m = await env.msg(lane="idle")
+    d = env.dispatcher()
+    await d.drain()
+    await d.aclose()
+    assert (await env.message(m["id"]))["status"] == "queued"
+    assert env.fake.received_turns == 0
+
+
+async def test_regular_and_priority_bypass_agent_free(env):
+    agent = await env.agent()
+    env.fake.set_session_state("busy")
+    await env.set_free(agent["id"], 0, "busy")  # the agent is mid-turn
+    reg = await env.msg(text="regular", lane="regular")
+    pri = await env.msg(text="priority", lane="priority")
+    d = env.dispatcher()
+    await d.drain()
+    await d.aclose()
+    assert (await env.message(reg["id"]))["status"] == "sent"
+    assert (await env.message(pri["id"]))["status"] == "sent"
+    assert env.fake.turn_texts == ["regular", "priority"]
+    assert env.fake.turn_lanes == ["regular", "priority"]
+
+
+async def test_idle_head_does_not_block_a_later_regular_message(env):
+    await env.agent(state="busy")
+    idle = await env.msg(text="later", lane="idle")
+    reg = await env.msg(text="now", lane="regular")
+    d = env.dispatcher()
+    await d.drain()
+    await d.aclose()
+    assert (await env.message(idle["id"]))["status"] == "queued"
+    assert (await env.message(reg["id"]))["status"] == "sent"
+
+
+async def test_lane_is_sent_to_the_wrapper(env):
+    await env.agent()
+    await env.msg(lane="idle")
+    d = env.dispatcher()
+    await d.drain()
+    await d.aclose()
+    assert env.fake.turn_lanes == ["idle"]
+
+
+async def test_dialog_open_fails_regular_message_with_reason(env):
+    agent = await env.agent()
+    m = await env.msg(lane="regular")
+    env.fake.set_turn_status(409, "dialog_open")
+    d = env.dispatcher()
+    await d.drain()
+    await d.aclose()
+    row = await env.message(m["id"])
+    assert (row["status"], row["error"]) == ("failed", "dialog_open")
+    assert (await env.agent_row(agent["id"]))["last_dispatched_at"] is None
+
+
+async def test_booting_and_busy_409_requeue_without_an_attempt(env):
+    await env.agent()
+    m = await env.msg(lane="priority")
+    d = env.dispatcher()
+    for code in ("booting", "busy"):
+        env.fake.set_turn_status(409, code)
+        await d.drain()
+        row = await env.message(m["id"])
+        assert (row["status"], row["attempts"]) == ("queued", 0), code
+    await d.aclose()
+
+
+async def test_dead_409_is_retried_with_backoff(env):
+    await env.agent()
+    m = await env.msg(lane="regular")
+    env.fake.set_turn_status(409, "dead")
+    d = env.dispatcher()
+    await d.drain()
+    await d.aclose()
+    row = await env.message(m["id"])
+    assert (row["status"], row["attempts"]) == ("queued", 1)
+
+
+async def test_live_lane_409_requeue_backs_off_exponentially_and_is_bounded(env):
+    await env.agent()
+    m = await env.msg(lane="priority")
+    env.fake.set_turn_status(409, "busy")
+    d = env.dispatcher(retry_backoff_base_seconds=1.0, retry_backoff_max_seconds=3.0)
+    gaps = []
+    for _ in range(4):
+        await env.exec("UPDATE messages SET not_before = NULL WHERE id=%s", (m["id"],))
+        await d.drain()
+        row = (
+            await env.rows(
+                "SELECT status, attempts, extract(epoch FROM not_before - now()) AS gap"
+                " FROM messages WHERE id=%s",
+                (m["id"],),
+            )
+        )[0]
+        assert (row["status"], row["attempts"]) == ("queued", 0)
+        gaps.append(round(float(row["gap"])))
+    await d.drain()  # inside the backoff: not claimed again
+    await d.aclose()
+    assert gaps == [1, 2, 3, 3]
+    assert env.fake.received_turns == 0
+
+
+async def test_idle_lane_409_requeue_has_no_backoff(env):
+    await env.agent()
+    m = await env.msg(lane="idle")
+    env.fake.set_turn_status(409)
+    d = env.dispatcher()
+    await d.drain()
+    await d.aclose()
+    assert (await env.message(m["id"]))["not_before"] is None

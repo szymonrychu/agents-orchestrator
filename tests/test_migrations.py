@@ -54,7 +54,8 @@ def test_fresh_database_gets_all_tables(empty_dsn):
         versions = [r[0] for r in c.execute("SELECT version FROM schema_migrations")]
     assert tables >= TABLES
     assert versions == [
-        "0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0011",
+        "0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0011", "0012",
+        "0013", "0014",
     ]  # fmt: skip
 
 
@@ -77,6 +78,9 @@ def test_presets_migration_on_existing_sessions(empty_dsn, tmp_path):
         "0008",
         "0009",
         "0011",
+        "0012",
+        "0013",
+        "0014",
     ]
     with psycopg.connect(empty_dsn) as c:
         row = c.execute(
@@ -111,9 +115,9 @@ def test_concurrent_migrate_serialises(empty_dsn):
     [t.start() for t in threads]
     [t.join() for t in threads]
     assert not errors
-    assert sorted(len(r) for r in results) == [0, 10]
+    assert sorted(len(r) for r in results) == [0, 13]
     with psycopg.connect(empty_dsn) as c:
-        assert c.execute("SELECT count(*) FROM schema_migrations").fetchone()[0] == 10
+        assert c.execute("SELECT count(*) FROM schema_migrations").fetchone()[0] == 13
 
 
 async def test_events_unique_agent_session_seq(pool):
@@ -525,7 +529,9 @@ def test_0005_renames_clusters_to_sessions(empty_dsn, tmp_path):
             "INSERT INTO file_locks (cluster_id, path, agent_id) VALUES (%s, 'a.py', %s)",
             (unit, agent),
         )
-    assert run_migrations(empty_dsn) == ["0005", "0006", "0007", "0008", "0009", "0011"]
+    assert run_migrations(empty_dsn) == [
+        "0005", "0006", "0007", "0008", "0009", "0011", "0012", "0013", "0014",
+    ]  # fmt: skip
     with psycopg.connect(empty_dsn) as c:
         assert c.execute(
             "SELECT id, slug, preset_id::text, preset_name FROM sessions"
@@ -706,3 +712,112 @@ def test_drop_feed_cursor_migration(empty_dsn, tmp_path):
         c.execute("DELETE FROM schema_migrations WHERE version = '0011'")
     assert run_migrations(empty_dsn, tmp_path) == ["0011"]
     assert run_migrations(empty_dsn, tmp_path) == []
+
+
+def test_0012_message_lane_column(empty_dsn, tmp_path):
+    for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
+        if path.name < "0012":
+            shutil.copy(path, tmp_path / path.name)
+    assert run_migrations(empty_dsn, tmp_path)[-1] == "0011"
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        sid = c.execute(
+            "INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), 'old', '{}')"
+            " RETURNING id"
+        ).fetchone()[0]
+        c.execute("INSERT INTO messages (session_id, text) VALUES (%s, 'old')", (sid,))
+    shutil.copy(MIGRATIONS_DIR / "0012_message_lane.sql", tmp_path)
+    assert run_migrations(empty_dsn, tmp_path) == ["0012"]
+    with psycopg.connect(empty_dsn) as c:
+        assert _cols(c, "messages")["lane"] == ("text", "NO")
+        assert c.execute("SELECT lane FROM messages").fetchall() == [("regular",)]
+    with psycopg.connect(empty_dsn) as c, pytest.raises(psycopg.errors.CheckViolation):
+        c.execute("INSERT INTO messages (session_id, text, lane) VALUES (%s, 'x', 'bogus')", (sid,))
+    sql = (MIGRATIONS_DIR / "0012_message_lane.sql").read_text()
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        c.execute(sql)
+        c.execute(sql)
+        c.execute("DELETE FROM schema_migrations WHERE version = '0012'")
+    assert run_migrations(empty_dsn, tmp_path) == ["0012"]
+    assert run_migrations(empty_dsn, tmp_path) == []
+
+
+def test_escape_template_tokens_migration(empty_dsn, tmp_path):
+    from agents_orchestrator.rendering import render_text
+    from agents_orchestrator.spec import SessionSpec
+
+    for path in MIGRATIONS_DIR.glob("*.sql"):
+        if path.name < "0013":
+            shutil.copy(path, tmp_path)
+    run_migrations(empty_dsn, tmp_path)
+    spec = {
+        "init_scripts": ["awk '{{print $1}}'", "echo {% x %} {# c #}", "plain"],
+        "wrapper": {
+            "system_append": "use {{name}} here",
+            "restart_continue_prompt": "go",
+            "auto_compact": {"instructions": "keep {{ '{{' }} escaped {{a"},
+        },
+        "env": {"A": "{{keep}}"},
+    }
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        c.execute(
+            "INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), 'old', %s)",
+            (json.dumps(spec),),
+        )
+        c.execute(
+            "INSERT INTO presets (id, name, spec) VALUES (gen_random_uuid(), 'old', %s)",
+            (json.dumps(spec),),
+        )
+    assert run_migrations(empty_dsn) == ["0013", "0014"]
+    with psycopg.connect(empty_dsn) as c:
+        stored = [
+            r[0]
+            for r in c.execute(
+                "SELECT spec FROM sessions WHERE slug='old' UNION ALL"
+                " SELECT spec FROM presets WHERE name='old'"
+            )
+        ]
+    for got in stored:
+        assert got["env"] == {"A": "{{keep}}"}  # not a template field
+        assert got["init_scripts"][2] == "plain"
+        assert got["wrapper"]["restart_continue_prompt"] == "go"
+        ctx = {}
+        assert render_text(got["init_scripts"][0], ctx) == "awk '{{print $1}}'"
+        assert render_text(got["init_scripts"][1], ctx) == "echo {% x %} {# c #}"
+        assert render_text(got["wrapper"]["system_append"], ctx) == "use {{name}} here"
+        # a token that was already escaped is left alone; a stray one is escaped
+        assert (
+            render_text(got["wrapper"]["auto_compact"]["instructions"], ctx)
+            == "keep {{ escaped {{a"
+        )
+        SessionSpec.model_validate(got)
+    sql = (MIGRATIONS_DIR / "0013_escape_template_tokens.sql").read_text()
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        c.execute(sql)  # a second run is a no-op
+    with psycopg.connect(empty_dsn) as c:
+        again = [
+            r[0]
+            for r in c.execute(
+                "SELECT spec FROM sessions WHERE slug='old' UNION ALL"
+                " SELECT spec FROM presets WHERE name='old'"
+            )
+        ]
+    assert again == stored
+
+
+def test_escape_template_tokens_migration_never_aborts_at_the_limit(empty_dsn, tmp_path):
+    for path in MIGRATIONS_DIR.glob("*.sql"):
+        if path.name < "0013":
+            shutil.copy(path, tmp_path)
+    run_migrations(empty_dsn, tmp_path)
+    near = "{{" + "a" * 16382  # 16384 chars; escaping adds 10
+    spec = {"init_scripts": [near, "{{ok"], "wrapper": {"system_append": near}}
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        c.execute(
+            "INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), 'big', %s)",
+            (json.dumps(spec),),
+        )
+    assert run_migrations(empty_dsn) == ["0013", "0014"]
+    with psycopg.connect(empty_dsn) as c:
+        got = c.execute("SELECT spec FROM sessions WHERE slug='big'").fetchone()[0]
+    assert got["init_scripts"] == [near, "{{ '{{' }}ok"]
+    assert got["wrapper"]["system_append"] == near

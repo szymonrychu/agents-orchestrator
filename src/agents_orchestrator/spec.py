@@ -9,11 +9,14 @@ import secrets
 import string
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from agents_orchestrator import rendering
 
 if TYPE_CHECKING:
     from agents_orchestrator.settings import Settings
@@ -184,37 +187,58 @@ CACHE_MAX_BYTES_LIMIT = 5368709120
 INIT_SCRIPT_MAX_CHARS = 16384
 
 
-def init_scripts_hash(scripts: list[str]) -> str:
-    """sha256 hex of the compact JSON list; the identity of an init script set."""
-    return hashlib.sha256(json.dumps(scripts, separators=(",", ":")).encode()).hexdigest()
+def init_scripts_hash(scripts: list[str], rendered: list[str] | None = None) -> str:
+    """sha256 hex of the compact JSON list; the identity of an init script set.
+
+    Scripts are templates: when `rendered` differs from them, the hash covers both, so an edit of
+    a template and a change of what it renders to (the session env) each move it. Without
+    templating the payload is the plain list, as before.
+    """
+    payload = scripts if rendered is None or rendered == scripts else [scripts, rendered]
+    return hashlib.sha256(json.dumps(payload, separators=(",", ":")).encode()).hexdigest()
 
 
-# The claude-code-wrapper 0.2.0 hook events (config.py:HOOK_EVENTS); the wrapper is only a dev
-# dependency, so the orchestrator keeps its own copy of the shapes it accepts.
-HOOK_EVENTS: tuple[str, ...] = (
-    "onCreate",
-    "onResume",
-    "onDestroy",
-    "onTurn",
-    "onTurnComplete",
-    "onStop",
-    "onTick",
-    "onAgentResponse",
-    "onAgentToolCall",
-    "onToolResult",
-    "onSubagentStart",
-    "onSubagentStop",
-    "onInterrupt",
-    "onCommand",
-    "onCommandComplete",
-    "onError",
-    "preJoin",
-    "postJoin",
-    "preLeave",
-    "postLeave",
-    "onStart",
+@dataclass(frozen=True)
+class HookEventSpec:
+    """One wrapper hook event and what its actions may carry (served by `/meta`)."""
+
+    name: str
+    can_veto: bool = False
+    supports_matcher: bool = False
+    supports_when: bool = False
+    supports_interval: bool = False
+    interval_required: bool = False
+
+
+_TICK = {"supports_when": True, "supports_interval": True, "interval_required": True}
+# The wrapper's hook events, in its config order. The wrapper is only a dev dependency, so this is
+# an equal copy; tests/fixtures/wrapper_hook_events.json snapshots the wrapper's list and a test
+# asserts equality.
+HOOK_EVENT_SPECS: tuple[HookEventSpec, ...] = (
+    HookEventSpec("onCreate", can_veto=True),
+    HookEventSpec("onResume", can_veto=True),
+    HookEventSpec("onDestroy"),
+    HookEventSpec("onTurn", can_veto=True),
+    HookEventSpec("onTurnComplete"),
+    HookEventSpec("onStop"),
+    HookEventSpec("onTick", **_TICK),
+    HookEventSpec("onAgentResponse"),
+    HookEventSpec("onAgentToolCall", can_veto=True, supports_matcher=True),
+    HookEventSpec("onToolResult", supports_matcher=True),
+    HookEventSpec("onSubagentStart"),
+    HookEventSpec("onSubagentStop"),
+    HookEventSpec("onInterrupt"),
+    HookEventSpec("onCommand", can_veto=True),
+    HookEventSpec("onCommandComplete"),
+    HookEventSpec("onError"),
+    HookEventSpec("preJoin", can_veto=True),
+    HookEventSpec("postJoin"),
+    HookEventSpec("preLeave"),
+    HookEventSpec("postLeave"),
+    HookEventSpec("onStart", can_veto=True),
 )
-TOOL_EVENTS: tuple[str, ...] = ("onAgentToolCall", "onToolResult")
+HOOK_EVENTS: tuple[str, ...] = tuple(s.name for s in HOOK_EVENT_SPECS)
+TOOL_EVENTS: tuple[str, ...] = tuple(s.name for s in HOOK_EVENT_SPECS if s.supports_matcher)
 HOOK_ACTIONS_MAX = 20
 HOOK_RUN_MAX_CHARS = 16384
 INSTRUCTIONS_MAX = 2000
@@ -475,6 +499,9 @@ class SessionSpec(BaseModel):
     auto_compact_pct: int | None = Field(default=None, ge=1, le=100)
     discard_hook_url: str | None = None
     init_scripts: list[str] = []
+    # Jinja template of the first message of a new session (sent by D6); sparse: unset is not
+    # stored or dumped in a preset.
+    start_prompt: str | None = None
     any_mcp_sources: list[str] | None = None
     wrapper: WrapperSettings | None = None
     leader_lease_seconds: int | None = Field(default=None, ge=60, le=604800)
@@ -633,6 +660,44 @@ def _config_plugin_names(config: dict[str, Any]) -> set[str]:
     return {e["name"] for e in plugins if isinstance(e, dict) and isinstance(e.get("name"), str)}
 
 
+def _template_problems(spec: SessionSpec) -> list[str]:
+    """One message per spec text field whose Jinja template does not validate or render."""
+    fields: list[tuple[str, str, Literal["web_chat_start", "preset_text", "init_script"]]] = [
+        (f"init_scripts[{i}]", script, "init_script") for i, script in enumerate(spec.init_scripts)
+    ]
+    if spec.start_prompt is not None:
+        fields.append(("start_prompt", spec.start_prompt, "web_chat_start"))
+    wrapper = spec.wrapper
+    if wrapper is not None:
+        if wrapper.auto_compact is not None and wrapper.auto_compact.instructions is not None:
+            fields.append(
+                (
+                    "wrapper.auto_compact.instructions",
+                    wrapper.auto_compact.instructions,
+                    "preset_text",
+                )
+            )
+        if wrapper.system_append is not None:
+            fields.append(("wrapper.system_append", wrapper.system_append, "preset_text"))
+        if wrapper.restart_continue_prompt is not None:
+            fields.append(
+                ("wrapper.restart_continue_prompt", wrapper.restart_continue_prompt, "preset_text")
+            )
+    errors: list[str] = []
+    for name, template, surface in fields:
+        error, rendered = rendering.problem(template, surface, spec.env)
+        if error is None and rendered is not None:
+            if name == "wrapper.auto_compact.instructions" and (
+                _INSTRUCTIONS_CONTROL.search(rendered) or len(rendered) > INSTRUCTIONS_MAX
+            ):
+                error = "renders to more than one line, control characters or too many characters"
+            elif name == "wrapper.system_append" and len(rendered) > SYSTEM_APPEND_MAX:
+                error = f"renders to more than {SYSTEM_APPEND_MAX} characters"
+        if error is not None:
+            errors.append(f"{name}: {error}")
+    return errors
+
+
 def validate_spec(spec: SessionSpec, settings: Settings, stored: SessionSpec | None = None) -> None:
     """Validate a spec.
 
@@ -751,5 +816,6 @@ def validate_spec(spec: SessionSpec, settings: Settings, stored: SessionSpec | N
                 derived[name] = i
                 continue
             errors.append(f"any_mcp_sources[{i}]: {reason}")
+    errors.extend(_template_problems(spec))
     if errors:
         raise SpecInvalid(errors)

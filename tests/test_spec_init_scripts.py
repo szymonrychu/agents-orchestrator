@@ -79,3 +79,13 @@ async def test_session_from_preset_snapshots_init_scripts(pool, dsn):
         r = await http.post(C, json={"preset_id": pid})
         assert r.status_code == 201, r.text
         assert r.json()["spec"]["init_scripts"] == ["echo hi"]
+
+
+def test_init_scripts_hash_covers_template_and_rendered_bytes():
+    templates = ["echo {{ env.A }}"]
+    plain = ["echo a"]
+    assert init_scripts_hash(plain, plain) == init_scripts_hash(plain)  # nothing templated
+    one = init_scripts_hash(templates, ["echo 1"])
+    assert one != init_scripts_hash(templates, ["echo 2"])  # env changed
+    assert one != init_scripts_hash(["echo {{ env.B }}"], ["echo 1"])  # template changed
+    assert one != init_scripts_hash(["echo 1"])

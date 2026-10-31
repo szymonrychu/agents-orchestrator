@@ -6,6 +6,7 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Response
+from fastapi.concurrency import run_in_threadpool
 from pydantic import ValidationError
 
 from agents_orchestrator.api import schemas
@@ -39,7 +40,7 @@ def _checked_name(name: str) -> str:
         raise ApiError(422, "invalid_request", str(exc)) from None
 
 
-def _validated(
+async def _validated(
     body: schemas.PresetIn,
     settings: Settings,
     stored: dict[str, Any] | None = None,
@@ -54,7 +55,7 @@ def _validated(
         except ValidationError:
             stored_spec = None
     derived = default_cache_key(preset_id) if preset_id is not None else None
-    check_spec(body.spec, settings, stored_spec, derived_cache_key=derived)
+    await run_in_threadpool(check_spec, body.spec, settings, stored_spec, derived_cache_key=derived)
     return body.spec.model_dump(mode="json", exclude_unset=True)
 
 
@@ -85,7 +86,7 @@ async def list_presets(pool: Pool) -> list[schemas.PresetView]:
 
 @router.post("/presets", status_code=201, response_model=schemas.PresetView)
 async def create_preset(body: schemas.PresetIn, pool: Pool, settings: Cfg) -> schemas.PresetView:
-    spec = _validated(body, settings)
+    spec = await _validated(body, settings)
     async with pool.connection() as conn:
         try:
             return _view(await repo.create(conn, body.name, spec))
@@ -110,7 +111,7 @@ async def replace_preset(
         stored = await repo.get(conn, preset_id)
         if stored is None:
             raise not_found("preset")
-        spec = _validated(body, settings, stored.spec, preset_id)
+        spec = await _validated(body, settings, stored.spec, preset_id)
         try:
             return _view(await repo.update(conn, preset_id, body.name, spec))
         except repo.PresetNotFound:

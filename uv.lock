@@ -11,10 +11,23 @@ resolution-markers = [
 overrides = [{ name = "any-mcp", git = "https://github.com/szymonrychu/any-mcp?rev=v0.5.0" }]
 
 [[package]]
+name = "agents-common"
+version = "0.5.0"
+source = { git = "https://github.com/szymonrychu/agents-common?rev=v0.5.0#fa6a14a09ff233a83724df737a974f7ae40a9380" }
+dependencies = [
+    { name = "httpx" },
+    { name = "jinja2" },
+    { name = "psycopg", extra = ["binary", "pool"] },
+    { name = "pydantic-settings" },
+    { name = "starlette" },
+]
+
+[[package]]
 name = "agents-orchestrator"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "agents-common" },
     { name = "any-mcp" },
     { name = "botocore" },
     { name = "fastapi" },
@@ -42,6 +55,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "agents-common", git = "https://github.com/szymonrychu/agents-common?rev=v0.5.0" },
     { name = "any-mcp", git = "https://github.com/szymonrychu/any-mcp?rev=v0.5.0" },
     { name = "botocore", specifier = ">=1.43.118" },
     { name = "fastapi", specifier = "==0.160.0" },
@@ -59,7 +73,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "any-mcp-tatara-orchestrator", git = "https://github.com/szymonrychu/any-mcp-tatara-plugins?subdirectory=orchestration%2Forchestrator&rev=v0.4.0" },
-    { name = "claude-code-wrapper", git = "https://github.com/szymonrychu/claude-code-wrapper?rev=5fd93ff52236790a7131755141d328b25826213a" },
+    { name = "claude-code-wrapper", git = "https://github.com/szymonrychu/claude-code-wrapper?rev=355e11bb4847ac0206ad609d118c851a3bbdbe19" },
     { name = "moto", extras = ["server"], specifier = ">=5.2.4" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -513,8 +527,8 @@ wheels = [
 
 [[package]]
 name = "claude-code-wrapper"
-version = "0.3.2"
-source = { git = "https://github.com/szymonrychu/claude-code-wrapper?rev=5fd93ff52236790a7131755141d328b25826213a#5fd93ff52236790a7131755141d328b25826213a" }
+version = "0.5.0"
+source = { git = "https://github.com/szymonrychu/claude-code-wrapper?rev=355e11bb4847ac0206ad609d118c851a3bbdbe19#355e11bb4847ac0206ad609d118c851a3bbdbe19" }
 dependencies = [
     { name = "anyio" },
     { name = "fastapi" },

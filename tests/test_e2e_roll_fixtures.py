@@ -56,6 +56,16 @@ def test_marathon_turn_outlasts_the_roll() -> None:
     assert module.marathon_seconds() == slept(turn)
 
 
+def test_typed_messages_queue_into_the_running_turn() -> None:
+    """Regular-lane messages are typed into a busy agent's running turn (wrapper 0.5.0 lanes).
+
+    Without `queue_input` the fake ends a "sleep" step on any typed byte and drops the text, so
+    the message queued for the busy follower during the roll ended the marathon turn in seconds
+    and status.rollout never held the busy pod. Real claude keeps the turn and queues the text.
+    """
+    assert json.loads(SCENARIO.read_text()).get("queue_input") is True
+
+
 def test_no_other_prompt_runs_the_marathon_turn() -> None:
     module = e2e_module()
     default_continue = Settings.model_fields["default_restart_continue_prompt"].default

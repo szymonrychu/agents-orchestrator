@@ -91,7 +91,7 @@ async def agent_rows(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> li
 MESSAGE_STATUSES = ("queued", "dispatching", "verifying", "sent", "failed", "cancelled")
 
 _MESSAGE_SELECT = """
-SELECT m.id, m.session_id, m.target_agent_id, m.agent_id, m.text, m.status, m.turn_id,
+SELECT m.id, m.session_id, m.target_agent_id, m.agent_id, m.text, m.status, m.lane, m.turn_id,
        m.attempts, m.not_before, m.error, m.created_at, m.dispatched_at,
        coalesce((c.spec->>'max_attempts')::int, %(default_attempts)s) AS max_attempts,
        t.status AS turn_status, t.started_at AS turn_started_at,

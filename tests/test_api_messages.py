@@ -243,3 +243,135 @@ async def test_checks_enqueue_and_get(http, pool):
         409,
         "session_deleting",
     )
+
+
+async def test_post_message_lane_defaults_to_regular_and_round_trips(http, pool):
+    cl = await insert_session(pool)
+    url = f"/api/v1/sessions/{cl['id']}/messages"
+    default = (await http.post(url, json={"text": "a"})).json()["message_id"]
+    assert (await http.get(f"/api/v1/messages/{default}")).json()["lane"] == "regular"
+    for lane in ("idle", "regular", "priority"):
+        r = await http.post(url, json={"text": lane, "lane": lane})
+        assert r.status_code == 202, r.text
+        got = (await http.get(f"/api/v1/messages/{r.json()['message_id']}")).json()
+        assert got["lane"] == lane
+    listed = (await http.get(url)).json()
+    assert {m["lane"] for m in listed} == {"idle", "regular", "priority"}
+
+
+async def test_post_message_rejects_unknown_lane(http, pool):
+    cl = await insert_session(pool)
+    r = await http.post(
+        f"/api/v1/sessions/{cl['id']}/messages", json={"text": "x", "lane": "urgent"}
+    )
+    assert r.status_code == 422
+    assert await _count(pool, "messages") == 0
+
+
+# ---------------------------------------------------------------- start prompt first (D6)
+
+
+async def _texts(http, session_id) -> list[str]:
+    rows = (await http.get(f"/api/v1/sessions/{session_id}/messages")).json()
+    return [m["text"] for m in sorted(rows, key=lambda m: m["id"])]
+
+
+async def test_first_message_is_start_prompt_then_prompt_in_one_message(http, pool):
+    cl = await insert_session(pool, spec={"start_prompt": "You are on {{ session_slug }}."})
+    url = f"/api/v1/sessions/{cl['id']}/messages"
+    r = await http.post(url, json={"text": "fix the bug"})
+    assert r.status_code == 202, r.text
+    assert await _texts(http, cl["id"]) == [f"You are on {cl['slug']}.\n\nfix the bug"]
+    assert await _count(pool, "messages") == 1
+
+
+async def test_start_prompt_is_prepended_only_once(http, pool):
+    cl = await insert_session(pool, spec={"start_prompt": "ctx"})
+    url = f"/api/v1/sessions/{cl['id']}/messages"
+    await http.post(url, json={"text": "one"})
+    await http.post(url, json={"text": "two"})
+    assert await _texts(http, cl["id"]) == ["ctx\n\none", "two"]
+
+
+async def test_start_prompt_not_prepended_when_session_already_has_messages(http, pool):
+    cl = await insert_session(pool, spec={"start_prompt": "ctx"})
+    await insert_message(  # a restart or resume: the start prompt was delivered with it
+        pool, cl["id"], text="earlier", status="sent", carries_start_prompt=True
+    )
+    r = await http.post(f"/api/v1/sessions/{cl['id']}/messages", json={"text": "again"})
+    assert r.status_code == 202
+    assert await _texts(http, cl["id"]) == ["earlier", "again"]
+
+
+async def test_no_start_prompt_sends_the_message_unchanged(http, pool):
+    cl = await insert_session(pool)
+    await http.post(f"/api/v1/sessions/{cl['id']}/messages", json={"text": "plain"})
+    assert await _texts(http, cl["id"]) == ["plain"]
+
+
+async def test_start_prompt_goes_before_the_chat_preamble_without_duplicating_it(http, pool):
+    # The Matrix connector posts its preamble (the chat prompt) and the sender's text as the
+    # message text through this same route: the preset start prompt comes first, the preamble once.
+    cl = await insert_session(pool, spec={"start_prompt": "preset start"})
+    preamble = "You are chatting through Matrix."
+    await http.post(f"/api/v1/sessions/{cl['id']}/messages", json={"text": f"{preamble}\n\nhi"})
+    [text] = await _texts(http, cl["id"])
+    assert text == f"preset start\n\n{preamble}\n\nhi"
+    assert text.count(preamble) == 1
+
+
+async def test_start_prompt_keeps_the_requested_lane(http, pool):
+    cl = await insert_session(pool, spec={"start_prompt": "ctx"})
+    r = await http.post(
+        f"/api/v1/sessions/{cl['id']}/messages", json={"text": "go", "lane": "priority"}
+    )
+    got = (await http.get(f"/api/v1/messages/{r.json()['message_id']}")).json()
+    assert got["lane"] == "priority"
+    assert got["text"] == "ctx\n\ngo"
+
+
+async def test_concurrent_first_messages_prepend_the_start_prompt_once(http, pool):
+    import asyncio
+
+    cl = await insert_session(pool, spec={"start_prompt": "ctx"})
+    url = f"/api/v1/sessions/{cl['id']}/messages"
+    await asyncio.gather(*(http.post(url, json={"text": f"m{i}"}) for i in range(4)))
+    texts = await _texts(http, cl["id"])
+    assert sum(t.startswith("ctx\n\n") for t in texts) == 1
+
+
+async def test_peer_message_arriving_first_does_not_consume_the_start_prompt(http, pool):
+    cl = await insert_session(pool, spec={"start_prompt": "ctx"})
+    await insert_message(pool, cl["id"], text="from a peer")  # no carries_start_prompt
+    await http.post(f"/api/v1/sessions/{cl['id']}/messages", json={"text": "user"})
+    assert await _texts(http, cl["id"]) == ["from a peer", "ctx\n\nuser"]
+
+
+async def test_failed_or_cancelled_first_message_hands_the_start_prompt_to_the_next(http, pool):
+    cl = await insert_session(pool, spec={"start_prompt": "ctx"})
+    url = f"/api/v1/sessions/{cl['id']}/messages"
+    first = (await http.post(url, json={"text": "a"})).json()["message_id"]
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE messages SET status='failed' WHERE id=%s", (first,))
+    second = (await http.post(url, json={"text": "b"})).json()["message_id"]
+    assert (await http.get(f"/api/v1/messages/{second}")).json()["text"] == "ctx\n\nb"
+    assert (await http.delete(f"/api/v1/messages/{second}")).status_code == 204
+    third = (await http.post(url, json={"text": "c"})).json()["message_id"]
+    assert (await http.get(f"/api/v1/messages/{third}")).json()["text"] == "ctx\n\nc"
+    fourth = (await http.post(url, json={"text": "d"})).json()["message_id"]
+    assert (await http.get(f"/api/v1/messages/{fourth}")).json()["text"] == "d"
+
+
+async def test_start_prompt_user_is_the_creating_service_or_empty(http, pool):
+    cl = await insert_session(pool, spec={"start_prompt": "[{{ user }}]"})
+    await http.post(f"/api/v1/sessions/{cl['id']}/messages", json={"text": "x"})
+    assert await _texts(http, cl["id"]) == ["[]\n\nx"]
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE sessions SET created_by_service='agents-webhook'")
+    cl2 = await insert_session(pool, spec={"start_prompt": "[{{ user }}]"})
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE sessions SET created_by_service='agents-webhook' WHERE id=%s", (cl2["id"],)
+        )
+    await http.post(f"/api/v1/sessions/{cl2['id']}/messages", json={"text": "y"})
+    assert await _texts(http, cl2["id"]) == ["[agents-webhook]\n\ny"]

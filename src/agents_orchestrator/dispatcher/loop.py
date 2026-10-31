@@ -26,6 +26,7 @@ from agents_orchestrator.wrapper.models import (
     Ambiguous,
     Busy,
     ConfigError,
+    DialogOpen,
     Gone,
     Rejected,
     TurnAccepted,
@@ -227,7 +228,9 @@ class Dispatcher:
                 metadata["orch_sender_session"] = claim.sender_slug
             heartbeat = asyncio.create_task(self._heartbeat(claim.message_id))
             try:
-                outcome = await client.submit_turn(claim.wrapper_session_id, text, metadata)
+                outcome = await client.submit_turn(
+                    claim.wrapper_session_id, text, metadata, claim.lane
+                )
             finally:
                 heartbeat.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -246,9 +249,13 @@ class Dispatcher:
                 conn, claim.agent_id, claim.previous_dispatched_at, claimed_at=claim.dispatched_at
             )
             if isinstance(outcome, Busy):
-                await queue.requeue(conn, mid)
+                await queue.requeue(
+                    conn, mid, s.retry_backoff_base_seconds, s.retry_backoff_max_seconds
+                )
             elif isinstance(outcome, ConfigError):
                 await queue.fail_message(conn, mid, "config_error")
+            elif isinstance(outcome, DialogOpen):
+                await queue.fail_message(conn, mid, "dialog_open")
             elif isinstance(outcome, Rejected):
                 await queue.fail_message(conn, mid, "rejected")
             elif isinstance(outcome, Unavailable | Gone):
