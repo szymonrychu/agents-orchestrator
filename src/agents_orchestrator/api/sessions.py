@@ -9,6 +9,7 @@ from typing import Annotated
 
 from agents_common.templating import TemplateError
 from fastapi import APIRouter, Depends, Request
+from fastapi.concurrency import run_in_threadpool
 from psycopg_pool import AsyncConnectionPool
 from pydantic import ValidationError
 
@@ -230,7 +231,7 @@ async def create_session(
             raise ApiError(422, "invalid_request", "slug is required with spec")
         if body.spec.cache is not None and body.spec.cache.key is None:
             raise ApiError(422, "invalid_request", "cache.key is required without a preset")
-        spec = check_spec(body.spec, settings)
+        spec = await run_in_threadpool(check_spec, body.spec, settings)
     if body.slug is not None:
         try:
             validate_slug(body.slug)
@@ -277,7 +278,8 @@ async def _create_from_preset(
     raw = dict(preset.spec)
     raw.setdefault("replicas", settings.default_replicas)
     try:
-        spec = check_spec(
+        spec = await run_in_threadpool(
+            check_spec,
             SessionSpec.model_validate(raw),
             settings,
             derived_cache_key=default_cache_key(preset.id),
@@ -368,7 +370,9 @@ async def edit_init_scripts(
     if current is None:
         raise not_found("session")
     for i, script in enumerate(scripts):
-        error, _ = rendering.problem(script, "init_script", current.spec.env)
+        error, _ = await run_in_threadpool(
+            rendering.problem, script, "init_script", current.spec.env
+        )
         if error is not None:
             hint = rendering.ESCAPE_HINT
             raise ApiError(422, "invalid_request", f"init_scripts[{i}]: {error} ({hint})")

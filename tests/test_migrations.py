@@ -55,6 +55,7 @@ def test_fresh_database_gets_all_tables(empty_dsn):
     assert tables >= TABLES
     assert versions == [
         "0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0011", "0012",
+        "0013",
     ]  # fmt: skip
 
 
@@ -78,6 +79,7 @@ def test_presets_migration_on_existing_sessions(empty_dsn, tmp_path):
         "0009",
         "0011",
         "0012",
+        "0013",
     ]
     with psycopg.connect(empty_dsn) as c:
         row = c.execute(
@@ -112,9 +114,9 @@ def test_concurrent_migrate_serialises(empty_dsn):
     [t.start() for t in threads]
     [t.join() for t in threads]
     assert not errors
-    assert sorted(len(r) for r in results) == [0, 11]
+    assert sorted(len(r) for r in results) == [0, 12]
     with psycopg.connect(empty_dsn) as c:
-        assert c.execute("SELECT count(*) FROM schema_migrations").fetchone()[0] == 11
+        assert c.execute("SELECT count(*) FROM schema_migrations").fetchone()[0] == 12
 
 
 async def test_events_unique_agent_session_seq(pool):
@@ -527,7 +529,7 @@ def test_0005_renames_clusters_to_sessions(empty_dsn, tmp_path):
             (unit, agent),
         )
     assert run_migrations(empty_dsn) == [
-        "0005", "0006", "0007", "0008", "0009", "0011", "0012",
+        "0005", "0006", "0007", "0008", "0009", "0011", "0012", "0013",
     ]  # fmt: skip
     with psycopg.connect(empty_dsn) as c:
         assert c.execute(
@@ -736,3 +738,66 @@ def test_0012_message_lane_column(empty_dsn, tmp_path):
         c.execute("DELETE FROM schema_migrations WHERE version = '0012'")
     assert run_migrations(empty_dsn, tmp_path) == ["0012"]
     assert run_migrations(empty_dsn, tmp_path) == []
+
+
+def test_escape_template_tokens_migration(empty_dsn, tmp_path):
+    from agents_orchestrator.rendering import render_text
+    from agents_orchestrator.spec import SessionSpec
+
+    for path in MIGRATIONS_DIR.glob("*.sql"):
+        if path.name < "0013":
+            shutil.copy(path, tmp_path)
+    run_migrations(empty_dsn, tmp_path)
+    spec = {
+        "init_scripts": ["awk '{{print $1}}'", "echo {% x %} {# c #}", "plain"],
+        "wrapper": {
+            "system_append": "use {{name}} here",
+            "restart_continue_prompt": "go",
+            "auto_compact": {"instructions": "keep {{ '{{' }} escaped {{a"},
+        },
+        "env": {"A": "{{keep}}"},
+    }
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        c.execute(
+            "INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), 'old', %s)",
+            (json.dumps(spec),),
+        )
+        c.execute(
+            "INSERT INTO presets (id, name, spec) VALUES (gen_random_uuid(), 'old', %s)",
+            (json.dumps(spec),),
+        )
+    assert run_migrations(empty_dsn) == ["0013"]
+    with psycopg.connect(empty_dsn) as c:
+        stored = [
+            r[0]
+            for r in c.execute(
+                "SELECT spec FROM sessions WHERE slug='old' UNION ALL"
+                " SELECT spec FROM presets WHERE name='old'"
+            )
+        ]
+    for got in stored:
+        assert got["env"] == {"A": "{{keep}}"}  # not a template field
+        assert got["init_scripts"][2] == "plain"
+        assert got["wrapper"]["restart_continue_prompt"] == "go"
+        ctx = {}
+        assert render_text(got["init_scripts"][0], ctx) == "awk '{{print $1}}'"
+        assert render_text(got["init_scripts"][1], ctx) == "echo {% x %} {# c #}"
+        assert render_text(got["wrapper"]["system_append"], ctx) == "use {{name}} here"
+        # a token that was already escaped is left alone; a stray one is escaped
+        assert (
+            render_text(got["wrapper"]["auto_compact"]["instructions"], ctx)
+            == "keep {{ escaped {{a"
+        )
+        SessionSpec.model_validate(got)
+    sql = (MIGRATIONS_DIR / "0013_escape_template_tokens.sql").read_text()
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        c.execute(sql)  # a second run is a no-op
+    with psycopg.connect(empty_dsn) as c:
+        again = [
+            r[0]
+            for r in c.execute(
+                "SELECT spec FROM sessions WHERE slug='old' UNION ALL"
+                " SELECT spec FROM presets WHERE name='old'"
+            )
+        ]
+    assert again == stored
