@@ -1684,6 +1684,15 @@
             "title": "Id",
             "type": "integer"
           },
+          "lane": {
+            "enum": [
+              "idle",
+              "regular",
+              "priority"
+            ],
+            "title": "Lane",
+            "type": "string"
+          },
           "max_attempts": {
             "title": "Max Attempts",
             "type": "integer"
@@ -1760,6 +1769,7 @@
           "session_id",
           "text",
           "status",
+          "lane",
           "target_agent_id",
           "agent_id",
           "turn_id",
@@ -2112,6 +2122,16 @@
       "PostMessage": {
         "additionalProperties": false,
         "properties": {
+          "lane": {
+            "default": "regular",
+            "enum": [
+              "idle",
+              "regular",
+              "priority"
+            ],
+            "title": "Lane",
+            "type": "string"
+          },
           "target_agent_id": {
             "anyOf": [
               {

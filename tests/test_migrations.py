@@ -54,7 +54,7 @@ def test_fresh_database_gets_all_tables(empty_dsn):
         versions = [r[0] for r in c.execute("SELECT version FROM schema_migrations")]
     assert tables >= TABLES
     assert versions == [
-        "0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0011",
+        "0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0011", "0012",
     ]  # fmt: skip
 
 
@@ -77,6 +77,7 @@ def test_presets_migration_on_existing_sessions(empty_dsn, tmp_path):
         "0008",
         "0009",
         "0011",
+        "0012",
     ]
     with psycopg.connect(empty_dsn) as c:
         row = c.execute(
@@ -111,9 +112,9 @@ def test_concurrent_migrate_serialises(empty_dsn):
     [t.start() for t in threads]
     [t.join() for t in threads]
     assert not errors
-    assert sorted(len(r) for r in results) == [0, 10]
+    assert sorted(len(r) for r in results) == [0, 11]
     with psycopg.connect(empty_dsn) as c:
-        assert c.execute("SELECT count(*) FROM schema_migrations").fetchone()[0] == 10
+        assert c.execute("SELECT count(*) FROM schema_migrations").fetchone()[0] == 11
 
 
 async def test_events_unique_agent_session_seq(pool):
@@ -525,7 +526,9 @@ def test_0005_renames_clusters_to_sessions(empty_dsn, tmp_path):
             "INSERT INTO file_locks (cluster_id, path, agent_id) VALUES (%s, 'a.py', %s)",
             (unit, agent),
         )
-    assert run_migrations(empty_dsn) == ["0005", "0006", "0007", "0008", "0009", "0011"]
+    assert run_migrations(empty_dsn) == [
+        "0005", "0006", "0007", "0008", "0009", "0011", "0012",
+    ]  # fmt: skip
     with psycopg.connect(empty_dsn) as c:
         assert c.execute(
             "SELECT id, slug, preset_id::text, preset_name FROM sessions"
@@ -705,4 +708,31 @@ def test_drop_feed_cursor_migration(empty_dsn, tmp_path):
         c.execute(sql)
         c.execute("DELETE FROM schema_migrations WHERE version = '0011'")
     assert run_migrations(empty_dsn, tmp_path) == ["0011"]
+    assert run_migrations(empty_dsn, tmp_path) == []
+
+
+def test_0012_message_lane_column(empty_dsn, tmp_path):
+    for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
+        if path.name < "0012":
+            shutil.copy(path, tmp_path / path.name)
+    assert run_migrations(empty_dsn, tmp_path)[-1] == "0011"
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        sid = c.execute(
+            "INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), 'old', '{}')"
+            " RETURNING id"
+        ).fetchone()[0]
+        c.execute("INSERT INTO messages (session_id, text) VALUES (%s, 'old')", (sid,))
+    shutil.copy(MIGRATIONS_DIR / "0012_message_lane.sql", tmp_path)
+    assert run_migrations(empty_dsn, tmp_path) == ["0012"]
+    with psycopg.connect(empty_dsn) as c:
+        assert _cols(c, "messages")["lane"] == ("text", "NO")
+        assert c.execute("SELECT lane FROM messages").fetchall() == [("regular",)]
+    with psycopg.connect(empty_dsn) as c, pytest.raises(psycopg.errors.CheckViolation):
+        c.execute("INSERT INTO messages (session_id, text, lane) VALUES (%s, 'x', 'bogus')", (sid,))
+    sql = (MIGRATIONS_DIR / "0012_message_lane.sql").read_text()
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        c.execute(sql)
+        c.execute(sql)
+        c.execute("DELETE FROM schema_migrations WHERE version = '0012'")
+    assert run_migrations(empty_dsn, tmp_path) == ["0012"]
     assert run_migrations(empty_dsn, tmp_path) == []

@@ -189,6 +189,7 @@ class Meta(BaseModel):
     kube_access: MetaKubeAccess
 
 
+Lane = Literal["idle", "regular", "priority"]
 MessageStatus = Literal["queued", "dispatching", "verifying", "sent", "failed", "cancelled"]
 
 
@@ -197,6 +198,7 @@ class PostMessage(BaseModel):
 
     text: str = Field(min_length=1)
     target_agent_id: uuid.UUID | None = None
+    lane: Lane = "regular"
 
 
 class MessageAccepted(BaseModel):
@@ -217,6 +219,7 @@ class MessageView(BaseModel):
     session_id: uuid.UUID
     text: str
     status: MessageStatus
+    lane: Lane
     target_agent_id: uuid.UUID | None
     agent_id: uuid.UUID | None
     turn_id: str | None

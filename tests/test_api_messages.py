@@ -243,3 +243,26 @@ async def test_checks_enqueue_and_get(http, pool):
         409,
         "session_deleting",
     )
+
+
+async def test_post_message_lane_defaults_to_regular_and_round_trips(http, pool):
+    cl = await insert_session(pool)
+    url = f"/api/v1/sessions/{cl['id']}/messages"
+    default = (await http.post(url, json={"text": "a"})).json()["message_id"]
+    assert (await http.get(f"/api/v1/messages/{default}")).json()["lane"] == "regular"
+    for lane in ("idle", "regular", "priority"):
+        r = await http.post(url, json={"text": lane, "lane": lane})
+        assert r.status_code == 202, r.text
+        got = (await http.get(f"/api/v1/messages/{r.json()['message_id']}")).json()
+        assert got["lane"] == lane
+    listed = (await http.get(url)).json()
+    assert {m["lane"] for m in listed} == {"idle", "regular", "priority"}
+
+
+async def test_post_message_rejects_unknown_lane(http, pool):
+    cl = await insert_session(pool)
+    r = await http.post(
+        f"/api/v1/sessions/{cl['id']}/messages", json={"text": "x", "lane": "urgent"}
+    )
+    assert r.status_code == 422
+    assert await _count(pool, "messages") == 0

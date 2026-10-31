@@ -36,6 +36,7 @@ def _message_view(r: dict) -> schemas.MessageView:
         session_id=r["session_id"],
         text=r["text"],
         status=r["status"],
+        lane=r["lane"],
         target_agent_id=r["target_agent_id"],
         agent_id=r["agent_id"],
         turn_id=r["turn_id"],
@@ -72,7 +73,9 @@ async def post_message(
                 raise ApiError(422, "invalid_request", "target agent is not in this session")
             if agent["gone_at"] is not None:
                 raise ApiError(422, "target_gone", "target agent is gone")
-        mid = await queue.enqueue_message(conn, session_id, body.text, body.target_agent_id)
+        mid = await queue.enqueue_message(
+            conn, session_id, body.text, body.target_agent_id, lane=body.lane
+        )
     return schemas.MessageAccepted(message_id=mid)
 
 

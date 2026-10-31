@@ -136,6 +136,7 @@ async def enqueue_message(
     sender_session_id: uuid.UUID | None = None,
     sender_slug: str | None = None,
     hop: int = 0,
+    lane: str = "regular",
 ) -> int:
     """Queue a message; a session message carries its sender and hop (D8).
 
@@ -146,8 +147,8 @@ async def enqueue_message(
         row = await _one(
             conn,
             "INSERT INTO messages (session_id, text, target_agent_id, sender_session_id,"
-            " sender_slug, hop) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
-            (session_id, text, target_agent_id, sender_session_id, sender_slug, hop),
+            " sender_slug, hop, lane) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            (session_id, text, target_agent_id, sender_session_id, sender_slug, hop, lane),
         )
         assert row is not None
         await notify(conn, "message_queued", {"session_id": str(session_id)})
