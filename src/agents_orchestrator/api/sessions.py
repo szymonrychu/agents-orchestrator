@@ -162,7 +162,7 @@ def _bootstrap_view(step: dict | None) -> schemas.AgentBootstrapStep | None:
     return schemas.AgentBootstrapStep(**step) if step else None
 
 
-async def _one_view(conn, session: repo.Session, settings: Settings) -> schemas.SessionView:
+async def one_view(conn, session: repo.Session, settings: Settings) -> schemas.SessionView:
     aggs = await views.session_aggregates(conn, session.id)
     return _view(session, aggs.get(session.id), settings)
 
@@ -233,13 +233,16 @@ async def list_sessions(pool: Pool, settings: Cfg) -> list[schemas.SessionView]:
     return [_view(c, aggs.get(c.id), settings) for c in found]
 
 
-@router.post("/sessions", status_code=201, response_model=schemas.SessionView)
-async def create_session(
+async def create(
+    pool,
+    settings: Settings,
     body: schemas.CreateSession,
-    request: Request,
-    pool: Pool,
-    settings: Cfg,
+    creator: str | None = None,
+    created_by_session: uuid.UUID | None = None,
 ) -> schemas.SessionView:
+    """Create a session from a spec or a preset; shared by the main port and the admin routes.
+    `creator` is the trigger service on the service port; `created_by_session` the superleader
+    that created it through the admin routes."""
     if (body.spec is None) == (body.preset_id is None):
         raise ApiError(422, "invalid_request", "exactly one of spec or preset_id")
     if body.spec is not None:
@@ -259,7 +262,6 @@ async def create_session(
             validate_slug(body.slug)
         except ValueError as exc:
             raise ApiError(422, "invalid_request", str(exc)) from None
-    creator = calling_service(request)
     async with pool.connection() as conn:
         async with conn.transaction():
             await conn.execute("SELECT pg_advisory_xact_lock(%s)", (_CREATE_LOCK,))
@@ -270,12 +272,28 @@ async def create_session(
             if body.preset_id is None:
                 if spec.protected_env:
                     raise _secret_unset(spec.protected_env)
-                session = await _insert(conn, body.slug, spec, created_by_service=creator)
+                session = await _insert(
+                    conn,
+                    body.slug,
+                    spec,
+                    created_by_service=creator,
+                    created_by_session=created_by_session,
+                )
             else:
                 session = await _create_from_preset(
-                    conn, body.preset_id, body.slug, settings, creator
+                    conn, body.preset_id, body.slug, settings, creator, created_by_session
                 )
-        return await _one_view(conn, session, settings)
+        return await one_view(conn, session, settings)
+
+
+@router.post("/sessions", status_code=201, response_model=schemas.SessionView)
+async def create_session(
+    body: schemas.CreateSession,
+    request: Request,
+    pool: Pool,
+    settings: Cfg,
+) -> schemas.SessionView:
+    return await create(pool, settings, body, calling_service(request))
 
 
 _SLUG_ATTEMPTS = 5
@@ -338,6 +356,7 @@ async def _create_from_preset(
     slug: str | None,
     settings: Settings,
     created_by_service: str | None = None,
+    created_by_session: uuid.UUID | None = None,
 ) -> repo.Session:
     """Snapshot the preset's spec, filled and validated against the current settings."""
     preset = await presets.get_for_share(conn, preset_id)
@@ -369,6 +388,7 @@ async def _create_from_preset(
         "preset_name": preset.name,
         "created_by_service": created_by_service,
         "secret_versions": versions,
+        "created_by_session": created_by_session,
     }
     if slug is not None:
         return await _insert(conn, slug, spec, **provenance)
@@ -399,7 +419,15 @@ async def get_session(
         session = await repo.get(conn, session_id)
         if session is None:
             raise not_found("session")
-        return await _one_view(conn, session, settings)
+        return await one_view(conn, session, settings)
+
+
+async def discard(conn, session_id: uuid.UUID, settings: Settings) -> schemas.SessionView:
+    try:
+        session = await repo.request_delete(conn, session_id)
+    except repo.SessionNotFound:
+        raise not_found("session") from None
+    return await one_view(conn, session, settings)
 
 
 @router.delete("/sessions/{session_id}", status_code=202, response_model=schemas.SessionView)
@@ -414,11 +442,7 @@ async def discard_session(
             422, "invalid_request", "discard takes no parameters; it always deletes everything"
         )
     async with pool.connection() as conn:
-        try:
-            session = await repo.request_delete(conn, session_id)
-        except repo.SessionNotFound:
-            raise not_found("session") from None
-        return await _one_view(conn, session, settings)
+        return await discard(conn, session_id, settings)
 
 
 def init_scripts_view(

@@ -65,6 +65,8 @@ class Session:
     created_by_service: str | None = None
     # {ENV_NAME: Secret name} of the protected variables, snapshotted at create
     secret_versions: dict[str, str] = field(default_factory=dict)
+    # the superleader session that created it through the admin routes
+    created_by_session: uuid.UUID | None = None
 
     @property
     def trigger_created(self) -> bool:
@@ -87,6 +89,7 @@ def _from_row(row: dict[str, Any]) -> Session:
         preset_name=row["preset_name"],
         created_by_service=row["created_by_service"],
         secret_versions=row["secret_versions"] or {},
+        created_by_session=row["created_by_session"],
     )
 
 
@@ -112,6 +115,7 @@ async def create(
     preset_name: str | None = None,
     created_by_service: str | None = None,
     secret_versions: dict[str, str] | None = None,
+    created_by_session: uuid.UUID | None = None,
 ) -> Session:
     validate_slug(slug)
     try:
@@ -119,7 +123,8 @@ async def create(
             rows = await _fetch(
                 conn,
                 "INSERT INTO sessions (id, slug, spec, preset_id, preset_name, created_by_service,"
-                " secret_versions) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING *",
+                " secret_versions, created_by_session)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
                 (
                     uuid.uuid4(),
                     slug,
@@ -128,6 +133,7 @@ async def create(
                     preset_name,
                     created_by_service,
                     Jsonb(secret_versions) if secret_versions else None,
+                    created_by_session,
                 ),
             )
             await _notify(conn, rows[0].id)

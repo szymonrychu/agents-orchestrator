@@ -19,8 +19,9 @@ from starlette.responses import Response as StarletteResponse
 
 from agents_orchestrator.api import presets as presets_api
 from agents_orchestrator.api import schemas
+from agents_orchestrator.api import sessions as sessions_api
 from agents_orchestrator.api.agent import Caller
-from agents_orchestrator.api.errors import ApiError
+from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.sessions import Cfg, Pool
 from agents_orchestrator.db import events as events_repo
 from agents_orchestrator.db import sessions as sessions_repo
@@ -187,3 +188,41 @@ async def set_preset_secret(
     touched(request, name)
     async with pool.connection() as conn:
         return await presets_api.put_secret(request, conn, settings, ref, name, body)
+
+
+# ---------------------------------------------------------------- sessions (O7)
+
+
+async def _target(conn, slug: str) -> sessions_repo.Session:
+    session = await sessions_repo.get_by_slug(conn, slug)
+    if session is None:
+        raise not_found("session")
+    return session
+
+
+@router.get("/sessions/{slug}", response_model=schemas.SessionView)
+async def get_session(slug: str, pool: Pool, settings: Cfg) -> schemas.SessionView:
+    async with pool.connection() as conn:
+        return await sessions_api.one_view(conn, await _target(conn, slug), settings)
+
+
+@router.post("/sessions", status_code=201, response_model=schemas.SessionView)
+async def create_session(
+    body: schemas.CreateSession, request: Request, pool: Pool, settings: Cfg
+) -> schemas.SessionView:
+    """Same body and rules as the main port; the caller's session is recorded as the creator
+    and `created_by_service` stays empty, so the new session is never a trigger session."""
+    _, caller = caller_of(request)
+    return await sessions_api.create(pool, settings, body, created_by_session=caller.id)
+
+
+@router.delete("/sessions/{slug}", status_code=202, response_model=schemas.SessionView)
+async def discard_session(
+    slug: str, request: Request, pool: Pool, settings: Cfg
+) -> schemas.SessionView:
+    _, caller = caller_of(request)
+    async with pool.connection() as conn:
+        target = await _target(conn, slug)
+        if target.id == caller.id:
+            raise ApiError(422, "own_session", "a session cannot discard itself")
+        return await sessions_api.discard(conn, target.id, settings)
