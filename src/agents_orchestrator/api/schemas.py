@@ -123,6 +123,20 @@ class InitScriptsIn(BaseModel):
     scripts: list[str]
 
 
+class PermissionModeIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    permission_mode: Literal["bypassPermissions", "auto"]
+
+
+class PermissionModeView(BaseModel):
+    session_id: uuid.UUID
+    permission_mode: Literal["bypassPermissions", "auto"]
+    preset_id: uuid.UUID | None = None
+    preset_name: str | None = None
+    preset_updated: bool = False
+
+
 class InitStatus(BaseModel):
     state: Literal["skipped", "running", "succeeded", "failed"]
     scripts_hash: str

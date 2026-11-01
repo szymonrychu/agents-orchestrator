@@ -694,7 +694,7 @@ Versioning: `/api/v1` is additive only. New routes, new optional request fields 
 
 Documented exception, 2026-10-23: `PATCH /api/v1/sessions/{session_id}` was removed (it now answers 405), and `POST /api/v1/sessions` requires exactly one of `spec` and `preset_id`. Why: a live spec edit rolled every agent pod of a running session; sessions now snapshot their preset at create and the spec is fixed from then on. To change it, discard the session and schedule again from a preset.
 
-In-place fields (amends the exception above): `spec.replicas` and `spec.init_scripts` are the only spec fields that change in place (no generation bump, no pod roll); PATCH stays 405.
+In-place fields (amends the exception above): `spec.replicas` and `spec.init_scripts` change in place with no generation bump and no pod roll; `spec.wrapper.permission_mode` (2026-11-01) also changes in place through `PUT /api/v1/sessions/{session_id}/permission-mode`, but it is rendered into the pod config, so a changed value bumps the generation and the config hash rolls the pods through the normal rollout (idle pods restart, busy ones wait for the turn to end). PATCH stays 405.
 
 Documented exception, 2026-10-25: the orchestrator's unit is a session. Every `/api/v1/clusters...` route became `/api/v1/sessions...` (path parameter `session_id`), every `cluster_id` field became `session_id`, the schemas `SessionSpec`, `SessionSummary`, `SessionView` and `CreateSession`, `caps.max_sessions`, the error codes `session_deleting`, `static_session` and `session_limit`, and the SSE events `session_status` and `session_removed`. There is no alias: the old routes answer 404. Why: one word for one thing across the API, the UI and the database (tables `sessions` and `session_leaders`, migration `0005`).
 
@@ -790,6 +790,10 @@ The session's init scripts and the last init run: `session_id`, `scripts` (the s
 ### `PUT /api/v1/sessions/{session_id}/init-scripts`
 
 Replaces the session's init scripts. Body `{"scripts": ["<shell script>", ...]}` (at most 20 entries, each non-empty after strip and at most 16384 characters). One transaction writes the session's stored `spec.init_scripts` and, when the session has a source preset that still exists (the Default preset included), that preset's `spec.init_scripts` too, bumping the preset's `updated_at`. `generation` is not bumped and no pod rolls. The running session never re-runs its init; the next session created from the preset runs the new list. Response 200 with the same view as the GET, with `preset_updated` true when a preset was written and false for a raw-spec session or a deleted preset. Errors: 422 `invalid_request` (invalid list, naming the index; nothing is written), 404 `not_found`, 409 `conflict` (the session is being deleted), 403 `forbidden`.
+
+### `PUT /api/v1/sessions/{session_id}/permission-mode`
+
+Sets the session's Claude permission mode. Body `{"permission_mode": "bypassPermissions" | "auto"}` (422 `invalid_request` for any other value or an unknown field). One transaction writes `spec.wrapper.permission_mode` of the session and, when the source preset still exists, of that preset too (same write-back as init scripts, bumping the preset's `updated_at`). A changed value bumps `generation`; the new config hash rolls the pods through the normal Replacer path (idle pods restart, busy ones wait for the turn end). An unchanged value bumps nothing. Response 200 `{session_id, permission_mode, preset_id, preset_name, preset_updated}`. Errors: 404 `not_found`, 409 `conflict` (session is being deleted).
 
 ### `GET /api/v1/sessions/{session_id}/agents`
 
@@ -1036,6 +1040,7 @@ Create-time only fields of the session `spec` (also accepted on `POST /api/v1/pr
 | `max_restarts` | integer 0 to 10 | `sessions.max_restarts` |
 | `restart_continue_prompt` | string; replaces `ORCH_DEFAULT_RESTART_CONTINUE_PROMPT`, empty disables the continuation | `sessions.restart_continue_prompt` |
 | `turn_max_seconds` | number >= 0 | `limits.turn_max_seconds` |
+| `permission_mode` | `bypassPermissions` or `auto`; unset keeps the wrapper default (bypass); editable in place, see `PUT .../permission-mode` | `claude.permission_mode` |
 | `agent_commands` | subset of `compact`, `context`, `mcp`, `reload-plugins`, `reload-skills` | `sessions.commands.agent` |
 
 Hooks: the event is one of the 21 wrapper events (`onCreate`, `onResume`, `onDestroy`, `onTurn`, `onTurnComplete`, `onStop`, `onTick`, `onAgentResponse`, `onAgentToolCall`, `onToolResult`, `onSubagentStart`, `onSubagentStop`, `onInterrupt`, `onCommand`, `onCommandComplete`, `onError`, `preJoin`, `postJoin`, `preLeave`, `postLeave`, `onStart`). An action is `{type: command, run, env}` or `{type: webhook, url, secret, headers, retries}` plus the common `timeout_seconds`, `blocking`, `on_error` (`allow` or `deny`); `matcher` (a regex) only on `onAgentToolCall` and `onToolResult`; `interval_seconds` (required) and `when` (`busy` or `always`) only on `onTick`. `run` is at most 16384 characters; command `env` keys match `[A-Z_][A-Z0-9_]*`; a webhook `url` is http or https.

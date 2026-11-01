@@ -357,6 +357,50 @@ async def set_init_scripts(
     return rows[0], preset_written
 
 
+async def set_permission_mode(
+    conn: psycopg.AsyncConnection, session_id: uuid.UUID, mode: str
+) -> tuple[Session, bool]:
+    """Write `spec.wrapper.permission_mode` to the session spec and its source preset.
+
+    Same transaction and lock order as `set_init_scripts` (sessions, then presets). Unlike the
+    init scripts the value is rendered into the pod config, so a changed value bumps the
+    generation and the config hash rolls the pods through the normal Replacer path (idle pods
+    restart, busy ones wait); an unchanged value bumps nothing. Returns the updated session and
+    whether a preset row was written.
+    """
+    async with conn.transaction():
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT desired, preset_id FROM sessions WHERE id = %s FOR UPDATE", (session_id,)
+            )
+            locked = await cur.fetchone()
+        if locked is None:
+            raise SessionNotFound(str(session_id))
+        desired, preset_id = locked
+        if desired == "deleting":
+            raise SessionBeingDeleted(str(session_id))
+        patch = Jsonb({"permission_mode": mode})
+        merge = "jsonb_set(spec, '{wrapper}', COALESCE(spec->'wrapper', '{}'::jsonb) || %s)"
+        rows = await _fetch(
+            conn,
+            f"UPDATE sessions SET spec = {merge},"
+            " generation = generation + CASE WHEN spec #>> '{wrapper,permission_mode}'"
+            " IS DISTINCT FROM %s THEN 1 ELSE 0 END WHERE id = %s RETURNING *",
+            (patch, mode, session_id),
+        )
+        preset_written = False
+        if preset_id is not None:
+            cur = await conn.execute("SELECT 1 FROM presets WHERE id = %s FOR UPDATE", (preset_id,))
+            if await cur.fetchone() is not None:
+                await conn.execute(
+                    f"UPDATE presets SET spec = {merge}, updated_at = now() WHERE id = %s",
+                    (patch, preset_id),
+                )
+                preset_written = True
+        await _notify(conn, session_id)
+    return rows[0], preset_written
+
+
 async def set_replicas(
     conn: psycopg.AsyncConnection,
     session_id: uuid.UUID,
