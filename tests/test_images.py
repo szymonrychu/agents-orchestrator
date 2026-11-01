@@ -89,10 +89,11 @@ def test_ccw_dev_dependency_matches_agent_image_sha():
     sha = re.search(r"claude-code-wrapper@([0-9a-f]{40})$", pin).group(1)
     readme = (ROOT / "README.md").read_text()
     images = readme.split("## Images", 1)[1].split("\n## ", 1)[0]
-    ref = r"harbor\.szymonrichert\.pl/containers/claude-code-wrapper:([0-9a-f]{7})\b"
+    ref = r"harbor\.szymonrichert\.pl/containers/claude-code-wrapper:(\d+\.\d+\.\d+)\b"
     m = re.search(ref, images)
     assert m, "README ## Images must name the agent image"
-    assert m.group(1) == sha[:7]
+    dockerfile = (ROOT / "e2e/agent-test.Dockerfile").read_text()
+    assert f"claude-code-wrapper:{m.group(1)}" in dockerfile  # semver tag, same in both places
     lock = (ROOT / "uv.lock").read_text()
     assert f"claude-code-wrapper?rev={sha}#{sha}" in lock
 
@@ -103,7 +104,10 @@ def test_agent_test_dockerfile_matches_dev_dependency():
     sha = re.search(r"claude-code-wrapper@([0-9a-f]{40})$", pin).group(1)
     text = (ROOT / "e2e/agent-test.Dockerfile").read_text()
     args = dict(re.findall(r"^ARG\s+(\w+)=(\S+)", text, re.M))
-    assert args["BASE_IMAGE"] == f"harbor.szymonrichert.pl/containers/claude-code-wrapper:{sha[:7]}"
+    assert re.fullmatch(
+        r"harbor\.szymonrichert\.pl/containers/claude-code-wrapper:\d+\.\d+\.\d+",
+        args["BASE_IMAGE"],
+    )
     assert args["WRAPPER_SHA"] == sha
 
 
