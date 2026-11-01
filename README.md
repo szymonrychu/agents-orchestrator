@@ -112,6 +112,10 @@ One image, one `orch` entrypoint. Every command reads `ORCH_*` settings (see Con
 - The lock connection is opened with libpq keepalives (`keepalives=1`, `keepalives_idle`, `keepalives_interval`, `keepalives_count`, all about a third of `ORCH_LOCK_TCP_USER_TIMEOUT_SECONDS`) and `tcp_user_timeout` set to `ORCH_LOCK_TCP_USER_TIMEOUT_SECONDS` times 1000, so a half-open connection (a blackholed node) is detected by the kernel instead of hanging.
 - Every `ORCH_LOCK_HEARTBEAT_SECONDS` a heartbeat checks on the lock connection that this backend still holds the advisory lock. A failed, timed-out or negative heartbeat, or a dropped connection, stops the loops and the process exits 3, so Kubernetes restarts it rather than letting it run without the lock. A holder behind a dead link therefore exits within `ORCH_LOCK_TCP_USER_TIMEOUT_SECONDS` plus one heartbeat.
 
+## Checking stored presets before a deploy
+
+`orch presets-check` (needs `ORCH_DATABASE_URL`) validates every stored preset the way a session create does and lists the ones that would be refused: one block per preset with the failing field and rule, then a count; exit code 1 when any would fail, 0 otherwise. It prints names, paths and rule text only, never an env value. Run it before deploying a release that tightens the spec model, for example to find a `${X}` in a hook or MCP field that names no `env` variable, or a plain-string `env` entry.
+
 ## Images
 
 CI (`.github/workflows/ci.yaml`, job `images`) builds the orchestrator image from the root `Dockerfile` and smoke-tests it with `docker run --rm <image> --help`, but only after the `lint`, `test` and `e2e` jobs pass; a red build is never pushed. Only a push to `main` logs in to Harbor (secrets `HARBOR_USERNAME`, `HARBOR_PASSWORD`) and pushes it with `regctl`, in 50MB chunks. The `e2e` job builds and loads its own images and does not use the pushed one, so it does not wait for `images`.
