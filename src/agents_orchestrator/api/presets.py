@@ -145,42 +145,98 @@ def _copy_name(source: str, taken: set[str]) -> str:
         n += 1
 
 
+async def list_all(conn) -> list[schemas.PresetView]:
+    presets = await repo.list_presets(conn)
+    metas = await secret_store.list_metas(conn, [p.id for p in presets])
+    return [_view(p, metas.get(p.id)) for p in presets]
+
+
+async def create(
+    request: Request, conn, settings: Settings, body: schemas.PresetIn
+) -> schemas.PresetView:
+    spec, values = await _validated(body, settings)
+    try:
+        preset, metas = await _save(
+            request, conn, settings, spec, values, lambda: repo.create(conn, body.name, spec)
+        )
+    except repo.PresetExists:
+        raise _exists(body.name) from None
+    return _view(preset, metas)
+
+
+async def get_one(conn, preset_id: uuid.UUID) -> schemas.PresetView:
+    preset = await repo.get(conn, preset_id)
+    if preset is None:
+        raise not_found("preset")
+    secrets = (await secret_store.list_metas(conn, [preset_id])).get(preset_id)
+    return _view(preset, secrets)
+
+
+async def replace(
+    request: Request, conn, settings: Settings, preset_id: uuid.UUID, body: schemas.PresetIn
+) -> schemas.PresetView:
+    stored = await repo.get(conn, preset_id)
+    if stored is None:
+        raise not_found("preset")
+    spec, values = await _validated(body, settings, stored.spec, preset_id)
+    try:
+        preset, metas = await _save(
+            request,
+            conn,
+            settings,
+            spec,
+            values,
+            lambda: repo.update(conn, preset_id, body.name, spec),
+        )
+        return _view(preset, metas)
+    except repo.PresetNotFound:
+        raise not_found("preset") from None
+    except repo.PresetDefault as exc:
+        raise _default_error(exc) from None
+    except repo.PresetExists:
+        raise _exists(body.name) from None
+
+
+async def remove(request: Request, conn, settings: Settings, preset_id: uuid.UUID) -> None:
+    try:
+        async with conn.transaction():
+            await repo.delete(conn, preset_id)
+            # no FK: the rows outlive the preset, so retire them here; gc then treats them
+            # as dead and deletes the versions no live session names
+            collect = await secret_store.has_rows(conn, preset_id)
+            if collect:
+                kube = secret_store.kube_of(request)
+                await secret_store.sync_declared(
+                    conn, kube, settings.namespace, preset_id, [], collect=False
+                )
+        if collect:
+            await secret_store.gc(conn, kube, settings.namespace, preset_id=preset_id)
+    except repo.PresetNotFound:
+        raise not_found("preset") from None
+    except repo.PresetDefault as exc:
+        raise _default_error(exc) from None
+    except repo.LastPreset:
+        raise ApiError(409, "last_preset", "the only preset cannot be deleted") from None
+
+
 @router.get("/presets", response_model=list[schemas.PresetView])
 async def list_presets(pool: Pool) -> list[schemas.PresetView]:
     async with pool.connection() as conn:
-        presets = await repo.list_presets(conn)
-        metas = await secret_store.list_metas(conn, [p.id for p in presets])
-        return [_view(p, metas.get(p.id)) for p in presets]
+        return await list_all(conn)
 
 
 @router.post("/presets", status_code=201, response_model=schemas.PresetView)
 async def create_preset(
     body: schemas.PresetIn, request: Request, pool: Pool, settings: Cfg
 ) -> schemas.PresetView:
-    spec, values = await _validated(body, settings)
     async with pool.connection() as conn:
-        try:
-            preset, metas = await _save(
-                request,
-                conn,
-                settings,
-                spec,
-                values,
-                lambda: repo.create(conn, body.name, spec),
-            )
-        except repo.PresetExists:
-            raise _exists(body.name) from None
-        return _view(preset, metas)
+        return await create(request, conn, settings, body)
 
 
 @router.get("/presets/{preset_id}", response_model=schemas.PresetView)
 async def get_preset(preset_id: uuid.UUID, pool: Pool) -> schemas.PresetView:
     async with pool.connection() as conn:
-        preset = await repo.get(conn, preset_id)
-        if preset is None:
-            raise not_found("preset")
-        secrets = (await secret_store.list_metas(conn, [preset_id])).get(preset_id)
-    return _view(preset, secrets)
+        return await get_one(conn, preset_id)
 
 
 @router.put("/presets/{preset_id}", response_model=schemas.PresetView)
@@ -188,26 +244,7 @@ async def replace_preset(
     preset_id: uuid.UUID, body: schemas.PresetIn, request: Request, pool: Pool, settings: Cfg
 ) -> schemas.PresetView:
     async with pool.connection() as conn:
-        stored = await repo.get(conn, preset_id)
-        if stored is None:
-            raise not_found("preset")
-        spec, values = await _validated(body, settings, stored.spec, preset_id)
-        try:
-            preset, metas = await _save(
-                request,
-                conn,
-                settings,
-                spec,
-                values,
-                lambda: repo.update(conn, preset_id, body.name, spec),
-            )
-            return _view(preset, metas)
-        except repo.PresetNotFound:
-            raise not_found("preset") from None
-        except repo.PresetDefault as exc:
-            raise _default_error(exc) from None
-        except repo.PresetExists:
-            raise _exists(body.name) from None
+        return await replace(request, conn, settings, preset_id, body)
 
 
 @router.delete("/presets/{preset_id}", status_code=204, response_model=None)
@@ -215,25 +252,7 @@ async def delete_preset(
     preset_id: uuid.UUID, request: Request, pool: Pool, settings: Cfg
 ) -> Response:
     async with pool.connection() as conn:
-        try:
-            async with conn.transaction():
-                await repo.delete(conn, preset_id)
-                # no FK: the rows outlive the preset, so retire them here; gc then treats them
-                # as dead and deletes the versions no live session names
-                collect = await secret_store.has_rows(conn, preset_id)
-                if collect:
-                    kube = secret_store.kube_of(request)
-                    await secret_store.sync_declared(
-                        conn, kube, settings.namespace, preset_id, [], collect=False
-                    )
-            if collect:
-                await secret_store.gc(conn, kube, settings.namespace, preset_id=preset_id)
-        except repo.PresetNotFound:
-            raise not_found("preset") from None
-        except repo.PresetDefault as exc:
-            raise _default_error(exc) from None
-        except repo.LastPreset:
-            raise ApiError(409, "last_preset", "the only preset cannot be deleted") from None
+        await remove(request, conn, settings, preset_id)
     return Response(status_code=204)
 
 
@@ -247,30 +266,33 @@ def _without_derived_key(spec: dict[str, Any], preset_id: uuid.UUID) -> dict[str
     return spec
 
 
+async def copy(conn, preset_id: uuid.UUID, explicit: str | None) -> schemas.PresetView:
+    if explicit is not None:
+        _checked_name(explicit)
+    source = await repo.get(conn, preset_id)
+    if source is None:
+        raise not_found("preset")
+    spec = _without_derived_key(source.spec, preset_id)
+    for _ in range(_COPY_TRIES):
+        taken = {p.name.lower() for p in await repo.list_presets(conn)}
+        name = explicit if explicit is not None else _copy_name(source.name, taken)
+        try:
+            return _view(await repo.create(conn, name, spec))
+        except repo.PresetExists:
+            if explicit is not None:
+                raise _exists(name) from None
+    raise ApiError(409, "conflict", f"could not find a free copy name for {source.name!r}")
+
+
 @router.post("/presets/{preset_id}/copy", status_code=201, response_model=schemas.PresetView)
 async def copy_preset(
     preset_id: uuid.UUID, pool: Pool, body: schemas.CopyPreset | None = None
 ) -> schemas.PresetView:
-    explicit = body.name if body else None
-    if explicit is not None:
-        _checked_name(explicit)
     async with pool.connection() as conn:
-        source = await repo.get(conn, preset_id)
-        if source is None:
-            raise not_found("preset")
-        spec = _without_derived_key(source.spec, preset_id)
-        for _ in range(_COPY_TRIES):
-            taken = {p.name.lower() for p in await repo.list_presets(conn)}
-            name = explicit if explicit is not None else _copy_name(source.name, taken)
-            try:
-                return _view(await repo.create(conn, name, spec))
-            except repo.PresetExists:
-                if explicit is not None:
-                    raise _exists(name) from None
-        raise ApiError(409, "conflict", f"could not find a free copy name for {source.name!r}")
+        return await copy(conn, preset_id, body.name if body else None)
 
 
-async def _by_ref(conn, ref: str) -> repo.Preset:
+async def by_ref(conn, ref: str) -> repo.Preset:
     """A preset by id or, failing that, by name (names are unique ignoring case)."""
     try:
         found = await repo.get(conn, uuid.UUID(ref))
@@ -283,6 +305,33 @@ async def _by_ref(conn, ref: str) -> repo.Preset:
     return found
 
 
+async def put_secret(
+    request: Request, conn, settings: Settings, preset: str, name: str, body: schemas.SecretIn
+) -> schemas.SecretView:
+    """Set the value of a protected variable (a new version). The value is never echoed."""
+    value = body.value.get_secret_value()
+    if len(value.encode()) > SECRET_MAX_BYTES:
+        raise ApiError(413, "secret_too_large", f"a secret holds at most {SECRET_MAX_BYTES} bytes")
+    found = await by_ref(conn, preset)
+    entry = found.spec.get("env", {}).get(name)
+    if not (isinstance(entry, dict) and entry.get("protected")):
+        raise ApiError(
+            422, "invalid_request", f"{name!r} is not a protected variable of this preset"
+        )
+    kube = secret_store.kube_of(request)
+    try:
+        meta = await secret_store.set_secret(
+            conn, kube, settings.namespace, found.id, name, body.value
+        )
+    except secret_store.PresetNotFound:
+        raise not_found("preset") from None
+    except secret_store.SecretStoreError:
+        raise _store_failed() from None
+    return schemas.SecretView(
+        name=meta.name, set=meta.set, version=meta.version, updated_at=meta.updated_at
+    )
+
+
 @router.put("/presets/{preset}/secrets/{name}", response_model=schemas.SecretView)
 async def set_preset_secret(
     preset: str,
@@ -292,26 +341,5 @@ async def set_preset_secret(
     pool: Pool,
     settings: Cfg,
 ) -> schemas.SecretView:
-    """Set the value of a protected variable (a new version). The value is never echoed."""
-    value = body.value.get_secret_value()
-    if len(value.encode()) > SECRET_MAX_BYTES:
-        raise ApiError(413, "secret_too_large", f"a secret holds at most {SECRET_MAX_BYTES} bytes")
     async with pool.connection() as conn:
-        found = await _by_ref(conn, preset)
-        entry = found.spec.get("env", {}).get(name)
-        if not (isinstance(entry, dict) and entry.get("protected")):
-            raise ApiError(
-                422, "invalid_request", f"{name!r} is not a protected variable of this preset"
-            )
-        kube = secret_store.kube_of(request)
-        try:
-            meta = await secret_store.set_secret(
-                conn, kube, settings.namespace, found.id, name, body.value
-            )
-        except secret_store.PresetNotFound:
-            raise not_found("preset") from None
-        except secret_store.SecretStoreError:
-            raise _store_failed() from None
-    return schemas.SecretView(
-        name=meta.name, set=meta.set, version=meta.version, updated_at=meta.updated_at
-    )
+        return await put_secret(request, conn, settings, preset, name, body)
