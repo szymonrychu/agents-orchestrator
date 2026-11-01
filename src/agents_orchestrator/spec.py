@@ -490,6 +490,7 @@ class WrapperSettings(_Strict):
     max_restarts: int | None = Field(default=None, ge=0, le=10)
     restart_continue_prompt: str | None = None
     turn_max_seconds: float | None = Field(default=None, ge=0)
+    permission_mode: Literal["bypassPermissions", "auto"] | None = None
     agent_commands: (
         list[Literal["compact", "context", "mcp", "reload-plugins", "reload-skills"]] | None
     ) = None
