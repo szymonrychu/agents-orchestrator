@@ -3204,7 +3204,7 @@ FETCH_BINARY = (
 )
 KIND_VERSION = "v0.33.0"
 # kind create cluster, nested in the sidecar
-KIND_CREATE = ["/tmp/kind", "create", "cluster", "--name", "nested", "--wait", "300s"]
+KIND_CREATE = "/tmp/kind create cluster --name nested --wait 300s"
 
 
 def docker_pod_items(slug: str) -> list[dict[str, Any]]:
@@ -3294,9 +3294,9 @@ def test_docker_sidecar_runs_containers_and_kind(api: httpx.Client, baseline: di
                 "-c",
                 "ccw",
                 "--",
-                *KIND_CREATE,
-                "--kubeconfig",
-                "/tmp/nested.kubeconfig",
+                "sh",
+                "-c",
+                f"{KIND_CREATE} --kubeconfig /tmp/nested.kubeconfig",
                 timeout=DOCKER_TIMEOUT,
             )
             nodes = kubectl(
