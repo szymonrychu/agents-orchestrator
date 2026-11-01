@@ -134,6 +134,7 @@ class _AgentStream:
                 current_turn_id=None if closed else snap.current_turn_id,
                 last_seq=self.last_seq,
                 waiting=(snap.waiting.reason, snap.waiting.since) if snap.waiting else None,
+                permission_mode=(snap.permission_mode_state, snap.permission_mode_reason),
                 bootstrap=status.bootstrap_from_steps(
                     [st.model_dump(mode="json") for st in snap.bootstrap.steps]
                     if snap.bootstrap
@@ -241,6 +242,12 @@ class _AgentStream:
         elif env.type == "waiting_ended":
             if await status.clear_waiting(conn, ref.agent_id, data.get("reason")):
                 await status.notify_status(conn, ref.session_id, ref.agent_id)
+        elif env.type == "permission_mode_unavailable":
+            reason = data.get("reason")
+            await status.set_permission_mode_unavailable(
+                conn, ref.agent_id, None if reason is None else str(reason)
+            )
+            await status.notify_status(conn, ref.session_id, ref.agent_id)
         elif env.type == "bootstrap_step":
             await status.apply_bootstrap_step(conn, ref.agent_id, data)
             await status.notify_status(conn, ref.session_id, ref.agent_id)

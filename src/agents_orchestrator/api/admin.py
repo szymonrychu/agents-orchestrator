@@ -28,6 +28,7 @@ from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.sessions import Cfg, Pool
 from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import events as events_repo
+from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.db import queue as q
 from agents_orchestrator.db import sessions as sessions_repo
 from agents_orchestrator.settings import Settings
@@ -134,13 +135,40 @@ def _sent_secrets(body: schemas.PresetIn) -> list[str]:
     return [n for n, e in body.spec.env.items() if e.protected and e.value is not None]
 
 
+# What each non-relay admin route hides from the superleader: "preset" and "session" routes
+# answer 404 for a target outside its remit, "list" and "create" are filtered or forced.
+ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
+    ("GET", f"{ADMIN_PREFIX}/presets"): "list",
+    ("POST", f"{ADMIN_PREFIX}/presets"): "create",
+    ("GET", f"{ADMIN_PREFIX}/presets/{{ref}}"): "preset",
+    ("PUT", f"{ADMIN_PREFIX}/presets/{{ref}}"): "preset",
+    ("DELETE", f"{ADMIN_PREFIX}/presets/{{ref}}"): "preset",
+    ("POST", f"{ADMIN_PREFIX}/presets/{{ref}}/copy"): "preset",
+    ("PUT", f"{ADMIN_PREFIX}/presets/{{ref}}/secrets/{{name}}"): "preset",
+    ("GET", f"{ADMIN_PREFIX}/sessions/{{slug}}"): "session",
+    ("POST", f"{ADMIN_PREFIX}/sessions"): "create",
+    ("DELETE", f"{ADMIN_PREFIX}/sessions/{{slug}}"): "session",
+    ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/restart"): "session",
+    ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/agents/{{pod}}/restart"): "session",
+    ("GET", f"{ADMIN_PREFIX}/commands/{{command_id}}"): "none",
+}
+
+
 # ---------------------------------------------------------------- presets (O6)
+
+
+async def _manageable_preset(conn, ref: str) -> presets_repo.Preset:
+    """A preset by id or name; one the superleader may not manage is as missing as an unknown."""
+    found = await presets_api.by_ref(conn, ref)
+    if not found.superleader_manageable:
+        raise not_found("preset")
+    return found
 
 
 @router.get("/presets", response_model=list[schemas.PresetView])
 async def list_presets(pool: Pool) -> list[schemas.PresetView]:
     async with pool.connection() as conn:
-        return await presets_api.list_all(conn)
+        return await presets_api.list_all(conn, only_manageable=True)
 
 
 @router.post("/presets", status_code=201, response_model=schemas.PresetView)
@@ -149,13 +177,13 @@ async def create_preset(
 ) -> schemas.PresetView:
     touched(request, *_sent_secrets(body))
     async with pool.connection() as conn:
-        return await presets_api.create(request, conn, settings, body)
+        return await presets_api.create(request, conn, settings, body, superleader=True)
 
 
 @router.get("/presets/{ref}", response_model=schemas.PresetView)
 async def get_preset(ref: str, pool: Pool) -> schemas.PresetView:
     async with pool.connection() as conn:
-        found = await presets_api.by_ref(conn, ref)
+        found = await _manageable_preset(conn, ref)
         return await presets_api.get_one(conn, found.id)
 
 
@@ -165,14 +193,14 @@ async def replace_preset(
 ) -> schemas.PresetView:
     touched(request, *_sent_secrets(body))
     async with pool.connection() as conn:
-        found = await presets_api.by_ref(conn, ref)
-        return await presets_api.replace(request, conn, settings, found.id, body)
+        found = await _manageable_preset(conn, ref)
+        return await presets_api.replace(request, conn, settings, found.id, body, superleader=True)
 
 
 @router.delete("/presets/{ref}", status_code=204, response_model=None)
 async def delete_preset(ref: str, request: Request, pool: Pool, settings: Cfg) -> Response:
     async with pool.connection() as conn:
-        found = await presets_api.by_ref(conn, ref)
+        found = await _manageable_preset(conn, ref)
         await presets_api.remove(request, conn, settings, found.id)
     return Response(status_code=204)
 
@@ -182,7 +210,7 @@ async def copy_preset(
     ref: str, pool: Pool, body: schemas.CopyPreset | None = None
 ) -> schemas.PresetView:
     async with pool.connection() as conn:
-        found = await presets_api.by_ref(conn, ref)
+        found = await _manageable_preset(conn, ref)
         return await presets_api.copy(conn, found.id, body.name if body else None)
 
 
@@ -192,23 +220,34 @@ async def set_preset_secret(
 ) -> schemas.SecretView:
     touched(request, name)
     async with pool.connection() as conn:
-        return await presets_api.put_secret(request, conn, settings, ref, name, body)
+        found = await _manageable_preset(conn, ref)
+        return await presets_api.put_secret(request, conn, settings, str(found.id), name, body)
 
 
 # ---------------------------------------------------------------- sessions (O7)
 
 
-async def _target(conn, slug: str) -> sessions_repo.Session:
+async def _target(conn, slug: str, caller: sessions_repo.Session) -> sessions_repo.Session:
+    """The caller's own session, or one whose preset the superleader may manage; any other
+    (hidden preset, no preset) is as missing as an unknown slug."""
     session = await sessions_repo.get_by_slug(conn, slug)
     if session is None:
+        raise not_found("session")
+    if session.id != caller.id and (
+        session.preset_id is None
+        or session.preset_id not in await presets_repo.manageable_ids(conn)
+    ):
         raise not_found("session")
     return session
 
 
 @router.get("/sessions/{slug}", response_model=schemas.SessionView)
-async def get_session(slug: str, pool: Pool, settings: Cfg) -> schemas.SessionView:
+async def get_session(
+    slug: str, request: Request, pool: Pool, settings: Cfg
+) -> schemas.SessionView:
+    _, caller = caller_of(request)
     async with pool.connection() as conn:
-        return await sessions_api.one_view(conn, await _target(conn, slug), settings)
+        return await sessions_api.one_view(conn, await _target(conn, slug, caller), settings)
 
 
 @router.post("/sessions", status_code=201, response_model=schemas.SessionView)
@@ -227,7 +266,7 @@ async def discard_session(
 ) -> schemas.SessionView:
     _, caller = caller_of(request)
     async with pool.connection() as conn:
-        target = await _target(conn, slug)
+        target = await _target(conn, slug, caller)
         if target.id == caller.id:
             raise ApiError(422, "own_session", "a session cannot discard itself")
         return await sessions_api.discard(conn, target.id, settings)
@@ -276,7 +315,7 @@ async def restart_session(
     cooldown and gets one note, all in the same transaction as the commands."""
     _, caller = caller_of(request)
     async with pool.connection() as conn, conn.transaction():
-        target = await _target(conn, slug)
+        target = await _target(conn, slug, caller)
         own = target.id == caller.id
         note_id = None
         if own:
@@ -295,7 +334,7 @@ async def restart_agent(
     """Restart one agent by pod name; an agent of the caller's own session is a self-restart."""
     _, caller = caller_of(request)
     async with pool.connection() as conn, conn.transaction():
-        target = await _target(conn, slug)
+        target = await _target(conn, slug, caller)
         if target.desired == "deleting":
             raise ApiError(409, "session_deleting", "session is being discarded")
         agent_id = await _member_id(conn, target.id, pod)

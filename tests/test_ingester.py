@@ -1130,6 +1130,53 @@ async def test_attach_seeds_waiting_and_bootstrap_from_snapshot(harness, pool) -
     assert row["waiting_since"] is None and row["bootstrap_failure"] is None
 
 
+async def test_attach_seeds_permission_mode_state_from_snapshot(harness, pool) -> None:
+    h = await harness()
+    h.fake.set_snapshot_permission_mode("unavailable", "plan")
+    await h.start()
+    await h.stored_through(h.last_fake_seq())
+    row = await status_row(pool, h.agent_id)
+    assert (row["permission_mode_state"], row["permission_mode_reason"]) == ("unavailable", "plan")
+
+    await h.stop()
+    h.fake.set_snapshot_permission_mode(None)
+    await h.start()
+
+    async def cleared() -> bool:
+        return (await status_row(pool, h.agent_id))["permission_mode_state"] is None
+
+    await wait_until(cleared)
+    assert (await status_row(pool, h.agent_id))["permission_mode_reason"] is None
+
+
+async def test_permission_mode_unavailable_event_projects_and_notifies(
+    harness, pool, listener
+) -> None:
+    h = await harness()
+    await h.start()
+    await h.stored_through(h.last_fake_seq())
+    row = await status_row(pool, h.agent_id)
+    assert row["permission_mode_state"] is None
+    mark = len(listener.on("status"))
+
+    h.fake.emit(
+        "permission_mode_unavailable", {"reason": "unavailable for this model", "tail": "screen"}
+    )
+    await h.stored_through(h.last_fake_seq())
+    row = await status_row(pool, h.agent_id)
+    assert row["permission_mode_state"] == "unavailable"
+    assert row["permission_mode_reason"] == "unavailable for this model"
+    assert len(listener.on("status")) > mark
+    # the event itself is in the stored feed
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT count(*) FROM events WHERE agent_id = %s"
+            " AND type = 'permission_mode_unavailable'",
+            (h.agent_id,),
+        )
+        assert (await cur.fetchone())[0] == 1
+
+
 async def test_waiting_events_project_and_notify(harness, pool, listener) -> None:
     h = await harness()
     await h.start()

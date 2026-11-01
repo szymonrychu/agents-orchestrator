@@ -53,6 +53,9 @@ class Snapshot(_Model):
     turns_completed: int = 0
     # wrapper 0.7.0, additive: absent on older wrappers
     waiting: Waiting | None = None
+    # wrapper 0.7.1, additive: "unavailable" while the requested permission mode cannot be used
+    permission_mode_state: str | None = None
+    permission_mode_reason: str | None = None
     bootstrap: Bootstrap | None = None
     # The wrapper reports no transcript field (its resume check tests the file on disk). A
     # completed turn proves a transcript exists (True); zero completed turns proves nothing,

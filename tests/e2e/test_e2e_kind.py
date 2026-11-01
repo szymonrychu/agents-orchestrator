@@ -1786,6 +1786,71 @@ def test_init_scripts_edit_writes_session_and_preset_without_roll(
         assert_no_roll()
 
 
+# ------------------------------------------------------------------ permission mode
+
+
+def test_permission_mode_preset_value_and_session_edit_reach_the_pod_config(
+    api: httpx.Client, baseline: dict
+) -> None:
+    resp = api.get("/meta")
+    assert resp.json()["permission_modes"] == [
+        {"value": "bypassPermissions", "label": "Allow all"},
+        {"value": "auto", "label": "Auto"},
+    ]
+    resp = api.post(
+        "/presets",
+        json={
+            "name": f"e2e-perm-{uuid.uuid4().hex[:6]}",
+            "spec": {
+                "replicas": 1,
+                "env": FAKE_TURN_ENV,
+                "wrapper": {"permission_mode": "bypassPermissions"},
+            },
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    preset = resp.json()
+    try:
+        with init_session(api, {"preset_id": preset["id"]}) as created:
+            cid, slug = created["id"], created["slug"]
+            name = f"agent-{slug}-config"
+
+            def rendered_mode() -> str | None:
+                proc = kubectl("get", "configmap", name, "-o", "json", check=False)
+                if proc.returncode != 0:
+                    return None
+                data = yaml.safe_load(json.loads(proc.stdout)["data"]["config.yaml"])
+                return data["claude"].get("permission_mode")
+
+            wait_for(
+                "the preset's permission mode in the pod config",
+                lambda: rendered_mode() == "bypassPermissions" or None,
+                120,
+            )
+            before = pod_identity(slug)
+            assert before, before
+
+            put = api.put(f"/sessions/{cid}/permission-mode", json={"permission_mode": "auto"})
+            assert put.status_code == 200, put.text
+            assert put.json()["preset_updated"] is True, put.text
+            assert api.get(f"/presets/{preset['id']}").json()["spec"]["wrapper"] == {
+                "permission_mode": "auto"
+            }
+            wait_for(
+                "the edited permission mode in the pod config",
+                lambda: rendered_mode() == "auto" or None,
+                120,
+            )
+
+            def hash_moved() -> bool:
+                hashes = {h for _, h in pod_identity(slug).values()}
+                return bool(hashes) and hashes.isdisjoint({h for _, h in before.values()})
+
+            wait_for("the config hash to move", hash_moved, 120)
+    finally:
+        api.delete(f"/presets/{preset['id']}")
+
+
 def test_init_scripts_failure_starts_sessions_degraded(api: httpx.Client, baseline: dict) -> None:
     spec = {"replicas": 1, "env": FAKE_TURN_ENV, "init_scripts": ["exit 3"]}
     with init_session(
@@ -3019,6 +3084,37 @@ def test_admin_preset_crud(superleader: dict[str, Any]) -> None:
         status, _ = admin_call(pod, "DELETE", f"/presets/{pid}")
     assert status == 204
     assert admin_call(pod, "GET", f"/presets/{pid}")[0] == 404
+
+
+def test_superleader_sees_only_manageable(api: httpx.Client, superleader: dict[str, Any]) -> None:
+    pod = superleader["pod"]
+    slug = "e2e-hidden"
+    spec = {"replicas": 1, "env": FAKE_TURN_ENV}
+    resp = api.post("/presets", json={"name": "E2E hidden", "spec": spec})
+    assert resp.status_code == 201, resp.text
+    pid = resp.json()["id"]
+    try:
+        resp = api.post("/sessions", json={"preset_id": pid, "slug": slug})
+        assert resp.status_code == 201, resp.text
+        assert admin_call(pod, "GET", f"/presets/{pid}")[0] == 404
+        assert admin_call(pod, "GET", f"/sessions/{slug}")[0] == 404
+        status, listed = admin_call(pod, "GET", "/presets")
+        assert status == 200 and pid not in [p["id"] for p in listed], listed
+        resp = api.put(
+            f"/presets/{pid}",
+            json={"name": "E2E hidden", "spec": spec, "superleader_manageable": True},
+        )
+        assert resp.status_code == 200, resp.text
+        assert admin_call(pod, "GET", f"/presets/{pid}")[0] == 200
+        assert admin_call(pod, "GET", f"/sessions/{slug}")[0] == 200
+    finally:
+        api.delete(f"/sessions/{slug}")
+        wait_for(
+            f"session {slug} objects to be deleted",
+            lambda: not labelled_objects(slug),
+            DISCARD_TIMEOUT,
+        )
+        api.delete(f"/presets/{pid}")
 
 
 def test_admin_routes_refuse_a_plain_session(target: dict[str, Any]) -> None:

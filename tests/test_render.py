@@ -863,3 +863,51 @@ def test_interrupt_settle_comes_from_the_orchestrator_setting():
     settings = make_settings(wrapper_interrupt_settle_seconds=7)
     cfg = config_of(render.render_session(make_session(), settings, TOKENS))
     assert cfg["sessions"]["interrupt_settle_seconds"] == 7
+
+
+def _hash_of(session) -> str:
+    objs = render.render_session(session, make_settings(agent_api_url=AGENT_URL), TOKENS)
+    return sts_of(objs)["spec"]["template"]["metadata"]["annotations"][render.HASH_ANNOTATION]
+
+
+def test_permission_mode_none_renders_no_key():
+    assert "permission_mode" not in wrapper_cfg({"turn_max_seconds": 5})["claude"]
+    assert (
+        "permission_mode"
+        not in config_of(render.render_session(make_session(), make_settings(), TOKENS))["claude"]
+    )
+
+
+@pytest.mark.parametrize("mode", ["auto", "bypassPermissions"])
+def test_permission_mode_rendered(mode, tmp_path, monkeypatch):
+    cfg = wrapper_cfg({"permission_mode": mode})
+    assert cfg["claude"]["permission_mode"] == mode
+    session = make_session(wrapper={"permission_mode": mode})
+    objs = render.render_session(session, make_settings(), TOKENS)
+    for k, v in {
+        "CCW_AUTH_TOKEN": TOKENS.auth,
+        "CCW_PEER_TOKEN": TOKENS.peer,
+        "CCW_PEER_URL": "http://agent-alpha-0.agent-alpha.agents.svc:8080",
+        "CLAUDE_CODE_OAUTH_TOKEN": "oauth",
+        "POD_NAME": "agent-alpha-0",
+    }.items():
+        monkeypatch.setenv(k, v)
+    path = tmp_path / "config.yaml"
+    path.write_text(by_kind(objs)["ConfigMap"]["data"]["config.yaml"])
+    assert load_config(path).claude.permission_mode == mode
+
+
+def test_permission_mode_changes_config_hash():
+    none = _hash_of(make_session())
+    auto = _hash_of(make_session(wrapper={"permission_mode": "auto"}))
+    bypass = _hash_of(make_session(wrapper={"permission_mode": "bypassPermissions"}))
+    assert len({none, auto, bypass}) == 3
+    assert auto == _hash_of(make_session(wrapper={"permission_mode": "auto"}))
+
+
+def test_permission_mode_shared_by_hive_members():
+    session = make_session(wrapper={"permission_mode": "auto"}, max_replicas=3, replicas=3)
+    objs = render.render_session(session, make_settings(agent_api_url=AGENT_URL), TOKENS)
+    assert sts_of(objs)["spec"]["replicas"] == 3
+    assert [o["kind"] for o in objs].count("ConfigMap") == 1
+    assert config_of(objs)["claude"]["permission_mode"] == "auto"

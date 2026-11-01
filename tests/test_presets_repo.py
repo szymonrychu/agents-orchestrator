@@ -108,3 +108,38 @@ async def test_concurrent_deletes_keep_one_row(pool):
     assert results == ["deleted", "last"]
     async with pool.connection() as conn:
         assert len(await presets.list_presets(conn)) == 1
+
+
+async def test_create_defaults_not_manageable(pool):
+    async with pool.connection() as conn:
+        p = await presets.create(conn, "a", {})
+    assert p.superleader_manageable is False
+
+
+async def test_create_manageable(pool):
+    async with pool.connection() as conn:
+        p = await presets.create(conn, "a", {}, superleader_manageable=True)
+    assert p.superleader_manageable is True
+
+
+async def test_update_none_keeps_flag(pool):
+    async with pool.connection() as conn:
+        p = await presets.create(conn, "a", {}, superleader_manageable=True)
+        upd = await presets.update(conn, p.id, "a", {}, None)
+    assert upd.superleader_manageable is True
+
+
+async def test_update_sets_flag(pool):
+    async with pool.connection() as conn:
+        p = await presets.create(conn, "a", {}, superleader_manageable=True)
+        off = await presets.update(conn, p.id, "a", {}, False)
+        on = await presets.update(conn, p.id, "a", {}, True)
+    assert (off.superleader_manageable, on.superleader_manageable) == (False, True)
+
+
+async def test_manageable_ids(pool):
+    async with pool.connection() as conn:
+        p1 = await presets.create(conn, "a", {}, superleader_manageable=True)
+        p2 = await presets.create(conn, "b", {}, superleader_manageable=True)
+        await presets.create(conn, "c", {})
+        assert await presets.manageable_ids(conn) == {p1.id, p2.id}

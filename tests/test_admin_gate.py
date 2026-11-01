@@ -93,3 +93,11 @@ async def test_superleader_reads_presets(pool, dsn):
         r = await http.get(GET_PRESETS, headers=headers(boss.id))
     assert r.status_code == 200, r.text
     assert isinstance(r.json(), list)
+
+
+async def test_flag_does_not_bypass_gate(pool, dsn):
+    app = create_app(make_settings(dsn), pool)
+    plain = await alone(pool, "g-flag-plain")
+    async with client_for(app, plain.leader_ip) as http:
+        r = await http.get(GET_PRESETS, headers=headers(plain.id))
+    assert_error(r, 403, "not_superleader")

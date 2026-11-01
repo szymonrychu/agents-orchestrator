@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import secrets as stdlib_secrets
+import uuid
 
 import pytest
 from fakes.fake_kube import FakeKube
@@ -129,3 +130,91 @@ async def test_refused_calls_are_not_audited(pool, dsn, boss):
         r = await http.get(A, headers=headers(plain.id))
     assert r.status_code == 403
     assert await events(pool, plain.id) == []
+
+
+async def main_call(app, method, path, **kw):
+    async with main_client(app) as http:
+        return await http.request(method, path, **kw)
+
+
+async def hidden_preset(call, name="hidden"):
+    r = await main_call(call.app, "POST", M, json={"name": name, "spec": {}})
+    assert r.status_code == 201, r.text
+    assert r.json()["superleader_manageable"] is False
+    return r.json()
+
+
+async def test_list_only_manageable(call):
+    await hidden_preset(call)
+    await call("POST", A, json={"name": "shown", "spec": {}})
+    names = [p["name"] for p in (await call("GET", A)).json()]
+    assert "shown" in names and "hidden" not in names
+
+
+HIDDEN_CALLS = [
+    ("GET", "{ref}", None),
+    ("PUT", "{ref}", {"name": "hidden", "spec": {}}),
+    ("DELETE", "{ref}", None),
+    ("POST", "{ref}/copy", None),
+    ("PUT", "{ref}/secrets/API_KEY", {"value": "v"}),
+]
+
+
+@pytest.mark.parametrize(("method", "tail", "body"), HIDDEN_CALLS)
+async def test_hidden_preset_404(call, method, tail, body):
+    hidden = await hidden_preset(call)
+    kw = {} if body is None else {"json": body}
+    got = await call(method, f"{A}/" + tail.format(ref=hidden["id"]), **kw)
+    missing = await call(method, f"{A}/" + tail.format(ref=uuid.uuid4()), **kw)
+    assert_error(got, 404, "not_found")
+    assert got.json() == missing.json()
+    async with main_client(call.app) as http:
+        assert (await http.get(f"{M}/{hidden['id']}")).status_code == 200
+
+
+async def test_hidden_preset_is_indistinguishable_from_missing(call):
+    hidden = await hidden_preset(call)
+    for ref, other in ((hidden["name"], "no-such-name"), (hidden["id"], str(uuid.uuid4()))):
+        a = await call("GET", f"{A}/{ref}")
+        b = await call("GET", f"{A}/{other}")
+        assert a.status_code == b.status_code == 404
+        assert a.json() == b.json()
+
+
+async def test_admin_create_forced_manageable(call):
+    r = await call("POST", A, json={"name": "forced", "spec": {}})
+    assert r.status_code == 201 and r.json()["superleader_manageable"] is True
+    got = await main_call(call.app, "GET", f"{M}/{r.json()['id']}")
+    assert got.json()["superleader_manageable"] is True
+
+
+async def test_admin_create_false_rejected(call):
+    r = await call("POST", A, json={"name": "nope", "spec": {}, "superleader_manageable": False})
+    assert_error(r, 422, "manageable_main_port_only")
+    assert [p for p in (await main_call(call.app, "GET", M)).json() if p["name"] == "nope"] == []
+
+
+async def test_admin_put_false_rejected(call):
+    made = (await call("POST", A, json={"name": "keep", "spec": {}})).json()
+    r = await call(
+        "PUT",
+        f"{A}/{made['id']}",
+        json={"name": "keep", "spec": {}, "superleader_manageable": False},
+    )
+    assert_error(r, 422, "manageable_main_port_only")
+    got = await main_call(call.app, "GET", f"{M}/{made['id']}")
+    assert got.json()["superleader_manageable"] is True
+
+
+@pytest.mark.parametrize("extra", [{}, {"superleader_manageable": True}])
+async def test_admin_put_true_or_absent_accepted(call, extra):
+    made = (await call("POST", A, json={"name": "keep2", "spec": {}})).json()
+    r = await call("PUT", f"{A}/{made['id']}", json={"name": "keep2", "spec": {}, **extra})
+    assert r.status_code == 200, r.text
+    assert r.json()["superleader_manageable"] is True
+
+
+async def test_admin_copy_is_manageable(call):
+    made = (await call("POST", A, json={"name": "orig", "spec": {}})).json()
+    r = await call("POST", f"{A}/{made['id']}/copy")
+    assert r.status_code == 201 and r.json()["superleader_manageable"] is True

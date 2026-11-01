@@ -42,6 +42,7 @@ class Preset:
     name: str
     spec: dict[str, Any]
     is_default: bool
+    superleader_manageable: bool
     created_at: datetime
     updated_at: datetime
 
@@ -64,6 +65,7 @@ def _from_row(row: dict[str, Any]) -> Preset:
         name=row["name"],
         spec=row["spec"],
         is_default=row["is_default"],
+        superleader_manageable=row["superleader_manageable"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -92,14 +94,20 @@ async def get_for_share(conn: psycopg.AsyncConnection, preset_id: uuid.UUID) -> 
     return rows[0] if rows else None
 
 
-async def create(conn: psycopg.AsyncConnection, name: str, spec: dict[str, Any]) -> Preset:
+async def create(
+    conn: psycopg.AsyncConnection,
+    name: str,
+    spec: dict[str, Any],
+    superleader_manageable: bool = False,
+) -> Preset:
     validate_preset_name(name)
     try:
         async with conn.transaction():
             rows = await _fetch(
                 conn,
-                "INSERT INTO presets (id, name, spec) VALUES (%s, %s, %s) RETURNING *",
-                (uuid.uuid4(), name, Jsonb(spec)),
+                "INSERT INTO presets (id, name, spec, superleader_manageable)"
+                " VALUES (%s, %s, %s, %s) RETURNING *",
+                (uuid.uuid4(), name, Jsonb(spec), superleader_manageable),
             )
     except psycopg.errors.UniqueViolation:
         raise PresetExists(name) from None
@@ -107,8 +115,13 @@ async def create(conn: psycopg.AsyncConnection, name: str, spec: dict[str, Any])
 
 
 async def update(
-    conn: psycopg.AsyncConnection, preset_id: uuid.UUID, name: str, spec: dict[str, Any]
+    conn: psycopg.AsyncConnection,
+    preset_id: uuid.UUID,
+    name: str,
+    spec: dict[str, Any],
+    superleader_manageable: bool | None = None,
 ) -> Preset:
+    """Replace name and spec; a None flag keeps the stored superleader_manageable."""
     validate_preset_name(name)
     try:
         async with conn.transaction():
@@ -121,13 +134,19 @@ async def update(
                 raise PresetDefault(current[0].name)
             rows = await _fetch(
                 conn,
-                "UPDATE presets SET name = %s, spec = %s, updated_at = now()"
-                " WHERE id = %s RETURNING *",
-                (name, Jsonb(spec), preset_id),
+                "UPDATE presets SET name = %s, spec = %s,"
+                " superleader_manageable = COALESCE(%s, superleader_manageable),"
+                " updated_at = now() WHERE id = %s RETURNING *",
+                (name, Jsonb(spec), superleader_manageable, preset_id),
             )
     except psycopg.errors.UniqueViolation:
         raise PresetExists(name) from None
     return rows[0]
+
+
+async def manageable_ids(conn: psycopg.AsyncConnection) -> set[uuid.UUID]:
+    cur = await conn.execute("SELECT id FROM presets WHERE superleader_manageable")
+    return {r[0] for r in await cur.fetchall()}
 
 
 async def delete(conn: psycopg.AsyncConnection, preset_id: uuid.UUID) -> None:

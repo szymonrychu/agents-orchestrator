@@ -271,6 +271,29 @@
             "title": "Peers",
             "type": "integer"
           },
+          "permission_mode_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Permission Mode Reason"
+          },
+          "permission_mode_state": {
+            "anyOf": [
+              {
+                "const": "unavailable",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Permission Mode State"
+          },
           "pod_name": {
             "title": "Pod Name",
             "type": "string"
@@ -2239,6 +2262,13 @@
             },
             "title": "Models",
             "type": "array"
+          },
+          "permission_modes": {
+            "items": {
+              "$ref": "#/components/schemas/MetaPermissionMode"
+            },
+            "title": "Permission Modes",
+            "type": "array"
           }
         },
         "required": [
@@ -2251,7 +2281,8 @@
           "discard_hook",
           "cache",
           "kube_access",
-          "hook_events"
+          "hook_events",
+          "permission_modes"
         ],
         "title": "Meta",
         "type": "object"
@@ -2416,6 +2447,28 @@
         "title": "MetaKubeAccess",
         "type": "object"
       },
+      "MetaPermissionMode": {
+        "properties": {
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "value": {
+            "enum": [
+              "bypassPermissions",
+              "auto"
+            ],
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value",
+          "label"
+        ],
+        "title": "MetaPermissionMode",
+        "type": "object"
+      },
       "MetaResources": {
         "properties": {
           "limits": {
@@ -2438,6 +2491,75 @@
           "limits"
         ],
         "title": "MetaResources",
+        "type": "object"
+      },
+      "PermissionModeIn": {
+        "additionalProperties": false,
+        "properties": {
+          "permission_mode": {
+            "enum": [
+              "bypassPermissions",
+              "auto"
+            ],
+            "title": "Permission Mode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "permission_mode"
+        ],
+        "title": "PermissionModeIn",
+        "type": "object"
+      },
+      "PermissionModeView": {
+        "properties": {
+          "permission_mode": {
+            "enum": [
+              "bypassPermissions",
+              "auto"
+            ],
+            "title": "Permission Mode",
+            "type": "string"
+          },
+          "preset_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preset Id"
+          },
+          "preset_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preset Name"
+          },
+          "preset_updated": {
+            "default": false,
+            "title": "Preset Updated",
+            "type": "boolean"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "permission_mode"
+        ],
+        "title": "PermissionModeView",
         "type": "object"
       },
       "Permissions": {
@@ -2622,6 +2744,17 @@
               "static": false,
               "workdir": "workdir"
             }
+          },
+          "superleader_manageable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Superleader Manageable"
           }
         },
         "required": [
@@ -2655,6 +2788,10 @@
             "title": "Spec",
             "type": "object"
           },
+          "superleader_manageable": {
+            "title": "Superleader Manageable",
+            "type": "boolean"
+          },
           "updated_at": {
             "format": "date-time",
             "title": "Updated At",
@@ -2665,6 +2802,7 @@
           "id",
           "name",
           "is_default",
+          "superleader_manageable",
           "spec",
           "created_at",
           "updated_at"
@@ -3645,6 +3783,10 @@
             ],
             "title": "Oldest Queued At"
           },
+          "permission_unavailable_agents": {
+            "title": "Permission Unavailable Agents",
+            "type": "integer"
+          },
           "queued": {
             "title": "Queued",
             "type": "integer"
@@ -3679,7 +3821,8 @@
           "failed",
           "oldest_queued_at",
           "attention_agents",
-          "bootstrap_failed_agents"
+          "bootstrap_failed_agents",
+          "permission_unavailable_agents"
         ],
         "title": "SessionSummary",
         "type": "object"
@@ -4362,6 +4505,21 @@
               }
             ],
             "title": "Mcp Servers"
+          },
+          "permission_mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "bypassPermissions",
+                  "auto"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Permission Mode"
           },
           "permissions": {
             "anyOf": [
@@ -10185,6 +10343,57 @@
           }
         },
         "summary": "Post Message"
+      }
+    },
+    "/api/v1/sessions/{session_id}/permission-mode": {
+      "put": {
+        "description": "Set `spec.wrapper.permission_mode` on the session and its source preset.\n\nApplied by the normal config-hash rollout: idle pods restart, busy ones at the turn end.",
+        "operationId": "put_permission_mode_api_v1_sessions__session_id__permission_mode_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PermissionModeIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PermissionModeView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Permission Mode"
       }
     },
     "/api/v1/sessions/{session_id}/restart": {

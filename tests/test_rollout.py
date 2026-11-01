@@ -730,3 +730,32 @@ def test_drain_and_rollout_share_busy_predicate():
     assert inflight in rollout.BUSY
     sources = inspect.getsource(loop) + inspect.getsource(rollout)
     assert sources.count(inflight) == 1
+
+
+async def test_permission_mode_edit_rolls_idle_pods_and_waits_for_busy(env):
+    """A permission-mode edit changes the config hash: idle pods roll, a busy one waits."""
+    env.kube.pods_ready = True
+    c = await env.session("alpha", replicas=2, max_replicas=2)
+    await env.tick()
+    agents = await env.agents(c.id)
+    for agent in agents.values():
+        await env.execute(
+            "UPDATE agents SET wrapper_session_id = %s WHERE id = %s",
+            (f"ws-{agent.ordinal}", agent.id),
+        )
+        await set_agent_status(env.pool, agent.id, state="idle")
+    old = env.revision()
+    await set_agent_status(env.pool, agents[0].id, state="busy")
+    env.kube.pods_ready = False
+    env.kube.reset_records()
+    async with env.pool.connection() as conn:
+        await sessions.set_permission_mode(conn, c.id, "auto")
+    await env.tick()
+    assert env.revision() != old
+    assert env.pod_deletes() == ["agent-alpha-1"]
+    env.ready(1)
+    await env.tick(3)
+    assert env.pod_deletes() == ["agent-alpha-1"]
+    await set_agent_status(env.pool, agents[0].id, state="idle")
+    await env.tick()
+    assert env.pod_deletes() == ["agent-alpha-1", "agent-alpha-0"]
