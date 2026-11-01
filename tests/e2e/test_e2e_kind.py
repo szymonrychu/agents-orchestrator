@@ -3188,3 +3188,130 @@ def test_self_restart_cooldown_and_held_note(
     assert datetime.fromisoformat(held["dispatched_at"]) >= datetime.fromisoformat(
         done["finished_at"]
     ), (held, done)
+
+
+# ------------------------------------------------------------------ docker-in-docker sidecar
+
+DOCKER_SLUG = "e2e-docker"
+DOCKER_TIMEOUT = 900  # kind node image pull and boot inside the sidecar
+# Run inside the agent container: fetch a static binary into /tmp (the agent image has no kind).
+FETCH_BINARY = (
+    "import os, platform, stat, sys, urllib.request\n"
+    "arch = {'aarch64': 'arm64', 'arm64': 'arm64', 'x86_64': 'amd64'}[platform.machine()]\n"
+    "url, dest = sys.argv[1].format(arch=arch), sys.argv[2]\n"
+    "urllib.request.urlretrieve(url, dest)\n"
+    "os.chmod(dest, os.stat(dest).st_mode | stat.S_IXUSR)\n"
+)
+KIND_VERSION = "v0.33.0"
+# kind create cluster, nested in the sidecar
+KIND_CREATE = ["/tmp/kind", "create", "cluster", "--name", "nested", "--wait", "300s"]
+
+
+def docker_pod_items(slug: str) -> list[dict[str, Any]]:
+    return kube_json("get", "pods", "-l", f"{SESSION_LABEL}={slug}")["items"]
+
+
+def test_docker_sidecar_runs_containers_and_kind(api: httpx.Client, baseline: dict) -> None:
+    resp = api.post(
+        "/presets",
+        json={
+            "name": f"e2e-docker-{uuid.uuid4().hex[:6]}",
+            "spec": {
+                "replicas": 1,
+                "env": FAKE_TURN_ENV,
+                "docker": True,
+                "init_scripts": ["sleep 25"],
+            },
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    preset = resp.json()
+    try:
+        with init_session(api, {"preset_id": preset["id"], "slug": DOCKER_SLUG}) as created:
+            cid = created["id"]
+            # the init Job of the same session carries no docker (D2): read it while it runs
+            job = wait_for(
+                "the init Job",
+                lambda: (
+                    kube_json("get", "jobs", f"agent-{DOCKER_SLUG}-init")
+                    if init_jobs(DOCKER_SLUG)
+                    else None
+                ),
+                INIT_TIMEOUT,
+                1,
+            )
+            job_spec = job["spec"]["template"]["spec"]
+            containers = [*job_spec.get("initContainers", []), *job_spec["containers"]]
+            assert not [c for c in containers if c.get("securityContext", {}).get("privileged")]
+            names = [v["name"] for v in job_spec.get("volumes", [])]
+            names += [e["name"] for c in containers for e in c.get("env", [])]
+            names += [c["name"] for c in containers]
+            assert not [n for n in names if "docker" in n.lower() or n == "dind"], names
+            wait_init_state(api, cid, ("succeeded",))
+            agents = wait_sessions(api, cid, 1)
+            pod = pod_name_of(agents[0])
+            spec = kube_json("get", "pod", pod)["spec"]
+            dind = next(c for c in spec["initContainers"] if c["name"] == "dind")
+            assert dind["securityContext"]["privileged"] is True
+            assert not [
+                c for c in spec["containers"] if c.get("securityContext", {}).get("privileged")
+            ]
+            assert pod_exec(pod, "docker", "version", "--format", "{{.Server.Version}}").strip()
+            hello = kubectl(
+                "exec",
+                pod,
+                "-c",
+                "ccw",
+                "--",
+                "docker",
+                "run",
+                "--rm",
+                "hello-world",
+                timeout=DOCKER_TIMEOUT,
+            ).stdout
+            assert "Hello from Docker!" in hello, hello
+            # kind in dind: the dind pod shares the network namespace, so the kind API server
+            # published on 127.0.0.1 is reachable from the agent container (D4)
+            kind_url = f"https://github.com/kubernetes-sigs/kind/releases/download/{KIND_VERSION}/kind-linux-{{arch}}"
+            kubectl_url = "https://dl.k8s.io/release/v1.33.0/bin/linux/{arch}/kubectl"
+            for url, dest in ((kind_url, "/tmp/kind"), (kubectl_url, "/tmp/kubectl")):
+                kubectl(
+                    "exec",
+                    pod,
+                    "-c",
+                    "ccw",
+                    "--",
+                    "python3",
+                    "-c",
+                    FETCH_BINARY,
+                    url,
+                    dest,
+                    timeout=DOCKER_TIMEOUT,
+                )
+            kubectl(
+                "exec",
+                pod,
+                "-c",
+                "ccw",
+                "--",
+                *KIND_CREATE,
+                "--kubeconfig",
+                "/tmp/nested.kubeconfig",
+                timeout=DOCKER_TIMEOUT,
+            )
+            nodes = kubectl(
+                "exec",
+                pod,
+                "-c",
+                "ccw",
+                "--",
+                "/tmp/kubectl",
+                "--kubeconfig",
+                "/tmp/nested.kubeconfig",
+                "get",
+                "nodes",
+                timeout=120,
+            ).stdout
+            assert "Ready" in nodes and "control-plane" in nodes, nodes
+    finally:
+        api.delete(f"/presets/{preset['id']}")
