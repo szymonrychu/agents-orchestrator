@@ -246,6 +246,10 @@ class CommandAccepted(BaseModel):
     command_id: int
 
 
+class SessionRestartAccepted(BaseModel):
+    command_ids: list[int]
+
+
 class CommandView(BaseModel):
     id: int
     agent_id: uuid.UUID
