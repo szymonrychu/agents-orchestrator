@@ -199,6 +199,8 @@ def _apply_wrapper(cfg: dict[str, Any], wrapper: WrapperSettings, session: Sessi
         cfg["limits"]["turn_max_seconds"] = user["turn_max_seconds"]
     if "plugins" in user:
         cfg["plugins"] = user["plugins"]
+    if "permission_mode" in user:
+        cfg["claude"]["permission_mode"] = user["permission_mode"]
 
 
 def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
