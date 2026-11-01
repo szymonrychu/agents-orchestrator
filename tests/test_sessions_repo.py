@@ -120,8 +120,8 @@ async def test_purge_cascades_history(pool):
 )
 def test_spec_rejects_secret_env(key):
     with pytest.raises(ValidationError):
-        SessionSpec(env={key: "v"})
-    SessionSpec(env={"MY_FLAG": "v"})
+        SessionSpec(env={key: {"value": "v"}})
+    SessionSpec(env={"MY_FLAG": {"value": "v"}})
 
 
 async def test_duplicate_slug(pool):
@@ -146,7 +146,7 @@ async def test_duplicate_slug(pool):
 )
 def test_spec_rejects_reserved_env_keys(key):
     with pytest.raises(ValidationError):
-        SessionSpec(env={key: "v"})
+        SessionSpec(env={key: {"value": "v"}})
 
 
 def test_reserved_slugs_rejected():
@@ -233,7 +233,7 @@ def test_trailing_newline_rejected():
     with pytest.raises(ValidationError):
         SessionSpec(workdir="wd\n")
     with pytest.raises(ValidationError):
-        SessionSpec(env={"FOO\n": "x"})
+        SessionSpec(env={"FOO\n": {"value": "x"}})
 
 
 def test_live_edit_code_retired():

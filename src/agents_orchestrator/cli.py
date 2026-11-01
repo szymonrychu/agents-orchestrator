@@ -242,7 +242,19 @@ def _cmd_cache(args: argparse.Namespace) -> int:
     return run(os.environ)
 
 
+def _cmd_presets_check(_args: argparse.Namespace) -> int:
+    from agents_orchestrator import presets_check
+
+    settings = _settings()
+    return presets_check.run(settings.database_url, settings, sys.stdout)
+
+
 register("migrate", _cmd_migrate, "apply database migrations and exit")
+register(
+    "presets-check",
+    _cmd_presets_check,
+    "list the stored presets a session create would refuse (run before a deploy; prints no values)",
+)
 register("api", _cmd_api, "serve the HTTP API and UI")
 register("dispatcher", _cmd_dispatcher, "dispatch queued messages to agents")
 register("ingester", _cmd_ingester, "store every wrapper event (singleton)")

@@ -28,7 +28,7 @@ def test_samples_are_the_one_definition():
 
 
 def test_context_keys_equal_the_preview_samples():
-    session = make_session("alpha", env={"A": "b"})
+    session = make_session("alpha", env={"A": {"value": "b"}})
     for surface in ("preset_text", "init_script"):
         ctx = rendering.session_context(surface, session)
         assert set(ctx) == set(templates.SAMPLES[surface])
@@ -40,7 +40,7 @@ def test_context_keys_equal_the_preview_samples():
 
 def test_wrapper_text_fields_are_rendered():
     cfg = cfg_for(
-        env={"TZ": "UTC"},
+        env={"TZ": {"value": "UTC"}},
         wrapper={
             "auto_compact": {"instructions": "keep notes of {{ session_slug }} ({{ env.TZ }})"},
             "system_append": "You are in {{ session_slug }}.",
@@ -58,7 +58,9 @@ def test_literal_braces_use_the_escape_rule():
 
 
 def test_rendered_text_is_dollar_escaped_after_rendering():
-    cfg = cfg_for(env={"X": "${CLAUDE_CODE_OAUTH_TOKEN}"}, wrapper={"system_append": "{{ env.X }}"})
+    cfg = cfg_for(
+        env={"X": {"value": "${CLAUDE_CODE_OAUTH_TOKEN}"}}, wrapper={"system_append": "{{ env.X }}"}
+    )
     assert cfg["prompts"]["system_append"].endswith("$${CLAUDE_CODE_OAUTH_TOKEN}")
 
 
@@ -100,7 +102,9 @@ def test_syntax_error_fails_validation_with_line():
 
 
 def test_render_error_at_sample_fails_validation():
-    assert "MISSING" in invalid(env={"A": "b"}, wrapper={"system_append": "{{ env.MISSING }}"})
+    assert "MISSING" in invalid(
+        env={"A": {"value": "b"}}, wrapper={"system_append": "{{ env.MISSING }}"}
+    )
 
 
 def test_instructions_stay_one_line_after_rendering():
@@ -112,7 +116,7 @@ def test_valid_templates_pass():
     validate_spec(
         SessionSpec.model_validate(
             {
-                "env": {"TZ": "UTC"},
+                "env": {"TZ": {"value": "UTC"}},
                 "start_prompt": "hi {{ user }} from {{ preset_name }}",
                 "init_scripts": ["echo {{ session_slug }} {{ env.TZ }}"],
                 "wrapper": {

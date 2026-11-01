@@ -56,9 +56,17 @@ RECONCILER_SA = f"system:serviceaccount:{NAMESPACE}:{RELEASE}-reconciler"
 # fake first on PATH (so the rendered config's `claude` binary resolves to it) and selects
 # that scenario; the renderer passes both through to the claude child (claude.passthrough_env).
 FAKE_TURN_ENV = {
-    "PATH": "/opt/agent-test:/opt/mise/shims:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin"
-    ":/sbin:/bin",
-    "FAKE_CLAUDE_SCENARIO": "/opt/agent-test/scenario.json",
+    "PATH": {
+        "value": "/opt/agent-test:/opt/mise/shims:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin"
+        ":/sbin:/bin",
+        "protected": False,
+        "expand": False,
+    },
+    "FAKE_CLAUDE_SCENARIO": {
+        "value": "/opt/agent-test/scenario.json",
+        "protected": False,
+        "expand": False,
+    },
 }
 SLOW_PROMPT = "slow task {n}: report when done"
 DISPATCH_STAGGER = 1.5  # seconds between dispatching message 1 and sending message 2

@@ -6,16 +6,16 @@ import uuid
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
-from agents_orchestrator.spec import SessionSpec
+from agents_orchestrator.spec import SessionSpec, SessionSpecIn
 
 
 class CreateSession(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     slug: str | None = None
-    spec: SessionSpec | None = None
+    spec: SessionSpecIn | None = None
     preset_id: uuid.UUID | None = None
 
 
@@ -23,7 +23,24 @@ class PresetIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
-    spec: SessionSpec = SessionSpec()
+    spec: SessionSpecIn = SessionSpecIn()
+
+
+class SecretIn(BaseModel):
+    """The new value of one protected variable; it is never echoed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    value: SecretStr = Field(min_length=1)
+
+
+class SecretView(BaseModel):
+    """Metadata of a protected variable's stored value; the value is never returned."""
+
+    name: str
+    set: bool
+    version: int
+    updated_at: datetime
 
 
 class CopyPreset(BaseModel):
@@ -269,6 +286,10 @@ class MessageView(BaseModel):
 
 class CommandAccepted(BaseModel):
     command_id: int
+
+
+class SessionRestartAccepted(BaseModel):
+    command_ids: list[int]
 
 
 class CommandView(BaseModel):

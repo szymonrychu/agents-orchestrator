@@ -55,7 +55,7 @@ def make_session(slug: str = "alpha", **spec: Any) -> Session:
     spec = {
         "image": SPEC_IMAGE,
         "workdir": "repo",
-        "env": {"SPEC_VAR": "x", "AWS_PROFILE": "agent"},
+        "env": {"SPEC_VAR": {"value": "x"}, "AWS_PROFILE": {"value": "agent"}},
         "cache": {
             "restore_key": "preset-0123456789abcdef",
             "save_key": "preset-0123456789abcdef",
@@ -237,7 +237,7 @@ def test_job_limits(action):
 
 
 def test_agent_pods_carry_no_cache_credentials():
-    s, settings = make_session(env={"SPEC_VAR": "x"}), make_settings()
+    s, settings = make_session(env={"SPEC_VAR": {"value": "x"}}), make_settings()
     objs = render.render_session(s, settings, TOKENS)
     names = labels.object_names("alpha")
     env_names = [e["name"] for k, v in walk(objs) if k == "env" for e in v]

@@ -179,7 +179,9 @@ async def test_session_view_edited_flag(http, pool):
 
 
 async def test_put_rejects_a_bad_template_and_keeps_edited_flag_stable(http, pool):
-    r = await http.post("/api/v1/presets", json={"name": "tpl", "spec": {"env": {"A": "1"}}})
+    r = await http.post(
+        "/api/v1/presets", json={"name": "tpl", "spec": {"env": {"A": {"value": "1"}}}}
+    )
     cl = await session_from_preset(http, r.json()["id"])
     cid = cl["id"]
     r = await http.put(url(cid), json={"scripts": ["echo {{ nope }}"]})

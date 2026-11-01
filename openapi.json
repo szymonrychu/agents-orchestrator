@@ -937,7 +937,7 @@
           "spec": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/SessionSpec"
+                "$ref": "#/components/schemas/SessionSpecIn"
               },
               {
                 "type": "null"
@@ -995,6 +995,41 @@
           "keys"
         ],
         "title": "DeleteArchives",
+        "type": "object"
+      },
+      "EnvVar": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "EnvVarIn": {
+        "additionalProperties": false,
+        "description": "The request form of an env variable: a protected one may carry its new value.\n\nOnly the api sees it; `SessionSpecIn.split` moves the value out so a `SessionSpec` never holds\none. Without a value a protected variable keeps its stored one.",
+        "properties": {
+          "expand": {
+            "default": false,
+            "title": "Expand",
+            "type": "boolean"
+          },
+          "protected": {
+            "default": false,
+            "title": "Protected",
+            "type": "boolean"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "format": "password",
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "title": "EnvVarIn",
         "type": "object"
       },
       "EventView": {
@@ -2576,7 +2611,7 @@
             "type": "string"
           },
           "spec": {
-            "$ref": "#/components/schemas/SessionSpec",
+            "$ref": "#/components/schemas/SessionSpecIn",
             "default": {
               "env": {},
               "init_scripts": [],
@@ -2804,6 +2839,54 @@
         "title": "ScaleResult",
         "type": "object"
       },
+      "SecretIn": {
+        "additionalProperties": false,
+        "description": "The new value of one protected variable; it is never echoed.",
+        "properties": {
+          "value": {
+            "format": "password",
+            "minLength": 1,
+            "title": "Value",
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "title": "SecretIn",
+        "type": "object"
+      },
+      "SecretView": {
+        "description": "Metadata of a protected variable's stored value; the value is never returned.",
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "set": {
+            "title": "Set",
+            "type": "boolean"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "set",
+          "version",
+          "updated_at"
+        ],
+        "title": "SecretView",
+        "type": "object"
+      },
       "SessionBackup": {
         "description": "What a discard would save now; each flag is true only when that save would really run.\n\n`reason` is null when both run, else `no_session_cache` (no `spec.cache`),\n`cache_not_configured` (no S3 cache configured) or the save's skip reason, the workdir's first.",
         "properties": {
@@ -2936,6 +3019,22 @@
         "title": "SessionPeers",
         "type": "object"
       },
+      "SessionRestartAccepted": {
+        "properties": {
+          "command_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Command Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "command_ids"
+        ],
+        "title": "SessionRestartAccepted",
+        "type": "object"
+      },
       "SessionSpec": {
         "additionalProperties": false,
         "properties": {
@@ -3025,7 +3124,7 @@
           },
           "env": {
             "additionalProperties": {
-              "type": "string"
+              "$ref": "#/components/schemas/EnvVar"
             },
             "default": {},
             "title": "Env",
@@ -3195,6 +3294,268 @@
           }
         },
         "title": "SessionSpec",
+        "type": "object"
+      },
+      "SessionSpecIn": {
+        "additionalProperties": false,
+        "description": "A spec as the api receives it: protected variables may carry a value (`EnvVarIn`).",
+        "properties": {
+          "any_mcp_config": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Any Mcp Config"
+          },
+          "any_mcp_sources": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Any Mcp Sources"
+          },
+          "auto_compact_pct": {
+            "anyOf": [
+              {
+                "maximum": 100.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Auto Compact Pct"
+          },
+          "autoclose_after_seconds": {
+            "anyOf": [
+              {
+                "maximum": 2592000.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Autoclose After Seconds"
+          },
+          "cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceCache"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "discard_hook_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Discard Hook Url"
+          },
+          "effort": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effort"
+          },
+          "env": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/EnvVarIn"
+            },
+            "default": {},
+            "title": "Env",
+            "type": "object"
+          },
+          "image": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image"
+          },
+          "init_scripts": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Init Scripts",
+            "type": "array"
+          },
+          "kube_access": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kube Access"
+          },
+          "leader_lease_seconds": {
+            "anyOf": [
+              {
+                "maximum": 604800.0,
+                "minimum": 60.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Leader Lease Seconds"
+          },
+          "max_attempts": {
+            "default": 5,
+            "maximum": 10.0,
+            "minimum": 1.0,
+            "title": "Max Attempts",
+            "type": "integer"
+          },
+          "max_replicas": {
+            "anyOf": [
+              {
+                "maximum": 16.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Replicas"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "peers": {
+            "default": true,
+            "title": "Peers",
+            "type": "boolean"
+          },
+          "pvc_size": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pvc Size"
+          },
+          "replicas": {
+            "default": 1,
+            "maximum": 16.0,
+            "minimum": 1.0,
+            "title": "Replicas",
+            "type": "integer"
+          },
+          "resources": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Resources"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reuse_running_agent": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reuse Running Agent"
+          },
+          "session_messaging": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Messaging"
+          },
+          "start_prompt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Prompt"
+          },
+          "static": {
+            "default": false,
+            "title": "Static",
+            "type": "boolean"
+          },
+          "workdir": {
+            "default": "workdir",
+            "maxLength": 63,
+            "title": "Workdir",
+            "type": "string"
+          },
+          "wrapper": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WrapperSettings"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "SessionSpecIn",
         "type": "object"
       },
       "SessionSummary": {
@@ -6169,6 +6530,65 @@
         "summary": "Copy Preset"
       }
     },
+    "/api/v1/presets/{preset}/secrets/{name}": {
+      "put": {
+        "description": "Set the value of a protected variable (a new version). The value is never echoed.",
+        "operationId": "set_preset_secret_api_v1_presets__preset__secrets__name__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "preset",
+            "required": true,
+            "schema": {
+              "title": "Preset",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SecretIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecretView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Preset Secret"
+      }
+    },
     "/api/v1/sessions": {
       "get": {
         "operationId": "list_sessions_api_v1_sessions_get",
@@ -7161,6 +7581,47 @@
           }
         },
         "summary": "Post Message"
+      }
+    },
+    "/api/v1/sessions/{session_id}/restart": {
+      "post": {
+        "description": "One restart command per live agent of the session, all in one transaction.",
+        "operationId": "restart_session_api_v1_sessions__session_id__restart_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionRestartAccepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Restart Session"
       }
     },
     "/api/v1/sessions/{session_id}/scale": {

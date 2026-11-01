@@ -152,7 +152,7 @@ async def rolling(env: Env, replicas: int = 3, *, slug: str = "alpha", **spec):
     assert {env.pod_revision(i) for i in range(replicas)} == {old}
     env.kube.pods_ready = False
     env.kube.reset_records()
-    await env.update(c.id, replicas=replicas, env={"ROLL": "2"}, **spec)
+    await env.update(c.id, replicas=replicas, env={"ROLL": {"value": "2"}}, **spec)
     return c, agents, old
 
 

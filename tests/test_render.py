@@ -79,7 +79,7 @@ def golden(name: str, objs: list[dict]) -> None:
 def test_golden_two_replicas_with_peers():
     session = make_session(
         replicas=2,
-        env={"GITHUB_TOKEN": "x", "AAA": "1"},
+        env={"GITHUB_TOKEN": {"value": "x"}, "AAA": {"value": "1"}},
         resources={"requests": {"cpu": "500m"}, "limits": {"memory": "2Gi"}},
         any_mcp_config={"servers": {}},
         pvc_size="5Gi",
@@ -99,7 +99,9 @@ def test_golden_single_without_peers():
 def test_rendered_ccw_config_validates(tmp_path, monkeypatch):
     for peers in (True, False):
         objs = render.render_session(
-            make_session(replicas=3, peers=peers, env={"FOO": "bar"}), make_settings(), TOKENS
+            make_session(replicas=3, peers=peers, env={"FOO": {"value": "bar"}}),
+            make_settings(),
+            TOKENS,
         )
         monkeypatch.setenv("CCW_AUTH_TOKEN", TOKENS.auth)
         monkeypatch.setenv("CCW_PEER_TOKEN", TOKENS.peer)
@@ -242,7 +244,7 @@ def test_all_objects_in_namespace():
 
 def test_passthrough_env_lists_spec_env_names(tmp_path, monkeypatch):
     objs = render.render_session(
-        make_session(env={"ZED": "1", "ALPHA": "2"}), make_settings(), TOKENS
+        make_session(env={"ZED": {"value": "1"}, "ALPHA": {"value": "2"}}), make_settings(), TOKENS
     )
     cfg = config_of(objs)
     assert cfg["claude"]["passthrough_env"] == sorted(["ALPHA", "ZED", *AGENT_ENV])
@@ -505,7 +507,7 @@ def test_agent_env_session_id():
 
 def test_passthrough_includes_agent_env():
     objs = render.render_session(
-        make_session(env={"ZED": "1"}), make_settings(agent_api_url=AGENT_URL), TOKENS
+        make_session(env={"ZED": {"value": "1"}}), make_settings(agent_api_url=AGENT_URL), TOKENS
     )
     assert config_of(objs)["claude"]["passthrough_env"] == sorted(["ZED", *AGENT_ENV])
     solo = render.render_session(

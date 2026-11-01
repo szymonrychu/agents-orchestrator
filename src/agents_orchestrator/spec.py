@@ -10,6 +10,7 @@ import string
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from urllib.parse import urlparse
@@ -18,8 +19,10 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SecretStr,
     ValidationInfo,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -64,6 +67,10 @@ class SpecInvalid(ValueError):
     def __init__(self, errors: list[str]):
         self.errors = errors
         super().__init__("invalid session spec: " + "; ".join(errors))
+
+
+def _reserved_env_name(name: str) -> bool:
+    return name == "POD_NAME" or name.startswith(_RESERVED_ENV_PREFIXES)
 
 
 def slugify(text: str, max_len: int = SLUG_MAX) -> str:
@@ -180,6 +187,7 @@ def source_plugin_name(source: str) -> str:
 
 
 INIT_SCRIPTS_MAX = 20
+PROTECTED_MAX = 50
 
 CACHE_KEY_TEMPLATE_MAX = 256
 CACHE_EXCLUDE_MAX = 50
@@ -281,6 +289,88 @@ class _HookAction(_Strict):
             except re.error as exc:
                 raise ValueError(f"invalid regex: {exc}") from exc
         return v
+
+
+class EnvVar(_Strict):
+    """One session env variable, GitLab CI style: `{value, protected, expand}`.
+
+    A protected variable is write-only: it carries no value here (the value lives in a
+    Kubernetes Secret and is rendered as `secretKeyRef`). `expand` gates `$` handling of a plain
+    value; a protected variable ignores it because the kubelet does not expand `secretKeyRef`, so
+    `protected` with `expand` is refused rather than silently ignored.
+    """
+
+    value: str | None = None
+    protected: bool = Field(default=False, strict=True)
+    expand: bool = Field(default=False, strict=True)
+    # Output only, set on reads of a protected variable (never stored, never accepted as input):
+    # whether a value exists, its Secret version and when it was written.
+    set: bool | None = None
+    version: int | None = None
+    updated_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def _shape(self) -> EnvVar:
+        if self.protected:
+            if self.value is not None:
+                raise ValueError(
+                    "a protected variable holds no value in the spec; set it through the "
+                    "secret route"
+                )
+            if self.expand:
+                raise ValueError("a protected variable ignores expand (not expanded); set it false")
+        elif self.value is None:
+            raise ValueError("a variable that is not protected needs a value")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _sparse(self, handler: Any) -> dict[str, Any]:
+        data = handler(self)
+        for key in ("value", "set", "version", "updated_at"):
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
+
+
+class EnvVarIn(_Strict):
+    """The request form of an env variable: a protected one may carry its new value.
+
+    Only the api sees it; `SessionSpecIn.split` moves the value out so a `SessionSpec` never holds
+    one. Without a value a protected variable keeps its stored one.
+    """
+
+    value: SecretStr | None = None
+    protected: bool = Field(default=False, strict=True)
+    expand: bool = Field(default=False, strict=True)
+
+    @model_validator(mode="after")
+    def _shape(self) -> EnvVarIn:
+        if self.protected:
+            if self.expand:
+                raise ValueError("a protected variable ignores expand (not expanded); set it false")
+        elif self.value is None:
+            raise ValueError("a variable that is not protected needs a value")
+        return self
+
+
+_REF_RE = re.compile(r"\$\$|\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?P<default>:-[^}]*)?\}")
+
+
+def _refs(value: object) -> set[str]:
+    """Variable names a string, or the strings of a mapping, reference as `${NAME}`.
+
+    `$$` is the escape for a literal `$`. A `${NAME:-default}` reference never fails, so it names
+    nothing that must exist.
+    """
+    if isinstance(value, str):
+        return {
+            m.group("name")
+            for m in _REF_RE.finditer(value)
+            if m.group("name") and m.group("default") is None
+        }
+    if isinstance(value, dict):
+        return set().union(*(_refs(v) for v in value.values()))
+    return set()
 
 
 class CommandHook(_HookAction):
@@ -534,7 +624,7 @@ class SessionSpec(BaseModel):
     workdir: str = Field(default="workdir", max_length=63)
     pvc_size: Quantity | None = None
     resources: Resources | None = None
-    env: dict[str, str] = {}
+    env: dict[str, EnvVar] = {}
     any_mcp_config: dict[str, Any] | None = None
     max_attempts: int = Field(default=5, ge=1, le=10)
     auto_compact_pct: int | None = Field(default=None, ge=1, le=100)
@@ -576,6 +666,36 @@ class SessionSpec(BaseModel):
         if self.leader_lease_seconds is not None and not self.hive:
             raise ValueError("leader_lease_seconds requires a hive session (max_replicas > 1)")
         return self
+
+    @model_validator(mode="after")
+    def _references(self) -> SessionSpec:
+        used: set[str] = set()
+        wrapper = self.wrapper
+        if wrapper is not None:
+            for actions in (wrapper.hooks or {}).values():
+                for action in actions:
+                    if isinstance(action, WebhookHook):
+                        used |= _refs(action.secret) | _refs(action.headers)
+            for server in (wrapper.mcp_servers or {}).values():
+                used |= _refs(server.env if isinstance(server, McpStdio) else server.headers)
+        # names the platform puts in the pod itself are always set
+        missing = {n for n in used - set(self.env) if not _reserved_env_name(n)}
+        if missing:
+            raise ValueError(
+                "${NAME} references with no env variable of that name: "
+                + ", ".join(sorted(missing))
+            )
+        return self
+
+    @property
+    def plain_env(self) -> dict[str, str]:
+        """The non-protected variables and their values."""
+        return {k: v.value for k, v in self.env.items() if not v.protected and v.value is not None}
+
+    @property
+    def protected_env(self) -> list[str]:
+        """Names of the protected variables, sorted."""
+        return sorted(k for k, v in self.env.items() if v.protected)
 
     @property
     def hive(self) -> bool:
@@ -637,9 +757,22 @@ class SessionSpec(BaseModel):
             _quantity(v)
         return v
 
+    @field_validator("env", mode="before")
+    @classmethod
+    def _env_entries(cls, v: Any) -> Any:
+        if isinstance(v, dict):
+            bad = sorted(str(k) for k, e in v.items() if not isinstance(e, dict | BaseModel))
+            if bad:
+                raise ValueError(
+                    "; ".join(
+                        f"env.{k} must be an object {{value, protected, expand}}" for k in bad
+                    )
+                )
+        return v
+
     @field_validator("env")
     @classmethod
-    def _env(cls, v: dict[str, str]) -> dict[str, str]:
+    def _env(cls, v: dict[str, EnvVar]) -> dict[str, EnvVar]:
         bad = []
         for key in v:
             if (
@@ -654,6 +787,9 @@ class SessionSpec(BaseModel):
                 "env keys must match [A-Z_][A-Z0-9_]* and must not be POD_NAME, CCW_*, CLAUDE_*, "
                 "ANTHROPIC_*, ORCH_*, *_PROXY or *_BASE_URL: " + ", ".join(sorted(bad))
             )
+        protected = sum(1 for e in v.values() if e.protected)
+        if protected > PROTECTED_MAX:
+            raise ValueError(f"env has {protected} protected variables, at most {PROTECTED_MAX}")
         return v
 
     @field_validator("discard_hook_url")
@@ -730,7 +866,7 @@ def _template_problems(spec: SessionSpec) -> list[str]:
                 fields.append((f"cache.{field}", getattr(spec.cache, field), "archive_name"))
     errors: list[str] = []
     for name, template, surface in fields:
-        error, rendered = rendering.problem(template, surface, spec.env)
+        error, rendered = rendering.problem(template, surface, spec.plain_env)
         if error is None and rendered is not None:
             if surface == "archive_name":
                 try:
@@ -746,6 +882,35 @@ def _template_problems(spec: SessionSpec) -> list[str]:
         if error is not None:
             errors.append(f"{name}: {error}")
     return errors
+
+
+class SessionSpecIn(SessionSpec):
+    """A spec as the api receives it: protected variables may carry a value (`EnvVarIn`)."""
+
+    env: dict[str, EnvVarIn] = {}  # type: ignore[assignment]
+
+    def split(self) -> tuple[SessionSpec, dict[str, SecretStr]]:
+        """The storable spec (no protected value in it) and the protected values that were sent."""
+        values: dict[str, SecretStr] = {}
+        env: dict[str, EnvVar] = {}
+        for name, entry in self.env.items():
+            given = {k: getattr(entry, k) for k in entry.model_fields_set if k != "value"}
+            if entry.protected:
+                if entry.value is not None:
+                    values[name] = entry.value
+                env[name] = EnvVar(**given)
+            else:
+                assert entry.value is not None
+                env[name] = EnvVar(value=entry.value.get_secret_value(), **given)
+        fields = {
+            k: getattr(self, k)
+            for k in SessionSpec.model_fields
+            if k in self.model_fields_set and k != "env"
+        }
+        spec = SessionSpec.model_construct(
+            _fields_set=set(self.model_fields_set), **fields, env=env
+        )
+        return spec, values
 
 
 def validate_spec(spec: SessionSpec, settings: Settings, stored: SessionSpec | None = None) -> None:

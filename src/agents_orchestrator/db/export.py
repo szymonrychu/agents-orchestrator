@@ -16,6 +16,8 @@ from typing import Any
 import psycopg
 from psycopg.rows import dict_row
 
+from agents_orchestrator.secret_view import redact_spec_dict, session_metas
+
 FETCH_SIZE = 500
 
 # kind -> query; every one takes the session id as %(c)s.
@@ -58,11 +60,14 @@ async def export_session_history(
     async with conn.transaction():
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
-                "SELECT id, slug, spec, created_at FROM sessions WHERE id = %s", (session_id,)
+                "SELECT id, slug, spec, created_at, secret_versions FROM sessions WHERE id = %s",
+                (session_id,),
             )
             row = await cur.fetchone()
         if row is None:
             return
+        metas = session_metas(row.pop("secret_versions") or {}, row["created_at"])
+        row["spec"] = redact_spec_dict(row["spec"], metas)
         yield _line("session", row)
         for kind, query in QUERIES:
             async with conn.cursor(name=f"export_{kind}", row_factory=dict_row) as cur:

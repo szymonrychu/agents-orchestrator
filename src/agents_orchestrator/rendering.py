@@ -86,7 +86,7 @@ def session_context(
         "session_slug": session.slug,
         "preset_name": session.preset_name or "",
         "user": session.created_by_service or "",  # the api has no end-user identity
-        "env": dict(session.spec.env),
+        "env": session.spec.plain_env,
         "now": session.created_at.isoformat(),
     }
     return {k: ctx[k] for k in SAMPLES[surface]}
