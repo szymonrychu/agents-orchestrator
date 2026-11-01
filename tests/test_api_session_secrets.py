@@ -108,3 +108,44 @@ async def test_rotation_waits_for_an_uncommitted_create_so_gc_keeps_its_version(
         )
     await asyncio.wait_for(rotation, 10)
     assert v1 in {k[2] for k in kube.objects}
+
+
+async def test_gc_never_deletes_a_version_a_session_snapshots_after_it_read_the_references(
+    pool, monkeypatch
+):
+    """The other half of the race: gc read the stored references, then a create snapshotted the
+    current version and a rotation made it old. gc must decide from the current versions it read
+    and then read the references, so the version is kept."""
+    kube = FakeKube(namespace=NS)
+    preset = await preset_with_env(pool)
+    for _ in range(2):
+        async with pool.connection() as conn:
+            await store.set_secret(
+                conn,
+                kube,
+                NS,
+                preset.id,
+                "API_KEY",
+                SecretStr(stdlib_secrets.token_hex(8)),
+                collect=False,
+            )
+    v2 = store.secret_name(preset.id, "API_KEY", 2)
+    real = store._referenced
+
+    async def referenced_then_create_and_rotate(conn):
+        names = await real(conn)
+        async with pool.connection() as other:
+            await other.execute(
+                "INSERT INTO sessions (id, slug, spec, secret_versions)"
+                " VALUES (gen_random_uuid(), 'late', %s, %s)",
+                (Jsonb({"env": ENV}), Jsonb({"API_KEY": v2})),
+            )
+            await store.set_secret(
+                other, kube, NS, preset.id, "API_KEY", SecretStr("x" * 8), collect=False
+            )
+        return names
+
+    monkeypatch.setattr(store, "_referenced", referenced_then_create_and_rotate)
+    async with pool.connection() as conn:
+        await store.gc(conn, kube, NS, preset_id=preset.id)
+    assert v2 in {k[2] for k in kube.objects}

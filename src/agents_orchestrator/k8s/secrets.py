@@ -235,10 +235,10 @@ async def gc(
 ) -> None:
     """Delete, by name, every Secret version that is neither current nor named by a stored session.
 
-    Reads only our database. A retired row, or one whose preset is gone, has no current version;
-    its row is dropped once every version is deleted.
+    Reads only our database, the current versions first and the session references after them
+    (the order closes the race with a session being created). A retired row, or one whose
+    preset is gone, has no current version; its row is dropped once every version is deleted.
     """
-    referenced = await _referenced(conn)
     where, params = "", []
     if preset_id is not None:
         where += " AND ps.preset_id = %s"
@@ -255,6 +255,9 @@ async def gc(
             params,
         )
         found = await cur.fetchall()
+    # Read after the current versions: a create that snapshotted a version committed before the
+    # rotation that made it old, so a reference list read now always includes it.
+    referenced = await _referenced(conn)
     for row in found:
         await _sweep(conn, kube, namespace, row, referenced)
 
