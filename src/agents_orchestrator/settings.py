@@ -79,6 +79,20 @@ def normalise_origin(value: str) -> str | None:
     return origin if value == explicit else None
 
 
+#: The fixed part of the wrapper's priority hold: four spaced ESCs (1 s apart at most) and two
+#: runner drains after an interrupt (5 s each), see `priority_hold_seconds`.
+PRIORITY_HOLD_SLACK_SECONDS = 4 * 1.0 + 2 * 5.0
+
+
+def priority_hold_seconds(interrupt_settle_seconds: float) -> float:
+    """The longest a wrapper holds a priority send before its 202 (claude-code-wrapper
+    `SessionRouter._priority`): it interrupts the running turn (an ESC, up to one settle wait
+    for the interrupt line, a second ESC), waits up to one settle for the turn claude starts
+    for the still-queued messages and interrupts that one too, then submits. Three settle
+    waits plus the fixed slack; onTurn and onInterrupt hooks are extra."""
+    return 3 * interrupt_settle_seconds + PRIORITY_HOLD_SLACK_SECONDS
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix=PREFIX, extra="ignore")
 
@@ -139,6 +153,9 @@ class Settings(BaseSettings):
     autoclose_min_seconds: int = Field(default=300, ge=1)
 
     wrapper_send_timeout_seconds: float = 15
+    #: Rendered into every wrapper as `sessions.interrupt_settle_seconds`; the priority lane's
+    #: send timeout is derived from it (`priority_send_timeout_seconds`).
+    wrapper_interrupt_settle_seconds: float = Field(default=20, ge=0)
     dispatching_stale_seconds: float = 60
     dispatching_heartbeat_seconds: float = 5
     lock_heartbeat_seconds: float = 5
@@ -458,6 +475,14 @@ class Settings(BaseSettings):
         if not self.agent_image:
             raise SettingsError({"ORCH_AGENT_IMAGE": "required"})
         return self.agent_image
+
+    @property
+    def priority_send_timeout_seconds(self) -> float:
+        """The send timeout of a priority message: the plain send timeout plus the longest the
+        wrapper holds a priority request before it answers (`priority_hold_seconds`)."""
+        return self.wrapper_send_timeout_seconds + priority_hold_seconds(
+            self.wrapper_interrupt_settle_seconds
+        )
 
     @property
     def cache_available(self) -> bool:

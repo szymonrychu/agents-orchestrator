@@ -279,6 +279,9 @@ class FakeWrapper:
         self.turn_texts: list[str] = []
         self.turn_metadata: list[dict[str, Any]] = []
         self.turn_lanes: list[str] = []
+        self.turn_message_ids: list[str | None] = []  # the message_id of every POST /turns
+        self._priority_hold = 0.0
+        self._priority_ids: dict[str, str] = {}
         self._status_code: str | None = None
         self.last_turn_id = ""
         self._ids = 0
@@ -468,6 +471,11 @@ class FakeWrapper:
     def delay_turn_response(self, seconds: float) -> None:
         """Record the turn, then answer after `seconds` (a client timeout sees a started turn)."""
         self._delay = seconds
+
+    def hold_priority(self, seconds: float) -> None:
+        """A priority send holds its answer this long (the wrapper's interrupt), its turn
+        listed `pending` meanwhile, as the wrapper does."""
+        self._priority_hold = seconds
 
     def disable_notes(self, disabled: bool = True) -> None:
         """Answer 409 notes_disabled, as a wrapper with notes.enabled false."""
@@ -690,8 +698,21 @@ class FakeWrapper:
             text, metadata = body.get("text"), body.get("metadata", {})
             if not isinstance(text, str) or not isinstance(metadata, dict):
                 raise _Err(422, "invalid_request", "text must be a string, metadata an object")
+            message_id = body.get("message_id")
+            self.turn_message_ids.append(message_id)
+            known = self._priority_ids.get(message_id) if lane == "priority" else None
+            if known is not None:  # the wrapper's idempotent priority retry
+                turn = ses.turns[known]
+                return {"turn_id": known, "state": turn.state, "duplicate": True}
             self._write_turn_files(ses, body.get("files"))
             turn = _Turn(self._new_id("turn-"), text, metadata, _now())
+            if lane == "priority" and message_id is not None:
+                self._priority_ids[message_id] = turn.turn_id
+            if lane == "priority" and self._priority_hold:
+                turn.state = "pending"
+                ses.turns[turn.turn_id] = turn
+                await asyncio.sleep(self._priority_hold)
+                turn.state = "running"
             ses.turns[turn.turn_id] = turn
             ses.current_turn_id = turn.turn_id
             self.received_turns += 1

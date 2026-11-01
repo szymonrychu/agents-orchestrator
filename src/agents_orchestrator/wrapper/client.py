@@ -147,16 +147,22 @@ class WrapperClient:
         text: str,
         metadata: dict[str, Any] | None = None,
         lane: str = "regular",
+        message_id: str | None = None,
+        timeout: float | None = None,
     ) -> SubmitOutcome:
+        """`message_id` makes a priority send idempotent: the wrapper answers a repeat with
+        the turn the first send started. `timeout` overrides the send timeout (priority)."""
         body: dict[str, Any] = {"text": text, "lane": lane}
         if metadata is not None:
             body["metadata"] = metadata
+        if message_id is not None:
+            body["message_id"] = message_id
         try:
             resp = await self._http.post(
                 self._url(f"/sessions/{session_id}/turns"),
                 json=body,
                 headers=self._headers,
-                timeout=self.send_timeout,
+                timeout=self.send_timeout if timeout is None else timeout,
             )
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
             return Unavailable(f"{type(exc).__name__}: {exc}")
@@ -169,9 +175,15 @@ class WrapperClient:
         status = resp.status_code
         if 200 <= status < 300:
             try:
-                return TurnAccepted(str(resp.json()["turn_id"]))
+                body = resp.json()
+                turn_id = str(body["turn_id"])
             except (ValueError, KeyError, TypeError):
                 return Ambiguous(f"{status} without a turn_id")
+            if isinstance(body, dict) and body.get("state") == "pending":
+                # a retried priority send whose first send is still interrupting: the turn
+                # is not running yet, so the verifier decides once it starts or is dropped
+                return Ambiguous(f"{status} turn {turn_id} pending")
+            return TurnAccepted(turn_id)
         code, message = _error_parts(resp)
         reason = f"{status} {code}: {message}"
         if status == 409:

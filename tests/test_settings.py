@@ -350,3 +350,23 @@ def test_chat_settings(monkeypatch):
         Settings()
     assert "ORCH_CHAT_URL" in str(exc.value) and "ORCH_CHAT_TOKEN" in str(exc.value)
     assert token not in str(exc.value)
+
+
+def test_priority_send_timeout_covers_the_wrapper_interrupt_budget():
+    from agents_orchestrator.settings import PRIORITY_HOLD_SLACK_SECONDS
+
+    s = Settings(database_url="postgresql://x", master_key="k" * 32)
+    assert s.wrapper_interrupt_settle_seconds == 20
+    # two interrupts (each up to one settle wait) and the flushed-queue wait in between
+    assert s.priority_send_timeout_seconds == 15 + 3 * 20 + PRIORITY_HOLD_SLACK_SECONDS
+    s = Settings(
+        database_url="postgresql://x",
+        master_key="k" * 32,
+        wrapper_send_timeout_seconds=5,
+        wrapper_interrupt_settle_seconds=2,
+    )
+    assert s.priority_send_timeout_seconds == 5 + 3 * 2 + PRIORITY_HOLD_SLACK_SECONDS
+    with pytest.raises(SettingsError):
+        Settings(
+            database_url="postgresql://x", master_key="k" * 32, wrapper_interrupt_settle_seconds=-1
+        )

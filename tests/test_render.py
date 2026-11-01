@@ -790,6 +790,7 @@ def test_no_wrapper_block_renders_unchanged():
         "idle_timeout_seconds": 0,
         "ask_user_question": "deny",
         "restart_continue_prompt": "Claude was restarted. Continue the task where you left off.",
+        "interrupt_settle_seconds": 20,
     }
     assert cfg["claude"]["permissions"] == {
         "deny": ["EnterPlanMode", "ExitPlanMode", "AskUserQuestion"]
@@ -851,3 +852,12 @@ def test_hive_with_agent_commands_validates(tmp_path, monkeypatch):
     path = tmp_path / "config.yaml"
     path.write_text(by_kind(objs)["ConfigMap"]["data"]["config.yaml"])
     assert load_config(path).sessions.commands.agent == ["compact"]
+
+
+def test_interrupt_settle_comes_from_the_orchestrator_setting():
+    # The priority send timeout is derived from this value, so the wrapper must run with it.
+    cfg = config_of(render.render_session(make_session(), make_settings(), TOKENS))
+    assert cfg["sessions"]["interrupt_settle_seconds"] == 20
+    settings = make_settings(wrapper_interrupt_settle_seconds=7)
+    cfg = config_of(render.render_session(make_session(), settings, TOKENS))
+    assert cfg["sessions"]["interrupt_settle_seconds"] == 7
