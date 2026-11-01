@@ -10,11 +10,13 @@ from __future__ import annotations
 import json
 import re
 import secrets as stdlib_secrets
+import uuid
 
 import httpx
 import pytest
 from fakes import fake_upstream as fu
 from fakes.fake_kube import FakeKube
+from psycopg.types.json import Jsonb
 from test_agent_session_messaging import alone
 from test_api_agent import KEY, client_for, headers, make_settings
 from test_api_sessions import assert_error
@@ -75,6 +77,9 @@ async def rig(pool, dsn):
     r.boss, r.app, r.fakes, r.kube, r.hosts, r.tokens, r.pool = (
         boss, app, fakes, kube, hosts, tokens, pool,
     )  # fmt: skip
+    r.vis = str(await add_preset(pool, True))
+    r.hid = str(await add_preset(pool, False))
+    seed(r)
 
     async def call(method, path, **kw):
         extra = kw.pop("headers", {})
@@ -85,8 +90,81 @@ async def rig(pool, dsn):
     return r
 
 
-def relay_url(service: str, template: str) -> str:
-    return ADMIN_PREFIX + RELAY_PREFIX[service] + re.sub(r"\{[^}]+\}", "7", template)
+async def add_preset(pool, manageable: bool) -> uuid.UUID:
+    pid = uuid.uuid4()
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO presets (id, name, spec, superleader_manageable) VALUES (%s,%s,%s,%s)",
+            (pid, f"p-{pid.hex[:8]}", Jsonb({}), manageable),
+        )
+    return pid
+
+
+# object id -> which preset it sits on: 7 visible, 8 hidden, 9 none
+ID_FIELD = {"EndpointView": "id", "EventView": "id", "ScheduleView": "id", "RunView": "id"}
+ID_FIELD["RoomView"] = ID_FIELD["EventDetail"] = ID_FIELD["EventView"]
+ID_FIELD["RoomView"] = "room_id"
+
+
+def ident(service: str, n: int | str, sample=None):
+    """Object id `n` as the upstream spells it: schedules and runs use UUIDs."""
+    if service == "schedule":
+        return f"00000000-0000-4000-8000-{int(n):012d}"
+    return n if isinstance(sample, int) else str(n)
+
+
+def make(service: str, schema: str, n: int, **over):
+    obj = fu.sample(DOCS[service], {"$ref": f"#/components/schemas/{schema}"})
+    field = ID_FIELD[schema]
+    obj[field] = ident(service, n, obj[field])
+    obj.update(over)
+    return obj
+
+
+def seed(rig) -> None:
+    """Give the fakes one object on a manageable preset (7), one on a hidden preset (8) and,
+    for rooms and runs, one without a preset (9); mutations answer a minimal valid success."""
+    by = {7: rig.vis, 8: rig.hid, 9: None}
+    ends = [make("webhook", "EndpointView", n, preset_id=by[n]) for n in (7, 8)]
+    events = [make("webhook", "EventView", n, preset_id=by[n]) for n in (7, 8, 9)]
+    details = [make("webhook", "EventDetail", n, preset_id=by[n]) for n in (7, 8, 9)]
+    scheds = [make("schedule", "ScheduleView", n, preset_id=by[n]) for n in (7, 8)]
+    runs = [make("schedule", "RunView", n, schedule_id=ident("schedule", n)) for n in (7, 8, 9)]
+    runs[2]["schedule_id"] = ident("schedule", 99)  # a schedule the upstream does not list
+    rooms = [make("connector", "RoomView", n, preset_id=by[n]) for n in (7, 8, 9)]
+    for name, fake in rig.fakes.items():
+        for key in admin_ops(name):
+            fake.answers[key] = fu.success_sample(fake, key)
+    w, sc, c = rig.fakes["webhook"], rig.fakes["schedule"], rig.fakes["connector"]
+    w.answers[("GET", "/webhooks/api/v1/endpoints")] = (200, ends)
+    w.answers[("GET", "/webhooks/api/v1/events")] = (200, events)
+    w.answers[("GET", "/webhooks/api/v1/events/{id}")] = lambda call, p: (
+        200,
+        next(e for e in details if str(e["id"]) == p["id"]),
+    )
+    sc.answers[("GET", "/schedules/api/v1/schedules")] = (200, scheds)
+    sc.answers[("GET", "/schedules/api/v1/runs")] = (200, runs)
+    sc.answers[("GET", "/schedules/api/v1/runs/{run_id}")] = lambda call, p: (
+        200,
+        next(r for r in runs if str(r["id"]) == p["run_id"]),
+    )
+    c.answers[("GET", "/chat/v1/admin/rooms")] = (200, rooms)
+
+
+SEEDED = {
+    ("GET", "/webhooks/api/v1/endpoints"),
+    ("GET", "/webhooks/api/v1/events"),
+    ("GET", "/webhooks/api/v1/events/{id}"),
+    ("GET", "/schedules/api/v1/schedules"),
+    ("GET", "/schedules/api/v1/runs"),
+    ("GET", "/schedules/api/v1/runs/{run_id}"),
+    ("GET", "/chat/v1/admin/rooms"),
+}
+
+
+def relay_url(service: str, template: str, n: int = 7) -> str:
+    fill = str(ident(service, n))
+    return ADMIN_PREFIX + RELAY_PREFIX[service] + re.sub(r"\{[^}]+\}", fill, template)
 
 
 def admin_ops(service: str) -> dict[tuple[str, str], dict]:
@@ -129,12 +207,18 @@ async def test_every_route_round_trips_the_documented_answer(rig, name):
     fake = rig.fakes[name]
     for method, template, status in admin_relay.SERVICES[name][3]:
         key = (method, UPSTREAM_PREFIX[name] + template)
-        fake.answers[key] = fu.success_sample(fake, key)
-        body = fu.sample(DOCS[name], _body_schema(fake, key)) if _has_body(fake, key) else None
+        if key not in SEEDED:  # the seeded lists and single answers stay: guards read them
+            fake.answers[key] = fu.success_sample(fake, key)
+        body = None
+        if _has_body(fake, key):
+            body = fu.sample(DOCS[name], _body_schema(fake, key))
+            if isinstance(body, dict) and "preset_id" in body:
+                body["preset_id"] = rig.vis
         r = await rig.call(method, relay_url(name, template), json=body)
         assert r.status_code == status, (key, r.text)
-        want = fake.answers[key][1]
-        assert (r.json() if r.content else None) == want, key
+        if key not in SEEDED:
+            want = fake.answers[key][1]
+            assert (r.json() if r.content else None) == want, key
     assert fake.calls
 
 
@@ -307,14 +391,127 @@ async def test_encoded_dots_reach_the_upstream_as_one_segment(rig):
 
     rig.app.state.admin_http = httpx.AsyncClient(transport=httpx.MockTransport(record))
     for raw in ("%2e%2e", "%2E%2E", "%2e", "..%5c"):
-        r = await rig.call("GET", ADMIN_PREFIX + f"/schedules/schedules/{raw}")
+        r = await rig.call("DELETE", ADMIN_PREFIX + f"/chats/rules/{raw}")
         assert r.status_code == 404, (raw, r.text)
     assert len(seen) == 4
     # a decoded slash splits the path before routing: it never matches a relay route
-    await rig.call("GET", ADMIN_PREFIX + "/schedules/schedules/a%2f..%2fb")
+    await rig.call("DELETE", ADMIN_PREFIX + "/chats/rules/a%2f..%2fb")
     assert len(seen) == 4
     for path in seen:
-        head = "/schedules/api/v1/schedules/"
+        head = "/chat/v1/admin/rules/"
         assert path.startswith(head), path
         tail = path[len(head) :]
         assert "/" not in tail and tail not in (".", "..") and "\\" not in tail, path
+
+
+# ------------------------------------------------------------------------------- the guards
+
+
+def ids(response, field: str = "id") -> set[str]:
+    return {str(i[field]) for i in response.json()}
+
+
+@pytest.mark.parametrize(
+    ("service", "template", "field"),
+    [
+        ("webhook", "/endpoints", "id"),
+        ("webhook", "/events", "id"),
+        ("schedule", "/schedules", "id"),
+        ("schedule", "/runs", "id"),
+        ("connector", "/rooms", "room_id"),
+    ],
+)
+async def test_lists_filtered(rig, service, template, field):
+    r = await rig.call("GET", relay_url(service, template))
+    assert r.status_code == 200
+    assert ids(r, field) == {str(ident(service, 7))}
+
+
+def _body_for(rig, service: str, method: str, template: str, preset):
+    key = (method, UPSTREAM_PREFIX[service] + template)
+    fake = rig.fakes[service]
+    if "requestBody" not in fake._ops[key]:
+        return None
+    body = fu.sample(DOCS[service], _body_schema(fake, key))
+    body = body if isinstance(body, dict) else {}
+    body["preset_id"] = preset
+    return body
+
+
+def _sent(rig, service: str, method: str, template: str, n: int = 7) -> bool:
+    path = UPSTREAM_PREFIX[service] + re.sub(r"\{[^}]+\}", str(ident(service, n)), template)
+    return any(c.method == method and c.path == path for c in rig.fakes[service].calls)
+
+
+STORED = sorted(
+    (s, m, t) for (s, m, t), g in admin_relay.GUARDS.items() if g.stored
+)  # fmt: skip
+BODY = sorted((s, m, t) for (s, m, t), g in admin_relay.GUARDS.items() if g.body_preset)
+
+
+def _success(service: str, method: str, template: str) -> int:
+    return next(st for m, t, st in admin_relay.SERVICES[service][3] if (m, t) == (method, template))
+
+
+@pytest.mark.parametrize(("service", "method", "template"), STORED)
+async def test_hidden_mutation_never_forwarded(rig, service, method, template):
+    for n in (8, 9, 404):  # hidden preset, no preset, unknown
+        body = _body_for(rig, service, method, template, rig.vis)
+        r = await rig.call(method, relay_url(service, template, n), json=body)
+        assert_error(r, 404, "not_found")
+        assert not _sent(rig, service, method, template, n), (n, r.text)
+
+
+@pytest.mark.parametrize(("service", "method", "template"), STORED)
+async def test_visible_mutation_is_forwarded(rig, service, method, template):
+    body = _body_for(rig, service, method, template, rig.vis)
+    r = await rig.call(method, relay_url(service, template), json=body)
+    assert r.status_code == _success(service, method, template), r.text
+    assert _sent(rig, service, method, template)
+
+
+@pytest.mark.parametrize(("service", "method", "template"), BODY)
+async def test_body_hidden_preset_404(rig, service, method, template):
+    for preset in (rig.hid, None, str(uuid.uuid4())):
+        body = _body_for(rig, service, method, template, preset)
+        r = await rig.call(method, relay_url(service, template), json=body)
+        assert_error(r, 404, "not_found")
+        assert not _sent(rig, service, method, template), preset
+    body = _body_for(rig, service, method, template, rig.vis)
+    r = await rig.call(method, relay_url(service, template), json=body)
+    assert r.status_code == _success(service, method, template), r.text
+
+
+@pytest.mark.parametrize(
+    ("service", "template"), [("webhook", "/events/{id}"), ("schedule", "/runs/{run_id}")]
+)
+async def test_answer_hidden_404(rig, service, template):
+    for n in (8, 9):
+        assert_error(await rig.call("GET", relay_url(service, template, n)), 404, "not_found")
+    assert (await rig.call("GET", relay_url(service, template))).status_code == 200
+
+
+async def test_unguarded_routes_unchanged(rig):
+    for service, method, template in (
+        ("webhook", "GET", "/meta"),
+        ("webhook", "POST", "/templates/preview"),
+        ("connector", "GET", "/rules"),
+        ("connector", "POST", "/rules"),
+        ("connector", "DELETE", "/rules/{rule_id}"),
+    ):
+        key = (method, UPSTREAM_PREFIX[service] + template)
+        body = None
+        if "requestBody" in rig.fakes[service]._ops[key]:
+            body = fu.sample(DOCS[service], _body_schema(rig.fakes[service], key))
+        r = await rig.call(method, relay_url(service, template), json=body)
+        assert r.status_code == _success(service, method, template), (key, r.text)
+        assert rig.fakes[service].answers[key] is not None
+
+
+async def test_null_preset_room_hidden(rig):
+    r = await rig.call("GET", relay_url("connector", "/rooms"))
+    assert "9" not in ids(r, "room_id")
+    body = _body_for(rig, "connector", "PUT", "/rooms/{room_id}/settings", rig.vis)
+    url = relay_url("connector", "/rooms/{room_id}/settings", 9)
+    assert_error(await rig.call("PUT", url, json=body), 404, "not_found")
+    assert not _sent(rig, "connector", "PUT", "/rooms/{room_id}/settings", 9)
