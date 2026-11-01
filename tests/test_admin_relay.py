@@ -427,6 +427,16 @@ async def test_lists_filtered(rig, service, template, field):
     assert ids(r, field) == {str(ident(service, 7))}
 
 
+async def test_list_with_non_list_payload_fails_closed(rig):
+    async def answer(request):
+        return httpx.Response(200, json={"items": [{"id": 8, "preset_id": rig.vis}]})
+
+    rig.app.state.admin_http = httpx.AsyncClient(transport=httpx.MockTransport(answer))
+    r = await rig.call("GET", relay_url("webhook", "/endpoints"))
+    assert_error(r, 502, "upstream_shape")
+    assert "items" not in r.text
+
+
 def _body_for(rig, service: str, method: str, template: str, preset):
     key = (method, UPSTREAM_PREFIX[service] + template)
     fake = rig.fakes[service]

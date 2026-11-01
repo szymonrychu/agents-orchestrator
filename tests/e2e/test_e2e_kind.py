@@ -3021,6 +3021,37 @@ def test_admin_preset_crud(superleader: dict[str, Any]) -> None:
     assert admin_call(pod, "GET", f"/presets/{pid}")[0] == 404
 
 
+def test_superleader_sees_only_manageable(api: httpx.Client, superleader: dict[str, Any]) -> None:
+    pod = superleader["pod"]
+    slug = "e2e-hidden"
+    spec = {"replicas": 1, "env": FAKE_TURN_ENV}
+    resp = api.post("/presets", json={"name": "E2E hidden", "spec": spec})
+    assert resp.status_code == 201, resp.text
+    pid = resp.json()["id"]
+    try:
+        resp = api.post("/sessions", json={"preset_id": pid, "slug": slug})
+        assert resp.status_code == 201, resp.text
+        assert admin_call(pod, "GET", f"/presets/{pid}")[0] == 404
+        assert admin_call(pod, "GET", f"/sessions/{slug}")[0] == 404
+        status, listed = admin_call(pod, "GET", "/presets")
+        assert status == 200 and pid not in [p["id"] for p in listed], listed
+        resp = api.put(
+            f"/presets/{pid}",
+            json={"name": "E2E hidden", "spec": spec, "superleader_manageable": True},
+        )
+        assert resp.status_code == 200, resp.text
+        assert admin_call(pod, "GET", f"/presets/{pid}")[0] == 200
+        assert admin_call(pod, "GET", f"/sessions/{slug}")[0] == 200
+    finally:
+        api.delete(f"/sessions/{slug}")
+        wait_for(
+            f"session {slug} objects to be deleted",
+            lambda: not labelled_objects(slug),
+            DISCARD_TIMEOUT,
+        )
+        api.delete(f"/presets/{pid}")
+
+
 def test_admin_routes_refuse_a_plain_session(target: dict[str, Any]) -> None:
     status, body = agent_call(target["pod"], "GET", "/agent/v1/admin/presets")
     assert status == 403 and body["error"]["code"] == "not_superleader", (status, body)

@@ -9,10 +9,12 @@ come back unchanged, except for webhook credentials (D9, `credentials` below). A
 or a non-JSON answer is 503 `upstream_unavailable`. The upstream validates the bodies.
 
 The superleader sees only objects of presets it may manage (`superleader_manageable`). `GUARDS`
-holds one `Guard` per route: a body naming a hidden preset (or none, or null), or a stored
-object (endpoint, schedule, room) on a hidden preset, is 404 and never forwarded; lists are
-filtered and a single event or run of a hidden preset is 404. An object without a preset counts
-as hidden. Run objects are mapped to their preset through one upstream `GET /schedules`.
+holds one `Guard` per route: a body naming a hidden or null preset, or a stored object
+(endpoint, schedule, room) on a hidden preset, is 404 and never forwarded. A body without
+`preset_id` passes: the upstream requires it on create and PUT, and the stored check covers
+PATCH and clone. Lists are filtered (a non-list answer is 502 `upstream_shape`) and a single
+event or run of a hidden preset is 404. An object without a preset counts as hidden. Run
+objects are mapped to their preset through one upstream `GET /schedules`.
 """
 
 from __future__ import annotations
@@ -299,9 +301,9 @@ async def _filter_answer(
         return preset is not None and str(preset) in visible
 
     if guard.list_filter:
-        if isinstance(payload, list):
-            return json.dumps([i for i in payload if shown(i)]).encode()
-        return content
+        if not isinstance(payload, list):
+            raise ApiError(502, "upstream_shape", "upstream list answer is not a list")
+        return json.dumps([i for i in payload if shown(i)]).encode()
     if not shown(payload):
         raise not_found("object")
     return content
