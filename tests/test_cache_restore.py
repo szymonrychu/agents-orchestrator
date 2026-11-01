@@ -150,8 +150,7 @@ async def test_restore_job_created_before_init(env):
     c = await env.session("alpha", init_scripts=["echo a"])
     await env.tick()
     cache = await env.cache(c.id)
-    assert cache["key"] == CACHE_KEY
-    assert cache["object"] == f"workspace-cache/{CACHE_KEY}.tar.zst"
+    assert cache["restore_resolved"] == f"workspace-cache/{CACHE_KEY}.tar.zst"
     restore = cache["restore"]
     assert restore["state"] == "running" and restore["job"] == RESTORE
     assert restore["started_at"] and restore["finished_at"] is None

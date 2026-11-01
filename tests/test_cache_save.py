@@ -410,20 +410,21 @@ async def test_recorded_outcome_is_not_saved_again(env):
 
 async def test_same_object_name(env, monkeypatch):
     calls: list[tuple[str, str]] = []
-    real = cache_mod.presign
+    real = cache_mod.presign_object
 
     def spy(settings, method, key, *a, **kw):
         calls.append((method, key))
         return real(settings, method, key, *a, **kw)
 
-    monkeypatch.setattr(cache_mod, "presign", spy)
+    monkeypatch.setattr(cache_mod, "presign_object", spy)
     c = await env.ready()
     await env.delete(c)
     await env.tick()
-    assert calls[0] == ("GET", CACHE_KEY) and calls[-1] == ("PUT", CACHE_KEY)
+    obj = f"workspace-cache/{CACHE_KEY}.tar.zst"
+    assert calls[0] == ("GET", obj) and calls[-1] == ("PUT", obj)
     job = env.kube.get("Job", SAVE)
     vars_ = {v["name"]: v["value"] for v in job["spec"]["template"]["spec"]["containers"][0]["env"]}
-    obj = (await env.cache(c.id))["object"]
+    cache = await env.cache(c.id)
     assert urlsplit(vars_["CACHE_URL"]).path == "/" + obj
-    assert obj == f"workspace-cache/{CACHE_KEY}.tar.zst"
+    assert cache["restore_resolved"] == cache["save_resolved"] == obj
     assert RESTORE  # the restore used the same key

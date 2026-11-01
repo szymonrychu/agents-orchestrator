@@ -138,17 +138,20 @@ def presign(
 ) -> str:
     """One SigV4 URL for `method` on the object of `target` and `name`, valid for the Job's life.
 
-    `name` is the workspace cache key for the workdir and the session slug for the sessions.
+    `name` is the workspace cache name for the workdir and the session slug for the sessions.
     """
+    return presign_object(settings, method, target_object_name(settings, target, name))
+
+
+def presign_object(settings: Settings, method: Literal["GET", "PUT"], key: str) -> str:
+    """One SigV4 URL for `method` on the full object `key`, valid for the Job's life."""
     operation = _OPERATIONS.get(method)
     if operation is None:
         raise ValueError(f"cache URLs are GET or PUT, not {method!r}")
-    key = target_object_name(settings, target, name)
-    client = _client_for(settings)
     params = {"Bucket": settings.cache_s3_bucket, "Key": key}
     if method == "PUT":
         params["ContentType"] = CONTENT_TYPE
-    url: str = client.generate_presigned_url(
+    url: str = _client_for(settings).generate_presigned_url(
         operation,
         Params=params,
         ExpiresIn=settings.cache_timeout_seconds + EXPIRY_MARGIN_SECONDS,

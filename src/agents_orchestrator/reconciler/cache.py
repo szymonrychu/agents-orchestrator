@@ -32,6 +32,7 @@ after the workdir; whatever their outcome, they never hold the discard.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
@@ -41,7 +42,9 @@ from typing import Any, Literal, get_args
 
 from psycopg_pool import AsyncConnectionPool
 
-from agents_orchestrator.cache.presign import CacheTarget, object_name, presign
+from agents_orchestrator import rendering
+from agents_orchestrator.cache.keys import ArchiveNameError, list_prefix_for, object_name_for
+from agents_orchestrator.cache.presign import CacheTarget, latest_under, presign, presign_object
 from agents_orchestrator.cache.save_rule import PODS_EXIST, save_skip
 from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.k8s.kube import KubeApi, KubeError, Obj, is_owned
@@ -328,7 +331,10 @@ class CacheRunner:
         cache = session.status.get("cache") or {}
         save = cache.get(op.status_key)
         if save is None:
-            skip = save_skip(self.settings.cache_available, session.status, target)
+            restore_only = target == "workdir" and not self._key(session, op)
+            skip = save_skip(
+                self.settings.cache_available, session.status, target, restore_only=restore_only
+            )
             if skip is not None:
                 await self._write(session, cache, op, {"state": "skipped", "reason": skip})
                 log.info("%s of session %s skipped: %s", op.title, session.slug, skip)
@@ -349,10 +355,6 @@ class CacheRunner:
 
     async def _begin(self, session: Session, op: CacheOp) -> dict[str, Any]:
         cache = dict(session.status.get("cache") or {})
-        if not op.sessions:
-            key = self._key(session, op)
-            cache["key"] = key
-            cache["object"] = object_name(self.settings, key) if key else None
         run = {
             "state": "running",
             "started_at": (await self._now()).isoformat(),
@@ -361,8 +363,51 @@ class CacheRunner:
             "reason": None,
             "job": None,
         }
+        if not op.sessions and self.settings.cache_available:
+            # The resolved object is written with the running state, before any Job exists, so a
+            # crash or retry reuses it and the sweep sees it as referenced.
+            done = await self._resolve(session, op, cache)
+            if done is not None:
+                state, reason = done
+                return await self._finish(session, cache, op, run, state, reason=reason)
         cache = await self._write(session, cache, op, run)
         return await self._start(session, cache, op, run)
+
+    async def _resolve(
+        self, session: Session, op: CacheOp, cache: dict[str, Any]
+    ) -> tuple[str, str | None] | None:
+        """Fill `cache[<restore|save>_resolved]` with the object key; return the final
+        (state, reason) when no Job is needed (a miss, a fresh start, a bad name), else None."""
+        field = f"{op.action}_resolved"
+        if op.action == "save" and cache.get(field):
+            return None  # a retry keeps the name it was given
+        cache[field] = None
+        template = self._key(session, op)
+        if not template:
+            if op.action == "save":
+                return "skipped", "restore-only"
+            return "miss", "fresh_start"
+        prefix = self.settings.cache_s3_prefix
+        now = await self._now() if op.action == "save" else None
+        try:
+            name = rendering.render_name(
+                template,
+                rendering.session_context("archive_name", session, now=now),
+                allow_prefix=op.action == "restore",
+            )
+            if not name.endswith("/"):
+                cache[field] = object_name_for(prefix, name)
+                return None
+            listing = list_prefix_for(prefix, name)
+        except ArchiveNameError as exc:
+            return "failed", f"bad_cache_key: {exc}"[:REASON_MAX]
+        try:
+            found = await asyncio.to_thread(latest_under, self.settings, listing)
+        except Exception as exc:
+            log.exception("listing %s for session %s failed", listing, session.slug)
+            return "failed", f"list_failed: {exc}"[:REASON_MAX]
+        cache[field] = found.key if found is not None else None
+        return None if found is not None else ("miss", None)
 
     @staticmethod
     def _key(session: Session, op: CacheOp) -> str:
@@ -378,7 +423,8 @@ class CacheRunner:
         ns, name = self.settings.namespace, op.job_name(session.slug)
         if not self.settings.cache_available:
             return await self._finish(session, cache, op, run, "failed", reason="not_configured")
-        if not op.sessions and not cache.get("key"):
+        resolved = cache.get(f"{op.action}_resolved")
+        if not op.sessions and not resolved:
             return await self._finish(session, cache, op, run, "failed", reason="no_cache_key")
         existing = await self.kube.get_job(ns, name)
         if existing is not None:
@@ -389,8 +435,10 @@ class CacheRunner:
         else:
             try:
                 method = "PUT" if op.action == "save" else "GET"
-                obj = session.slug if op.sessions else cache["key"]
-                url = presign(self.settings, method, obj, op.target)
+                if op.sessions:
+                    url = presign(self.settings, method, session.slug, op.target)
+                else:
+                    url = presign_object(self.settings, method, resolved)
                 await self.kube.create_job(
                     render_cache_job(session, self.settings, op.action, url, op.target)
                 )
@@ -522,7 +570,7 @@ class CacheRunner:
         await self._write(session, cache, op, run)
         detail = f": {reason}" if reason else ""
         if op.action == "save" and state == "failed":
-            subject = "" if op.sessions else f" (key {cache.get('key')})"
+            subject = "" if op.sessions else f" (object {cache.get('save_resolved')})"
             log.warning("%s of session %s%s failed%s", op.title, session.slug, subject, detail)
         else:
             log.info("%s of session %s %s%s", op.title, session.slug, state, detail)

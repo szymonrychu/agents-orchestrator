@@ -86,7 +86,11 @@ def _backup(session: repo.Session, settings: Settings) -> schemas.SessionBackup:
     elif not settings.cache_available:
         skips = ["cache_not_configured"] * 2
     else:
-        skips = [save_skip(True, session.status, target) for target in ("workdir", "sessions")]
+        restore_only = not session.spec.cache.save_key
+        skips = [
+            save_skip(True, session.status, target, restore_only=restore_only)
+            for target in ("workdir", "sessions")
+        ]
     return schemas.SessionBackup(
         workdir=skips[0] is None,
         transcripts=skips[1] is None,
