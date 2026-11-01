@@ -194,3 +194,37 @@ async def test_bad_key_templates_are_422(pool, dsn):
             },
         )
         assert ok.status_code == 201, ok.text
+
+
+async def test_names_that_render_empty_for_this_session_are_422(pool, dsn):
+    """The preview sample renders fine; this preset's name squeezes to nothing."""
+    async with app_client(pool, dsn) as http:
+        spec = {"cache": {"restore_key": "{{ preset_name }}", "save_key": "x"}}
+        preset = await make_preset(http, "...", spec)
+        r = await http.post(C, json={"preset_id": preset["id"], "slug": "sym"})
+        assert_error(r, 422, "invalid_request")
+        assert "cache.restore_key" in r.json()["error"]["message"]
+        r = await http.post(C, json={"preset_id": preset["id"]})
+        assert_error(r, 422, "invalid_request")
+
+
+async def test_template_error_reports_the_line(pool, dsn):
+    async with app_client(pool, dsn) as http:
+        r = await http.post(
+            C, json={"slug": "bad", "spec": {"cache": {"restore_key": "a\n{% if %}"}}}
+        )
+        assert_error(r, 422, "invalid_request")
+        assert "line 2" in r.json()["error"]["message"]
+        assert "cache.restore_key" in r.json()["error"]["message"]
+
+
+async def test_session_name_renders_with_the_real_context(pool, dsn):
+    async with app_client(pool, dsn) as http:
+        spec = {
+            "cache": {
+                "restore_key": "{{ session_slug }}/",
+                "save_key": "{{ session_slug }}/{{ now }}",
+            }
+        }
+        r = await http.post(C, json={"slug": "alpha", "spec": spec})
+        assert r.status_code == 201, r.text

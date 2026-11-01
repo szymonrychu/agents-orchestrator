@@ -407,3 +407,58 @@ class ScaleResult(BaseModel):
 
 class LeadershipRequested(BaseModel):
     request_id: int
+
+
+class ArchiveView(BaseModel):
+    key: str
+    name: str
+    size: int
+    last_modified: datetime
+    referenced_by: list[str]
+    protected: bool
+
+
+class ArchivePage(BaseModel):
+    items: list[ArchiveView]
+    next_cursor: str | None
+
+
+class CleanupItem(BaseModel):
+    key: str
+    size: int
+    reason: str
+
+
+class CleanupPreview(BaseModel):
+    would_delete: list[CleanupItem]
+    count: int
+    total_bytes: int
+    retention_days: int
+    keep_newest: int
+    grace_seconds: int
+    sweep_enabled: bool
+    sweep_dry_run: bool
+    last_sweep: dict[str, Any] | None
+
+
+class DeleteArchives(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    keys: list[str] = Field(min_length=1, max_length=1000)
+
+
+class ArchiveRefusal(BaseModel):
+    key: str
+    reason: str
+
+
+class ArchiveDeleteError(BaseModel):
+    key: str
+    code: str
+    message: str
+
+
+class ArchiveDeleteResult(BaseModel):
+    deleted: list[str]
+    refused: list[ArchiveRefusal]
+    errors: list[ArchiveDeleteError]

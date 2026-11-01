@@ -701,7 +701,23 @@ Optional body `{"name": "<name>"}`. Creates a new, non-default preset holding th
 
 ### `POST /api/v1/templates/preview`
 
-Renders a Jinja2 template for an editor against a fixed sample context. Body `{"template": "<text>", "surface": "web_chat_start" | "preset_text" | "init_script", "context": {...}}`; `context` is optional and replaces the sample's top-level keys. Response 200 `{rendered, error, variables}`: `rendered` is the text (null on error), `error` is `{line, message}` or null, `variables` the sorted names the template reads. A template error (syntax, undefined variable, over the 16 KiB limit) is a 200 with `error` set. Errors: 422 `invalid_request` (unknown surface).
+Renders a Jinja2 template for an editor against a fixed sample context. Body `{"template": "<text>", "surface": "web_chat_start" | "preset_text" | "init_script" | "archive_name", "context": {...}}`; `context` is optional and replaces the sample's top-level keys. Response 200 `{rendered, error, variables}`: `rendered` is the text (null on error), `error` is `{line, message}` or null, `variables` the sorted names the template reads. A template error (syntax, undefined variable, over the 16 KiB limit) is a 200 with `error` set. Errors: 422 `invalid_request` (unknown surface).
+
+### `GET /api/v1/cache/archives`
+
+Lists the workspace cache archives (objects ending `.tar.zst` under `ORCH_CACHE_S3_PREFIX`) with the api pod's own S3 key pair. Query: `prefix` (optional sub-prefix of lowercase `[a-z0-9._/-]`, at most 200 characters, no `..` segment), `cursor` (the `next_cursor` of the previous page), `limit` (1 to 1000, default 200). Response 200 `{"items": [{"key", "name", "size", "last_modified", "referenced_by": [slug, ...], "protected": bool}], "next_cursor": <string or null>}`, in key order; `referenced_by` lists the sessions whose resolved or rendered restore or save key, or transcripts object, is this key, and `protected` is true when there is at least one. Errors: 400 `bad_request` (bad prefix or cursor), 503 `unavailable` (no bucket or no `ORCH_CACHE_S3_API_*` pair).
+
+### `GET /api/v1/cache/archives/download`
+
+Query `key` (the full object key). Answers 302 with `Cache-Control: no-store` and a `Location` that is a presigned GET valid for 5 minutes, signed with the api pod's key pair, forcing `Content-Disposition: attachment; filename="<name with / as _>.tar.zst"`; the archive bytes never pass through the api. The key must sit inside the cache prefix, end `.tar.zst` and hold a valid archive name (or a `sessions/<slug>` transcripts object). Errors: 400 `bad_request` (any other key), 503 `unavailable`.
+
+### `GET /api/v1/cache/cleanup/preview`
+
+What the cleanup sweep would delete now: the same planner as the reconciler's sweep, read-only. Response 200 `{"would_delete": [{"key", "size", "reason"}], "count", "total_bytes", "retention_days", "keep_newest", "grace_seconds", "sweep_enabled", "sweep_dry_run", "last_sweep": <last sweep result or null>}` with `Cache-Control: no-store`. An archive is listed only when it is beyond the newest `ORCH_CACHE_KEEP_NEWEST` of its group, older than `ORCH_CACHE_RETENTION_DAYS` and than the grace period, and referenced by no session; the newest object of a group is never listed. Errors: 503 `unavailable`.
+
+### `DELETE /api/v1/cache/archives`
+
+Body `{"keys": ["<full object key>", ...]}` (1 to 1000 keys, extra fields rejected). Deletes the keys the server re-checks right before deleting: a key outside the grammar, a missing one, one a session references and one younger than the grace period are refused, each with a reason, and never sent to S3. Response 200 `{"deleted": [key], "refused": [{"key", "reason"}], "errors": [{"key", "code", "message"}]}`; `errors` are the per-key failures S3 reported for a delete it accepted. Every call writes an `audit:` log line with the caller (the service name or the peer address), the deleted keys and the counts. Errors: 422 `invalid_request` (bad body), 503 `unavailable`. These four routes are on the main port only: the service port does not serve them.
 
 ### `GET /api/v1/sessions`
 

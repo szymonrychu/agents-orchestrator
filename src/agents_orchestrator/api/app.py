@@ -14,6 +14,7 @@ from psycopg_pool import AsyncConnectionPool
 from agents_orchestrator import __version__
 from agents_orchestrator.api import (
     agent,
+    archives,
     autoclose,
     chat,
     errors,
@@ -80,6 +81,7 @@ def create_app(
     app.include_router(chat.router)
     app.include_router(presets.router)
     app.include_router(templates.router)
+    app.include_router(archives.router)
     app.include_router(messages.router)
     app.include_router(streams.router)
     app.include_router(workspace.router)

@@ -177,6 +177,29 @@ def list_archives(
     ]
 
 
+def list_page(
+    settings: Settings,
+    prefix: str,
+    *,
+    token: str | None = None,
+    limit: int = LIST_PAGE_SIZE,
+    credentials: S3Credentials | None = None,
+) -> tuple[list[ArchiveObject], str | None]:
+    """One page of at most `limit` objects under `prefix` and the token of the next page, if any."""
+    args: dict[str, Any] = {
+        "Bucket": settings.cache_s3_bucket,
+        "Prefix": prefix,
+        "MaxKeys": min(max(limit, 1), LIST_PAGE_SIZE),
+    }
+    if token:
+        args["ContinuationToken"] = token
+    page = _client_for(settings, credentials).list_objects_v2(**args)
+    found = [
+        ArchiveObject(o["Key"], int(o["Size"]), o["LastModified"]) for o in page.get("Contents", ())
+    ]
+    return found, (page.get("NextContinuationToken") if page.get("IsTruncated") else None)
+
+
 def latest_under(
     settings: Settings, prefix: str, *, credentials: S3Credentials | None = None
 ) -> ArchiveObject | None:

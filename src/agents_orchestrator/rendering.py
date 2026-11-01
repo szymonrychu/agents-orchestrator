@@ -56,13 +56,16 @@ def _segment(value: str) -> str:
     return _NOT_SEGMENT.sub("-", value.lower()).strip("-._")[:63].rstrip("-._")
 
 
-def _archive_context(session: Session, now: datetime) -> dict[str, Any]:
+def archive_context(
+    slug: str, preset_name: str | None, user: str | None, now: datetime
+) -> dict[str, Any]:
+    """The `archive_name` context: every value squeezed into the archive segment alphabet."""
     return {
-        "session_slug": _segment(session.slug),
-        "preset_name": _segment(session.preset_name or ""),
+        "session_slug": _segment(slug),
+        "preset_name": _segment(preset_name or ""),
         "now": format_now(now),
         "date": now.astimezone(UTC).strftime("%Y-%m-%d"),
-        "user": _segment(session.created_by_service or ""),
+        "user": _segment(user or ""),
     }
 
 
@@ -76,7 +79,9 @@ def session_context(
     The `archive_name` surface alone takes a `now` override: a save name is rendered at save time.
     """
     if surface == "archive_name":
-        return _archive_context(session, now or session.created_at)
+        return archive_context(
+            session.slug, session.preset_name, session.created_by_service, now or session.created_at
+        )
     ctx: dict[str, Any] = {
         "session_slug": session.slug,
         "preset_name": session.preset_name or "",

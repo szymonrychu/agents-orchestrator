@@ -16,6 +16,7 @@ from agents_orchestrator.cache.presign import (
     delete_keys,
     latest_under,
     list_archives,
+    list_page,
     presign_get,
 )
 from agents_orchestrator.settings import Settings
@@ -219,3 +220,20 @@ def test_client_config_uses_when_required_checksums_timeouts_and_retries():
     assert cfg.response_checksum_validation == "when_required"
     assert cfg.connect_timeout and cfg.read_timeout
     assert cfg.retries["total_max_attempts"] >= 3
+
+
+def test_list_page_returns_the_token_of_the_next_page(stub):
+    stub.add_response(
+        "list_objects_v2",
+        _page([f"{PREFIX}a.tar.zst"], "t9", True),
+        {"Bucket": "b", "Prefix": PREFIX, "MaxKeys": 5},
+    )
+    stub.add_response(
+        "list_objects_v2",
+        _page([f"{PREFIX}b.tar.zst"]),
+        {"Bucket": "b", "Prefix": PREFIX, "MaxKeys": 5, "ContinuationToken": "t9"},
+    )
+    items, token = list_page(_settings(), PREFIX, limit=5)
+    assert [o.key for o in items] == [f"{PREFIX}a.tar.zst"] and token == "t9"
+    items, token = list_page(_settings(), PREFIX, limit=5, token="t9")
+    assert [o.key for o in items] == [f"{PREFIX}b.tar.zst"] and token is None
