@@ -4,6 +4,8 @@ agents-orchestrator is a headless `/api/v1` that defines, runs, messages and dis
 
 ## Development
 
+Run `pre-commit install` once per clone to enable the gitleaks hook.
+
 Tasks run through mise:
 
 - `mise run install` - sync dependencies
