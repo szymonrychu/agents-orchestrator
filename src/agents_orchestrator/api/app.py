@@ -14,11 +14,13 @@ from psycopg_pool import AsyncConnectionPool
 from agents_orchestrator import __version__
 from agents_orchestrator.api import (
     admin,
+    admin_relay,
     agent,
     archives,
     autoclose,
     chat,
     errors,
+    forward,
     messages,
     presets,
     secret_store,
@@ -62,6 +64,7 @@ def create_app(
             await listener.stop()
             await workspace.close_client(app)
             await chat.close_client(app)
+            await forward.close_client(app, admin_relay.STATE_ATTR)
             await secret_store.close_kube(app)
             if owns_pool:
                 await app.state.pool.close()
@@ -79,6 +82,7 @@ def create_app(
     app.state.listener = listener
     app.state.wrapper_http = None
     app.state.chat_http = None
+    app.state.admin_http = None
     app.state.kube = kube  # given (tests) or built on first use by api.secret_store
     app.state.kube_owned = False
     app.state.stream_poll_seconds = stream_poll_seconds

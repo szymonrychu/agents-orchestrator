@@ -107,7 +107,7 @@ async def test_patch_session_retired_405(http):
         if path.startswith("/api/v1") and "PATCH" in methods
     ]
     spec = (await http.get("/api/v1/openapi.json")).json()
-    assert not [p for p, ops in spec["paths"].items() if "patch" in ops]
+    assert not [p for p, ops in spec["paths"].items() if p.startswith("/api/v1") and "patch" in ops]
 
 
 async def test_delete_is_discard_without_purge(http, pool):

@@ -16,9 +16,6 @@ carry the method, path and status only, never a token or a body.
 
 from __future__ import annotations
 
-import asyncio
-import json
-import logging
 from typing import Any
 from urllib.parse import quote
 
@@ -26,36 +23,26 @@ import httpx
 from fastapi import APIRouter, FastAPI, Request, Response
 from pydantic import BaseModel, ConfigDict
 
+from agents_orchestrator.api import forward as forward_core
 from agents_orchestrator.api.agent import Caller, _leads, _session
 from agents_orchestrator.api.errors import ApiError
 from agents_orchestrator.api.sessions import Cfg, Pool
 
-log = logging.getLogger(__name__)
-
 router = APIRouter(prefix="/agent/v1/chat", tags=["agent"])
 
-MAX_BODY_BYTES = 256 * 1024
-TIMEOUT_SECONDS = 10.0
+MAX_BODY_BYTES = forward_core.MAX_BODY_BYTES
+TIMEOUT_SECONDS = forward_core.TIMEOUT_SECONDS
 UPSTREAM_PREFIX = "/chat/v1"
-
-
-def new_client() -> httpx.AsyncClient:
-    return httpx.AsyncClient(timeout=TIMEOUT_SECONDS)
+STATE_ATTR = "chat_http"
 
 
 def client(app: FastAPI) -> httpx.AsyncClient:
     """The app's upstream client, created on first use; tests set `app.state.chat_http`."""
-    http = getattr(app.state, "chat_http", None)
-    if http is None:
-        http = app.state.chat_http = new_client()
-    return http
+    return forward_core.client(app, STATE_ATTR)
 
 
 async def close_client(app: FastAPI) -> None:
-    http = getattr(app.state, "chat_http", None)
-    if http is not None:
-        app.state.chat_http = None
-        await http.aclose()
+    await forward_core.close_client(app, STATE_ATTR)
 
 
 class ChatMessageIn(BaseModel):
@@ -94,57 +81,21 @@ def _json_body(model: type[BaseModel]) -> dict[str, Any]:
     return {"requestBody": {"required": True, "content": schema}}
 
 
-async def _capped_body(request: Request) -> bytes:
-    declared = request.headers.get("content-length")
-    if declared is not None and declared.isdigit() and int(declared) > MAX_BODY_BYTES:
-        raise _too_large()
-    chunks: list[bytes] = []
-    size = 0
-    async for chunk in request.stream():
-        size += len(chunk)
-        if size > MAX_BODY_BYTES:
-            raise _too_large()
-        chunks.append(chunk)
-    return b"".join(chunks)
-
-
-def _too_large() -> ApiError:
-    return ApiError(413, "payload_too_large", f"the request body exceeds {MAX_BODY_BYTES} bytes")
-
-
-def _unavailable() -> ApiError:
-    return ApiError(503, "chat_unavailable", "the chat upstream is unavailable")
-
-
 async def forward(
     request: Request, method: str, path: str, body: bytes | None, session: str, slug: str
 ) -> Response:
     """Send one call to the chat upstream and hand its status and JSON body back unchanged."""
     settings = request.app.state.settings
-    url = settings.chat_url.rstrip("/") + UPSTREAM_PREFIX + path
-    query = request.scope.get("query_string", b"").decode("latin-1")
-    if query:
-        url += "?" + query
-    headers = {
-        "Authorization": f"Bearer {settings.chat_token}",
-        "X-Orch-Session": session,
-        "X-Orch-Slug": slug,
-    }
-    if body is not None:
-        headers["Content-Type"] = "application/json"
-    try:
-        async with asyncio.timeout(TIMEOUT_SECONDS):
-            upstream = await client(request.app).request(method, url, content=body, headers=headers)
-    except (httpx.HTTPError, TimeoutError) as exc:
-        log.warning("chat relay %s %s unavailable: %s", method, path, type(exc).__name__)
-        raise _unavailable() from None
-    try:
-        json.loads(upstream.content)
-    except ValueError:
-        log.warning("chat relay %s %s status %s: not JSON", method, path, upstream.status_code)
-        raise _unavailable() from None
-    log.info("chat relay %s %s status %s", method, path, upstream.status_code)
-    return Response(upstream.content, upstream.status_code, media_type="application/json")
+    target = forward_core.Target(
+        "chat relay",
+        settings.chat_url.rstrip("/") + UPSTREAM_PREFIX,
+        settings.chat_token,
+        STATE_ATTR,
+        "chat_unavailable",
+        TIMEOUT_SECONDS,
+    )
+    status, content = await forward_core.forward(request, target, method, path, body, session, slug)
+    return Response(content, status, media_type="application/json")
 
 
 async def _relay(
@@ -160,7 +111,7 @@ async def _relay(
             raise ApiError(403, "not_leader", "only the leader of a session can use the chat")
     if not settings.chat_available:
         raise ApiError(503, "chat_unconfigured", "no chat upstream is configured")
-    body = await _capped_body(request) if method == "POST" else None
+    body = await forward_core.capped_body(request) if method == "POST" else None
     return await forward(request, method, path, body, str(own.id), own.slug)
 
 

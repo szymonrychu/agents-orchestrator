@@ -215,6 +215,14 @@ class Settings(BaseSettings):
     chat_url: str = ""
     chat_token: str = Field(default="", repr=False)
 
+    # superleader admin relay upstreams (url and service token come as a pair, or neither)
+    webhook_url: str = ""
+    webhook_token: str = Field(default="", repr=False)
+    schedule_url: str = ""
+    schedule_token: str = Field(default="", repr=False)
+    connector_url: str = ""
+    connector_token: str = Field(default="", repr=False)
+
     def __init__(self, **values: object) -> None:
         try:
             super().__init__(**values)
@@ -461,6 +469,28 @@ class Settings(BaseSettings):
                 raise _Bad("must not carry a query or fragment (the relay appends /chat/v1/...)")
         return v
 
+    @field_validator("webhook_url", "schedule_url", "connector_url")
+    @classmethod
+    def _check_admin_url(cls, v: str) -> str:
+        if v:
+            parsed = urlparse(v)
+            if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                raise _Bad("must be an http or https URL")
+            if parsed.query or parsed.fragment:
+                raise _Bad("must not carry a query or fragment (the relay appends the path)")
+        return v
+
+    @field_validator("webhook_token", "schedule_token", "connector_token")
+    @classmethod
+    def _check_admin_pair(cls, v: str, info: ValidationInfo) -> str:
+        name = (info.field_name or "").removesuffix("_token")
+        url = info.data.get(f"{name}_url")
+        if url is not None and bool(url) != bool(v):
+            raise _Bad(
+                f"set ORCH_{name.upper()}_URL and ORCH_{name.upper()}_TOKEN together, or neither"
+            )
+        return v
+
     @field_validator("cache_s3_api_secret_access_key")
     @classmethod
     def _check_api_pair(cls, v: str, info: ValidationInfo) -> str:
@@ -534,6 +564,11 @@ class Settings(BaseSettings):
 
     def api_s3_credentials(self) -> tuple[str, str]:
         return self.cache_s3_api_access_key_id, self.cache_s3_api_secret_access_key
+
+    def admin_upstream(self, name: str) -> tuple[str, str] | None:
+        """(url, token) of the admin relay upstream `webhook`, `schedule` or `connector`."""
+        url = getattr(self, f"{name}_url")
+        return (url, getattr(self, f"{name}_token")) if url else None
 
     @property
     def chat_available(self) -> bool:

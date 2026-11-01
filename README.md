@@ -92,6 +92,12 @@ Every process reads `ORCH_*` variables (the contract `agents-orchestrator-settin
 | `ORCH_SESSION_MESSAGE_PAIR_MAX_PER_HOUR` | `30` | api | cross-session messages one pair of sessions may exchange, both directions, in the last hour (at least 1); above it a send is refused 429 `pair_budget` |
 | `ORCH_CHAT_URL` | empty | api | http or https base URL of the chat upstream (the matrix connector's agent listener); the chat relay calls `{ORCH_CHAT_URL}/chat/v1/...`. No query or fragment. Set together with `ORCH_CHAT_TOKEN` or neither; empty answers every `/agent/v1/chat/*` call 503 `chat_unconfigured` |
 | `ORCH_CHAT_TOKEN` | empty | api | bearer token the chat relay presents to the chat upstream (`Authorization: Bearer`); secret, never in a repr, a log line or an error body. Set together with `ORCH_CHAT_URL` or neither, else a settings error naming both |
+| `ORCH_WEBHOOK_URL` | empty | api | http or https base URL of the agents-webhook admin listener; the superleader admin relay (`/agent/v1/admin/webhooks/*`) calls `/webhooks/api/v1/...`. No query or fragment. Set together with `ORCH_WEBHOOK_TOKEN` or neither; empty answers those calls 503 `upstream_unconfigured` |
+| `ORCH_WEBHOOK_TOKEN` | empty | api | service bearer the admin relay presents to that upstream (`Authorization: Bearer`); secret, never in a repr, a log line or an error body. Set together with `ORCH_WEBHOOK_URL` or neither |
+| `ORCH_SCHEDULE_URL` | empty | api | http or https base URL of the agents-schedule admin listener; the superleader admin relay (`/agent/v1/admin/schedules/*`) calls `/schedules/api/v1/...`. No query or fragment. Set together with `ORCH_SCHEDULE_TOKEN` or neither; empty answers those calls 503 `upstream_unconfigured` |
+| `ORCH_SCHEDULE_TOKEN` | empty | api | service bearer the admin relay presents to that upstream (`Authorization: Bearer`); secret, never in a repr, a log line or an error body. Set together with `ORCH_SCHEDULE_URL` or neither |
+| `ORCH_CONNECTOR_URL` | empty | api | http or https base URL of the matrix connector agent listener; the superleader admin relay (`/agent/v1/admin/chats/*`) calls `/chat/v1/admin/...`. No query or fragment. Set together with `ORCH_CONNECTOR_TOKEN` or neither; empty answers those calls 503 `upstream_unconfigured` |
+| `ORCH_CONNECTOR_TOKEN` | empty | api | service bearer the admin relay presents to that upstream (`Authorization: Bearer`); secret, never in a repr, a log line or an error body. Set together with `ORCH_CONNECTOR_URL` or neither |
 
 ## Commands
 
