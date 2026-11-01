@@ -1,9 +1,7 @@
 """Chat relay (`/agent/v1/chat`), served only on the agent port (design D2, D5, D12).
 
 A session leader reaches the user's chat through the orchestrator: every route runs
-`require_agent`, then the trigger-session check (403 `trigger_session`: a session created by
-agents-webhook or agents-schedule works on attacker-controlled text and never reaches the user's
-chat), then the leader check of `session_send` (403 `not_leader`), then requires the
+`require_agent`, then the leader check of `session_send` (403 `not_leader`), then requires the
 chat upstream configured (503 `chat_unconfigured`), then caps the body at 256 KiB (413
 `payload_too_large`) and forwards the call to `{ORCH_CHAT_URL}/chat/v1/...`. The forwarded request
 carries only the chat bearer (`ORCH_CHAT_TOKEN`), `X-Orch-Session` and `X-Orch-Slug` of the caller
@@ -67,7 +65,7 @@ class ChatReactionIn(BaseModel):
 _PASS_THROUGH = {"description": "The chat upstream's status and JSON body, unchanged"}
 _RESPONSES: dict[int | str, dict[str, Any]] = {
     401: {"description": "unauthorized: missing or invalid agent credentials"},
-    403: {"description": "forbidden (not a live agent pod), trigger_session or not_leader"},
+    403: {"description": "forbidden (not a live agent pod) or not_leader"},
     503: {"description": "chat_unconfigured or chat_unavailable"},
 }
 _POST_RESPONSES: dict[int | str, dict[str, Any]] = {
@@ -103,10 +101,6 @@ async def _relay(
 ) -> Response:
     async with pool.connection() as conn:
         own = await _session(conn, agent)
-        if own.trigger_created:
-            raise ApiError(
-                403, "trigger_session", "sessions started by a trigger service cannot use the chat"
-            )
         if not await _leads(conn, agent, own):
             raise ApiError(403, "not_leader", "only the leader of a session can use the chat")
     if not settings.chat_available:

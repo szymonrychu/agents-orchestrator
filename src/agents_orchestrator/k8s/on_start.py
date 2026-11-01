@@ -33,16 +33,15 @@ INIT_SCRIPTS_TOOLS = ["init_scripts_get", "init_scripts_edit"]
 CHAT_TOOLS = ["chat_rooms", "chat_send", "chat_react", "chat_status"]
 
 
-def orchestrator_allow(spec: SessionSpec, *, chat: bool = True) -> list[str]:
+def orchestrator_allow(spec: SessionSpec) -> list[str]:
     """The orchestrator tools this session's agents may call.
 
     Every session gets the session tools (D11), the init-scripts tools and the chat tools (D13),
     alone sessions included; the agent API decides what each caller may list, send, edit and say
-    in the chat (leader only), so the list never depends on `session_messaging`. `chat=False`
-    drops the chat tools: sessions a trigger service started read attacker-controlled text and
-    must not be able to message the user.
+    in the chat (leader only), so the list never depends on `session_messaging`. Who created the
+    session does not change the list.
     """
-    shared = [*SESSION_TOOLS, *INIT_SCRIPTS_TOOLS, *(CHAT_TOOLS if chat else [])]
+    shared = [*SESSION_TOOLS, *INIT_SCRIPTS_TOOLS, *CHAT_TOOLS]
     if not spec.hive:
         return shared
     scale = [SCALE_TOOL] if spec.scalable else []
@@ -50,7 +49,7 @@ def orchestrator_allow(spec: SessionSpec, *, chat: bool = True) -> list[str]:
 
 
 def _orchestrator_entry(
-    spec: SessionSpec, settings: Settings, slug: str | None, chat: bool
+    spec: SessionSpec, settings: Settings, slug: str | None
 ) -> dict[str, Any] | None:
     if not settings.agent_api_url or not slug:
         return None
@@ -61,7 +60,7 @@ def _orchestrator_entry(
             f"?ref={settings.any_mcp_plugins_ref}"
         ),
         "namespace": PLUGIN_NAME,
-        "allow": orchestrator_allow(spec, chat=chat),
+        "allow": orchestrator_allow(spec),
         "config": {
             "base_url": "${ORCH_AGENT_URL}",
             "token": "${ORCH_AGENT_TOKEN}",
@@ -77,14 +76,14 @@ def _orchestrator_entry(
 
 
 def any_mcp_config(
-    spec: SessionSpec, settings: Settings, slug: str | None = None, *, chat: bool = True
+    spec: SessionSpec, settings: Settings, slug: str | None = None
 ) -> dict[str, Any]:
     base = (
         spec.any_mcp_config
         if spec.any_mcp_config is not None
         else settings.default_any_mcp_config()
     )
-    entry = _orchestrator_entry(spec, settings, slug, chat)
+    entry = _orchestrator_entry(spec, settings, slug)
     sources = [{"name": source_plugin_name(s), "source": s} for s in spec.any_mcp_sources or []]
     if entry is None and not sources:
         return base
@@ -95,16 +94,14 @@ def any_mcp_config(
     return {**base, "plugins": [*kept, *sources, entry]}
 
 
-def render_on_start(
-    spec: SessionSpec, settings: Settings, slug: str | None = None, *, chat: bool = True
-) -> str:
+def render_on_start(spec: SessionSpec, settings: Settings, slug: str | None = None) -> str:
     """The onStart script; an install failure is one stderr line naming the step, never an exit.
 
     D6: the venv plus pip install and `any-mcp plugins install` are swallowed (the wrapper denies
     on exit 2 whatever on_error says); a failed package install writes no `.ref`, so the next
     start retries, and every later install step and the `--help` check are skipped.
     """
-    body = json.dumps(any_mcp_config(spec, settings, slug, chat=chat), indent=2, sort_keys=True)
+    body = json.dumps(any_mcp_config(spec, settings, slug), indent=2, sort_keys=True)
     if DELIMITER in body.splitlines():
         raise ValueError(f"any-mcp config contains the heredoc delimiter line {DELIMITER}")
     ref = shlex.quote(settings.any_mcp_ref)

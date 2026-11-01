@@ -1,7 +1,7 @@
 """Admin routes of the agent port (`/agent/v1/admin`), for a superleader session (D3, D10).
 
 One gate covers the whole router: `require_superleader` (a live agent of a session with
-`session_messaging` set that no trigger service created). Every call is audited without values
+`session_messaging` set, whoever created the session). Every call is audited without values
 or bodies (D15): one log line and one `events` row the UI feed shows.
 """
 
@@ -39,12 +39,11 @@ _WRAPPER_SESSION = "admin"  # the events key of audit rows, which no wrapper ses
 
 
 async def require_superleader(request: Request, agent: Caller, pool: Pool) -> sessions_repo.Session:
-    """The caller's session. 403 `trigger_session` first, then 403 `not_superleader`."""
+    """The caller's session; 403 `not_superleader` unless its spec enables `session_messaging`.
+    Who created the session does not matter."""
     async with pool.connection() as conn:
         session = await sessions_repo.get(conn, agent.session_id)
     assert session is not None
-    if session.trigger_created:
-        raise ApiError(403, "trigger_session", "trigger-created sessions have no admin access")
     if not session.spec.session_messaging:
         raise ApiError(403, "not_superleader", "admin routes need a superleader session")
     request.state.admin_caller = (agent, session)
@@ -217,7 +216,7 @@ async def create_session(
     body: schemas.CreateSession, request: Request, pool: Pool, settings: Cfg
 ) -> schemas.SessionView:
     """Same body and rules as the main port; the caller's session is recorded as the creator
-    and `created_by_service` stays empty, so the new session is never a trigger session."""
+    and `created_by_service` stays empty."""
     _, caller = caller_of(request)
     return await sessions_api.create(pool, settings, body, created_by_session=caller.id)
 

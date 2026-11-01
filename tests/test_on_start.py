@@ -123,29 +123,9 @@ def rendered_allow(created_by_service: str | None, **spec_fields) -> list[str]:
     return next(p for p in plugins if p["name"] == "orchestrator")["allow"]
 
 
-def test_trigger_service_sessions_get_no_chat_tools():
-    """Security: a session started by agents-webhook or agents-schedule reads attacker-controlled
-    text, so its onStart config carries the other tools and none of the chat tools."""
-    for service in ("agents-webhook", "agents-schedule"):
-        assert rendered_allow(service, replicas=1) == [
-            *SESSION_TOOLS,
-            *INIT_SCRIPTS_TOOLS,
-        ], service
-        assert rendered_allow(service, replicas=2, max_replicas=4) == [
-            *HIVE_TOOLS,
-            "scale",
-            *SESSION_TOOLS,
-            *INIT_SCRIPTS_TOOLS,
-        ], service
-    assert on_start.orchestrator_allow(SessionSpec(replicas=1), chat=False) == [
-        *SESSION_TOOLS,
-        *INIT_SCRIPTS_TOOLS,
-    ]
-
-
-def test_other_creators_keep_the_chat_tools():
-    """User sessions (no creator) and the matrix connector's sessions keep every chat tool."""
-    for service in (None, "agents-matrix-connector"):
+def test_every_creator_gets_the_chat_tools():
+    """Who created the session does not change the allow list (an enabled flag is honoured)."""
+    for service in (None, "agents-webhook", "agents-schedule", "agents-matrix-connector"):
         assert rendered_allow(service, replicas=1) == TAIL_TOOLS, service
         assert rendered_allow(service, replicas=2) == [*HIVE_TOOLS, "scale", *TAIL_TOOLS], service
 

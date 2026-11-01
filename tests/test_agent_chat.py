@@ -219,22 +219,9 @@ def make_rig(
 # -------------------------------------------------------------------------------- forwarding
 
 
-async def test_trigger_service_session_refused(monkeypatch):
-    """A session started by agents-webhook or agents-schedule (attacker-controlled text in its
-    prompt) never reaches the user's chat: 403 `trigger_session`, no upstream call, on every route
-    and for a leader and a lone session alike."""
-    for service in ("agents-webhook", "agents-schedule"):
-        for hive in (True, False):
-            rig = make_rig(monkeypatch, hive=hive, created_by_service=service)
-            for method, path, _ in ROUTES:
-                r = await rig.call(method, path)
-                assert_error(r, 403, "trigger_session")
-            assert rig.upstream.seen == [], service
-
-
-async def test_user_session_may_use_chat(monkeypatch):
-    """A user-created session (no creator) and a connector-created one keep the relay."""
-    for service in (None, "agents-matrix-connector"):
+async def test_any_creator_may_use_chat(monkeypatch):
+    """The creator does not matter: every kind of session keeps the relay."""
+    for service in (None, "agents-webhook", "agents-schedule", "agents-matrix-connector"):
         rig = make_rig(monkeypatch, created_by_service=service)
         for method, path, upstream_path in ROUTES:
             rig.upstream.seen.clear()

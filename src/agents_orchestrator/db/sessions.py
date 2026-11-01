@@ -19,10 +19,6 @@ from agents_orchestrator.spec import SessionSpec, validate_slug
 
 CHANNEL = "session_changed"
 
-# Service tokens (ORCH_SERVICE_TOKENS names) of the trigger services: their sessions work on
-# attacker-controlled text (PR, issue and alert bodies), so they never get the chat tools.
-TRIGGER_SERVICES = frozenset({"agents-webhook", "agents-schedule"})
-
 
 class SessionExists(Exception):
     """A session with this slug already has a row."""
@@ -67,12 +63,6 @@ class Session:
     secret_versions: dict[str, str] = field(default_factory=dict)
     # the superleader session that created it through the admin routes
     created_by_session: uuid.UUID | None = None
-
-    @property
-    def trigger_created(self) -> bool:
-        """True when a trigger service created the session; NULL (a user, or a session from before
-        the column existed) is not a trigger service."""
-        return self.created_by_service in TRIGGER_SERVICES
 
 
 def _from_row(row: dict[str, Any]) -> Session:

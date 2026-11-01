@@ -68,20 +68,22 @@ async def test_gate_table_over_all_admin_routes(pool, dsn):
             assert_error(non_super, 403, "not_superleader")
             async with client_for(app, trigger.leader_ip) as http:
                 trig = await http.request(method, path, json={}, headers=headers(trigger.id))
-            assert_error(trig, 403, "trigger_session")
+            assert trig.status_code not in (401, 403), (method, route.path, trig.text)
             async with client_for(app, boss.leader_ip) as http:
                 ok = await http.request(method, path, json={}, headers=headers(boss.id))
             assert ok.status_code not in (401, 403), (method, route.path, ok.text)
 
 
-@pytest.mark.parametrize("service", ["agents-webhook", "agents-schedule"])
-async def test_trigger_created_session_is_refused_even_when_flagged(pool, dsn, service):
+@pytest.mark.parametrize(
+    "service", ["agents-webhook", "agents-schedule", "agents-matrix-connector"]
+)
+async def test_flagged_session_is_admitted_whoever_created_it(pool, dsn, service):
     app = create_app(make_settings(dsn), pool)
     s = await hive(pool, f"g-t-{service[-4:]}", superleader=True)
     await mark_trigger(pool, s.id, service)
     async with client_for(app, s.leader_ip) as http:
         r = await http.get(GET_PRESETS, headers=headers(s.id))
-    assert_error(r, 403, "trigger_session")
+    assert r.status_code == 200, r.text
 
 
 async def test_superleader_reads_presets(pool, dsn):

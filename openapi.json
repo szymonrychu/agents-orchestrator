@@ -6009,7 +6009,7 @@
     },
     "/agent/v1/admin/sessions": {
       "post": {
-        "description": "Same body and rules as the main port; the caller's session is recorded as the creator\nand `created_by_service` stays empty, so the new session is never a trigger session.",
+        "description": "Same body and rules as the main port; the caller's session is recorded as the creator\nand `created_by_service` stays empty.",
         "operationId": "create_session_agent_v1_admin_sessions_post",
         "parameters": [
           {
@@ -7127,7 +7127,7 @@
             "description": "unauthorized: missing or invalid agent credentials"
           },
           "403": {
-            "description": "forbidden (not a live agent pod), trigger_session or not_leader"
+            "description": "forbidden (not a live agent pod) or not_leader"
           },
           "413": {
             "description": "payload_too_large: the body exceeds 256 KiB"
@@ -7211,7 +7211,7 @@
             "description": "unauthorized: missing or invalid agent credentials"
           },
           "403": {
-            "description": "forbidden (not a live agent pod), trigger_session or not_leader"
+            "description": "forbidden (not a live agent pod) or not_leader"
           },
           "422": {
             "content": {
@@ -7310,7 +7310,7 @@
             "description": "unauthorized: missing or invalid agent credentials"
           },
           "403": {
-            "description": "forbidden (not a live agent pod), trigger_session or not_leader"
+            "description": "forbidden (not a live agent pod) or not_leader"
           },
           "413": {
             "description": "payload_too_large: the body exceeds 256 KiB"
@@ -7385,7 +7385,7 @@
             "description": "unauthorized: missing or invalid agent credentials"
           },
           "403": {
-            "description": "forbidden (not a live agent pod), trigger_session or not_leader"
+            "description": "forbidden (not a live agent pod) or not_leader"
           },
           "422": {
             "content": {
