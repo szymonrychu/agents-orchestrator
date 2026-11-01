@@ -85,6 +85,13 @@ Every process reads `ORCH_*` variables (the contract `agents-orchestrator-settin
 | `ORCH_ANY_MCP_PLUGINS_REF` | `v0.6.1` | api, reconciler | any-mcp plugins pinned release tag vX.Y.Z (never a branch) |
 | `ORCH_ON_START_TIMEOUT_SECONDS` | `600` | api, reconciler | onStart hook timeout |
 | `ORCH_KUBE_ACCESS_SERVICE_ACCOUNT` | empty | api, reconciler | ServiceAccount (bound to the `cluster-admin` ClusterRole by the chart) that pods of a `kube_access` session run as; empty refuses `spec.kube_access: true` with 422 and `GET /api/v1/meta` reports `kube_access.available` false |
+| `ORCH_DOCKER_IMAGE` | empty | api, reconciler | Docker-in-Docker image of the privileged sidecar of a `docker` session, pinned by semver tag like `docker:27.3.1-dind` (`latest`, `dind` and sha pins are refused at startup); empty refuses `spec.docker: true` with 422 and `GET /api/v1/meta` reports `docker.available` false |
+| `ORCH_DOCKER_REGISTRY_MIRROR` | empty | api, reconciler | dockerd `--registry-mirror` of the sidecar, `[http(s)://]host[:port]` with no path (dockerd refuses one); empty = no mirror |
+| `ORCH_DOCKER_STORAGE` | `30Gi` | api, reconciler | default `sizeLimit` of the sidecar's `/var/lib/docker` emptyDir (exceeding it evicts the pod); at most `ORCH_MAX_DOCKER_STORAGE` |
+| `ORCH_DOCKER_CPU_REQUEST`, `ORCH_DOCKER_CPU_LIMIT` | `500m`, `4` | api, reconciler | default sidecar CPU; the limit is at most `ORCH_MAX_DOCKER_CPU` and at least the request |
+| `ORCH_DOCKER_MEMORY_REQUEST`, `ORCH_DOCKER_MEMORY_LIMIT` | `1Gi`, `8Gi` | api, reconciler | default sidecar memory; the limit is at most `ORCH_MAX_DOCKER_MEMORY` and at least the request |
+| `ORCH_DOCKER_EPHEMERAL_REQUEST` | `5Gi` | api, reconciler | `ephemeral-storage` request of the sidecar |
+| `ORCH_MAX_DOCKER_STORAGE`, `ORCH_MAX_DOCKER_CPU`, `ORCH_MAX_DOCKER_MEMORY` | `100Gi`, `8`, `16Gi` | api | caps for `spec.docker_storage`, `docker_cpu`, `docker_memory` (422 above) |
 | `ORCH_AGENT_SERVICE_ACCOUNT` | `default` | reconciler | unprivileged ServiceAccount of every other agent pod and of every init, check and cache Job, with no token mounted |
 | `ORCH_SESSION_MESSAGE_RATE_PER_MINUTE` | `10` | api | cross-session messages one sender session may send in the last 60 s (at least 1); above it a send is refused 429 `rate_limited` |
 | `ORCH_SESSION_MESSAGE_QUEUED_MAX` | `20` | api | queued cross-session messages one target session may hold (at least 1); above it a send is refused 409 `target_queue_full` |
