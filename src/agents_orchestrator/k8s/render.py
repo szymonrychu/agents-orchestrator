@@ -17,7 +17,7 @@ from agents_orchestrator.dispatcher.hive import compact_pct
 from agents_orchestrator.k8s.labels import object_names, prefix, selector, session_labels
 from agents_orchestrator.k8s.on_start import render_on_start
 from agents_orchestrator.settings import Settings
-from agents_orchestrator.spec import WORKDIR_ROOT, SessionSpec, WrapperSettings
+from agents_orchestrator.spec import WORKDIR_ROOT, SessionSpec, WrapperSettings, parse_quantity
 from agents_orchestrator.tokens import SessionTokens
 
 HASH_ANNOTATION = "agents.szymonrichert.pl/config-hash"
@@ -29,6 +29,8 @@ STARTUP_SLACK = 12
 # Always passed to the any-mcp stdio child; ORCH_AGENT_URL is listed even when unset (the wrapper
 # passes through only variables that exist).
 KUBE_PASSTHROUGH_ENV = ("KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT")
+DOCKER_PASSTHROUGH_ENV = ("DOCKER_HOST",)
+DOCKER_CONFIG_DIR = "/docker-config"
 AGENT_PASSTHROUGH_ENV = ("ORCH_AGENT_TOKEN", "ORCH_AGENT_URL", "ORCH_SESSION_ID", "POD_NAME")
 
 AGENT_USAGE_TOKEN_ENV = "CCW_USAGE_TOKEN"
@@ -63,6 +65,109 @@ def agent_identity(settings: Settings) -> dict[str, Any]:
 def kube_access_granted(spec: SessionSpec, settings: Settings) -> bool:
     """A kube_access spec gets the privileged identity only while the setting is set (D3)."""
     return bool(spec.kube_access and settings.kube_access_service_account)
+
+
+DOCKER_SOCKET_DIR = "/var/run/docker"
+DOCKER_HOST_URL = f"unix://{DOCKER_SOCKET_DIR}/docker.sock"
+DOCKER_CLI_DIR = "/cli"
+DOCKER_GID = 1000
+DOCKER_STARTUP_SECONDS = 120
+
+
+def docker_enabled(spec: SessionSpec, settings: Settings) -> bool:
+    """An enabled docker flag is honoured or loud: no image means no pod, never a muted flag."""
+    if not spec.docker:
+        return False
+    if not settings.docker_available:
+        raise ValueError("docker is enabled but ORCH_DOCKER_IMAGE is unset")
+    return True
+
+
+def _docker_limit_request(request: str, limit: str) -> str:
+    return request if parse_quantity(request) <= parse_quantity(limit) else limit
+
+
+def _docker_init_containers(spec: SessionSpec, settings: Settings) -> list[dict[str, Any]]:
+    """The CLI copy, then the privileged dind native sidecar (socket only, no TCP, no TLS)."""
+    image = settings.docker_image
+    cpu = spec.docker_cpu or settings.docker_cpu_limit
+    memory = spec.docker_memory or settings.docker_memory_limit
+    command = [
+        "dockerd-entrypoint.sh",
+        "dockerd",
+        f"--host={DOCKER_HOST_URL}",
+        f"--group={DOCKER_GID}",
+    ]
+    mounts = [
+        {"name": "docker-sock", "mountPath": DOCKER_SOCKET_DIR},
+        {"name": "docker-data", "mountPath": "/var/lib/docker"},
+        {"name": "lib-modules", "mountPath": "/lib/modules", "readOnly": True},
+    ]
+    if settings.image_pull_secret:
+        mounts.append({"name": "docker-auth", "mountPath": "/root/.docker", "readOnly": True})
+    cli_dir = "/usr/local/libexec/docker/cli-plugins"
+    return [
+        {
+            "name": "docker-cli",
+            "image": image,
+            "command": [
+                "sh",
+                "-ec",
+                f"cp /usr/local/bin/docker {DOCKER_CLI_DIR}/docker"
+                f" && mkdir -p {DOCKER_CLI_DIR}/cli-plugins"
+                f" && cp {cli_dir}/* {DOCKER_CLI_DIR}/cli-plugins/",
+            ],
+            "volumeMounts": [{"name": "docker-cli", "mountPath": DOCKER_CLI_DIR}],
+        },
+        {
+            "name": "dind",
+            "image": image,
+            "restartPolicy": "Always",
+            "command": command,
+            "env": [{"name": "DOCKER_TLS_CERTDIR", "value": ""}],
+            "securityContext": {"privileged": True, "runAsUser": 0},
+            "startupProbe": {
+                "exec": {"command": ["docker", "-H", DOCKER_HOST_URL, "info"]},
+                "periodSeconds": 2,
+                "failureThreshold": DOCKER_STARTUP_SECONDS // 2,
+            },
+            "resources": {
+                "requests": {
+                    "cpu": _docker_limit_request(settings.docker_cpu_request, cpu),
+                    "memory": _docker_limit_request(settings.docker_memory_request, memory),
+                    "ephemeral-storage": settings.docker_ephemeral_request,
+                },
+                "limits": {"cpu": cpu, "memory": memory},
+            },
+            "volumeMounts": mounts,
+        },
+    ]
+
+
+def _docker_volumes(spec: SessionSpec, settings: Settings) -> list[dict[str, Any]]:
+    volumes: list[dict[str, Any]] = [
+        {"name": "docker-sock", "emptyDir": {}},
+        # never the session PVC: overlay2 needs a local ext4/xfs filesystem
+        {
+            "name": "docker-data",
+            "emptyDir": {"sizeLimit": spec.docker_storage or settings.docker_storage},
+        },
+        {"name": "docker-cli", "emptyDir": {}},
+        {"name": "lib-modules", "hostPath": {"path": "/lib/modules"}},
+    ]
+    if settings.image_pull_secret:
+        # Harbor login: the pull secret's config.json, for the CLI (agent) and the daemon (dind).
+        volumes += [
+            {"name": "docker-config", "emptyDir": {}},
+            {
+                "name": "docker-auth",
+                "secret": {
+                    "secretName": settings.image_pull_secret,
+                    "items": [{"key": ".dockerconfigjson", "path": "config.json"}],
+                },
+            },
+        ]
+    return volumes
 
 
 def pod_identity(spec: SessionSpec, settings: Settings) -> dict[str, Any]:
@@ -219,8 +324,13 @@ def _apply_wrapper(cfg: dict[str, Any], wrapper: WrapperSettings, session: Sessi
 def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
     spec, slug = session.spec, session.slug
     kube_env = KUBE_PASSTHROUGH_ENV if kube_access_granted(spec, settings) else ()
+    docker_env = ()
+    if docker_enabled(spec, settings):
+        docker_env = DOCKER_PASSTHROUGH_ENV + (
+            ("DOCKER_CONFIG",) if settings.image_pull_secret else ()
+        )
     claude: dict[str, Any] = {
-        "passthrough_env": sorted([*spec.env, *AGENT_PASSTHROUGH_ENV, *kube_env]),
+        "passthrough_env": sorted([*spec.env, *AGENT_PASSTHROUGH_ENV, *kube_env, *docker_env]),
         "env": {
             "claude_code_oauth_token": "${CLAUDE_CODE_OAUTH_TOKEN}",
             "disable_autoupdater": True,
@@ -384,6 +494,34 @@ def _container(session: Session, settings: Settings, names: dict[str, str]) -> d
             {"name": "config", "mountPath": "/etc/ccw"},
         ],
     }
+    if docker_enabled(spec, settings):
+        container["env"].append({"name": "DOCKER_HOST", "value": DOCKER_HOST_URL})
+        container["volumeMounts"] += [
+            {"name": "docker-sock", "mountPath": DOCKER_SOCKET_DIR},
+            {
+                "name": "docker-cli",
+                "mountPath": "/usr/local/bin/docker",
+                "subPath": "docker",
+                "readOnly": True,
+            },
+            {
+                "name": "docker-cli",
+                "mountPath": "/usr/local/lib/docker/cli-plugins",
+                "subPath": "cli-plugins",
+                "readOnly": True,
+            },
+        ]
+        if settings.image_pull_secret:
+            container["env"].append({"name": "DOCKER_CONFIG", "value": DOCKER_CONFIG_DIR})
+            container["volumeMounts"] += [
+                {"name": "docker-config", "mountPath": DOCKER_CONFIG_DIR},
+                {
+                    "name": "docker-auth",
+                    "mountPath": f"{DOCKER_CONFIG_DIR}/config.json",
+                    "subPath": "config.json",
+                    "readOnly": True,
+                },
+            ]
     if spec.resources is not None:
         resources = {k: v for k, v in spec.resources.model_dump().items() if v}
         if resources:
@@ -460,6 +598,9 @@ def render_session(
             {"name": "any-mcp", "emptyDir": {}},
         ],
     }
+    if docker_enabled(spec, settings):
+        pod_spec["initContainers"] = _docker_init_containers(spec, settings)
+        pod_spec["volumes"] += _docker_volumes(spec, settings)
     if settings.image_pull_secret:
         pod_spec = {"imagePullSecrets": [{"name": settings.image_pull_secret}], **pod_spec}
     statefulset = {

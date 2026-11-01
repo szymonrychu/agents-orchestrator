@@ -232,6 +232,13 @@ async def meta(settings: Cfg) -> schemas.Meta:
             available=settings.cache_available, max_bytes=settings.cache_max_bytes
         ),
         kube_access=schemas.MetaKubeAccess(available=settings.kube_access_available),
+        docker=schemas.MetaDocker(
+            available=settings.docker_available,
+            storage=settings.docker_storage,
+            max_storage=settings.max_docker_storage,
+            max_cpu=settings.max_docker_cpu,
+            max_memory=settings.max_docker_memory,
+        ),
         hook_events=[schemas.MetaHookEvent(**asdict(e)) for e in HOOK_EVENT_SPECS],
         permission_modes=[schemas.MetaPermissionMode(**m) for m in PERMISSION_MODES],
         usage=schemas.MetaUsage(

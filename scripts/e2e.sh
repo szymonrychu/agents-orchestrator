@@ -27,6 +27,8 @@ ORCH_IMAGE=agents-orchestrator:e2e
 AGENT_IMAGE=agents-orchestrator-agent-test:e2e
 # a second tag of the same image: the roll-mid-turn e2e upgrades the release to it
 AGENT_IMAGE_NEXT=agents-orchestrator-agent-test:e2e-next
+# the dind sidecar image; keep it equal to docker.image in e2e/values-kind.yaml
+DIND_IMAGE=docker:27.3.1-dind
 PORT="${E2E_PORT:-18080}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/orch-e2e.XXXXXX")"
 export KUBECONFIG="$WORK/kubeconfig"
@@ -254,6 +256,8 @@ log "loading images into kind"
 load_image "$ORCH_IMAGE"
 load_image "$AGENT_IMAGE"
 load_image "$AGENT_IMAGE_NEXT"
+docker pull --quiet --platform "$PLATFORM" "$DIND_IMAGE" >&2
+load_image "$DIND_IMAGE"
 
 log "probing a ReadWriteMany StorageClass"
 STORAGE_CLASS="$(choose_rwx_storage_class)"

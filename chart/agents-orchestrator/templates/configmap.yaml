@@ -35,6 +35,23 @@ data:
   ORCH_AGENT_USAGE_URL: {{ .Values.agentUsage.url | quote }}
   ORCH_AGENT_USAGE_SECRET: {{ .Values.agentUsage.secretName | quote }}
   {{- end }}
+  {{- with .Values.docker }}
+  {{- if .image }}
+  {{- if not (regexMatch "^[a-z0-9][a-z0-9._:/-]*:[0-9]+\\.[0-9]+\\.[0-9]+-dind$" .image) }}
+  {{- fail (printf "agents-orchestrator: docker.image %q must be pinned by semver tag like docker:27.3.1-dind" .image) }}
+  {{- end }}
+  ORCH_DOCKER_IMAGE: {{ .image | quote }}
+  ORCH_DOCKER_STORAGE: {{ .storage | quote }}
+  ORCH_DOCKER_CPU_REQUEST: {{ .cpu.request | quote }}
+  ORCH_DOCKER_CPU_LIMIT: {{ .cpu.limit | quote }}
+  ORCH_DOCKER_MEMORY_REQUEST: {{ .memory.request | quote }}
+  ORCH_DOCKER_MEMORY_LIMIT: {{ .memory.limit | quote }}
+  ORCH_DOCKER_EPHEMERAL_REQUEST: {{ .ephemeralRequest | quote }}
+  ORCH_MAX_DOCKER_STORAGE: {{ .maxStorage | quote }}
+  ORCH_MAX_DOCKER_CPU: {{ .maxCpu | quote }}
+  ORCH_MAX_DOCKER_MEMORY: {{ .maxMemory | quote }}
+  {{- end }}
+  {{- end }}
   {{- with .Values.cache }}
   {{- if .s3.bucket }}
   ORCH_CACHE_S3_ENDPOINT: {{ .s3.endpoint | quote }}

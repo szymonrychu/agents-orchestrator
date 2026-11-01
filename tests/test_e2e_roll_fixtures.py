@@ -185,3 +185,10 @@ def test_resilient_client_never_resends_a_post_that_may_have_been_accepted(
     with resilient(handler, monkeypatch) as client, pytest.raises(exc):
         client.post("/sessions/x/messages", json={"text": "t"})
     assert handler.calls == 1
+
+
+def test_kind_values_pin_the_dind_image_the_script_loads() -> None:
+    """The dind sidecar image is semver-pinned and loaded into kind by scripts/e2e.sh."""
+    image = yaml.safe_load(VALUES.read_text())["docker"]["image"]
+    assert re.fullmatch(r"docker:\d+\.\d+\.\d+-dind", image), image
+    assert f"DIND_IMAGE={image}" in SCRIPT.read_text()
