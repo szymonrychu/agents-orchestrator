@@ -157,7 +157,8 @@ async def test_deleting_session_is_not_dispatched(pool):
     active = (await insert_session(pool))["id"]
     await _ready_agent(pool, deleting, free_ago=60)
     other = await _ready_agent(pool, active)
-    held = await _enqueue(pool, deleting, "first")
+    # enqueue_message now refuses a deleting session, so seed the queued row directly
+    held = (await insert_message(pool, deleting, text="first"))["id"]
     moving = await _enqueue(pool, active, "second")
 
     claim = await _claim(pool)

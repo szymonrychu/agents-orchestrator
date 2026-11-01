@@ -33,6 +33,10 @@ _CLAIM_LOCK_NAMESPACE = 0x6F726331  # "orc1"
 _SCAN_BATCH = 100
 
 
+class SessionBeingDeleted(Exception):
+    """The session is being deleted and takes no more edits or messages."""
+
+
 @dataclass(frozen=True)
 class Claim:
     message_id: int
@@ -146,6 +150,13 @@ async def enqueue_message(
     the target session at claim time.
     """
     async with conn.transaction():
+        # Share-lock the session row: the idle discard holds it FOR UPDATE while it re-checks, so
+        # a message either lands before that check (and cancels the discard) or is refused.
+        locked = await _one(
+            conn, "SELECT desired FROM sessions WHERE id = %s FOR SHARE", (session_id,)
+        )
+        if locked is not None and locked["desired"] != "active":
+            raise SessionBeingDeleted(str(session_id))
         row = await _one(
             conn,
             "INSERT INTO messages (session_id, text, target_agent_id, sender_session_id,"

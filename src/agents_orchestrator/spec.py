@@ -637,6 +637,9 @@ class SessionSpec(BaseModel):
     wrapper: WrapperSettings | None = None
     leader_lease_seconds: int | None = Field(default=None, ge=60, le=604800)
     autoclose_after_seconds: int | None = Field(default=None, ge=1, le=2592000)
+    # Idle-based discard: the session is discarded once it has been idle this long (see
+    # db.sessions.discard_idle). Unset means off.
+    discard_after_idle_seconds: int | None = Field(default=None, ge=60, le=2592000)
     # Read only by trigger services (agents-webhook, agents-schedule): send a new event to
     # the session still running for it. The orchestrator never acts on it, so a session a
     # user creates ignores it. Sparse: unset is not stored or dumped in a preset.

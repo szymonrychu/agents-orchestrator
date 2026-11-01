@@ -97,14 +97,17 @@ async def post_message(
         )
         if carries:
             text = await _with_start_prompt(session, text)
-        mid = await queue.enqueue_message(
-            conn,
-            session_id,
-            text,
-            body.target_agent_id,
-            lane=body.lane,
-            carries_start_prompt=carries,
-        )
+        try:
+            mid = await queue.enqueue_message(
+                conn,
+                session_id,
+                text,
+                body.target_agent_id,
+                lane=body.lane,
+                carries_start_prompt=carries,
+            )
+        except repo.SessionBeingDeleted as exc:
+            raise ApiError(409, "session_deleting", "session is being discarded") from exc
     return schemas.MessageAccepted(message_id=mid)
 
 

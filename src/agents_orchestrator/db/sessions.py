@@ -14,6 +14,7 @@ from psycopg.types.json import Jsonb
 from agents_orchestrator.db import leadership
 from agents_orchestrator.db.eligibility import ELIGIBLE
 from agents_orchestrator.db.pool import notify
+from agents_orchestrator.db.queue import SessionBeingDeleted
 from agents_orchestrator.spec import SessionSpec, validate_slug
 
 CHANNEL = "session_changed"
@@ -29,10 +30,6 @@ class SessionExists(Exception):
 
 class SessionNotFound(Exception):
     pass
-
-
-class SessionBeingDeleted(Exception):
-    """The session is being deleted and takes no more edits."""
 
 
 class ScaleRefused(Exception):
@@ -267,6 +264,61 @@ async def close_expired(conn: psycopg.AsyncConnection) -> list[uuid.UUID]:
         for session_id in ids:
             await _notify(conn, session_id)
     return ids
+
+
+# A session is idle when it has at least one live agent, every live agent is idle with no turn
+# and no attention, no message is queued, dispatching or verifying, and its init is not running.
+# `idle_since` is the latest signal: creation, agent free_since and attention, turn start and
+# end, message creation and dispatch, init start and finish.
+_IDLE_PREDICATE = """
+    s.desired = 'active'
+    AND (s.spec->>'discard_after_idle_seconds') IS NOT NULL
+    AND EXISTS (SELECT 1 FROM agents a WHERE a.session_id = s.id AND a.gone_at IS NULL)
+    AND NOT EXISTS (
+        SELECT 1 FROM agents a LEFT JOIN agent_status st ON st.agent_id = a.id
+        WHERE a.session_id = s.id AND a.gone_at IS NULL
+          AND (st.state IS DISTINCT FROM 'idle' OR st.current_turn_id IS NOT NULL
+               OR st.waiting_since IS NOT NULL))
+    AND NOT EXISTS (
+        SELECT 1 FROM messages m
+        WHERE m.session_id = s.id AND m.status IN ('queued', 'dispatching', 'verifying'))
+    AND COALESCE(s.status->'init'->>'state', '') <> 'running'
+    AND GREATEST(
+        s.created_at,
+        (SELECT max(GREATEST(st.free_since, st.waiting_since))
+           FROM agents a JOIN agent_status st ON st.agent_id = a.id WHERE a.session_id = s.id),
+        (SELECT max(GREATEST(t.started_at, t.completed_at))
+           FROM agents a JOIN turns t ON t.agent_id = a.id WHERE a.session_id = s.id),
+        (SELECT max(GREATEST(m.created_at, m.dispatched_at))
+           FROM messages m WHERE m.session_id = s.id),
+        NULLIF(s.status->'init'->>'started_at', '')::timestamptz,
+        NULLIF(s.status->'init'->>'finished_at', '')::timestamptz
+    ) + make_interval(secs => (s.spec->>'discard_after_idle_seconds')::int) <= now()
+"""
+
+
+async def discard_idle(conn: psycopg.AsyncConnection) -> list[uuid.UUID]:
+    """Flip sessions idle for their `discard_after_idle_seconds` to deleting (request_delete write).
+
+    Per candidate, in its own transaction: lock the session row first, then re-evaluate the idle
+    predicate in a fresh statement and flip under the `desired = 'active'` guard. `enqueue_message`
+    takes the same row lock (FOR SHARE) before inserting, so a message committed first is seen by
+    the re-check and cancels the discard, and one arriving after the flip is refused.
+    """
+    cur = await conn.execute(f"SELECT s.id FROM sessions s WHERE {_IDLE_PREDICATE}")
+    flipped: list[uuid.UUID] = []
+    for (session_id,) in await cur.fetchall():
+        async with conn.transaction():
+            await conn.execute("SELECT 1 FROM sessions WHERE id = %s FOR UPDATE", (session_id,))
+            cur = await conn.execute(
+                "UPDATE sessions s SET desired = 'deleting', generation = generation + 1"
+                f" WHERE s.id = %s AND {_IDLE_PREDICATE} RETURNING s.id",
+                (session_id,),
+            )
+            if await cur.fetchone() is not None:
+                await _notify(conn, session_id)
+                flipped.append(session_id)
+    return flipped
 
 
 async def set_init_scripts(
