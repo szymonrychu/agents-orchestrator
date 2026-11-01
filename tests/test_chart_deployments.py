@@ -64,21 +64,25 @@ def test_component_commands_and_values() -> None:
     assert _container(deps[f"{FULL}-dispatcher"])["args"] == ["dispatcher", "--verbose"]
 
 
-def test_only_reconciler_gets_kube_token() -> None:
+def test_only_reconciler_and_api_get_kube_token() -> None:
     deps = _deployments()
     for c in COMPONENTS:
         spec = deps[f"{FULL}-{c}"]["spec"]["template"]["spec"]
         if c == "reconciler":
             assert spec["serviceAccountName"] == f"{FULL}-reconciler"
             assert spec.get("automountServiceAccountToken") is not False
+        elif c == "api":
+            assert spec["serviceAccountName"] == f"{FULL}-api"
+            assert spec.get("automountServiceAccountToken") is not False
         else:
             assert spec["automountServiceAccountToken"] is False
-            assert spec["serviceAccountName"] != f"{FULL}-reconciler"
+            assert spec["serviceAccountName"] not in (f"{FULL}-reconciler", f"{FULL}-api")
     sas = {
         d["metadata"]["name"]: d
         for d in render({**BASE}, show_only=["templates/serviceaccount.yaml"])
     }
-    assert set(sas) == {FULL, f"{FULL}-reconciler", f"{FULL}-agent"}
+    assert set(sas) == {FULL, f"{FULL}-reconciler", f"{FULL}-api", f"{FULL}-agent"}
+    assert sas[f"{FULL}-api"]["automountServiceAccountToken"] is True
     assert sas[FULL]["automountServiceAccountToken"] is False
     assert sas[f"{FULL}-agent"]["automountServiceAccountToken"] is False
     off = render({**BASE, "serviceAccount": {"create": False}}, show_only=None)

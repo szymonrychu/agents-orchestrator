@@ -45,6 +45,8 @@ spec:
       {{- end }}
       {{- if eq $component "reconciler" }}
       serviceAccountName: {{ include "agents-orchestrator.fullname" $ }}-reconciler
+      {{- else if eq $component "api" }}
+      serviceAccountName: {{ include "agents-orchestrator.fullname" $ }}-api
       {{- else }}
       serviceAccountName: {{ include "agents-orchestrator.serviceAccountName" $ }}
       automountServiceAccountToken: false

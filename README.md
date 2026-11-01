@@ -317,6 +317,8 @@ Only the reconciler talks to Kubernetes. Everything it touches lives in one name
 | `batch` jobs | get, list, watch, create, delete | checks |
 | pods/log | get | check log tails |
 
+The api pod has its own ServiceAccount `<fullname>-api` (token mounted) bound to a second Role `<fullname>-api` that grants only Secrets create, patch and delete in the release namespace: the preset secret store writes one immutable Secret per protected variable version (`ps-<preset>-<name>-v<N>`) and collects old ones; sessions reference them by `secretKeyRef`. The dispatcher and ingester still mount no token. Protected variables need `rbac.create` (the default); without it a protected value write fails with 502 `secret_store_failed`.
+
 Secrets are limited to create, patch and delete: there is no get, list or watch on secrets, so the reconciler can never read the master key, the Claude token, the database credentials or any other Secret in the namespace. The Role is bound only to the reconciler's ServiceAccount; the api, dispatcher and ingester run with `automountServiceAccountToken: false`. The Role never grants `pods/exec`, and there is no ClusterRole and no wildcard.
 
 Agent pods and Jobs (D4) name their ServiceAccount explicitly and mount no token: every agent StatefulSet pod and every init, check and cache Job sets `serviceAccountName` to `ORCH_AGENT_SERVICE_ACCOUNT` (default `default`; the chart sets `<fullname>-agent`, which has no binding) and `automountServiceAccountToken: false`. Only the agent pods of a `kube_access` session run as another ServiceAccount (below); Jobs never do, whatever the session's spec.
