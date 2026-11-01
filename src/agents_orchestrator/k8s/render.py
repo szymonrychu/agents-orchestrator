@@ -159,7 +159,7 @@ def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
     spec, slug = session.spec, session.slug
     kube_env = KUBE_PASSTHROUGH_ENV if kube_access_granted(spec, settings) else ()
     claude: dict[str, Any] = {
-        "passthrough_env": sorted([*spec.env, *AGENT_PASSTHROUGH_ENV, *kube_env]),
+        "passthrough_env": sorted([*spec.plain_env, *AGENT_PASSTHROUGH_ENV, *kube_env]),
         "env": {
             "claude_code_oauth_token": "${CLAUDE_CODE_OAUTH_TOKEN}",
             "disable_autoupdater": True,
@@ -260,7 +260,7 @@ def _container(session: Session, settings: Settings, names: dict[str, str]) -> d
             if settings.agent_api_url
             else []
         ),
-        *({"name": k, "value": v} for k, v in sorted(spec.env.items())),
+        *({"name": k, "value": v} for k, v in sorted(spec.plain_env.items())),
     ]
     startup_failures = math.ceil(settings.on_start_timeout_seconds / PROBE_PERIOD) + STARTUP_SLACK
     container: dict[str, Any] = {

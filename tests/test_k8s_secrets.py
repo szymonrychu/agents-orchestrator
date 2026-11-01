@@ -198,3 +198,20 @@ async def test_apply_response_is_dropped_not_returned(pool, kube, canary):
     pid = await make_preset(pool)
     meta = await put(pool, kube, pid, "TOK", canary)
     assert set(vars(meta)) == {"name", "set", "version", "updated_at"}
+
+
+async def test_set_on_a_missing_preset_writes_nothing(pool, kube, canary):
+    ghost = uuid.uuid4()
+    with pytest.raises(store.PresetNotFound) as exc:
+        await put(pool, kube, ghost, "TOK", canary)
+    assert canary not in str(exc.value)
+    assert secret_objects(kube) == {}
+    assert await rows(pool, ghost) == []
+
+
+async def test_set_on_a_deleted_preset_does_not_leave_a_collected_secret(pool, kube, canary):
+    pid = await make_preset(pool)
+    async with pool.connection() as conn:
+        await presets_repo.delete(conn, pid)
+    with pytest.raises(store.PresetNotFound):
+        await put(pool, kube, pid, "TOK", canary)

@@ -430,7 +430,7 @@ async def edit_init_scripts(
         raise not_found("session")
     for i, script in enumerate(scripts):
         error, _ = await run_in_threadpool(
-            rendering.problem, script, "init_script", current.spec.env
+            rendering.problem, script, "init_script", current.spec.plain_env
         )
         if error is not None:
             hint = rendering.ESCAPE_HINT

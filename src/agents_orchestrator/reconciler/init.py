@@ -116,7 +116,7 @@ def render_init_job(session: Session, settings: Settings, scripts: list[str] | N
         "image": spec.image or settings.agent_image,
         "command": ["sh", "-c", WRAPPER, "agent-init", *chunks],
         "env": [
-            *({"name": k, "value": v} for k, v in sorted(spec.env.items())),
+            *({"name": k, "value": v} for k, v in sorted(spec.plain_env.items())),
             {"name": WORKDIR_ENV, "value": workdir_path(spec)},
         ],
         "volumeMounts": [workdir_mount(spec)],

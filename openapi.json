@@ -820,7 +820,7 @@
           "spec": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/SessionSpec"
+                "$ref": "#/components/schemas/SessionSpec-Input"
               },
               {
                 "type": "null"
@@ -878,6 +878,39 @@
           "keys"
         ],
         "title": "DeleteArchives",
+        "type": "object"
+      },
+      "EnvVar-Input": {
+        "additionalProperties": false,
+        "description": "One session env variable, GitLab CI style: `{value, protected, expand}`.\n\nA protected variable is write-only: it carries no value here (the value lives in a\nKubernetes Secret and is rendered as `secretKeyRef`). `expand` gates `$` handling of a plain\nvalue; a protected variable ignores it because the kubelet does not expand `secretKeyRef`, so\n`protected` with `expand` is refused rather than silently ignored.",
+        "properties": {
+          "expand": {
+            "default": false,
+            "title": "Expand",
+            "type": "boolean"
+          },
+          "protected": {
+            "default": false,
+            "title": "Protected",
+            "type": "boolean"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "title": "EnvVar",
+        "type": "object"
+      },
+      "EnvVar-Output": {
+        "additionalProperties": true,
         "type": "object"
       },
       "EventView": {
@@ -1673,14 +1706,7 @@
             "anyOf": [
               {
                 "additionalProperties": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "$ref": "#/components/schemas/SecretRef"
-                    }
-                  ]
+                  "type": "string"
                 },
                 "type": "object"
               },
@@ -1736,14 +1762,7 @@
             "anyOf": [
               {
                 "additionalProperties": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "$ref": "#/components/schemas/SecretRef"
-                    }
-                  ]
+                  "type": "string"
                 },
                 "type": "object"
               },
@@ -2473,7 +2492,7 @@
             "type": "string"
           },
           "spec": {
-            "$ref": "#/components/schemas/SessionSpec",
+            "$ref": "#/components/schemas/SessionSpec-Input",
             "default": {
               "env": {},
               "init_scripts": [],
@@ -2701,21 +2720,6 @@
         "title": "ScaleResult",
         "type": "object"
       },
-      "SecretRef": {
-        "additionalProperties": false,
-        "description": "A reference to a secret declared in `SessionSpec.secrets`; never a value.",
-        "properties": {
-          "secret": {
-            "title": "Secret",
-            "type": "string"
-          }
-        },
-        "required": [
-          "secret"
-        ],
-        "title": "SecretRef",
-        "type": "object"
-      },
       "SessionBackup": {
         "description": "What a discard would save now; each flag is true only when that save would really run.\n\n`reason` is null when both run, else `no_session_cache` (no `spec.cache`),\n`cache_not_configured` (no S3 cache configured) or the save's skip reason, the workdir's first.",
         "properties": {
@@ -2864,7 +2868,7 @@
         "title": "SessionRestartAccepted",
         "type": "object"
       },
-      "SessionSpec": {
+      "SessionSpec-Input": {
         "additionalProperties": false,
         "properties": {
           "any_mcp_config": {
@@ -2953,7 +2957,7 @@
           },
           "env": {
             "additionalProperties": {
-              "type": "string"
+              "$ref": "#/components/schemas/EnvVar-Input"
             },
             "default": {},
             "title": "Env",
@@ -3078,7 +3082,69 @@
             ],
             "title": "Reuse Running Agent"
           },
-          "secrets": {
+          "session_messaging": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Messaging"
+          },
+          "start_prompt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Prompt"
+          },
+          "static": {
+            "default": false,
+            "title": "Static",
+            "type": "boolean"
+          },
+          "workdir": {
+            "default": "workdir",
+            "maxLength": 63,
+            "title": "Workdir",
+            "type": "string"
+          },
+          "wrapper": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WrapperSettings"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "SessionSpec",
+        "type": "object"
+      },
+      "SessionSpec-Output": {
+        "additionalProperties": false,
+        "properties": {
+          "any_mcp_config": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Any Mcp Config"
+          },
+          "any_mcp_sources": {
             "anyOf": [
               {
                 "items": {
@@ -3090,7 +3156,192 @@
                 "type": "null"
               }
             ],
-            "title": "Secrets"
+            "title": "Any Mcp Sources"
+          },
+          "auto_compact_pct": {
+            "anyOf": [
+              {
+                "maximum": 100.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Auto Compact Pct"
+          },
+          "autoclose_after_seconds": {
+            "anyOf": [
+              {
+                "maximum": 2592000.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Autoclose After Seconds"
+          },
+          "cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceCache"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "discard_hook_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Discard Hook Url"
+          },
+          "effort": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effort"
+          },
+          "env": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/EnvVar-Output"
+            },
+            "default": {},
+            "title": "Env",
+            "type": "object"
+          },
+          "image": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image"
+          },
+          "init_scripts": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Init Scripts",
+            "type": "array"
+          },
+          "kube_access": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kube Access"
+          },
+          "leader_lease_seconds": {
+            "anyOf": [
+              {
+                "maximum": 604800.0,
+                "minimum": 60.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Leader Lease Seconds"
+          },
+          "max_attempts": {
+            "default": 5,
+            "maximum": 10.0,
+            "minimum": 1.0,
+            "title": "Max Attempts",
+            "type": "integer"
+          },
+          "max_replicas": {
+            "anyOf": [
+              {
+                "maximum": 16.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Replicas"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "peers": {
+            "default": true,
+            "title": "Peers",
+            "type": "boolean"
+          },
+          "pvc_size": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pvc Size"
+          },
+          "replicas": {
+            "default": 1,
+            "maximum": 16.0,
+            "minimum": 1.0,
+            "title": "Replicas",
+            "type": "integer"
+          },
+          "resources": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Resources"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reuse_running_agent": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reuse Running Agent"
           },
           "session_messaging": {
             "anyOf": [
@@ -3338,7 +3589,7 @@
             "type": "string"
           },
           "spec": {
-            "$ref": "#/components/schemas/SessionSpec"
+            "$ref": "#/components/schemas/SessionSpec-Output"
           },
           "static": {
             "title": "Static",
@@ -3593,14 +3844,7 @@
             "anyOf": [
               {
                 "additionalProperties": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "$ref": "#/components/schemas/SecretRef"
-                    }
-                  ]
+                  "type": "string"
                 },
                 "type": "object"
               },
@@ -3664,9 +3908,6 @@
             "anyOf": [
               {
                 "type": "string"
-              },
-              {
-                "$ref": "#/components/schemas/SecretRef"
               },
               {
                 "type": "null"

@@ -33,6 +33,10 @@ class SecretStoreError(Exception):
     """A secret write failed; the message never carries the value or a Kubernetes body."""
 
 
+class PresetNotFound(SecretStoreError):
+    """The preset a secret is set on does not exist; nothing was written."""
+
+
 @dataclass(frozen=True)
 class SecretMeta:
     name: str
@@ -68,11 +72,18 @@ async def set_secret(
     name: str,
     value: SecretStr,
 ) -> SecretMeta:
-    """Store `value` as the next version of the preset's secret `name`; returns metadata only."""
+    """Store `value` as the next version of the preset's protected variable `name`.
+
+    Returns metadata only. The preset must exist: garbage collection treats a row with no preset
+    as dead and would delete the Secret just written.
+    """
     async with conn.transaction():
         await conn.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"{preset_id}/{name}",)
         )
+        cur = await conn.execute("SELECT 1 FROM presets WHERE id = %s", (preset_id,))
+        if await cur.fetchone() is None:
+            raise PresetNotFound(f"preset not found for secret {name}")
         cur = await conn.execute(
             "SELECT version FROM preset_secrets WHERE preset_id = %s AND name = %s",
             (preset_id, name),
@@ -120,7 +131,10 @@ async def sync_declared(
     preset_id: uuid.UUID,
     declared: list[str],
 ) -> None:
-    """Retire the secrets whose name left `declared` and delete what no session still names."""
+    """Retire the secrets whose name left `declared`, the preset's protected variable names.
+
+    Then delete what no session still names.
+    """
     async with conn.transaction():
         await conn.execute(
             "UPDATE preset_secrets SET retired_at = now()"

@@ -371,8 +371,8 @@ async def test_openapi_and_docs_paths(http):
     "spec",
     [
         {"image": "evil:latest"},
-        {"env": {"CCW_TOKEN": "x"}},
-        {"env": {"HTTPS_PROXY": "x"}},
+        {"env": {"CCW_TOKEN": {"value": "x"}}},
+        {"env": {"HTTPS_PROXY": {"value": "x"}}},
         {"replicas": 5},
         {"pvc_size": "200Gi"},
         {"any_mcp_config": {"plugins": "nope"}},
