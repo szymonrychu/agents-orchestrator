@@ -3093,9 +3093,11 @@ def test_superleader_sees_only_manageable(api: httpx.Client, superleader: dict[s
     resp = api.post("/presets", json={"name": "E2E hidden", "spec": spec})
     assert resp.status_code == 201, resp.text
     pid = resp.json()["id"]
+    cid = None
     try:
         resp = api.post("/sessions", json={"preset_id": pid, "slug": slug})
         assert resp.status_code == 201, resp.text
+        cid = resp.json()["id"]
         assert admin_call(pod, "GET", f"/presets/{pid}")[0] == 404
         assert admin_call(pod, "GET", f"/sessions/{slug}")[0] == 404
         status, listed = admin_call(pod, "GET", "/presets")
@@ -3108,7 +3110,8 @@ def test_superleader_sees_only_manageable(api: httpx.Client, superleader: dict[s
         assert admin_call(pod, "GET", f"/presets/{pid}")[0] == 200
         assert admin_call(pod, "GET", f"/sessions/{slug}")[0] == 200
     finally:
-        api.delete(f"/sessions/{slug}")
+        if cid is not None:
+            api.delete(f"/sessions/{cid}")  # the main route takes the id, not the slug
         wait_for(
             f"session {slug} objects to be deleted",
             lambda: not labelled_objects(slug),
