@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import asdict
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from agents_common.templating import TemplateError
@@ -17,6 +17,7 @@ from agents_orchestrator import rendering
 from agents_orchestrator.api import schemas
 from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.service_auth import calling_service
+from agents_orchestrator.cache.keys import ArchiveNameError
 from agents_orchestrator.cache.save_rule import save_skip
 from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import leadership, presets, views
@@ -29,6 +30,7 @@ from agents_orchestrator.spec import (
     SessionSpec,
     SpecInvalid,
     check_caller_cache_key,
+    check_rendered_cache_name,
     default_cache_key,
     fill_resource_defaults,
     generated_slug,
@@ -86,7 +88,11 @@ def _backup(session: repo.Session, settings: Settings) -> schemas.SessionBackup:
     elif not settings.cache_available:
         skips = ["cache_not_configured"] * 2
     else:
-        skips = [save_skip(True, session.status, target) for target in ("workdir", "sessions")]
+        restore_only = not session.spec.cache.save_key
+        skips = [
+            save_skip(True, session.status, target, restore_only=restore_only)
+            for target in ("workdir", "sessions")
+        ]
     return schemas.SessionBackup(
         workdir=skips[0] is None,
         transcripts=skips[1] is None,
@@ -229,8 +235,13 @@ async def create_session(
     if body.spec is not None:
         if body.slug is None:
             raise ApiError(422, "invalid_request", "slug is required with spec")
-        if body.spec.cache is not None and body.spec.cache.key is None:
-            raise ApiError(422, "invalid_request", "cache.key is required without a preset")
+        cache = body.spec.cache
+        if cache is not None and cache.restore_key is None and cache.save_key is None:
+            raise ApiError(
+                422,
+                "invalid_request",
+                "cache.restore_key or cache.save_key is required without a preset",
+            )
         spec = await run_in_threadpool(check_spec, body.spec, settings)
     if body.slug is not None:
         try:
@@ -257,7 +268,45 @@ async def create_session(
 _SLUG_ATTEMPTS = 5
 
 
+def check_archive_names(
+    slug: str,
+    spec: SessionSpec,
+    preset_name: str | None,
+    created_by_service: str | None,
+    derived_key: str | None = None,
+) -> None:
+    """Render both cache key templates with this session's real context; 422 on a bad name.
+
+    `validate_spec` already rendered them against the preview sample, which cannot see a slug,
+    preset name or user that squeezes to nothing (`{{ preset_name }}` for a name of only symbols).
+    The save name is rendered again at save time with the clock then.
+    """
+    cache = spec.cache
+    if cache is None:
+        return
+    context = rendering.archive_context(slug, preset_name, created_by_service, datetime.now(UTC))
+    for field, template in (("restore_key", cache.restore_key), ("save_key", cache.save_key)):
+        if not template:
+            continue
+        try:
+            name = rendering.render_name(template, context, allow_prefix=field == "restore_key")
+            check_rendered_cache_name(name, field, derived_key)
+        except ValueError as exc:  # ArchiveNameError is a ValueError
+            if not isinstance(exc, ArchiveNameError):
+                raise ApiError(422, "invalid_request", str(exc)) from None
+            where = f" (line {exc.line})" if exc.line else ""
+            raise ApiError(422, "invalid_request", f"cache.{field}{where}: {exc}") from None
+
+
 async def _insert(conn, slug: str, spec: SessionSpec, **provenance) -> repo.Session:
+    await run_in_threadpool(
+        check_archive_names,
+        slug,
+        spec,
+        provenance.get("preset_name"),
+        provenance.get("created_by_service"),
+        default_cache_key(provenance["preset_id"]) if provenance.get("preset_id") else None,
+    )
     try:
         return await repo.create(conn, slug, spec, **provenance)
     except repo.SessionExists:
@@ -288,8 +337,9 @@ async def _create_from_preset(
         raise ApiError(422, "invalid_request", f"preset '{preset.name}': {exc}") from None
     except ApiError as exc:
         raise ApiError(422, "invalid_request", f"preset '{preset.name}': {exc.message}") from None
-    if spec.cache is not None and spec.cache.key is None:
-        cache = spec.cache.model_copy(update={"key": default_cache_key(preset.id)})
+    if spec.cache is not None and spec.cache.restore_key is None and spec.cache.save_key is None:
+        derived = default_cache_key(preset.id)
+        cache = spec.cache.model_copy(update={"restore_key": derived, "save_key": derived})
         spec = spec.model_copy(update={"cache": cache})
     provenance = {
         "preset_id": preset.id,
@@ -299,8 +349,17 @@ async def _create_from_preset(
     if slug is not None:
         return await _insert(conn, slug, spec, **provenance)
     for _ in range(_SLUG_ATTEMPTS):
+        generated = generated_slug(preset.name)
+        await run_in_threadpool(
+            check_archive_names,
+            generated,
+            spec,
+            preset.name,
+            created_by_service,
+            default_cache_key(preset.id),
+        )
         try:
-            return await repo.create(conn, generated_slug(preset.name), spec, **provenance)
+            return await repo.create(conn, generated, spec, **provenance)
         except repo.SessionExists:
             continue
     raise ApiError(409, "conflict", "could not generate a free session slug; retry")

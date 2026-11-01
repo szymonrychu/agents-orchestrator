@@ -270,6 +270,16 @@ cache:
     accessKeyIdKey: AWS_ACCESS_KEY_ID
     # Key of the secret access key in existingSecret.
     secretAccessKeyKey: AWS_SECRET_ACCESS_KEY
+    # The api pod's own key pair, for the archives list, download, cleanup preview and delete
+    # routes, read from its own Secret reference by the api container only. The orchestrator code
+    # uses it for list, get and delete only (never a put). It may name the same Secret as
+    # existingSecret when the store has a single identity (least privilege is then enforced in
+    # code, not by the store); a separate store identity is the stronger setup. Empty leaves those
+    # routes answering 503 and renders no ORCH_CACHE_S3_API_* variable.
+    api:
+      existingSecret: ""
+      accessKeyIdKey: AWS_ACCESS_KEY_ID
+      secretAccessKeyKey: AWS_SECRET_ACCESS_KEY
   # Image of the cache Jobs; empty uses the chart's own image (image.repository:image.tag,
   # the tag defaulting to the chart appVersion).
   image: ""
@@ -277,3 +287,16 @@ cache:
   maxBytes: 5368709120
   # Deadline of one cache Job in seconds (60 to 86400).
   timeoutSeconds: 1800
+  # Cleanup sweep of stale archives, run by the reconciler. dryRun only plans and logs: set it
+  # false after reading the preview (GET /api/v1/cache/cleanup/preview). An archive is deleted
+  # only when it is beyond the newest keepNewest of its group, older than retentionDays and than
+  # graceSeconds, and referenced by no session.
+  sweep:
+    enabled: true
+    dryRun: true
+    retentionDays: 30
+    keepNewest: 3
+    # Seconds between sweeps (at least 60).
+    intervalSeconds: 21600
+    # Archives younger than this are never deleted; empty means timeoutSeconds + 600.
+    graceSeconds: ""

@@ -32,7 +32,7 @@ def make_settings(**over: Any) -> Settings:
         "models": ["sonnet"],
         "cache_s3_endpoint": "http://rgw.example:80",
         "cache_s3_bucket": "agents-workspace-cache",
-        "cache_s3_access_key_id": "AKIAEXAMPLEACCESSKEY",
+        "cache_s3_access_key_id": "TESTIDEXAMPLEACCESSKEY",
         "cache_s3_secret_access_key": "s3cr3t-example-secret-access-key",
         "cache_image": "harbor.example/containers/agents-orchestrator:abc1234",
         "kube_access_service_account": "orch-kube-access",
@@ -48,7 +48,10 @@ def make_session(**spec: Any) -> Session:
         spec=SessionSpec.model_validate(
             {
                 "init_scripts": ["echo hi"],
-                "cache": {"key": "preset-0123456789abcdef"},
+                "cache": {
+                    "restore_key": "preset-0123456789abcdef",
+                    "save_key": "preset-0123456789abcdef",
+                },
                 **spec,
             }
         ),

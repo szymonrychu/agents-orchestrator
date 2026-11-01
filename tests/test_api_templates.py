@@ -51,6 +51,7 @@ PLAN_KEYS = {
     "web_chat_start": {"session_slug", "preset_name", "user", "now"},
     "preset_text": {"session_slug", "preset_name", "env", "now"},
     "init_script": {"session_slug", "preset_name", "env"},
+    "archive_name": {"session_slug", "preset_name", "now", "date", "user"},
 }
 
 
@@ -99,3 +100,12 @@ async def test_oversized_template_is_an_error(http):
     assert r.status_code == 200
     assert body["rendered"] is None
     assert "limit" in body["error"]["message"]
+
+
+async def test_archive_name_surface_previews_the_name(http):
+    r = await post(http, "{{ preset_name }}/{{ now }}", surface="archive_name")
+    assert r.json() == {
+        "rendered": "default/20260101t000000z",
+        "error": None,
+        "variables": ["now", "preset_name"],
+    }

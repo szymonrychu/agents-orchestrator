@@ -187,6 +187,149 @@
         "title": "AgentView",
         "type": "object"
       },
+      "ArchiveDeleteError": {
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "code",
+          "message"
+        ],
+        "title": "ArchiveDeleteError",
+        "type": "object"
+      },
+      "ArchiveDeleteResult": {
+        "properties": {
+          "deleted": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Deleted",
+            "type": "array"
+          },
+          "errors": {
+            "items": {
+              "$ref": "#/components/schemas/ArchiveDeleteError"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "refused": {
+            "items": {
+              "$ref": "#/components/schemas/ArchiveRefusal"
+            },
+            "title": "Refused",
+            "type": "array"
+          }
+        },
+        "required": [
+          "deleted",
+          "refused",
+          "errors"
+        ],
+        "title": "ArchiveDeleteResult",
+        "type": "object"
+      },
+      "ArchivePage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ArchiveView"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "title": "ArchivePage",
+        "type": "object"
+      },
+      "ArchiveRefusal": {
+        "properties": {
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "reason"
+        ],
+        "title": "ArchiveRefusal",
+        "type": "object"
+      },
+      "ArchiveView": {
+        "properties": {
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "last_modified": {
+            "format": "date-time",
+            "title": "Last Modified",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "protected": {
+            "title": "Protected",
+            "type": "boolean"
+          },
+          "referenced_by": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Referenced By",
+            "type": "array"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "key",
+          "name",
+          "size",
+          "last_modified",
+          "referenced_by",
+          "protected"
+        ],
+        "title": "ArchiveView",
+        "type": "object"
+      },
       "AutoCompact": {
         "additionalProperties": false,
         "properties": {
@@ -345,6 +488,93 @@
           "finished_at"
         ],
         "title": "CheckView",
+        "type": "object"
+      },
+      "CleanupItem": {
+        "properties": {
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "key",
+          "size",
+          "reason"
+        ],
+        "title": "CleanupItem",
+        "type": "object"
+      },
+      "CleanupPreview": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "grace_seconds": {
+            "title": "Grace Seconds",
+            "type": "integer"
+          },
+          "keep_newest": {
+            "title": "Keep Newest",
+            "type": "integer"
+          },
+          "last_sweep": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Sweep"
+          },
+          "retention_days": {
+            "title": "Retention Days",
+            "type": "integer"
+          },
+          "sweep_dry_run": {
+            "title": "Sweep Dry Run",
+            "type": "boolean"
+          },
+          "sweep_enabled": {
+            "title": "Sweep Enabled",
+            "type": "boolean"
+          },
+          "total_bytes": {
+            "title": "Total Bytes",
+            "type": "integer"
+          },
+          "would_delete": {
+            "items": {
+              "$ref": "#/components/schemas/CleanupItem"
+            },
+            "title": "Would Delete",
+            "type": "array"
+          }
+        },
+        "required": [
+          "would_delete",
+          "count",
+          "total_bytes",
+          "retention_days",
+          "keep_newest",
+          "grace_seconds",
+          "sweep_enabled",
+          "sweep_dry_run",
+          "last_sweep"
+        ],
+        "title": "CleanupPreview",
         "type": "object"
       },
       "CommandAccepted": {
@@ -629,6 +859,25 @@
           }
         },
         "title": "CreateTerminal",
+        "type": "object"
+      },
+      "DeleteArchives": {
+        "additionalProperties": false,
+        "properties": {
+          "keys": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 1000,
+            "minItems": 1,
+            "title": "Keys",
+            "type": "array"
+          }
+        },
+        "required": [
+          "keys"
+        ],
+        "title": "DeleteArchives",
         "type": "object"
       },
       "EventView": {
@@ -2315,7 +2564,8 @@
             "enum": [
               "web_chat_start",
               "preset_text",
-              "init_script"
+              "init_script",
+              "archive_name"
             ],
             "title": "Surface",
             "type": "string"
@@ -3401,6 +3651,7 @@
       },
       "WorkspaceCache": {
         "additionalProperties": false,
+        "description": "`restore_key` and `save_key` are Jinja templates (surface `archive_name`).\n\nNone is unset: a preset-derived session gets `default_cache_key` for both when both are None.\nAn empty string is explicit: empty `restore_key` is a fresh start, empty `save_key` is\nrestore-only. A restore_key ending in `/` restores the newest archive under that prefix.",
         "properties": {
           "exclude": {
             "default": [],
@@ -3410,7 +3661,7 @@
             "title": "Exclude",
             "type": "array"
           },
-          "key": {
+          "restore_key": {
             "anyOf": [
               {
                 "type": "string"
@@ -3419,7 +3670,18 @@
                 "type": "null"
               }
             ],
-            "title": "Key"
+            "title": "Restore Key"
+          },
+          "save_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Save Key"
           }
         },
         "title": "WorkspaceCache",
@@ -5185,6 +5447,161 @@
           }
         },
         "summary": "Delete Terminal"
+      }
+    },
+    "/api/v1/cache/archives": {
+      "delete": {
+        "operationId": "delete_archives_api_v1_cache_archives_delete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteArchives"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArchiveDeleteResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Archives"
+      },
+      "get": {
+        "operationId": "list_archives_api_v1_cache_archives_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "prefix",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Prefix",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 1024,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArchivePage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Archives"
+      }
+    },
+    "/api/v1/cache/archives/download": {
+      "get": {
+        "operationId": "download_archive_api_v1_cache_archives_download_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download Archive"
+      }
+    },
+    "/api/v1/cache/cleanup/preview": {
+      "get": {
+        "operationId": "cleanup_preview_api_v1_cache_cleanup_preview_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CleanupPreview"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Cleanup Preview"
       }
     },
     "/api/v1/checks/{check_id}": {

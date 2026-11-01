@@ -23,12 +23,13 @@ from test_cache_restore import CACHE_KEY, Env, line
 from test_cache_save import SAVE, SaveEnv
 
 from agents_orchestrator.cache import presign as presign_module
+from agents_orchestrator.cache.keys import CACHE_KEY_RE
 from agents_orchestrator.cache.presign import object_name, presign, sessions_object_name
 from agents_orchestrator.k8s import labels, render
 from agents_orchestrator.k8s.labels import object_names
 from agents_orchestrator.reconciler import cache as cache_mod
 from agents_orchestrator.reconciler.cache import CACHE_LABEL, job_name, render_cache_job
-from agents_orchestrator.spec import CACHE_KEY_RE, SESSIONS_EXCLUDE
+from agents_orchestrator.spec import SESSIONS_EXCLUDE
 
 SESSIONS_SAVE = job_name("alpha", "save", "sessions")
 
@@ -316,7 +317,9 @@ async def test_no_sessions_save_without_session_cache(env, pool, dsn):
     from agents_orchestrator.spec import SessionSpec
 
     async with pool.connection() as conn:
-        d = await sessions.create(conn, "beta", SessionSpec(cache={"key": CACHE_KEY}))
+        d = await sessions.create(
+            conn, "beta", SessionSpec(cache={"restore_key": CACHE_KEY, "save_key": CACHE_KEY})
+        )
     await e.tick()
     await e.patch_restore(d.id, state="restored", reason=None, job=None)
     await e.delete(d)

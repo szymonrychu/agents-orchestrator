@@ -28,7 +28,13 @@ NON_SECRET_ENV = (
     "ORCH_CACHE_IMAGE",
     "ORCH_CACHE_MAX_BYTES",
     "ORCH_CACHE_TIMEOUT_SECONDS",
+    "ORCH_CACHE_SWEEP_ENABLED",
+    "ORCH_CACHE_SWEEP_DRY_RUN",
+    "ORCH_CACHE_RETENTION_DAYS",
+    "ORCH_CACHE_KEEP_NEWEST",
+    "ORCH_CACHE_SWEEP_INTERVAL_SECONDS",
 )
+API_CREDENTIAL_ENV = ("ORCH_CACHE_S3_API_ACCESS_KEY_ID", "ORCH_CACHE_S3_API_SECRET_ACCESS_KEY")
 
 
 def _values(cache: dict[str, Any] | None = None, **extra: Any) -> dict[str, Any]:
@@ -70,7 +76,13 @@ def test_configmap_cache_env() -> None:
         "ORCH_CACHE_IMAGE": f"{REPO}:{_app_version()}",
         "ORCH_CACHE_MAX_BYTES": "5368709120",
         "ORCH_CACHE_TIMEOUT_SECONDS": "1800",
+        "ORCH_CACHE_SWEEP_ENABLED": "true",
+        "ORCH_CACHE_SWEEP_DRY_RUN": "true",
+        "ORCH_CACHE_RETENTION_DAYS": "30",
+        "ORCH_CACHE_KEEP_NEWEST": "3",
+        "ORCH_CACHE_SWEEP_INTERVAL_SECONDS": "21600",
     }
+    assert "ORCH_CACHE_SWEEP_GRACE_SECONDS" not in _settings(render(_values(_cache())))
     custom = {
         "s3": {
             "endpoint": "https://s3.example.com",
@@ -84,8 +96,17 @@ def test_configmap_cache_env() -> None:
         "image": "registry.example/cache:2",
         "maxBytes": 1073741824,
         "timeoutSeconds": 600,
+        "sweep": {
+            "enabled": False,
+            "dryRun": False,
+            "retentionDays": 7,
+            "keepNewest": 2,
+            "intervalSeconds": 120,
+            "graceSeconds": 90,
+        },
     }
     data = _settings(render(_values(custom)))
+    assert data["ORCH_CACHE_SWEEP_GRACE_SECONDS"] == "90"
     assert {k: data[k] for k in NON_SECRET_ENV} == {
         "ORCH_CACHE_S3_ENDPOINT": "https://s3.example.com",
         "ORCH_CACHE_S3_REGION": "eu-central-1",
@@ -96,6 +117,11 @@ def test_configmap_cache_env() -> None:
         "ORCH_CACHE_IMAGE": "registry.example/cache:2",
         "ORCH_CACHE_MAX_BYTES": "1073741824",
         "ORCH_CACHE_TIMEOUT_SECONDS": "600",
+        "ORCH_CACHE_SWEEP_ENABLED": "false",
+        "ORCH_CACHE_SWEEP_DRY_RUN": "false",
+        "ORCH_CACHE_RETENTION_DAYS": "7",
+        "ORCH_CACHE_KEEP_NEWEST": "2",
+        "ORCH_CACHE_SWEEP_INTERVAL_SECONDS": "120",
     }
     assert not set(CREDENTIAL_ENV) & set(data)
 
@@ -193,10 +219,23 @@ def test_cache_values_generic_s3() -> None:
             "existingSecret": "",
             "accessKeyIdKey": "AWS_ACCESS_KEY_ID",
             "secretAccessKeyKey": "AWS_SECRET_ACCESS_KEY",
+            "api": {
+                "existingSecret": "",
+                "accessKeyIdKey": "AWS_ACCESS_KEY_ID",
+                "secretAccessKeyKey": "AWS_SECRET_ACCESS_KEY",
+            },
         },
         "image": "",
         "maxBytes": 5368709120,
         "timeoutSeconds": 1800,
+        "sweep": {
+            "enabled": True,
+            "dryRun": True,
+            "retentionDays": 30,
+            "keepNewest": 3,
+            "intervalSeconds": 21600,
+            "graceSeconds": "",
+        },
     }
     for path in (CHART / "values.yaml", CHART / "README.md"):
         text = path.read_text().lower()
@@ -233,3 +272,60 @@ def test_readme_documents_cache_values() -> None:
 
 def _app_version() -> str:
     return str(yaml.safe_load((CHART / "Chart.yaml").read_text())["appVersion"])
+
+
+def test_sweep_defaults_to_dry_run() -> None:
+    assert _settings(render(_values(_cache())))["ORCH_CACHE_SWEEP_DRY_RUN"] == "true"
+
+
+def test_api_pod_gets_its_own_key_pair_from_its_own_secret_reference() -> None:
+    cache = _cache(
+        existingSecret="reconciler-creds",
+        api={"existingSecret": "api-creds", "accessKeyIdKey": "id", "secretAccessKeyKey": "key"},
+    )
+    docs = render(_values(cache))
+    deps = _deployments(docs)
+    api = deps[f"{FULL}-api"]["spec"]["template"]["spec"]["containers"][0]
+    env = {e["name"]: e for e in api["env"]}
+    assert env["ORCH_CACHE_S3_API_ACCESS_KEY_ID"]["valueFrom"] == {
+        "secretKeyRef": {"name": "api-creds", "key": "id"}
+    }
+    assert env["ORCH_CACHE_S3_API_SECRET_ACCESS_KEY"]["valueFrom"] == {
+        "secretKeyRef": {"name": "api-creds", "key": "key"}
+    }
+    # the api pod never reads the reconciler's pair; only the api reads the api pair
+    assert not set(CREDENTIAL_ENV) & set(_env_names(api))
+    for name, dep in deps.items():
+        spec = dep["spec"]["template"]["spec"]
+        containers = spec["containers"] + spec["initContainers"]
+        if name != f"{FULL}-api":
+            for cont in containers:
+                assert not set(API_CREDENTIAL_ENV) & set(_env_names(cont)), name
+        if name != f"{FULL}-reconciler":
+            for cont in containers:
+                assert not set(CREDENTIAL_ENV) & set(_env_names(cont)), name
+    others = [d for d in docs if d["metadata"]["name"] != f"{FULL}-api"]
+    assert "api-creds" not in yaml.safe_dump_all(others)
+    assert not set(API_CREDENTIAL_ENV) & set(_settings(docs))
+
+
+def test_api_pair_defaults_and_absence() -> None:
+    dep = _deployments(render(_values(_cache(api={"existingSecret": "a"}))))
+    api = dep[f"{FULL}-api"]["spec"]["template"]["spec"]["containers"][0]
+    refs = {e["name"]: e["valueFrom"]["secretKeyRef"] for e in api["env"] if "valueFrom" in e}
+    assert refs["ORCH_CACHE_S3_API_ACCESS_KEY_ID"] == {"name": "a", "key": "AWS_ACCESS_KEY_ID"}
+    assert refs["ORCH_CACHE_S3_API_SECRET_ACCESS_KEY"] == {
+        "name": "a",
+        "key": "AWS_SECRET_ACCESS_KEY",
+    }
+    none = _deployments(render(_values(_cache())))
+    for dep in none.values():
+        for cont in dep["spec"]["template"]["spec"]["containers"]:
+            assert not set(API_CREDENTIAL_ENV) & set(_env_names(cont))
+
+
+def test_api_pair_needs_a_bucket() -> None:
+    docs = render(_values({"s3": {"api": {"existingSecret": "a"}}}))
+    for dep in _deployments(docs).values():
+        for cont in dep["spec"]["template"]["spec"]["containers"]:
+            assert not [n for n in _env_names(cont) if n.startswith("ORCH_CACHE_")]
