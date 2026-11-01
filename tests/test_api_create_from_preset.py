@@ -172,3 +172,12 @@ async def test_replicas_filled_from_settings_at_schedule(pool, dsn):
         raw = (await http.post(C, json={"slug": "raw", "spec": {}})).json()
         assert raw["spec"]["replicas"] == 1
         assert raw["preset_id"] is None and raw["preset_name"] is None
+
+
+async def test_main_port_ignores_flag(pool, dsn):
+    async with app_client(pool, dsn) as http:
+        p = await make_preset(http, "unmanaged")
+        assert p["superleader_manageable"] is False
+        assert (await http.post(C, json={"preset_id": p["id"], "slug": "m-one"})).status_code == 201
+        raw = await http.post(C, json={"slug": "m-two", "spec": {}})
+        assert raw.status_code == 201, raw.text

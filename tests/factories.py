@@ -293,3 +293,19 @@ async def insert_turn(
             completed_at,
         ),
     )
+
+
+async def attach_preset(pool, session_id: uuid.UUID, *, manageable: bool = True) -> uuid.UUID:
+    """Give a session a preset of its own, with the superleader flag as asked."""
+    preset = await _one(
+        pool,
+        "INSERT INTO presets (id, name, spec, superleader_manageable)"
+        " VALUES (%s,%s,%s,%s) RETURNING id",
+        (uuid.uuid4(), f"preset-{uuid.uuid4().hex[:8]}", Jsonb({}), manageable),
+    )
+    await _one(
+        pool,
+        "UPDATE sessions SET preset_id = %s WHERE id = %s RETURNING id",
+        (preset["id"], session_id),
+    )
+    return preset["id"]

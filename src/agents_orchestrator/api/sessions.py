@@ -245,6 +245,8 @@ async def create(
     that created it through the admin routes."""
     if (body.spec is None) == (body.preset_id is None):
         raise ApiError(422, "invalid_request", "exactly one of spec or preset_id")
+    if created_by_session is not None and body.spec is not None:
+        raise ApiError(422, "preset_required", "the superleader creates sessions from a preset")
     if body.spec is not None:
         if body.slug is None:
             raise ApiError(422, "invalid_request", "slug is required with spec")
@@ -360,7 +362,7 @@ async def _create_from_preset(
 ) -> repo.Session:
     """Snapshot the preset's spec, filled and validated against the current settings."""
     preset = await presets.get_for_share(conn, preset_id)
-    if preset is None:
+    if preset is None or (created_by_session is not None and not preset.superleader_manageable):
         raise not_found("preset")
     raw = dict(preset.spec)
     raw.setdefault("replicas", settings.default_replicas)
