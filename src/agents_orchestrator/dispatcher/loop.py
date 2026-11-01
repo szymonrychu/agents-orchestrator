@@ -226,10 +226,17 @@ class Dispatcher:
             if claim.sender_slug is not None:
                 text = frame(claim.text, claim.sender_slug, claim.message_id)
                 metadata["orch_sender_session"] = claim.sender_slug
+            message_id: str | None = None
+            timeout: float | None = None
+            if claim.lane == "priority":
+                # The wrapper holds a priority send through its interrupt; the same message id
+                # on every send makes a re-send answer the turn the first one started.
+                message_id = f"orch-{claim.message_id}"
+                timeout = s.priority_send_timeout_seconds
             heartbeat = asyncio.create_task(self._heartbeat(claim.message_id))
             try:
                 outcome = await client.submit_turn(
-                    claim.wrapper_session_id, text, metadata, claim.lane
+                    claim.wrapper_session_id, text, metadata, claim.lane, message_id, timeout
                 )
             finally:
                 heartbeat.cancel()

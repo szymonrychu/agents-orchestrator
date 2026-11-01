@@ -503,3 +503,27 @@ async def test_open_download_errors():
 
     with pytest.raises(WrapperUnreachable):
         await client(boom).open_download("ses_1", "x")
+
+
+async def test_priority_send_carries_message_id_and_its_own_timeout():
+    seen = {}
+
+    def h(r):
+        seen["body"] = json.loads(r.content)
+        seen["timeout"] = r.extensions["timeout"]["read"]
+        return httpx.Response(202, json={"turn_id": "t", "state": "running"})
+
+    c = client(h, send_timeout=3.0)
+    out = await c.submit_turn("s", "x", {"orch_message_id": 9}, "priority", "orch-9", 40.0)
+    assert isinstance(out, TurnAccepted) and out.turn_id == "t"
+    assert seen["body"]["message_id"] == "orch-9" and seen["body"]["lane"] == "priority"
+    assert seen["timeout"] == 40.0
+    await c.submit_turn("s", "x", {}, "regular")
+    assert "message_id" not in seen["body"] and seen["timeout"] == 3.0
+
+
+async def test_pending_priority_answer_is_ambiguous():
+    # a retry the wrapper matched to a delivery still interrupting: the turn is not running yet
+    c = client(lambda r: httpx.Response(202, json={"turn_id": "t", "state": "pending"}))
+    out = await c.submit_turn("s", "x", {}, "priority", "orch-1")
+    assert isinstance(out, Ambiguous) and "pending" in out.reason

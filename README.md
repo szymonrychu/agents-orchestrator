@@ -66,6 +66,7 @@ Every process reads `ORCH_*` variables (the contract `agents-orchestrator-settin
 | `ORCH_MAX_SESSIONS` | `20` | api | cap on session rows |
 | `ORCH_AUTOCLOSE_MIN_SECONDS` | `300` | api | smallest accepted `autoclose_after_seconds` of a session spec |
 | `ORCH_WRAPPER_SEND_TIMEOUT_SECONDS` | `15` | dispatcher, ingester | wrapper send timeout; at most half of dispatching_stale_seconds |
+| `ORCH_WRAPPER_INTERRUPT_SETTLE_SECONDS` | `20` | reconciler, dispatcher | rendered into every wrapper as `sessions.interrupt_settle_seconds`; the priority send timeout is `ORCH_WRAPPER_SEND_TIMEOUT_SECONDS + 3 * this + 14` s (89 s by default) |
 | `ORCH_DISPATCHING_STALE_SECONDS` | `60` | dispatcher, ingester | dispatching row stale cutoff |
 | `ORCH_DISPATCHING_HEARTBEAT_SECONDS` | `5` | dispatcher, ingester | dispatching row heartbeat |
 | `ORCH_LOCK_HEARTBEAT_SECONDS` | `5` | all | singleton lock-held heartbeat |
@@ -618,6 +619,8 @@ Backoff. A counted attempt sets `not_before = now() + least(ORCH_RETRY_BACKOFF_B
 
 Slow sends. The send timeout `ORCH_WRAPPER_SEND_TIMEOUT_SECONDS` (15 s) is at most half of the stale cutoff `ORCH_DISPATCHING_STALE_SECONDS` (60 s). While a send is in flight the `dispatching` row heartbeats every `ORCH_DISPATCHING_HEARTBEAT_SECONDS` (5 s). A `dispatching` row whose `coalesce(heartbeat_at, dispatched_at)` is older than the cutoff belonged to a lost dispatcher: it moves to `verifying` (`dispatcher_lost`), never straight back to `queued`.
 
+Priority sends. The wrapper answers a `priority` send only after it has interrupted the running turn (an ESC, up to `interrupt_settle_seconds` for the interrupt line, a second ESC), waited up to one more settle for the turn claude starts for messages still queued in it, and interrupted that one too. A priority send therefore uses its own timeout, derived from the setting the orchestrator renders into the wrapper: `ORCH_WRAPPER_SEND_TIMEOUT_SECONDS + 3 * ORCH_WRAPPER_INTERRUPT_SETTLE_SECONDS + 14` (four spaced ESCs and two 5 s runner drains). Every priority send carries `message_id: orch-<id>`: the wrapper lists the turn as `pending` (with its metadata) from the moment the request arrives, and answers a repeat of the same message id with the turn the first send started (`duplicate: true`), so a re-send never delivers twice.
+
 ### The `verifying` state
 
 A message in `verifying` has `ambiguous_at = now()` and keeps its agent reserved, because its turn may be running. Every dispatcher pass (each NOTIFY wake and each poll) runs the verifier (`dispatcher/verify.py`) over at most 50 such messages. For each one it asks the original agent's wrapper, with the session's derived token, whether a turn carrying this message started:
@@ -625,6 +628,7 @@ A message in `verifying` has `ambiguous_at = now()` and keeps its agent reserved
 - It reads the session snapshot. When `current_turn_id` is set, it fetches that turn record. It then fetches the records of the newest 10 turns of the turns list (the list holds summaries only, so each record is read on its own).
 - Started: a record whose `metadata.orch_message_id` is this message. The message becomes `sent` with that `turn_id` and the reservation stays. A peer or other turn running on the agent does not match, because the match is on the message id, never on "some turn is running".
 - Definitely not started: the wrapper answered the snapshot and every turn lookup, no record carries the id, and the message has been `verifying` for at least the settle window. An attempt is counted (`ambiguous_not_started`) and the message is requeued with backoff, or fails at max. The reservation is cleared only while `agents.last_dispatched_at` still equals this message's `dispatched_at`, so a newer claim on the agent is never undone.
+- Pending: the record carrying the id is a priority turn still `pending` (its interrupt runs). Nothing changes, whatever the age; the next pass checks again.
 - Unknown: the wrapper is unreachable, the session answers 404 (or any other error), or the message is still inside the settle window. Nothing changes; the next pass checks again.
 - Deadline: no definite answer within the deadline fails the message with `ambiguous`. Only the user's explicit Retry (`POST /api/v1/messages/{message_id}/retry`) sends it again, with a fresh attempt budget.
 

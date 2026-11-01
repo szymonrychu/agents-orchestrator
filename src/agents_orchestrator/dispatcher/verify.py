@@ -5,6 +5,8 @@ request was written) or a stale `dispatching` row. Before anything re-sends it, 
 agent's wrapper is asked whether a turn whose `metadata.orch_message_id` is this message exists.
 
 - Started: the message is `sent` with that turn id; the agent stays reserved.
+- Pending (a priority turn the wrapper lists while it still interrupts the running turn): in
+  progress, so nothing changes and the next pass checks again; never requeued.
 - Definitely not started (the wrapper answered and no record carries the id) once the settle
   window has passed: an attempt is counted and the message is requeued with backoff, or fails
   at max. The reservation is cleared only while it is still this message's.
@@ -13,7 +15,8 @@ agent's wrapper is asked whether a turn whose `metadata.orch_message_id` is this
 - Deadline: no definite answer by `ambiguous_deadline_seconds` fails it with `ambiguous`; only
   the user's explicit Retry re-sends it.
 
-The wrapper records a turn, metadata included, before it answers 202, so a missing record after
+The wrapper records a turn, metadata included, before it answers 202 (a priority turn as
+`pending` from the moment its request arrives, before the interrupt), so a missing record after
 the settle window means the request never reached its router. Every write is a guarded queue
 function, so concurrent verifiers resolve a message once, and only `age_seconds` (database
 clock) is compared with the windows; wrapper timestamps never are (D23).
@@ -48,6 +51,7 @@ WrapperFactory = Callable[[str, str], WrapperClient]
 
 class Answer(enum.Enum):
     STARTED = "started"
+    PENDING = "pending"
     NOT_STARTED = "not_started"
     UNKNOWN = "unknown"
 
@@ -67,6 +71,11 @@ async def session_max_attempts(conn: Any, session_id: uuid.UUID) -> int:
 def _carries(record: TurnRecord, message_id: int) -> bool:
     value = record.metadata.get("orch_message_id")
     return value is not None and str(value) == str(message_id)
+
+
+def _found(record: TurnRecord) -> Lookup:
+    answer = Answer.PENDING if record.state == "pending" else Answer.STARTED
+    return Lookup(answer, record.turn_id)
 
 
 class Verifier:
@@ -96,7 +105,9 @@ class Verifier:
         s = self.settings
         found = await self._lookup(msg)
         async with self.pool.connection() as conn:
-            if found.answer is Answer.STARTED:
+            if found.answer is Answer.PENDING:
+                log.info("message %s: turn %s still pending", msg.message_id, found.turn_id)
+            elif found.answer is Answer.STARTED:
                 assert found.turn_id is not None
                 won = await queue.resolve_started(conn, msg.message_id, found.turn_id)
                 if won:
@@ -135,7 +146,7 @@ class Verifier:
                     checked.add(snap.current_turn_id)
                     record = await client.get_turn(session, snap.current_turn_id)
                     if _carries(record, msg.message_id):
-                        return Lookup(Answer.STARTED, record.turn_id)
+                        return _found(record)
                 # the summaries carry no metadata, so each candidate's record is fetched
                 turns = await client.list_turns(session)
                 for summary in reversed(turns[-NEWEST_TURNS:]):
@@ -143,7 +154,7 @@ class Verifier:
                         continue
                     record = await client.get_turn(session, summary.turn_id)
                     if _carries(record, msg.message_id):
-                        return Lookup(Answer.STARTED, record.turn_id)
+                        return _found(record)
             finally:
                 await client.aclose()
         except WrapperUnreachable as exc:
