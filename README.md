@@ -708,11 +708,11 @@ Defaults and limits for forms: `defaults` (model, effort, replicas, auto_compact
 
 ### `GET /api/v1/presets`
 
-All presets as a list of preset views `{id, name, is_default, spec, created_at, updated_at}`, the default first, then by name. `spec` holds only the keys the caller stored. A fresh database has one preset, `Default`, with spec `{"replicas": 1}`. Response 200.
+All presets as a list of preset views `{id, name, is_default, superleader_manageable, spec, created_at, updated_at}`, the default first, then by name. `spec` holds only the keys the caller stored. A fresh database has one preset, `Default`, with spec `{"replicas": 1}`. Response 200.
 
 ### `POST /api/v1/presets`
 
-Body `{"name": "<name>", "spec": {...}}`. The name is 1 to 40 characters of letters, digits, spaces, dots, dashes and underscores, with no leading or trailing space; the API never trims it. Names are unique ignoring case. `spec` takes the same fields as the session spec (all optional) and is checked against the current settings (models, efforts, image allowlist, caps) like a session create; only the keys sent are stored, no defaults are filled. Response 201 with the preset view. Errors: 422 `invalid_request` (bad name, or a spec the settings refuse), 409 `conflict` (name taken).
+Body `{"name": "<name>", "spec": {...}}`. The name is 1 to 40 characters of letters, digits, spaces, dots, dashes and underscores, with no leading or trailing space; the API never trims it. Names are unique ignoring case. `spec` takes the same fields as the session spec (all optional) and is checked against the current settings (models, efforts, image allowlist, caps) like a session create; only the keys sent are stored, no defaults are filled. Response 201 with the preset view. Optional `superleader_manageable` (boolean, default false) is the switch that lets a superleader see and manage this preset through the admin API; it is a column on the preset, not a spec field, and is set only on the main port. Errors: 422 `invalid_request` (bad name, or a spec the settings refuse), 409 `conflict` (name taken).
 
 ### `GET /api/v1/presets/{preset_id}`
 
@@ -720,7 +720,7 @@ One preset view. `spec.reuse_running_agent` (optional, default false) tells trig
 
 ### `PUT /api/v1/presets/{preset_id}`
 
-Body `{"name": "<name>", "spec": {...}}` replaces the name and the whole spec, with the rules of the create. A model, effort or image that is no longer in the settings lists is accepted only when it equals the value already stored in this preset. The default preset can be edited but not renamed. Response 200 with the preset view. Errors: 404 `not_found`, 409 `conflict` (name taken), 409 `preset_default` (renaming the default), 422 `invalid_request`.
+Body `{"name": "<name>", "spec": {...}}` replaces the name and the whole spec, with the rules of the create. A model, effort or image that is no longer in the settings lists is accepted only when it equals the value already stored in this preset. The default preset can be edited but not renamed. An omitted `superleader_manageable` keeps the stored value. Response 200 with the preset view. Errors: 404 `not_found`, 409 `conflict` (name taken), 409 `preset_default` (renaming the default), 422 `invalid_request`.
 
 ### `DELETE /api/v1/presets/{preset_id}`
 
@@ -1204,6 +1204,16 @@ Advisory locks on files, so agents claim what they edit and are warned before wr
 A superleader session (`session_messaging` set in its spec, whoever created the session: a user, a trigger service or the matrix connector) reaches the trigger services through `/agent/v1/admin/webhooks/*`, `/schedules/*` and `/chats/*`, which map 1:1 to the upstream admin routes (`ORCH_WEBHOOK_URL`, `ORCH_SCHEDULE_URL`, `ORCH_CONNECTOR_URL` with their tokens). After the superleader gate the upstream must be configured (503 `upstream_unconfigured`) and the body is capped at 256 KiB (413). The upstream gets only its service bearer, `X-Orch-Session` and `X-Orch-Slug`; its status and JSON come back unchanged, a failed or non-JSON call is 503 `upstream_unavailable`.
 
 Webhook credentials never reach the caller. A credential agents-webhook issues once (create, rotate, clone, a PATCH that changes the auth mode) is stored in the Secret `webhook-<id>-password` (key `password`, or `secret` for header, bearer and hmac) and the answer carries `password_secret` (the Secret name) and `key` instead. If the Secret cannot be written the call is 503 `credential_not_stored` and no value is returned; rotate the endpoint for a new one. Deleting the webhook deletes the Secret. A call with `X-Orch-Tool: local` also gets `credential: {key, value}` once, for the plugin's `to_file`.
+
+### Admin visibility (superleader_manageable)
+
+Each preset has a `superleader_manageable` switch (default false, main port only). A superleader sees and manages only presets with the switch on, and the sessions, webhook endpoints, schedules, runs, events and chat rooms that belong to them:
+
+- Admin preset routes: list omits hidden presets; get, replace, copy, delete and secrets of a hidden preset are 404. Presets created through the admin API are manageable.
+- Admin session create needs a `preset_id` of a manageable preset (a raw `spec` is 422 `preset_required`; a hidden preset is 404); a session of a hidden preset, or with a null preset, is 404 on every admin session route and absent from the list.
+- Sending `superleader_manageable` through the admin API is 422 `manageable_main_port_only` when false; the admin API cannot hide a preset.
+- Relay (`/agent/v1/admin/webhooks`, `/schedules`, `/chats`): a body naming a hidden or null preset, or a stored object on one, is 404 and never forwarded. Lists (endpoints, events, schedules, runs, rooms) are filtered after the upstream page, so a page of `events` or `runs` full of hidden items comes back short or empty; a single event or run of a hidden preset is 404. Objects with a null preset (for example chat rooms without a preset) are hidden. A list answer that is not a JSON list is 502 `upstream_shape`.
+- Cross-session messaging (`/agent/v1/sessions`) is not filtered by this switch.
 
 ### Admin relay: secrets, cooldown and known risks
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from factories import attach_preset
 from fakes.fake_kube import FakeKube
 from psycopg.rows import dict_row
 from test_agent_session_messaging import alone, hive
@@ -54,6 +55,7 @@ async def agents_of(pool, session_id):
 
 async def test_restart_of_another_session_needs_no_claim(call, pool, boss):
     other = await hive(pool, "rs-other")
+    await attach_preset(pool, other.id)
     r = await call("POST", f"{S}/{other.slug}/restart")
     assert r.status_code == 202, r.text
     ids = r.json()["command_ids"]
@@ -72,6 +74,7 @@ async def test_restart_of_another_session_needs_no_claim(call, pool, boss):
 
 async def test_restart_of_another_sessions_agent(call, pool):
     other = await hive(pool, "rs-other-agent")
+    await attach_preset(pool, other.id)
     pod = (await agents_of(pool, other.id))[1]["pod_name"]
     r = await call("POST", f"{S}/{other.slug}/agents/{pod}/restart")
     assert r.status_code == 202, r.text
@@ -85,6 +88,7 @@ async def test_restart_of_another_sessions_agent(call, pool):
 
 async def test_deleting_session_is_refused(call, pool):
     gone = await hive(pool, "rs-deleting", desired="deleting")
+    await attach_preset(pool, gone.id)
     assert_error(await call("POST", f"{S}/{gone.slug}/restart"), 409, "session_deleting")
 
 
@@ -265,6 +269,7 @@ async def test_a_gone_agent_does_not_hold_the_note(call, pool, boss):
 
 async def test_commands_are_scoped_to_the_issuing_superleader(call, pool, app, boss):
     other = await hive(pool, "rs-victim")
+    await attach_preset(pool, other.id)
     mine = (await call("POST", f"{S}/{other.slug}/restart")).json()["command_ids"][0]
     assert (await call("GET", f"{ADMIN_PREFIX}/commands/{mine}")).status_code == 200
     # a command made on the main port, and one issued by another superleader, are not visible
@@ -279,3 +284,24 @@ async def test_commands_are_scoped_to_the_issuing_superleader(call, pool, app, b
     async with client_for(app, rival.leader_ip) as http:
         r = await http.get(f"{ADMIN_PREFIX}/commands/{mine}", headers=headers(rival.id))
     assert_error(r, 404, "not_found")
+
+
+async def test_restart_hidden_session_404(call, pool):
+    other = await hive(pool, "rs-hidden")
+    await attach_preset(pool, other.id, manageable=False)
+    assert_error(await call("POST", f"{S}/{other.slug}/restart"), 404, "not_found")
+    assert await q(pool, "SELECT 1 FROM commands") == []
+
+
+async def test_restart_agent_hidden_session_404(call, pool):
+    other = await hive(pool, "rs-hidden-agent")
+    await attach_preset(pool, other.id, manageable=False)
+    pod = (await agents_of(pool, other.id))[0]["pod_name"]
+    assert_error(await call("POST", f"{S}/{other.slug}/agents/{pod}/restart"), 404, "not_found")
+    assert await q(pool, "SELECT 1 FROM commands") == []
+
+
+async def test_self_restart_with_hidden_preset_still_works(call, pool, boss):
+    await attach_preset(pool, boss.id, manageable=False)
+    assert (await call("POST", f"{S}/{boss.slug}/restart")).status_code == 202
+    assert_error(await call("POST", f"{S}/{boss.slug}/restart"), 429, "restart_cooldown")

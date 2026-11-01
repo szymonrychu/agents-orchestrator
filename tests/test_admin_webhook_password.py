@@ -55,6 +55,7 @@ async def go(rig, name, canary, **kw):  # noqa: F811
         fake = rig.fakes["webhook"]
         key = (method, UPSTREAM_PREFIX["webhook"] + "/endpoints")
         body = fu.sample(DOCS["webhook"], _body_schema(fake, key))
+        body["preset_id"] = rig.vis  # a hidden preset is refused before the relay forwards
     r = await rig.call(method, url, json=body, headers=headers)
     return r, status
 
@@ -171,7 +172,7 @@ async def test_a_credential_on_a_non_issuing_route_is_refused(rig, canary):  # n
     fake = rig.fakes["webhook"]
     key = ("GET", UPSTREAM_PREFIX["webhook"] + "/endpoints")
     view = fu.sample(DOCS["webhook"], {"$ref": "#/components/schemas/EndpointView"})
-    fake.answers[key] = (200, [{**view, "secret": canary}])
+    fake.answers[key] = (200, [{**view, "preset_id": rig.vis, "secret": canary}])
     r = await rig.call("GET", relay_url("webhook", "/endpoints"))
     assert_error(r, 503, "upstream_unavailable")
     assert canary not in r.text
