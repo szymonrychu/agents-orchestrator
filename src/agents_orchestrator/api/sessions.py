@@ -27,6 +27,7 @@ from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import (
     HOOK_EVENT_SPECS,
     INIT_DIR,
+    PERMISSION_MODES,
     WORKDIR_ROOT,
     SessionSpec,
     SpecInvalid,
@@ -155,6 +156,8 @@ def agent_view(r: dict) -> schemas.AgentView:
         else None,
         bootstrap=_bootstrap_view(r["bootstrap_step"]),
         bootstrap_failure=_bootstrap_view(r["bootstrap_failure"]),
+        permission_mode_state=r["permission_mode_state"],
+        permission_mode_reason=r["permission_mode_reason"],
     )
 
 
@@ -222,6 +225,7 @@ async def meta(settings: Cfg) -> schemas.Meta:
         ),
         kube_access=schemas.MetaKubeAccess(available=settings.kube_access_available),
         hook_events=[schemas.MetaHookEvent(**asdict(e)) for e in HOOK_EVENT_SPECS],
+        permission_modes=[schemas.MetaPermissionMode(**m) for m in PERMISSION_MODES],
     )
 
 

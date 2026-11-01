@@ -253,6 +253,10 @@ HOOK_EVENT_SPECS: tuple[HookEventSpec, ...] = (
     HookEventSpec("postLeave"),
     HookEventSpec("onStart", can_veto=True),
 )
+PERMISSION_MODES: tuple[dict[str, str], ...] = (
+    {"value": "bypassPermissions", "label": "Allow all"},
+    {"value": "auto", "label": "Auto"},
+)
 HOOK_EVENTS: tuple[str, ...] = tuple(s.name for s in HOOK_EVENT_SPECS)
 TOOL_EVENTS: tuple[str, ...] = tuple(s.name for s in HOOK_EVENT_SPECS if s.supports_matcher)
 HOOK_ACTIONS_MAX = 20
