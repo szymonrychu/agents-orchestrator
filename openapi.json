@@ -8432,7 +8432,7 @@
     },
     "/agent/v1/scale": {
       "post": {
-        "description": "A scale-up over the usage quota is refused 409 `usage_quota`.",
+        "description": "A scale-up over the usage quota is refused 409 `usage_quota`, but only for the leader:\na non-leader is always answered 403 `not_leader`.",
         "operationId": "scale_agent_v1_scale_post",
         "parameters": [
           {

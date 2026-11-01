@@ -11,13 +11,14 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import httpx
+import pytest_asyncio
 from factories import attach_preset, insert_session
 from test_agent_scale import hive as scale_hive
 from test_agent_scale import replicas_of
 from test_agent_session_messaging import alone
 from test_agent_session_messaging import hive as admin_hive
+from test_api_agent import IP1, headers
 from test_api_agent import client_for as agent_client
-from test_api_agent import headers
 from test_api_agent import make_settings as agent_settings
 from test_api_sessions import assert_error, client_for, make_settings
 from test_service_port import DEFAULT_ID, TOKENS
@@ -66,10 +67,25 @@ class Upstream:
         return httpx.Response(200, json=self.body)
 
 
+_APPS: list = []
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def close_usage_sources():
+    """ASGITransport does not run the app lifespan, so close each app's usage client here."""
+    yield
+    apps, _APPS[:] = list(_APPS), []
+    for app in apps:
+        if app.state.usage is not None:
+            await app.state.usage.aclose()
+
+
 def gated(settings: Settings, pool, upstream: Upstream, configured: bool = True, **kw):
     if configured:
         settings = settings.model_copy(update={"usage_url": URL, "usage_token": "t"})
-    return create_app(settings, pool, usage_transport=httpx.MockTransport(upstream), **kw)
+    app = create_app(settings, pool, usage_transport=httpx.MockTransport(upstream), **kw)
+    _APPS.append(app)
+    return app
 
 
 async def session_count(pool) -> int:
@@ -244,6 +260,26 @@ async def test_agent_scale_up_refused(pool, dsn):
         r = await http.post("/agent/v1/scale", json={"replicas": 2}, headers=headers(c["id"]))
     assert_refused(r, "seven_day", 100.0, 100)
     assert await replicas_of(pool, c["id"]) == 1
+
+
+async def test_agent_scale_non_leader_over_quota_is_not_leader(pool, dsn):
+    c, _, _ = await scale_hive(pool, replicas=1, max_replicas=3)
+    app = gated(agent_settings(dsn), pool, Upstream(windows(seven_day=100.0)))
+    async with agent_client(app, IP1) as http:
+        r = await http.post("/agent/v1/scale", json={"replicas": 2}, headers=headers(c["id"]))
+    assert_error(r, 403, "not_leader")
+    assert "usage" not in r.json()["error"] and "Retry-After" not in r.headers
+    assert await replicas_of(pool, c["id"]) == 1
+
+
+async def test_agent_scale_up_under_quota_applies(pool, dsn):
+    c, _, _ = await scale_hive(pool, replicas=1, max_replicas=3)
+    app = gated(agent_settings(dsn), pool, Upstream(windows(seven_day=50.0)))
+    async with agent_client(app) as http:
+        r = await http.post("/agent/v1/scale", json={"replicas": 2}, headers=headers(c["id"]))
+    assert r.status_code == 202, r.text
+    assert r.json()["replicas"] == 2 and r.json()["previous_replicas"] == 1
+    assert await replicas_of(pool, c["id"]) == 2
 
 
 async def test_agent_scale_down_never_gated(pool, dsn):

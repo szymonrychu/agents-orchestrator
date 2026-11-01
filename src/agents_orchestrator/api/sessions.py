@@ -589,22 +589,34 @@ SCALE_STATUS = {
 
 
 async def gate_scale_up(
-    pool, usage: UsageSource | None, settings: Settings, session_id: uuid.UUID, replicas: int
+    pool,
+    usage: UsageSource | None,
+    settings: Settings,
+    session_id: uuid.UUID,
+    replicas: int,
+    *,
+    caller_agent_id: uuid.UUID | None = None,
 ) -> None:
     """Refuse a scale-up over the usage quota (409 `usage_quota`), from the session's own
     snapshotted quota. Scale-down, an unchanged count and a gate that is off are never gated;
     nor is a count `set_replicas` refuses on its own (missing, deleting, static, out of range),
-    so its error stays the answer. Check-then-act: a concurrent scale between this read and
-    `set_replicas` is not re-judged (fail-open, like missing data)."""
+    so its error stays the answer; that includes `not_leader` for a `caller_agent_id` that is
+    not the session's leader, so a non-leader never sees `usage_quota`. Check-then-act: a
+    concurrent scale between this read and `set_replicas` is not re-judged (fail-open, like
+    missing data)."""
     if usage is None:
         return
     async with pool.connection() as conn:
         session = await repo.get(conn, session_id)
-    if session is None or session.desired != "active" or session.spec.static:
-        return
-    spec = session.spec
-    if not spec.replicas < replicas <= (spec.max_replicas or spec.replicas):
-        return
+        if session is None or session.desired != "active" or session.spec.static:
+            return
+        spec = session.spec
+        if not spec.replicas < replicas <= (spec.max_replicas or spec.replicas):
+            return
+        if caller_agent_id is not None:
+            leader = await agents_repo.leader_of(conn, session_id)
+            if leader is None or leader[0] != caller_agent_id:
+                return
     await usage_gate.enforce(usage, spec.usage_quota, settings.usage_quota_default)
 
 
