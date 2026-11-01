@@ -276,3 +276,45 @@ async def test_nothing_is_logged_with_a_token_or_body(rig, caplog):
         await rig.call("POST", relay_url("connector", "/rules"), json=body)
     assert canary not in caplog.text
     assert rig.tokens["connector"] not in caplog.text
+
+
+# ------------------------------------------------------------------------- path encoding
+
+
+@pytest.mark.parametrize(
+    ("raw", "want"),
+    [
+        ("..", "%2E%2E"),
+        (".", "%2E"),
+        ("", ""),
+        ("%2e%2e", "%252e%252e"),
+        ("a%2Fb", "a%252Fb"),
+        ("a/b", "a%2Fb"),
+        ("a\\b", "a%5Cb"),
+    ],
+)
+def test_segment_is_always_one_inert_path_segment(raw, want):
+    assert admin_relay._segment(raw) == want
+    assert "/" not in want and "\\" not in want and want not in (".", "..")
+
+
+async def test_encoded_dots_reach_the_upstream_as_one_segment(rig):
+    seen = []
+
+    async def record(request):
+        seen.append(request.url.raw_path.decode())
+        return httpx.Response(404, json={"error": {"code": "not_found", "message": "x"}})
+
+    rig.app.state.admin_http = httpx.AsyncClient(transport=httpx.MockTransport(record))
+    for raw in ("%2e%2e", "%2E%2E", "%2e", "..%5c"):
+        r = await rig.call("GET", ADMIN_PREFIX + f"/schedules/schedules/{raw}")
+        assert r.status_code == 404, (raw, r.text)
+    assert len(seen) == 4
+    # a decoded slash splits the path before routing: it never matches a relay route
+    await rig.call("GET", ADMIN_PREFIX + "/schedules/schedules/a%2f..%2fb")
+    assert len(seen) == 4
+    for path in seen:
+        head = "/schedules/api/v1/schedules/"
+        assert path.startswith(head), path
+        tail = path[len(head) :]
+        assert "/" not in tail and tail not in (".", "..") and "\\" not in tail, path
