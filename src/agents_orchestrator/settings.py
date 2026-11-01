@@ -190,6 +190,17 @@ class Settings(BaseSettings):
     cache_image: str = ""
     cache_max_bytes: int = Field(default=CACHE_MAX_BYTES_LIMIT, ge=1, le=CACHE_MAX_BYTES_LIMIT)
     cache_timeout_seconds: int = Field(default=1800, ge=60, le=86400)
+    # Archive cleanup sweep (reconciler leader). The grace period, when unset, is the cache Job
+    # deadline plus the presign margin: an archive younger than that may still be mid-save.
+    cache_retention_days: int = Field(default=30, ge=1)
+    cache_keep_newest: int = Field(default=3, ge=1)
+    cache_sweep_interval_seconds: int = Field(default=6 * 3600, ge=60)
+    cache_sweep_grace_seconds: int | None = Field(default=None, ge=0)
+    cache_sweep_enabled: bool = True
+    cache_sweep_dry_run: bool = True
+    # The api pod's own list/get/delete key pair (the reconciler keeps cache_s3_access_key_id).
+    cache_s3_api_access_key_id: str = ""
+    cache_s3_api_secret_access_key: str = Field(default="", repr=False)
 
     kube_access_service_account: str = ""
     agent_service_account: str = "default"
@@ -448,6 +459,17 @@ class Settings(BaseSettings):
                 raise _Bad("must not carry a query or fragment (the relay appends /chat/v1/...)")
         return v
 
+    @field_validator("cache_s3_api_secret_access_key")
+    @classmethod
+    def _check_api_pair(cls, v: str, info: ValidationInfo) -> str:
+        key_id = info.data.get("cache_s3_api_access_key_id")
+        if key_id is not None and bool(key_id) != bool(v):
+            raise _Bad(
+                "set ORCH_CACHE_S3_API_ACCESS_KEY_ID and ORCH_CACHE_S3_API_SECRET_ACCESS_KEY "
+                "together, or neither"
+            )
+        return v
+
     @field_validator("chat_token")
     @classmethod
     def _check_chat_pair(cls, v: str, info: ValidationInfo) -> str:
@@ -464,6 +486,8 @@ class Settings(BaseSettings):
             self.default_model = self.models[0]
         if not self.check_image:
             self.check_image = self.agent_image
+        if self.cache_sweep_grace_seconds is None:
+            self.cache_sweep_grace_seconds = self.cache_timeout_seconds + 600
         return self
 
     def require_master_key(self) -> str:
@@ -487,6 +511,27 @@ class Settings(BaseSettings):
     @property
     def cache_available(self) -> bool:
         return bool(self.cache_s3_bucket)
+
+    @property
+    def reconciler_s3_configured(self) -> bool:
+        """The bucket and the reconciler's key pair are set (presign, list resolution, sweep)."""
+        return self.cache_available and bool(
+            self.cache_s3_access_key_id and self.cache_s3_secret_access_key
+        )
+
+    @property
+    def api_s3_configured(self) -> bool:
+        """The bucket and the api pod's own key pair are set (archives endpoints answer 503
+        otherwise)."""
+        return self.cache_available and bool(
+            self.cache_s3_api_access_key_id and self.cache_s3_api_secret_access_key
+        )
+
+    def reconciler_s3_credentials(self) -> tuple[str, str]:
+        return self.cache_s3_access_key_id, self.cache_s3_secret_access_key
+
+    def api_s3_credentials(self) -> tuple[str, str]:
+        return self.cache_s3_api_access_key_id, self.cache_s3_api_secret_access_key
 
     @property
     def chat_available(self) -> bool:

@@ -54,12 +54,26 @@ renders no `ORCH_CACHE_*` setting and the cache stays off.
 | `cache.image` | `""` (the chart image, `image.repository:image.tag`) | `ORCH_CACHE_IMAGE` |
 | `cache.maxBytes` | `5368709120` (5 GiB, the maximum) | `ORCH_CACHE_MAX_BYTES` |
 | `cache.timeoutSeconds` | `1800` | `ORCH_CACHE_TIMEOUT_SECONDS` |
+| `cache.s3.api.existingSecret` | `""` (the archives routes answer 503) | - |
+| `cache.s3.api.accessKeyIdKey` | `AWS_ACCESS_KEY_ID` | `ORCH_CACHE_S3_API_ACCESS_KEY_ID` |
+| `cache.s3.api.secretAccessKeyKey` | `AWS_SECRET_ACCESS_KEY` | `ORCH_CACHE_S3_API_SECRET_ACCESS_KEY` |
+| `cache.sweep.enabled` | `true` | `ORCH_CACHE_SWEEP_ENABLED` |
+| `cache.sweep.dryRun` | `true` | `ORCH_CACHE_SWEEP_DRY_RUN` |
+| `cache.sweep.retentionDays` | `30` | `ORCH_CACHE_RETENTION_DAYS` |
+| `cache.sweep.keepNewest` | `3` | `ORCH_CACHE_KEEP_NEWEST` |
+| `cache.sweep.intervalSeconds` | `21600` | `ORCH_CACHE_SWEEP_INTERVAL_SECONDS` |
+| `cache.sweep.graceSeconds` | `""` (`timeoutSeconds` + 600) | `ORCH_CACHE_SWEEP_GRACE_SECONDS` |
 
 Everything but the access keys goes into the settings ConfigMap. The access key pair is read
 from `cache.s3.existingSecret` (keys `cache.s3.accessKeyIdKey` and `cache.s3.secretAccessKeyKey`)
 and reaches the reconciler container only, as `secretKeyRef` env: the api, dispatcher and
 ingester, the migrate init containers and the agent pods never see it, and each cache Job gets
 one presigned URL instead. A bucket without `cache.s3.existingSecret` fails the render.
+The api container alone reads its own pair from `cache.s3.api.existingSecret` (same key
+options), used for the archives list, download, cleanup preview and delete routes; the code
+only lists, gets and deletes with it. It may name the same Secret as `cache.s3.existingSecret`
+when the store has one identity. Without it those routes answer 503. The cleanup sweep starts in
+dry-run: read `GET /api/v1/cache/cleanup/preview`, then set `cache.sweep.dryRun: false`.
 The reconciler Role allows create, get and delete on `batch` Jobs in the release
 namespace (Kubernetes RBAC cannot restrict verbs by label).
 

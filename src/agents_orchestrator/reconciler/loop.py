@@ -43,6 +43,7 @@ from agents_orchestrator.reconciler.checks import CheckRunner
 from agents_orchestrator.reconciler.discard_hook import HookResult, resolve_hook, run_discard_hook
 from agents_orchestrator.reconciler.init import InitGate, InitRunner
 from agents_orchestrator.reconciler.rollout import BUSY, LEADS, Replacer, agent_pods, terminating
+from agents_orchestrator.reconciler.sweeper import CacheSweeper
 from agents_orchestrator.reconciler.wrapper_sessions import WrapperSessionBootstrapper
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.tokens import tokens_for
@@ -96,6 +97,7 @@ class Reconciler:
         self.checks = CheckRunner(pool, kube, settings)
         self.init = InitRunner(pool, kube, settings, write_status=self._write_status)
         self.cache = CacheRunner(pool, kube, settings, write_status=self._write_status)
+        self.sweeper = CacheSweeper(pool, settings)
         self.replacer = Replacer(pool, kube, settings)
         self.bootstrapper = (
             WrapperSessionBootstrapper(pool, wrapper_factory)
@@ -115,6 +117,7 @@ class Reconciler:
 
         listener_task = asyncio.create_task(listener())
         stop_wait = asyncio.create_task(stop.wait())
+        sweep_task = asyncio.create_task(self.sweeper.run(stop))
         try:
             while not stop.is_set():
                 wake.clear()
@@ -138,6 +141,9 @@ class Reconciler:
             stop_wait.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await listener_task
+            sweep_task.cancel()  # a sweep cut short is idempotent: the next one replans
+            with contextlib.suppress(asyncio.CancelledError):
+                await sweep_task
 
     # ------------------------------------------------------------------ one pass
 

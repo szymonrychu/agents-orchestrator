@@ -67,7 +67,12 @@ def test_kube_access_pod_identity() -> None:
         {"static": True, "replicas": 2, "max_replicas": 2},
         {"session_messaging": True},
         {"kube_access": False},
-        {"cache": {"key": "preset-0123456789abcdef"}},
+        {
+            "cache": {
+                "restore_key": "preset-0123456789abcdef",
+                "save_key": "preset-0123456789abcdef",
+            }
+        },
     ],
     ids=["alone", "hive", "static", "messaging-only", "kube-false", "cache"],
 )

@@ -19,6 +19,8 @@ SAVE_OK_RESTORE_STATES = frozenset({"restored", "miss", "reset"})
 # A sessions restore skipped because the session's pods existed when the feature arrived leaves
 # the transcripts the pods wrote, so they are saved as after a successful restore.
 PODS_EXIST = "pods_exist"
+# `spec.cache.save_key` is empty: the cache is restore-only and a discard saves nothing.
+RESTORE_ONLY = "restore-only"
 # No sessions restore record and no converge ever finished: the session was discarded before its
 # first converge, so no pod ever wrote /sessions and the save Job would wait on a missing PVC.
 NEVER_CONVERGED = "never_converged"
@@ -60,14 +62,24 @@ def has_converged(status: dict[str, Any]) -> bool:
     return "replicas" in status
 
 
-def save_skip(cache_available: bool, status: dict[str, Any], target: CacheTarget) -> str | None:
+def save_skip(
+    cache_available: bool,
+    status: dict[str, Any],
+    target: CacheTarget,
+    *,
+    restore_only: bool = False,
+) -> str | None:
     """Why the discard skips the save of `target` (a session's `status`), or None to save.
+
+    `restore_only` (an empty `spec.cache.save_key`) skips the workdir save with `restore-only`.
 
     Without a sessions restore record the session either predates the restore (its pods ran) or
     was discarded before its first converge (`never_converged`: no PVC, nothing to save).
     """
     if not cache_available:
         return "not_configured"
+    if restore_only and target == "workdir":
+        return RESTORE_ONLY
     restore = (status.get("cache") or {}).get(restore_key(target))
     if _pods_wrote_sessions(restore, target):
         return None if restore is not None or has_converged(status) else NEVER_CONVERGED

@@ -51,7 +51,7 @@ class Env:
         base = {
             "cache_s3_endpoint": "http://rgw.example:80",
             "cache_s3_bucket": "bucket",
-            "cache_s3_access_key_id": "AKIAEXAMPLE",
+            "cache_s3_access_key_id": "TESTIDEXAMPLE",
             "cache_s3_secret_access_key": "s3cr3t",
             "cache_image": "harbor.example/orch:1",
         }
@@ -70,7 +70,7 @@ class Env:
     async def create(self, slug: str = "alpha", cache: bool = True, **spec):
         """A new session row, with the workspace cache unless `cache` is False."""
         if cache:
-            spec["cache"] = {"key": CACHE_KEY}
+            spec["cache"] = {"restore_key": CACHE_KEY, "save_key": CACHE_KEY}
         async with self.pool.connection() as conn:
             c = await sessions.create(conn, slug, SessionSpec(**spec))
         if self.fake is not None:
@@ -150,8 +150,7 @@ async def test_restore_job_created_before_init(env):
     c = await env.session("alpha", init_scripts=["echo a"])
     await env.tick()
     cache = await env.cache(c.id)
-    assert cache["key"] == CACHE_KEY
-    assert cache["object"] == f"workspace-cache/{CACHE_KEY}.tar.zst"
+    assert cache["restore_resolved"] == f"workspace-cache/{CACHE_KEY}.tar.zst"
     restore = cache["restore"]
     assert restore["state"] == "running" and restore["job"] == RESTORE
     assert restore["started_at"] and restore["finished_at"] is None
@@ -308,7 +307,9 @@ async def _now(env):
 async def test_not_configured(pool, dsn):
     e = Env(pool, dsn, cache_s3_bucket="")
     async with pool.connection() as conn:
-        c = await sessions.create(conn, "alpha", SessionSpec(cache={"key": CACHE_KEY}))
+        c = await sessions.create(
+            conn, "alpha", SessionSpec(cache={"restore_key": CACHE_KEY, "save_key": CACHE_KEY})
+        )
     await e.tick()
     restore = (await e.cache(c.id))["restore"]
     assert (restore["state"], restore["reason"]) == ("failed", "not_configured")
