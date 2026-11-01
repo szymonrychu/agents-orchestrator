@@ -1673,7 +1673,14 @@
             "anyOf": [
               {
                 "additionalProperties": {
-                  "type": "string"
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SecretRef"
+                    }
+                  ]
                 },
                 "type": "object"
               },
@@ -1729,7 +1736,14 @@
             "anyOf": [
               {
                 "additionalProperties": {
-                  "type": "string"
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SecretRef"
+                    }
+                  ]
                 },
                 "type": "object"
               },
@@ -2687,6 +2701,21 @@
         "title": "ScaleResult",
         "type": "object"
       },
+      "SecretRef": {
+        "additionalProperties": false,
+        "description": "A reference to a secret declared in `SessionSpec.secrets`; never a value.",
+        "properties": {
+          "secret": {
+            "title": "Secret",
+            "type": "string"
+          }
+        },
+        "required": [
+          "secret"
+        ],
+        "title": "SecretRef",
+        "type": "object"
+      },
       "SessionBackup": {
         "description": "What a discard would save now; each flag is true only when that save would really run.\n\n`reason` is null when both run, else `no_session_cache` (no `spec.cache`),\n`cache_not_configured` (no S3 cache configured) or the save's skip reason, the workdir's first.",
         "properties": {
@@ -3032,6 +3061,20 @@
               }
             ],
             "title": "Reuse Running Agent"
+          },
+          "secrets": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secrets"
           },
           "session_messaging": {
             "anyOf": [
@@ -3534,7 +3577,14 @@
             "anyOf": [
               {
                 "additionalProperties": {
-                  "type": "string"
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SecretRef"
+                    }
+                  ]
                 },
                 "type": "object"
               },
@@ -3598,6 +3648,9 @@
             "anyOf": [
               {
                 "type": "string"
+              },
+              {
+                "$ref": "#/components/schemas/SecretRef"
               },
               {
                 "type": "null"

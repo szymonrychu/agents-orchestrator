@@ -66,6 +66,10 @@ class SpecInvalid(ValueError):
         super().__init__("invalid session spec: " + "; ".join(errors))
 
 
+def _reserved_env_name(name: str) -> bool:
+    return name == "POD_NAME" or name.startswith(_RESERVED_ENV_PREFIXES)
+
+
 def slugify(text: str, max_len: int = SLUG_MAX) -> str:
     """Lowercase `text` to a DNS-1123 label body of at most `max_len`; "" if nothing is usable."""
     body = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
@@ -180,6 +184,7 @@ def source_plugin_name(source: str) -> str:
 
 
 INIT_SCRIPTS_MAX = 20
+SECRETS_MAX = 50
 
 CACHE_KEY_TEMPLATE_MAX = 256
 CACHE_EXCLUDE_MAX = 50
@@ -283,6 +288,24 @@ class _HookAction(_Strict):
         return v
 
 
+class SecretRef(_Strict):
+    """A reference to a secret declared in `SessionSpec.secrets`; never a value."""
+
+    secret: str
+
+
+SecretOrStr = str | SecretRef
+
+
+def _refs(value: object) -> list[str]:
+    """Names referenced by one field: a ref, or the refs among a mapping's values."""
+    if isinstance(value, SecretRef):
+        return [value.secret]
+    if isinstance(value, dict):
+        return [v.secret for v in value.values() if isinstance(v, SecretRef)]
+    return []
+
+
 class CommandHook(_HookAction):
     type: Literal["command"]
     run: str = Field(min_length=1, max_length=HOOK_RUN_MAX_CHARS)
@@ -300,8 +323,8 @@ class CommandHook(_HookAction):
 class WebhookHook(_HookAction):
     type: Literal["webhook"]
     url: str
-    secret: str | None = None
-    headers: dict[str, str] | None = None
+    secret: SecretOrStr | None = None
+    headers: dict[str, SecretOrStr] | None = None
     retries: int | None = Field(default=None, ge=0)
 
     @field_validator("url")
@@ -319,13 +342,13 @@ class McpStdio(_Strict):
     type: Literal["stdio"]
     command: str = Field(min_length=1)
     args: list[str] | None = None
-    env: dict[str, str] | None = None
+    env: dict[str, SecretOrStr] | None = None
 
 
 class McpRemote(_Strict):
     type: Literal["http", "sse"]
     url: str
-    headers: dict[str, str] | None = None
+    headers: dict[str, SecretOrStr] | None = None
 
 
 McpServer = Annotated[McpStdio | McpRemote, Field(discriminator="type")]
@@ -559,6 +582,9 @@ class SessionSpec(BaseModel):
     kube_access: bool | None = Field(default=None, strict=True)
     # Workspace cache in S3; presence enables it. Sparse: unset is not stored or dumped.
     cache: WorkspaceCache | None = None
+    # Names of secrets whose values live in Kubernetes Secrets, set through the secrets route and
+    # never stored here. Sparse: unset is not stored or dumped in a preset.
+    secrets: list[str] | None = None
 
     @model_validator(mode="after")
     def _cap(self) -> SessionSpec:
@@ -575,6 +601,45 @@ class SessionSpec(BaseModel):
     def _lease_needs_hive(self) -> SessionSpec:
         if self.leader_lease_seconds is not None and not self.hive:
             raise ValueError("leader_lease_seconds requires a hive session (max_replicas > 1)")
+        return self
+
+    @field_validator("secrets")
+    @classmethod
+    def _secret_names(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return v
+        if len(v) > SECRETS_MAX:
+            raise ValueError(f"secrets has {len(v)} entries, at most {SECRETS_MAX}")
+        bad = [n for n in v if not _ENV_KEY_RE.fullmatch(n) or _reserved_env_name(n)]
+        if bad:
+            raise ValueError(
+                "secret names must match [A-Z_][A-Z0-9_]* and must not be POD_NAME, CCW_*, "
+                "CLAUDE_*, ANTHROPIC_* or ORCH_*: " + ", ".join(sorted(bad))
+            )
+        if len(set(v)) != len(v):
+            raise ValueError("secrets has duplicate names")
+        return v
+
+    @model_validator(mode="after")
+    def _secrets_declared(self) -> SessionSpec:
+        declared = set(self.secrets or [])
+        clash = declared & set(self.env)
+        if clash:
+            raise ValueError("secret names collide with env keys: " + ", ".join(sorted(clash)))
+        used: set[str] = set()
+        wrapper = self.wrapper
+        if wrapper is not None:
+            for actions in (wrapper.hooks or {}).values():
+                for action in actions:
+                    if isinstance(action, WebhookHook):
+                        used.update(_refs(action.secret), _refs(action.headers))
+            for server in (wrapper.mcp_servers or {}).values():
+                used.update(_refs(server.env if isinstance(server, McpStdio) else server.headers))
+        missing = used - declared
+        if missing:
+            raise ValueError(
+                "secret references not declared in secrets: " + ", ".join(sorted(missing))
+            )
         return self
 
     @property
