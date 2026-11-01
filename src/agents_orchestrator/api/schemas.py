@@ -119,6 +119,8 @@ class SessionView(BaseModel):
     closes_at: datetime | None
     init_edited_since_run: bool
     backup: SessionBackup
+    created_by_service: str | None = None
+    created_by_session: uuid.UUID | None = None
 
 
 class InitScriptsIn(BaseModel):

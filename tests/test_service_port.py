@@ -84,6 +84,21 @@ async def test_allowed_routes_with_token(app, caplog):
     assert all(TOKEN not in rec.getMessage() for rec in caplog.records)
 
 
+@pytest.mark.parametrize(
+    ("method", "path", "allowed"),
+    [
+        ("GET", "/api/v1/stream", True),
+        ("POST", "/api/v1/stream", False),
+        ("HEAD", "/api/v1/stream", False),
+        ("GET", "/api/v1/stream/x", False),
+        ("GET", "/api/v1/stream/", False),
+        ("GET", "/api/v1/sessions/x/events/stream", False),
+    ],
+)
+def test_stream_route_is_get_only_and_exact(method, path, allowed):
+    assert service_auth.route_allowed(method, path) is allowed
+
+
 async def test_token_required(app, caplog, monkeypatch):
     caplog.set_level(logging.DEBUG)
     async with client(app, 8002, token=None) as c:
@@ -141,7 +156,6 @@ async def test_route_allowlist(app, pool):
             ("POST", f"/api/v1/sessions/{cl['id']}/scale"),
             ("GET", f"/api/v1/sessions/{cl['id']}/agents"),
             ("GET", f"/api/v1/sessions/{cl['id']}/events/stream"),
-            ("GET", "/api/v1/stream"),
             ("GET", "/api/v1/openapi.json"),
             ("GET", "/api/v1/docs"),
             ("DELETE", f"/api/v1/messages/{uuid.uuid4()}"),
@@ -214,7 +228,7 @@ async def test_session_created_on_the_service_port_records_its_service(app, pool
     async with client(app, 8002) as c:
         r = await c.post("/api/v1/sessions", json={"preset_id": DEFAULT_ID, "slug": "wh-1"})
         assert r.status_code == 201, r.text
-        assert "created_by_service" not in r.json()
+        assert r.json()["created_by_service"] == "agents-webhook"
     async with client(app, 8002, token=OTHER_TOKEN) as c:
         r = await c.post("/api/v1/sessions", json={"preset_id": DEFAULT_ID, "slug": "sch-1"})
         assert r.status_code == 201, r.text

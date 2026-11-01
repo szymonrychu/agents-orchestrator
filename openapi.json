@@ -3871,6 +3871,29 @@
             "title": "Created At",
             "type": "string"
           },
+          "created_by_service": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By Service"
+          },
+          "created_by_session": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By Session"
+          },
           "desired": {
             "enum": [
               "active",

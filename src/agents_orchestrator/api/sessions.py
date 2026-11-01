@@ -133,6 +133,8 @@ def _view(session: repo.Session, agg: dict | None, settings: Settings) -> schema
         closes_at=_closes_at(session),
         init_edited_since_run=_init_edited(session),
         backup=_backup(session, settings),
+        created_by_service=session.created_by_service,
+        created_by_session=session.created_by_session,
     )
 
 

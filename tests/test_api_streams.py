@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
+import socket
 from collections.abc import AsyncIterator
 
 import httpx
@@ -31,10 +33,10 @@ class Served:
 
 
 @contextlib.asynccontextmanager
-async def serve(app) -> AsyncIterator[Served]:
-    """Real uvicorn on an ephemeral port: ASGITransport cannot stream incrementally."""
+async def serve(app, port: int = 0) -> AsyncIterator[Served]:
+    """Real uvicorn on an ephemeral port (or `port`): ASGITransport cannot stream incrementally."""
     server = uvicorn.Server(
-        uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning", lifespan="on")
+        uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", lifespan="on")
     )
     task = asyncio.create_task(server.serve())
     while not server.started:
@@ -237,6 +239,59 @@ async def test_status_stream_snapshot_and_delta(srv, pool):
         ms = seen["message_status"]
         assert ms["queued"] == 1 and ms["failed"] == 0
         assert [m["status"] for m in ms["messages"]] == ["queued"]
+
+
+SERVICE_TOKEN = "s3cret-usage-token-value"
+
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+@pytest_asyncio.fixture
+async def service_srv(pool, dsn):
+    """The app served with its service port equal to the listening port."""
+    port = free_port()
+    digest = hashlib.sha256(SERVICE_TOKEN.encode()).hexdigest()
+    settings = make_settings(dsn, service_port=port, service_tokens=f"agents-usage:{digest}")
+    app = create_app(settings, pool, stream_poll_seconds=0.3)
+    async with serve(app, port) as s:
+        yield s
+
+
+async def test_service_port_stream_needs_a_token(service_srv):
+    async with service_srv.client() as c:
+        assert_error(await c.get("/api/v1/stream"), 401, "unauthorized")
+        r = await c.get("/api/v1/stream", headers={"Authorization": "Bearer wrong"})
+        assert_error(r, 401, "unauthorized")
+
+
+async def test_service_port_stream_snapshot_carries_provenance(service_srv, pool):
+    boss = await insert_session(pool)
+    hooked = await insert_session(pool, created_by_service="agents-webhook")
+    child = await insert_session(pool, created_by_session=boss["id"])
+    auth = {"Authorization": f"Bearer {SERVICE_TOKEN}"}
+    async with open_sse(service_srv, "/api/v1/stream", headers=auth) as sse:
+        snap = await sse.next()
+        assert snap["event"] == "snapshot"
+        by_id = {x["session"]["id"]: x["session"] for x in snap["data"]["sessions"]}
+        assert by_id[str(boss["id"])]["created_by_service"] is None
+        assert by_id[str(boss["id"])]["created_by_session"] is None
+        assert by_id[str(hooked["id"])]["created_by_service"] == "agents-webhook"
+        assert by_id[str(hooked["id"])]["created_by_session"] is None
+        assert by_id[str(child["id"])]["created_by_service"] is None
+        assert by_id[str(child["id"])]["created_by_session"] == str(boss["id"])
+
+        await insert_message(pool, hooked["id"])
+        async with pool.connection() as conn:
+            await notify(conn, "status", {"session_id": str(hooked["id"])})
+        frames = {}
+        while "session_status" not in frames:
+            f = await sse.next()
+            frames[f["event"]] = f["data"]
+        assert frames["session_status"]["session"]["created_by_service"] == "agents-webhook"
 
 
 async def test_status_stream_carries_attention(srv, pool):
