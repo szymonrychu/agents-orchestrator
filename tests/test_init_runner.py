@@ -368,7 +368,7 @@ async def test_render_init_job(pool, dsn, tmp_path):
     c = await env.session(
         "alpha",
         workdir="repo",
-        env={"FOO": "bar", "A": "b"},
+        env={"FOO": {"value": "bar"}, "A": {"value": "b"}},
         init_scripts=scripts,
         resources={"requests": {"cpu": "500m"}, "limits": {"memory": "1Gi"}},
     )
@@ -532,7 +532,7 @@ async def test_job_lifecycle_and_not_an_agent(env):
 
 async def test_scripts_are_rendered_into_the_job_and_hash(env):
     tpl = ["echo {{ session_slug }} {{ env.FOO }}", "echo {{ preset_name }}|"]
-    c = await env.session("alpha", env={"FOO": "bar"}, init_scripts=tpl)
+    c = await env.session("alpha", env={"FOO": {"value": "bar"}}, init_scripts=tpl)
     await env.tick()
     job = env.kube.get("Job", "agent-alpha-init")
     command = job["spec"]["template"]["spec"]["containers"][0]["command"]
@@ -544,9 +544,11 @@ async def test_scripts_are_rendered_into_the_job_and_hash(env):
 
 
 async def test_hash_changes_with_template_or_env(env, pool):
-    a = await env.session("alpha", env={"FOO": "1"}, init_scripts=["echo {{ env.FOO }}"])
-    b = await env.session("beta", env={"FOO": "2"}, init_scripts=["echo {{ env.FOO }}"])
-    c = await env.session("gamma", env={"FOO": "1"}, init_scripts=["echo {{ env.FOO }} x"])
+    a = await env.session("alpha", env={"FOO": {"value": "1"}}, init_scripts=["echo {{ env.FOO }}"])
+    b = await env.session("beta", env={"FOO": {"value": "2"}}, init_scripts=["echo {{ env.FOO }}"])
+    c = await env.session(
+        "gamma", env={"FOO": {"value": "1"}}, init_scripts=["echo {{ env.FOO }} x"]
+    )
     await env.tick()
     hashes = [(await env.init(s.id))["scripts_hash"] for s in (a, b, c)]
     assert len(set(hashes)) == 3

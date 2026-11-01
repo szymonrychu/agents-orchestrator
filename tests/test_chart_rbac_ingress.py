@@ -26,6 +26,11 @@ def _by_kind(kind: str, values: dict[str, Any] | None = None) -> list[dict]:
     return [d for d in _docs(values) if d["kind"] == kind]
 
 
+def _named(kind: str, name: str, values: dict[str, Any] | None = None) -> dict:
+    (doc,) = [d for d in _by_kind(kind, values) if d["metadata"]["name"] == name]
+    return doc
+
+
 def _rules(role: dict) -> set[tuple[str, str, tuple[str, ...]]]:
     out = set()
     for rule in role["rules"]:
@@ -36,8 +41,7 @@ def _rules(role: dict) -> set[tuple[str, str, tuple[str, ...]]]:
 
 
 def test_role_has_exactly_d9_rules() -> None:
-    (role,) = _by_kind("Role")
-    assert role["metadata"]["name"] == f"{FULL}-reconciler"
+    role = _named("Role", f"{FULL}-reconciler")
     assert role["metadata"]["namespace"] == "agents"
     expected = {
         ("apps", "statefulsets", tuple(CRUD)),
@@ -53,7 +57,7 @@ def test_role_has_exactly_d9_rules() -> None:
 
 
 def test_secrets_write_only_and_no_exec() -> None:
-    (role,) = _by_kind("Role")
+    role = _named("Role", f"{FULL}-reconciler")
     for rule in role["rules"]:
         if "secrets" in rule["resources"]:
             assert sorted(rule["verbs"]) == ["create", "delete", "patch"]
@@ -63,8 +67,21 @@ def test_secrets_write_only_and_no_exec() -> None:
         assert "*" not in rule["apiGroups"]
 
 
+def test_api_role_is_secret_writes_only() -> None:
+    role = _named("Role", f"{FULL}-api")
+    assert role["metadata"]["namespace"] == "agents"
+    assert _rules(role) == {("", "secrets", ("create", "delete", "patch"))}
+    rb = _named("RoleBinding", f"{FULL}-api")
+    assert rb["roleRef"]["name"] == f"{FULL}-api"
+    assert rb["subjects"] == [
+        {"kind": "ServiceAccount", "name": f"{FULL}-api", "namespace": "agents"}
+    ]
+    off = _docs({"rbac": {"create": False}})
+    assert not [d for d in off if d["kind"] in ("Role", "RoleBinding")]
+
+
 def test_rolebinding_binds_reconciler_only() -> None:
-    (rb,) = _by_kind("RoleBinding")
+    rb = _named("RoleBinding", f"{FULL}-reconciler")
     assert rb["metadata"]["namespace"] == "agents"
     assert rb["roleRef"] == {
         "apiGroup": "rbac.authorization.k8s.io",

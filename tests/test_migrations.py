@@ -56,7 +56,7 @@ def test_fresh_database_gets_all_tables(empty_dsn):
     assert tables >= TABLES
     assert versions == [
         "0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0011", "0012",
-        "0013", "0014", "0015", "0016",
+        "0013", "0014", "0015", "0016", "0017", "0018", "0019",
     ]  # fmt: skip
 
 
@@ -84,6 +84,9 @@ def test_presets_migration_on_existing_sessions(empty_dsn, tmp_path):
         "0014",
         "0015",
         "0016",
+        "0017",
+        "0018",
+        "0019",
     ]
     with psycopg.connect(empty_dsn) as c:
         row = c.execute(
@@ -118,9 +121,10 @@ def test_concurrent_migrate_serialises(empty_dsn):
     [t.start() for t in threads]
     [t.join() for t in threads]
     assert not errors
-    assert sorted(len(r) for r in results) == [0, 15]
+    total = len(list(MIGRATIONS_DIR.glob("*.sql")))
+    assert sorted(len(r) for r in results) == [0, total]
     with psycopg.connect(empty_dsn) as c:
-        assert c.execute("SELECT count(*) FROM schema_migrations").fetchone()[0] == 15
+        assert c.execute("SELECT count(*) FROM schema_migrations").fetchone()[0] == total
 
 
 async def test_events_unique_agent_session_seq(pool):
@@ -534,6 +538,9 @@ def test_0005_renames_clusters_to_sessions(empty_dsn, tmp_path):
         )
     assert run_migrations(empty_dsn) == [
         "0005", "0006", "0007", "0008", "0009", "0011", "0012", "0013", "0014", "0015", "0016",
+        "0017",
+        "0018",
+        "0019",
     ]  # fmt: skip
     with psycopg.connect(empty_dsn) as c:
         assert c.execute(
@@ -770,7 +777,7 @@ def test_escape_template_tokens_migration(empty_dsn, tmp_path):
             "INSERT INTO presets (id, name, spec) VALUES (gen_random_uuid(), 'old', %s)",
             (json.dumps(spec),),
         )
-    assert run_migrations(empty_dsn) == ["0013", "0014", "0015", "0016"]
+    assert run_migrations(empty_dsn) == ["0013", "0014", "0015", "0016", "0017", "0018", "0019"]
     with psycopg.connect(empty_dsn) as c:
         stored = [
             r[0]
@@ -780,7 +787,8 @@ def test_escape_template_tokens_migration(empty_dsn, tmp_path):
             )
         ]
     for got in stored:
-        assert got["env"] == {"A": "{{keep}}"}  # not a template field
+        # not a template field (0019 then wraps the plaintext value)
+        assert got["env"] == {"A": {"value": "{{keep}}", "protected": False, "expand": False}}
         assert got["init_scripts"][2] == "plain"
         assert got["wrapper"]["restart_continue_prompt"] == "go"
         ctx = {}
@@ -819,7 +827,7 @@ def test_escape_template_tokens_migration_never_aborts_at_the_limit(empty_dsn, t
             "INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), 'big', %s)",
             (json.dumps(spec),),
         )
-    assert run_migrations(empty_dsn) == ["0013", "0014", "0015", "0016"]
+    assert run_migrations(empty_dsn) == ["0013", "0014", "0015", "0016", "0017", "0018", "0019"]
     with psycopg.connect(empty_dsn) as c:
         got = c.execute("SELECT spec FROM sessions WHERE slug='big'").fetchone()[0]
     assert got["init_scripts"] == [near, "{{ '{{' }}ok"]
@@ -854,7 +862,7 @@ def test_cache_keys_migration_splits_the_single_key(empty_dsn, tmp_path):
                 "INSERT INTO presets (id, name, spec) VALUES (gen_random_uuid(), %s, %s)",
                 (slug, json.dumps(spec)),
             )
-    assert run_migrations(empty_dsn) == ["0015", "0016"]
+    assert run_migrations(empty_dsn) == ["0015", "0016", "0017", "0018", "0019"]
     expected = {
         "keyed": {
             "replicas": 2,
@@ -885,3 +893,87 @@ def test_cache_keys_migration_splits_the_single_key(empty_dsn, tmp_path):
 
     parsed = SessionSpec.model_validate(sessions["keyed"])
     assert parsed.cache.restore_key == parsed.cache.save_key == "k1"
+
+
+def test_self_restart_migration_adds_nullable_column_idempotently(empty_dsn, tmp_path):
+    for path in MIGRATIONS_DIR.glob("*.sql"):
+        if path.name < "0017":
+            shutil.copy(path, tmp_path)
+    run_migrations(empty_dsn, tmp_path)
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        c.execute("INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), 'old', '{}')")
+    assert run_migrations(empty_dsn) == ["0017", "0018", "0019"]
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        assert c.execute("SELECT last_self_restart_at FROM sessions").fetchall() == [(None,)]
+        c.execute((MIGRATIONS_DIR / "0017_self_restart.sql").read_text())  # second run: no-op
+    assert "last_self_restart_at" in _columns(empty_dsn, "sessions")
+
+
+def test_preset_secrets_migration_adds_table_and_snapshot_column(empty_dsn, tmp_path):
+    for path in MIGRATIONS_DIR.glob("*.sql"):
+        if path.name < "0018":
+            shutil.copy(path, tmp_path)
+    run_migrations(empty_dsn, tmp_path)
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        c.execute("INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), 'old', '{}')")
+    assert run_migrations(empty_dsn) == ["0018", "0019"]
+    assert _columns(empty_dsn, "preset_secrets") == {
+        "preset_id", "name", "version", "swept", "retired_at", "updated_at",
+    }  # fmt: skip
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        assert c.execute("SELECT secret_versions FROM sessions").fetchall() == [(None,)]
+
+
+def test_env_entries_migration_wraps_plaintext_values(empty_dsn, tmp_path):
+    for path in MIGRATIONS_DIR.glob("*.sql"):
+        if path.name < "0019":
+            shutil.copy(path, tmp_path)
+    run_migrations(empty_dsn, tmp_path)
+    fixture = {
+        "plain": {"env": {"A": "one", "B": "$two", "EMPTY": ""}, "replicas": 2},
+        "none": {"replicas": 1},
+        "emptyenv": {"env": {}},
+        "done": {"env": {"A": {"value": "x", "protected": False, "expand": True}}},
+        "mixed": {"env": {"A": "one", "B": {"value": "y", "protected": False, "expand": False}}},
+    }
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        for slug, spec in fixture.items():
+            for table, col in (("sessions", "slug"), ("presets", "name")):
+                c.execute(
+                    f"INSERT INTO {table} (id, {col}, spec) VALUES (gen_random_uuid(), %s, %s)",  # noqa: S608
+                    (slug, json.dumps(spec)),
+                )
+
+    def entry(value):
+        return {"value": value, "protected": False, "expand": False}
+
+    expected = {
+        "plain": {
+            "env": {"A": entry("one"), "B": entry("$two"), "EMPTY": entry("")},
+            "replicas": 2,
+        },
+        "none": fixture["none"],
+        "emptyenv": fixture["emptyenv"],
+        "done": fixture["done"],
+        "mixed": {"env": {"A": entry("one"), "B": entry("y")}},
+    }
+    assert run_migrations(empty_dsn) == ["0019"]
+
+    def stored():
+        with psycopg.connect(empty_dsn) as c:
+            sessions = dict(c.execute("SELECT slug, spec FROM sessions").fetchall())
+            presets = dict(
+                c.execute("SELECT name, spec FROM presets WHERE name = ANY(%s)", (list(expected),))
+            )
+        return sessions, presets
+
+    sessions, presets = stored()
+    assert sessions == expected
+    assert presets == expected
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        c.execute((MIGRATIONS_DIR / "0019_env_entries.sql").read_text())  # idempotent
+    assert stored() == (sessions, presets)
+    from agents_orchestrator.spec import SessionSpec
+
+    parsed = SessionSpec.model_validate(sessions["plain"])
+    assert parsed.plain_env == {"A": "one", "B": "$two", "EMPTY": ""}

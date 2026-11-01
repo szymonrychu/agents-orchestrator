@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
+import re
 from typing import Any
 
 import yaml
@@ -114,6 +116,41 @@ def _escape(value: Any) -> Any:
     return value
 
 
+_REF = re.compile(r"\$\$|\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?::-[^}]*)?\}|\$")
+
+
+def _escape_keeping_refs(value: str, names: frozenset[str]) -> str:
+    """Escape `$` as `_escape` does, but keep `${NAME}` (and `${NAME:-default}`) for a `NAME` in
+    `names` and each `$$` pair, so the wrapper expands the reference from the pod env.
+
+    Only a session's own env variable names are kept: any other reference, such as the
+    orchestrator's own tokens, stays escaped and cannot read the pod environment.
+    """
+
+    def swap(m: re.Match[str]) -> str:
+        whole = m.group(0)
+        if whole == "$$":
+            return whole
+        if whole == "$":
+            return "$$"
+        return whole if m.group("name") in names else whole.replace("$", "$$")
+
+    return _REF.sub(swap, value)
+
+
+def _keep_refs(action_or_server: dict[str, Any], raw: dict[str, Any], names: frozenset[str]):
+    """Re-render the secret-bearing fields of one hook or MCP server with refs kept."""
+    for field in ("secret", "headers", "env"):
+        value = raw.get(field)
+        if isinstance(value, str):
+            action_or_server[field] = _escape_keeping_refs(value, names)
+        elif isinstance(value, dict):
+            action_or_server[field] = {
+                k: _escape_keeping_refs(v, names) if isinstance(v, str) else _escape(v)
+                for k, v in value.items()
+            }
+
+
 def _render_texts(user: dict[str, Any], session: Session) -> None:
     """Render the Jinja text fields of the dumped `spec.wrapper` in place (before `_escape`)."""
     context = rendering.session_context("preset_text", session)
@@ -131,7 +168,16 @@ def _apply_wrapper(cfg: dict[str, Any], wrapper: WrapperSettings, session: Sessi
     """Merge `spec.wrapper` into the config after the reserved entries, which stay first."""
     user = wrapper.model_dump(mode="json", exclude_none=True)
     _render_texts(user, session)
+    raw = copy.deepcopy(user)
     user = _escape(user)
+    names = frozenset(session.spec.env)
+    for event, actions in raw.get("hooks", {}).items():
+        for action, escaped in zip(actions, user["hooks"][event], strict=True):
+            if action.get("type") == "webhook":
+                _keep_refs(escaped, {k: action.get(k) for k in ("secret", "headers")}, names)
+    for name, server in raw.get("mcp_servers", {}).items():
+        field = "env" if server.get("type") == "stdio" else "headers"
+        _keep_refs(user["mcp_servers"][name], {field: server.get(field)}, names)
     hooks = cfg["hooks"]
     for event, actions in user.get("hooks", {}).items():
         hooks.setdefault(event, []).extend(actions)
@@ -241,6 +287,26 @@ def _secret_ref(name: str, key: str) -> dict[str, Any]:
     return {"valueFrom": {"secretKeyRef": {"name": name, "key": key}}}
 
 
+def env_entries(session: Session) -> list[dict[str, Any]]:
+    """The session's own env variables as container env, sorted by name.
+
+    A protected variable is a `secretKeyRef` to the Secret version snapshotted at create. A plain
+    one with `expand` false has its `$` doubled (the kubelet reads `$$` as a literal `$`, so
+    `$(VAR)` stays text); with `expand` true it is emitted as is, so `$(VAR)` references work.
+    """
+    out: list[dict[str, Any]] = []
+    for name, var in sorted(session.spec.env.items()):
+        if var.protected:
+            secret = session.secret_versions.get(name)
+            if secret is None:
+                raise ValueError(f"protected variable {name} has no stored secret")
+            out.append({"name": name, **_secret_ref(secret, "value")})
+        else:
+            value = var.value or ""
+            out.append({"name": name, "value": value if var.expand else value.replace("$", "$$")})
+    return out
+
+
 def _container(session: Session, settings: Settings, names: dict[str, str]) -> dict[str, Any]:
     spec, slug = session.spec, session.slug
     port = settings.wrapper_port
@@ -260,7 +326,7 @@ def _container(session: Session, settings: Settings, names: dict[str, str]) -> d
             if settings.agent_api_url
             else []
         ),
-        *({"name": k, "value": v} for k, v in sorted(spec.env.items())),
+        *env_entries(session),
     ]
     startup_failures = math.ceil(settings.on_start_timeout_seconds / PROBE_PERIOD) + STARTUP_SLACK
     container: dict[str, Any] = {

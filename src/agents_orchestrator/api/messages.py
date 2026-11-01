@@ -186,6 +186,18 @@ async def restart_agent(agent_id: uuid.UUID, pool: Pool) -> schemas.CommandAccep
     return await _command(agent_id, "restart", pool)
 
 
+@router.post(
+    "/sessions/{session_id}/restart", status_code=202, response_model=schemas.SessionRestartAccepted
+)
+async def restart_session(session_id: uuid.UUID, pool: Pool) -> schemas.SessionRestartAccepted:
+    """One restart command per live agent of the session, all in one transaction."""
+    async with pool.connection() as conn, conn.transaction():
+        await _require_open_session(conn, session_id)
+        agent_ids = await views.live_agent_ids(conn, session_id)
+        ids = [await queue.enqueue_command(conn, agent_id, "restart") for agent_id in agent_ids]
+    return schemas.SessionRestartAccepted(command_ids=ids)
+
+
 @router.get("/commands/{command_id}", response_model=schemas.CommandView)
 async def get_command(command_id: int, pool: Pool) -> schemas.CommandView:
     async with pool.connection() as conn:

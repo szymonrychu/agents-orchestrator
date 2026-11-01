@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -66,6 +66,8 @@ class Session:
     preset_id: uuid.UUID | None = None
     preset_name: str | None = None
     created_by_service: str | None = None
+    # {ENV_NAME: Secret name} of the protected variables, snapshotted at create
+    secret_versions: dict[str, str] = field(default_factory=dict)
 
     @property
     def trigger_created(self) -> bool:
@@ -87,6 +89,7 @@ def _from_row(row: dict[str, Any]) -> Session:
         preset_id=row["preset_id"],
         preset_name=row["preset_name"],
         created_by_service=row["created_by_service"],
+        secret_versions=row["secret_versions"] or {},
     )
 
 
@@ -111,15 +114,24 @@ async def create(
     preset_id: uuid.UUID | None = None,
     preset_name: str | None = None,
     created_by_service: str | None = None,
+    secret_versions: dict[str, str] | None = None,
 ) -> Session:
     validate_slug(slug)
     try:
         async with conn.transaction():
             rows = await _fetch(
                 conn,
-                "INSERT INTO sessions (id, slug, spec, preset_id, preset_name, created_by_service)"
-                " VALUES (%s, %s, %s, %s, %s, %s) RETURNING *",
-                (uuid.uuid4(), slug, _dump(spec), preset_id, preset_name, created_by_service),
+                "INSERT INTO sessions (id, slug, spec, preset_id, preset_name, created_by_service,"
+                " secret_versions) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING *",
+                (
+                    uuid.uuid4(),
+                    slug,
+                    _dump(spec),
+                    preset_id,
+                    preset_name,
+                    created_by_service,
+                    Jsonb(secret_versions) if secret_versions else None,
+                ),
             )
             await _notify(conn, rows[0].id)
     except psycopg.errors.UniqueViolation:
@@ -135,6 +147,38 @@ async def get(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Session |
 async def get_by_slug(conn: psycopg.AsyncConnection, slug: str) -> Session | None:
     rows = await _fetch(conn, "SELECT * FROM sessions WHERE slug = %s", (slug,))
     return rows[0] if rows else None
+
+
+@dataclass(frozen=True)
+class SelfRestartClaim:
+    claimed: bool
+    retry_after: int  # whole seconds until the next claim can win; 0 when claimed
+
+
+async def claim_self_restart(
+    conn: psycopg.AsyncConnection, session_id: uuid.UUID, cooldown_seconds: int
+) -> SelfRestartClaim:
+    """Claim the session's self-restart slot: exactly one concurrent caller wins, and none
+    again until `cooldown_seconds` have passed since the last winner."""
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "UPDATE sessions SET last_self_restart_at = now() WHERE id = %(id)s"
+            " AND (last_self_restart_at IS NULL"
+            "      OR last_self_restart_at <= now() - make_interval(secs => %(cd)s))"
+            " RETURNING id",
+            {"id": session_id, "cd": cooldown_seconds},
+        )
+        if await cur.fetchone() is not None:
+            return SelfRestartClaim(True, 0)
+        await cur.execute(
+            "SELECT ceil(extract(epoch FROM last_self_restart_at + make_interval(secs => %(cd)s)"
+            " - now())) AS wait FROM sessions WHERE id = %(id)s",
+            {"id": session_id, "cd": cooldown_seconds},
+        )
+        row = await cur.fetchone()
+    if row is None:
+        raise SessionNotFound(str(session_id))
+    return SelfRestartClaim(False, max(1, int(row["wait"])))
 
 
 async def list_sessions(conn: psycopg.AsyncConnection) -> list[Session]:

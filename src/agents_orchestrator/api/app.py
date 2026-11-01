@@ -20,6 +20,7 @@ from agents_orchestrator.api import (
     errors,
     messages,
     presets,
+    secret_store,
     sessions,
     streams,
     templates,
@@ -29,6 +30,7 @@ from agents_orchestrator.api.allowlist import PortGate, SourceAllowlist
 from agents_orchestrator.api.errors import error_response
 from agents_orchestrator.api.listener import Listener
 from agents_orchestrator.api.origin import OriginAllowlist
+from agents_orchestrator.api.secret_store import KubeApi
 from agents_orchestrator.api.service_auth import ServiceGate
 from agents_orchestrator.db.pool import open_pool
 from agents_orchestrator.settings import Settings
@@ -38,6 +40,7 @@ def create_app(
     settings: Settings,
     pool: AsyncConnectionPool | None = None,
     stream_poll_seconds: float = streams.DEFAULT_POLL_SECONDS,
+    kube: KubeApi | None = None,
 ) -> FastAPI:
     owns_pool = pool is None
     listener = Listener(settings.database_url)
@@ -58,6 +61,7 @@ def create_app(
             await listener.stop()
             await workspace.close_client(app)
             await chat.close_client(app)
+            await secret_store.close_kube(app)
             if owns_pool:
                 await app.state.pool.close()
 
@@ -74,6 +78,8 @@ def create_app(
     app.state.listener = listener
     app.state.wrapper_http = None
     app.state.chat_http = None
+    app.state.kube = kube  # given (tests) or built on first use by api.secret_store
+    app.state.kube_owned = False
     app.state.stream_poll_seconds = stream_poll_seconds
     errors.install(app)
     app.include_router(sessions.router)

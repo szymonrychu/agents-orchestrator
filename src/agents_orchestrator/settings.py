@@ -192,6 +192,8 @@ class Settings(BaseSettings):
     cache_timeout_seconds: int = Field(default=1800, ge=60, le=86400)
     # Archive cleanup sweep (reconciler leader). The grace period, when unset, is the cache Job
     # deadline plus the presign margin: an archive younger than that may still be mid-save.
+    # Seconds between two restarts an agent asks for on its own session (429 restart_cooldown).
+    self_restart_cooldown_seconds: int = Field(default=600, ge=1)
     cache_retention_days: int = Field(default=30, ge=1)
     cache_keep_newest: int = Field(default=3, ge=1)
     cache_sweep_interval_seconds: int = Field(default=6 * 3600, ge=60)

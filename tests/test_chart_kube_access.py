@@ -109,8 +109,8 @@ def test_reconciler_role_unchanged_with_kube_access() -> None:
     assert on_role["rules"] == off_role["rules"]
     assert on_rb["roleRef"] == off_rb["roleRef"]
     assert on_rb["subjects"] == off_rb["subjects"]
-    assert len([d for d in _docs(ON) if d["kind"] == "Role"]) == 1
-    assert len([d for d in _docs(ON) if d["kind"] == "RoleBinding"]) == 1
+    assert len([d for d in _docs(ON) if d["kind"] == "Role"]) == 2
+    assert len([d for d in _docs(ON) if d["kind"] == "RoleBinding"]) == 2
     for rule in on_role["rules"]:
         assert rule["apiGroups"] != ["rbac.authorization.k8s.io"]
 

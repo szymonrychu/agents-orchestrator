@@ -146,6 +146,15 @@ async def get_agent_ref(conn: psycopg.AsyncConnection, agent_id: uuid.UUID) -> d
     return rows[0] if rows else None
 
 
+async def live_agent_ids(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> list[uuid.UUID]:
+    rows = await _rows(
+        conn,
+        "SELECT id FROM agents WHERE session_id = %s AND gone_at IS NULL ORDER BY ordinal",
+        (session_id,),
+    )
+    return [r["id"] for r in rows]
+
+
 async def get_command(conn: psycopg.AsyncConnection, id: int) -> dict | None:
     rows = await _rows(
         conn,

@@ -48,7 +48,7 @@ async def test_create_stores_only_set_fields(http):
         "replicas": 2,
         "model": "claude-opus-5-5",
         "resources": {"requests": {"cpu": "1"}},
-        "env": {"A": "b"},
+        "env": {"A": {"value": "b"}},
     }
     r = await http.post(P, json={"name": "big", "spec": spec})
     assert r.status_code == 201, r.text
@@ -86,7 +86,7 @@ async def test_name_rules_and_unique_409(http):
         {"effort": "ludicrous"},
         {"replicas": 5},
         {"image": "evil:1"},
-        {"env": {"POD_NAME": "x"}},
+        {"env": {"POD_NAME": {"value": "x"}}},
         {"nope": 1},
     ],
 )
