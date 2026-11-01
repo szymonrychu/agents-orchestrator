@@ -87,10 +87,23 @@ def test_never_deletes_a_protected_key_and_says_why():
 
 
 def test_never_deletes_the_newest_of_a_group_even_when_ancient():
-    only = [obj("lonely", 400)]
-    assert plan(only, keep=1).keys == []
-    flat = [obj("a", 400), obj("b", 500)]
-    assert plan(flat).keys == []  # flat names group alone, each is its own newest
+    only_version = versions("proj", [400])
+    assert plan(only_version, keep=1).keys == []
+
+
+def test_flat_names_are_age_deleted_when_unreferenced_old_and_past_grace():
+    flat = [obj("preset-0123456789abcdef", 400), obj("migrated", 31), obj("fresh", 5)]
+    p = plan(flat)
+    assert keys_of(p) == {flat[0].key, flat[1].key}  # keep-last-N does not apply to flat names
+
+
+def test_flat_names_are_kept_when_referenced_or_inside_grace():
+    flat = [obj("pinned", 400), obj("racing", 400)]
+    p = plan(flat, {flat[0].key}, grace=10**9)
+    assert p.keys == []
+    p = plan(flat, {flat[0].key})
+    assert keys_of(p) == {flat[1].key}
+    assert p.reason(flat[0].key) == "protected: a session references it"
 
 
 def test_greatest_key_is_kept_even_when_its_mtime_is_old():
@@ -158,7 +171,9 @@ def test_invariants_on_random_listings(seed):
         by_group.setdefault(
             o.key.rsplit("/", 1)[0] if "/" in o.key[len(PRE) :] else o.key, []
         ).append(o)
-    for members in by_group.values():
+    for group, members in by_group.items():
+        if group.endswith(".tar.zst"):
+            continue  # flat names: age-deleted unless protected, no keep-last-N
         survivors = [o for o in members if o.key not in deleted]
         assert survivors, "a group is never emptied"
         assert max(o.key for o in members) not in deleted

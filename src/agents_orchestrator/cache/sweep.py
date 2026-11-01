@@ -2,12 +2,14 @@
 
 `plan_sweep` decides from a listing, the protected keys and the clock alone, so the same function
 serves the periodic sweep, the dry-run preview and the manual delete's re-check. It never returns a
-protected key and never the newest object of a group; it deletes an object only when it is beyond
-the newest K of its group AND older than N days AND older than the grace period (an archive
-younger than the grace may still be mid-save).
+protected key and never the newest object of a versioned group; it deletes an object only when it
+is beyond the newest K of its group AND older than N days AND older than the grace period (an
+archive younger than the grace may still be mid-save).
 
 Groups follow `keys.group_of`: everything up to the last `/` of the key below the cache prefix
-(`proj/20261031t120000z.tar.zst` groups under `proj/`); a flat name groups alone. Transcripts
+(`proj/20261031t120000z.tar.zst` groups under `proj/`). Keep-newest-K applies only to these
+versioned groups. A flat name (one object per group, e.g. `preset-<sha16>`) is deleted by age alone
+when no session references it and it is past the grace period. Transcripts
 (`<prefix>sessions/<slug>.tar.zst`) are one object per session: they are deleted by age alone, still
 never while protected.
 
@@ -102,7 +104,7 @@ def plan_sweep(
     for group, members in groups.items():
         members.sort(key=lambda o: (o.last_modified, o.key), reverse=True)
         keep_newest_keys: set[str] = set()
-        if group != SESSIONS_GROUP:
+        if group.endswith("/") and group != SESSIONS_GROUP:  # versioned groups only
             keep_newest_keys = {o.key for o in members[:keep_newest]}
             keep_newest_keys.add(max(o.key for o in members))
         for obj in members:
