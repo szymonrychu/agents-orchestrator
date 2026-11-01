@@ -11,6 +11,7 @@
 {{- $_ := include "agents-orchestrator.masterKeySecretName" . }}
 {{- $claude := include "agents-orchestrator.claudeSecretName" . }}
 {{- $_ := include "agents-orchestrator.chatEnabled" . }}
+{{- $_ := include "agents-orchestrator.usageEnabled" . }}
 {{- $_ := include "agents-orchestrator.adminUpstreams" . }}
 {{- $agentUsage := include "agents-orchestrator.agentUsageEnabled" . }}
 apiVersion: v1
@@ -25,6 +26,7 @@ data:
   ORCH_CLAUDE_SECRET_NAME: {{ $claude | quote }}
   ORCH_AGENT_PORT: {{ .Values.agentApi.port | toString | quote }}
   ORCH_SELF_RESTART_COOLDOWN_SECONDS: {{ .Values.selfRestartCooldownSeconds | int64 | toString | quote }}
+  ORCH_USAGE_QUOTA_DEFAULT: {{ .Values.usageQuotaDefault | int64 | toString | quote }}
   ORCH_SERVICE_PORT: {{ .Values.serviceApi.port | toString | quote }}
   ORCH_AGENT_API_URL: {{ include "agents-orchestrator.agentApiUrl" . | quote }}
   ORCH_AGENT_SERVICE_ACCOUNT: {{ ternary (printf "%s-agent" (include "agents-orchestrator.fullname" .)) "default" .Values.serviceAccount.create | quote }}

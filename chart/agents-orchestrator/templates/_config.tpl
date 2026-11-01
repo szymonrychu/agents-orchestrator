@@ -157,6 +157,42 @@ ConfigMap, the migrate init containers or the other components. Empty when the c
 {{- end }}
 
 {{/*
+"true" when the usage gate is configured, empty when it is off. usage.url and a token source
+(usage.token or usage.existingSecret) go together; one without the other fails the render.
+*/}}
+{{- define "agents-orchestrator.usageEnabled" -}}
+{{- $u := .Values.usage | default dict -}}
+{{- $token := or $u.token $u.existingSecret -}}
+{{- if and $u.url $token -}}
+true
+{{- else if or $u.url $token -}}
+{{- fail "agents-orchestrator: set usage.url together with usage.token or usage.existingSecret, or none of them" -}}
+{{- end -}}
+{{- end }}
+
+{{/* Name of the Secret holding ORCH_USAGE_TOKEN: existingSecret wins over the chart Secret. */}}
+{{- define "agents-orchestrator.usageSecretName" -}}
+{{- default (printf "%s-usage" (include "agents-orchestrator.fullname" .)) (.Values.usage | default dict).existingSecret -}}
+{{- end }}
+
+{{/*
+ORCH_USAGE_URL and ORCH_USAGE_TOKEN env entries, always together (Settings refuses one without the
+other). Only the api main container, which serves the usage gate, includes this; never the shared
+ConfigMap, the migrate init containers or the other components. Empty when the gate is off.
+*/}}
+{{- define "agents-orchestrator.usageEnv" -}}
+{{- if include "agents-orchestrator.usageEnabled" . -}}
+- name: ORCH_USAGE_URL
+  value: {{ .Values.usage.url | quote }}
+- name: ORCH_USAGE_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "agents-orchestrator.usageSecretName" . }}
+      key: {{ .Values.usage.existingSecretKey | default "usage-token" }}
+{{- end -}}
+{{- end }}
+
+{{/*
 Admin relay upstreams (admin.webhook, admin.schedule, admin.connector). Each needs url together
 with a token source (token or existingSecret); one without the other fails the render. Emits
 "<name>" lines for the configured ones.

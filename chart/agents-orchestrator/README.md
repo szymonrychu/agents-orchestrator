@@ -51,6 +51,28 @@ names the Secret and never holds the token. Both settings go into the settings C
 needs an `agentImage` of claude-code-wrapper 0.8.0 or newer, because an older wrapper refuses
 the `usage` config section; a session on another image (`spec.image`) does not forward.
 
+## Usage gate
+
+The orchestrator can refuse (409 `usage_quota`) to create a session or scale one up while the
+Claude plan usage reported by agents-usage is at or over the session's quota. It is off by
+default and renders no URL or token then.
+
+| Value | Default | Setting |
+|---|---|---|
+| `usage.url` | `""` (off) | `ORCH_USAGE_URL` |
+| `usage.token` | `""` | `ORCH_USAGE_TOKEN`, via the chart Secret `<fullname>-usage`, key `usage-token` |
+| `usage.existingSecret` | `""` | `ORCH_USAGE_TOKEN`, via this Secret (wins over `usage.token`) |
+| `usage.existingSecretKey` | `usage-token` | key of the token in the Secret |
+| `usageQuotaDefault` | `100` | `ORCH_USAGE_QUOTA_DEFAULT` |
+
+`usage.url` is the agents-usage service port; the token is the service token the orchestrator
+sends as a bearer (the sha256 of it goes into `serviceApi.tokenHashes` of agents-usage). Set the
+URL together with `usage.token` or `usage.existingSecret`, or none of them; one without the other
+fails the render. The URL and the token are env of the api main container only, because Settings
+refuses a URL without its token and no other component or init container uses the gate; the
+settings ConfigMap carries only `ORCH_USAGE_QUOTA_DEFAULT`. A metric gates when its percent is at
+or above the limit; missing, stale or reset data never gates.
+
 ## Workspace cache
 
 The reconciler can restore a session workspace from, and save it to, any S3-compatible object

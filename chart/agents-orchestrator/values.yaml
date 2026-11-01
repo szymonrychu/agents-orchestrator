@@ -276,6 +276,21 @@ chat:
   existingSecret: ""
   existingSecretKey: chat-token
 
+# Usage gate upstream (agents-usage service port). url becomes ORCH_USAGE_URL; ORCH_USAGE_TOKEN,
+# the service bearer sent upstream, comes from existingSecret/existingSecretKey, or from the chart
+# Secret <fullname>-usage built from token (existingSecret wins). Both are env of the api main
+# container only, always together, never in the settings ConfigMap. Set url with a token source,
+# or neither (the gate is then off and never blocks); one without the other fails the render.
+usage:
+  url: ""
+  token: ""
+  existingSecret: ""
+  existingSecretKey: usage-token
+
+# Default usage quota percent (1..100) of a session without its own usage_quota
+# (ORCH_USAGE_QUOTA_DEFAULT). A metric gates when its percent reaches the limit.
+usageQuotaDefault: 100
+
 # Seconds between two restarts an agent asks for on its own session (ORCH_SELF_RESTART_COOLDOWN_SECONDS).
 selfRestartCooldownSeconds: 600
 
