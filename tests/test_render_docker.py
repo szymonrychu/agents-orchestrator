@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+import yaml
 from test_service_accounts import TOKENS, make_session, make_settings
 
 from agents_orchestrator.k8s import render
@@ -181,3 +182,22 @@ def test_agent_container_wiring() -> None:
 def test_image_pull_secret_still_first_key() -> None:
     pod = docker_pod()
     assert pod["imagePullSecrets"] == [{"name": "regcred"}]
+
+
+def passthrough(session_kw: dict[str, Any]) -> list[str]:
+    objs = render.render_session(make_session(**session_kw), settings(), TOKENS)
+    (cm,) = (o for o in objs if o["kind"] == "ConfigMap")
+    return yaml.safe_load(cm["data"]["config.yaml"])["claude"]["passthrough_env"]
+
+
+def test_docker_host_in_passthrough_iff_docker_rendered() -> None:
+    assert "DOCKER_HOST" in passthrough({"docker": True})
+    assert "DOCKER_HOST" not in passthrough({})
+    assert "DOCKER_HOST" not in passthrough({"docker": False})
+
+
+def test_passthrough_keeps_kube_entries_and_stays_sorted() -> None:
+    both = passthrough({"docker": True, "kube_access": True})
+    assert {"DOCKER_HOST", "KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT"} <= set(both)
+    assert both == sorted(both)
+    assert "DOCKER_HOST" not in passthrough({"kube_access": True})

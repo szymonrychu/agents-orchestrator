@@ -29,6 +29,7 @@ STARTUP_SLACK = 12
 # Always passed to the any-mcp stdio child; ORCH_AGENT_URL is listed even when unset (the wrapper
 # passes through only variables that exist).
 KUBE_PASSTHROUGH_ENV = ("KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT")
+DOCKER_PASSTHROUGH_ENV = ("DOCKER_HOST",)
 AGENT_PASSTHROUGH_ENV = ("ORCH_AGENT_TOKEN", "ORCH_AGENT_URL", "ORCH_SESSION_ID", "POD_NAME")
 
 ASK_IN_WRITING_PROMPT = (
@@ -311,8 +312,9 @@ def _apply_wrapper(cfg: dict[str, Any], wrapper: WrapperSettings, session: Sessi
 def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
     spec, slug = session.spec, session.slug
     kube_env = KUBE_PASSTHROUGH_ENV if kube_access_granted(spec, settings) else ()
+    docker_env = DOCKER_PASSTHROUGH_ENV if docker_enabled(spec, settings) else ()
     claude: dict[str, Any] = {
-        "passthrough_env": sorted([*spec.env, *AGENT_PASSTHROUGH_ENV, *kube_env]),
+        "passthrough_env": sorted([*spec.env, *AGENT_PASSTHROUGH_ENV, *kube_env, *docker_env]),
         "env": {
             "claude_code_oauth_token": "${CLAUDE_CODE_OAUTH_TOKEN}",
             "disable_autoupdater": True,
