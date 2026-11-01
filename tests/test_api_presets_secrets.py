@@ -256,3 +256,17 @@ def make_http_for(app, port=8000, peer=None, headers=None):
         base_url=f"http://orch:{port}",
         headers=headers or {},
     )
+
+
+async def test_plain_string_env_entry_gets_a_clear_422(make_http):
+    async with make_http() as http:
+        bad = {"env": {"FOO": "bar", "OK": {"value": "v"}}}
+        r = await http.post(P, json={"name": "p", "spec": bad})
+        assert_error(r, 422, "invalid_request")
+        msg = r.json()["error"]["message"]
+        assert "env.FOO must be an object {value, protected, expand}" in msg
+        assert "env.OK" not in msg
+        r = await http.post(C, json={"slug": "x", "spec": {"env": {"FOO": "bar"}}})
+        assert (
+            "env.FOO must be an object {value, protected, expand}" in r.json()["error"]["message"]
+        )

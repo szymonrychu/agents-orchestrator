@@ -757,6 +757,19 @@ class SessionSpec(BaseModel):
             _quantity(v)
         return v
 
+    @field_validator("env", mode="before")
+    @classmethod
+    def _env_entries(cls, v: Any) -> Any:
+        if isinstance(v, dict):
+            bad = sorted(str(k) for k, e in v.items() if not isinstance(e, dict | BaseModel))
+            if bad:
+                raise ValueError(
+                    "; ".join(
+                        f"env.{k} must be an object {{value, protected, expand}}" for k in bad
+                    )
+                )
+        return v
+
     @field_validator("env")
     @classmethod
     def _env(cls, v: dict[str, EnvVar]) -> dict[str, EnvVar]:
