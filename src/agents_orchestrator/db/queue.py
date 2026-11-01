@@ -150,8 +150,9 @@ async def enqueue_message(
     A `held` message is not deliverable until `release_note` clears its `not_before` (the hold
     is a day, so a note whose commands never finish still expires).
 
-    A message with a sender is untargeted, so the leader routing delivers it to whoever leads
-    the target session at claim time.
+    `target_agent_id` is stored as given; this function does not clear it when a sender is set
+    (a None target leaves the claim to route the message to the session's leader). Raises
+    `SessionBeingDeleted` when the session exists but is no longer desired `active`.
     """
     async with conn.transaction():
         # Share-lock the session row: the idle discard holds it FOR UPDATE while it re-checks, so
