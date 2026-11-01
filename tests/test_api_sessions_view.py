@@ -8,8 +8,8 @@ import httpx
 import pytest
 from fakes.fake_kube import FakeKube
 from test_admin_sessions import P, S, boss  # noqa: F401  (boss is a fixture)
+from test_api_agent import KEY, headers
 from test_api_agent import client_for as agent_client
-from test_api_agent import headers
 from test_api_sessions import client_for as main_client
 from test_api_sessions import make_settings
 
@@ -22,7 +22,7 @@ DEFAULT_ID = "00000000-0000-0000-0000-000000000001"
 @pytest.fixture
 def app(pool, dsn):
     digest = hashlib.sha256(TOKEN.encode()).hexdigest()
-    settings = make_settings(dsn, service_tokens=f"agents-webhook:{digest}")
+    settings = make_settings(dsn, service_tokens=f"agents-webhook:{digest}", master_key=KEY)
     return create_app(settings, pool, kube=FakeKube(namespace="agents"))
 
 
