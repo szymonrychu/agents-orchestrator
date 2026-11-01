@@ -2,6 +2,7 @@
 {{- if and $cache.bucket (not $cache.existingSecret) }}
 {{- fail "agents-orchestrator: cache.s3.existingSecret is required when cache.s3.bucket is set (the Secret holding the S3 access key pair)" }}
 {{- end }}
+{{- $cacheApi := $cache.api | default dict }}
 {{- $settingsSum := include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
 {{- range $component, $cfg := .Values.components }}
 {{- $labels := dict "context" $ "component" $component }}
@@ -90,6 +91,18 @@ spec:
                 secretKeyRef:
                   name: {{ $cache.existingSecret }}
                   key: {{ $cache.secretAccessKeyKey | default "AWS_SECRET_ACCESS_KEY" }}
+          {{- end }}
+          {{- if and (eq $component "api") $cache.bucket $cacheApi.existingSecret }}
+            - name: ORCH_CACHE_S3_API_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $cacheApi.existingSecret }}
+                  key: {{ $cacheApi.accessKeyIdKey | default "AWS_ACCESS_KEY_ID" }}
+            - name: ORCH_CACHE_S3_API_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $cacheApi.existingSecret }}
+                  key: {{ $cacheApi.secretAccessKeyKey | default "AWS_SECRET_ACCESS_KEY" }}
           {{- end }}
           {{- if eq $component "api" }}
             - name: ORCH_HTTP_PORT

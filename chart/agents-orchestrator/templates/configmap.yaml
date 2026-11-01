@@ -39,6 +39,16 @@ data:
   ORCH_CACHE_IMAGE: {{ .image | default (printf "%s:%s" $.Values.image.repository ($.Values.image.tag | default $.Chart.AppVersion)) | quote }}
   ORCH_CACHE_MAX_BYTES: {{ .maxBytes | int64 | toString | quote }}
   ORCH_CACHE_TIMEOUT_SECONDS: {{ .timeoutSeconds | int64 | toString | quote }}
+  {{- with .sweep }}
+  ORCH_CACHE_SWEEP_ENABLED: {{ .enabled | toString | quote }}
+  ORCH_CACHE_SWEEP_DRY_RUN: {{ .dryRun | toString | quote }}
+  ORCH_CACHE_RETENTION_DAYS: {{ .retentionDays | int64 | toString | quote }}
+  ORCH_CACHE_KEEP_NEWEST: {{ .keepNewest | int64 | toString | quote }}
+  ORCH_CACHE_SWEEP_INTERVAL_SECONDS: {{ .intervalSeconds | int64 | toString | quote }}
+  {{- if ne (toString .graceSeconds) "" }}
+  ORCH_CACHE_SWEEP_GRACE_SECONDS: {{ .graceSeconds | int64 | toString | quote }}
+  {{- end }}
+  {{- end }}
   {{- end }}
   {{- end }}
   {{- range $k, $v := .Values.env }}
