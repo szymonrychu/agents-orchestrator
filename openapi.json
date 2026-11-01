@@ -3100,6 +3100,19 @@
               }
             ]
           },
+          "discard_after_idle_seconds": {
+            "anyOf": [
+              {
+                "maximum": 2592000.0,
+                "minimum": 60.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Discard After Idle Seconds"
+          },
           "discard_hook_url": {
             "anyOf": [
               {
@@ -3361,6 +3374,19 @@
                 "type": "null"
               }
             ]
+          },
+          "discard_after_idle_seconds": {
+            "anyOf": [
+              {
+                "maximum": 2592000.0,
+                "minimum": 60.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Discard After Idle Seconds"
           },
           "discard_hook_url": {
             "anyOf": [

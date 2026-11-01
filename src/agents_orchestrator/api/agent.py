@@ -441,15 +441,18 @@ async def session_send(
             raise ApiError(
                 409, "target_queue_full", f"session {slug} holds {cap} queued session messages"
             )
-        message_id = await q.enqueue_message(
-            conn,
-            target.id,
-            body.text,
-            sender_session_id=own.id,
-            sender_slug=own.slug,
-            hop=hop,
-            lane=body.lane,
-        )
+        try:
+            message_id = await q.enqueue_message(
+                conn,
+                target.id,
+                body.text,
+                sender_session_id=own.id,
+                sender_slug=own.slug,
+                hop=hop,
+                lane=body.lane,
+            )
+        except q.SessionBeingDeleted as exc:
+            raise ApiError(409, "session_deleting", "target session is being discarded") from exc
     return SessionMessageQueued(message_id=message_id)
 
 
