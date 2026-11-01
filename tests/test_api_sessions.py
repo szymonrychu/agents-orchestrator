@@ -11,6 +11,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from factories import insert_agent, insert_message, insert_session, set_agent_status
+from psycopg.types.json import Jsonb
 
 import agents_orchestrator.api as api_pkg
 from agents_orchestrator.api.app import create_app
@@ -179,6 +180,8 @@ async def test_session_summary_state_and_gauge_max(http, pool):
         "auto_compact_pct": 80,
         "queued": 2,
         "failed": 1,
+        "attention_agents": 0,
+        "bootstrap_failed_agents": 0,
     }
     await set_agent_status(pool, a1["id"], state="busy", context_pct=62.5)
     summary = (await http.get("/api/v1/sessions")).json()[0]["summary"]
@@ -498,3 +501,44 @@ async def test_old_cluster_routes_gone(http):
         ("DELETE", f"{retired}/{sid}"),
     ):
         assert_error(await http.request(method, path, json={}), 404, "not_found")
+
+
+_STEP = {
+    "step": "install_plugins",
+    "status": "failed",
+    "message": "plugin x not found",
+    "started_at": "2026-11-01T10:00:00+00:00",
+    "finished_at": "2026-11-01T10:00:05+00:00",
+}
+
+
+async def test_agent_attention_and_bootstrap_fields(http, pool):
+    c = await insert_session(pool, spec={"replicas": 2})
+    a0 = await insert_agent(pool, c["id"], ready=True)
+    a1 = await insert_agent(pool, c["id"], ready=False)
+    await set_agent_status(pool, a0["id"], state="idle")
+    await set_agent_status(pool, a1["id"], state="booting")
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE agent_status SET waiting_reason='question',"
+            " waiting_since='2026-11-01T10:01:00+00:00' WHERE agent_id=%s",
+            (a0["id"],),
+        )
+        await conn.execute(
+            "UPDATE agent_status SET bootstrap_step=%s, bootstrap_failure=%s WHERE agent_id=%s",
+            (Jsonb(_STEP), Jsonb(_STEP), a1["id"]),
+        )
+    agents = (await http.get(f"/api/v1/sessions/{c['id']}/agents")).json()
+    assert agents[0]["state"] == "idle"
+    assert agents[0]["attention"]["reason"] == "question"
+    assert datetime.fromisoformat(agents[0]["attention"]["since"]) == datetime.fromisoformat(
+        "2026-11-01T10:01:00+00:00"
+    )
+    assert agents[0]["bootstrap"] is None and agents[0]["bootstrap_failure"] is None
+    assert agents[1]["attention"] is None
+    assert agents[1]["bootstrap"]["step"] == "install_plugins"
+    assert agents[1]["bootstrap_failure"]["message"] == "plugin x not found"
+    summary = (await http.get(f"/api/v1/sessions/{c['id']}")).json()["summary"]
+    assert summary["state"] == "waiting"  # all idle: the name clash is left alone
+    assert summary["attention_agents"] == 1
+    assert summary["bootstrap_failed_agents"] == 1

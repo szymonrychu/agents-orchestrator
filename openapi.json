@@ -46,6 +46,90 @@
         "title": "ActivityLine",
         "type": "object"
       },
+      "AgentAttention": {
+        "description": "The agent's claude is waiting on a person; `state` is unchanged by it.",
+        "properties": {
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "since": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Since"
+          }
+        },
+        "required": [
+          "reason",
+          "since"
+        ],
+        "title": "AgentAttention",
+        "type": "object"
+      },
+      "AgentBootstrapStep": {
+        "description": "A wrapper bootstrap step. `message` is set on failure only: redacted by the wrapper and\ntruncated here.",
+        "properties": {
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "step": {
+            "title": "Step",
+            "type": "string"
+          }
+        },
+        "required": [
+          "step",
+          "status",
+          "message",
+          "started_at",
+          "finished_at"
+        ],
+        "title": "AgentBootstrapStep",
+        "type": "object"
+      },
       "AgentContext": {
         "properties": {
           "used_percentage": {
@@ -92,6 +176,36 @@
       },
       "AgentView": {
         "properties": {
+          "attention": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentAttention"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "bootstrap": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentBootstrapStep"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "bootstrap_failure": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentBootstrapStep"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "context": {
             "anyOf": [
               {
@@ -182,7 +296,10 @@
           "context_pct",
           "leader",
           "peers",
-          "gone"
+          "gone",
+          "attention",
+          "bootstrap",
+          "bootstrap_failure"
         ],
         "title": "AgentView",
         "type": "object"
@@ -3082,8 +3199,16 @@
       },
       "SessionSummary": {
         "properties": {
+          "attention_agents": {
+            "title": "Attention Agents",
+            "type": "integer"
+          },
           "auto_compact_pct": {
             "title": "Auto Compact Pct",
+            "type": "integer"
+          },
+          "bootstrap_failed_agents": {
+            "title": "Bootstrap Failed Agents",
             "type": "integer"
           },
           "context_pct_max": {
@@ -3145,7 +3270,9 @@
           "auto_compact_pct",
           "queued",
           "failed",
-          "oldest_queued_at"
+          "oldest_queued_at",
+          "attention_agents",
+          "bootstrap_failed_agents"
         ],
         "title": "SessionSummary",
         "type": "object"

@@ -16,6 +16,10 @@ _AGGREGATES = """
 SELECT c.id AS session_id,
        count(a.id) FILTER (WHERE a.ready AND a.gone_at IS NULL) AS ready,
        count(s.agent_id) FILTER (WHERE a.gone_at IS NULL AND s.state = 'busy') AS busy,
+       count(s.agent_id) FILTER (
+           WHERE a.gone_at IS NULL AND s.waiting_reason IS NOT NULL) AS attention_agents,
+       count(s.agent_id) FILTER (
+           WHERE a.gone_at IS NULL AND s.bootstrap_failure IS NOT NULL) AS bootstrap_failed_agents,
        max(s.context_pct) FILTER (WHERE a.gone_at IS NULL) AS context_pct_max,
        (SELECT count(*) FROM messages m
          WHERE m.session_id = c.id AND m.status = 'queued') AS queued,
@@ -37,6 +41,7 @@ _AGENTS = """
 SELECT a.id, a.ordinal, a.pod_name, a.ready, a.gone_at,
        s.state, s.free_since, s.current_turn_id, s.context_used_tokens,
        s.context_window_tokens, s.context_pct, s.peers,
+       s.waiting_reason, s.waiting_since, s.bootstrap_step, s.bootstrap_failure,
        (l.agent_id IS NOT NULL) AS leader
 FROM agents a
 LEFT JOIN session_leaders l ON l.agent_id = a.id
@@ -76,6 +81,8 @@ def summarize(session: Session, agg: dict[str, Any] | None, settings: Settings) 
         "auto_compact_pct": compact_pct(session.spec.auto_compact_pct, settings),
         "queued": agg.get("queued", 0),
         "failed": agg.get("failed", 0),
+        "attention_agents": agg.get("attention_agents", 0),
+        "bootstrap_failed_agents": agg.get("bootstrap_failed_agents", 0),
         "oldest_queued_at": agg.get("oldest_queued_at"),
     }
 

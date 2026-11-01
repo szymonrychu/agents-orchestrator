@@ -200,6 +200,8 @@ class _Session:
     idle_since: str | None = None
     context: dict[str, Any] | None = None
     current_turn_id: str | None = None
+    waiting: dict[str, Any] | None = None
+    bootstrap_steps: list[dict[str, Any]] = field(default_factory=list)
     turns: dict[str, _Turn] = field(default_factory=dict)
     events: list[dict[str, Any]] = field(default_factory=list)
     next_seq: int = 1
@@ -227,6 +229,8 @@ class _Session:
             "stall_suspected_since": None,
             "restarts": 0,
             "context": self.context,
+            "waiting": self.waiting,
+            "bootstrap": {"steps": self.bootstrap_steps},
         }
 
 
@@ -446,6 +450,20 @@ class FakeWrapper:
             "source": "statusline",
             "updated_at": _now(),
         }
+
+    def set_snapshot_waiting(
+        self, reason: str | None, since: str | None = None, session_id: str | None = None
+    ) -> None:
+        """Set the snapshot `waiting` (wrapper 0.7.0); None clears it."""
+        self._session(session_id).waiting = (
+            None if reason is None else {"reason": reason, "since": since or _now()}
+        )
+
+    def set_bootstrap_steps(
+        self, steps: list[dict[str, Any]], session_id: str | None = None
+    ) -> None:
+        """Set the snapshot `bootstrap.steps` (wrapper 0.7.0)."""
+        self._session(session_id).bootstrap_steps = steps
 
     def drop_streams(self) -> None:
         """End every open SSE stream, as a network disconnect would."""

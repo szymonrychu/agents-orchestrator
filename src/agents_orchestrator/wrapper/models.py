@@ -22,6 +22,23 @@ class Context(_Model):
     updated_at: datetime | None = None
 
 
+class Waiting(_Model):
+    reason: str
+    since: datetime | None = None
+
+
+class BootstrapStep(_Model):
+    step: str
+    status: str
+    message: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class Bootstrap(_Model):
+    steps: list[BootstrapStep] = Field(default_factory=list)
+
+
 class Snapshot(_Model):
     # the wrapper sends `session_id`; the orchestrator calls it wrapper_session_id (D3)
     wrapper_session_id: str = Field(validation_alias="session_id")
@@ -34,6 +51,9 @@ class Snapshot(_Model):
     workdir: str | None = None
     created_at: datetime | None = None
     turns_completed: int = 0
+    # wrapper 0.7.0, additive: absent on older wrappers
+    waiting: Waiting | None = None
+    bootstrap: Bootstrap | None = None
     # The wrapper reports no transcript field (its resume check tests the file on disk). A
     # completed turn proves a transcript exists (True); zero completed turns proves nothing,
     # since an interrupted or failed first turn can still leave one, so that stays None
