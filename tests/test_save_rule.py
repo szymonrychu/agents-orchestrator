@@ -31,3 +31,23 @@ def test_not_configured_wins_over_restore_only():
 def test_fresh_start_and_miss_still_save(state):
     status = {"cache": {"restore": {"state": state, "reason": "fresh_start"}}, "replicas": 1}
     assert save_skip(True, status, "workdir") is None
+
+
+@pytest.mark.parametrize("state", ["running", "failed"])
+def test_unfinished_or_failed_init_skips_the_workdir_save(state):
+    status = {**RESTORED, "init": {"state": state}}
+    assert save_skip(True, status, "workdir") == f"init_{state}"
+
+
+@pytest.mark.parametrize("init", [None, {"state": "skipped"}, {"state": "succeeded"}])
+def test_no_init_or_successful_init_still_saves_the_workdir(init):
+    status = {**RESTORED, **({"init": init} if init else {})}
+    assert save_skip(True, status, "workdir") is None
+
+
+def test_failed_init_does_not_affect_the_transcripts_save():
+    status = {
+        "cache": {"restore": {"state": "restored"}, "sessions_restore": {"state": "miss"}},
+        "init": {"state": "failed"},
+    }
+    assert save_skip(True, status, "sessions") is None

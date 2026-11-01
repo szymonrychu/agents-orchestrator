@@ -26,6 +26,11 @@ RESTORE_ONLY = "restore-only"
 NEVER_CONVERGED = "never_converged"
 
 
+# A workdir an init is still writing, or one a failed init left half built (a half-cloned
+# submodule), must not replace the cache archive: every later restore would inherit it.
+INIT_BLOCKS_SAVE = frozenset({"running", "failed"})
+
+
 def restore_key(target: CacheTarget) -> str:
     """The `status.cache` key of the restore run of `target`."""
     return "sessions_restore" if target == "sessions" else "restore"
@@ -72,6 +77,7 @@ def save_skip(
     """Why the discard skips the save of `target` (a session's `status`), or None to save.
 
     `restore_only` (an empty `spec.cache.save_key`) skips the workdir save with `restore-only`.
+    A workdir save also skips with `init_running` or `init_failed` while `status.init` says so.
 
     Without a sessions restore record the session either predates the restore (its pods ran) or
     was discarded before its first converge (`never_converged`: no PVC, nothing to save).
@@ -80,6 +86,10 @@ def save_skip(
         return "not_configured"
     if restore_only and target == "workdir":
         return RESTORE_ONLY
+    if target == "workdir":
+        init_state = (status.get("init") or {}).get("state")
+        if init_state in INIT_BLOCKS_SAVE:
+            return f"init_{init_state}"
     restore = (status.get("cache") or {}).get(restore_key(target))
     if _pods_wrote_sessions(restore, target):
         return None if restore is not None or has_converged(status) else NEVER_CONVERGED
