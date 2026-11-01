@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 import yaml
+from test_render_kube_access import jobs_of
 from test_service_accounts import TOKENS, make_session, make_settings
 
 from agents_orchestrator.k8s import render
@@ -54,6 +55,14 @@ def test_enabled_flag_without_setting_fails_loudly() -> None:
     # An enabled flag is never silently muted: no image means no pod, not a pod without docker.
     with pytest.raises(ValueError, match="ORCH_DOCKER_IMAGE"):
         render.render_session(make_session(docker=True), make_settings(), TOKENS)
+
+
+@pytest.mark.parametrize("mirror", ["", "mirror.example:5000"], ids=["no-mirror", "mirror"])
+def test_enabled_flag_without_image_is_never_muted(mirror: str) -> None:
+    # Whatever else is configured, an enabled flag with ORCH_DOCKER_IMAGE unset raises at render.
+    settings = make_settings(docker_image="", docker_registry_mirror=mirror)
+    with pytest.raises(ValueError, match="ORCH_DOCKER_IMAGE"):
+        render.render_session(make_session(docker=True, docker_storage="10Gi"), settings, TOKENS)
 
 
 def test_init_container_order_and_sidecar_shape() -> None:
@@ -201,3 +210,20 @@ def test_passthrough_keeps_kube_entries_and_stays_sorted() -> None:
     assert {"DOCKER_HOST", "KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT"} <= set(both)
     assert both == sorted(both)
     assert "DOCKER_HOST" not in passthrough({"kube_access": True})
+
+
+def test_docker_jobs_stay_docker_free() -> None:
+    # Init, check and cache Jobs are separate pods; a docker spec must not leak into them.
+    session = make_session(docker=True, docker_storage="10Gi", docker_cpu="2", docker_memory="2Gi")
+    jobs = jobs_of(session, settings())
+    assert len(jobs) == 4
+    for job in jobs:
+        pod = job["spec"]["template"]["spec"]
+        assert "privileged" not in str(pod)
+        assert not any(v["name"].startswith("docker") for v in pod.get("volumes", []))
+        assert "lib-modules" not in {v["name"] for v in pod.get("volumes", [])}
+        assert "/lib/modules" not in str(pod)
+        for c in [*pod["containers"], *pod.get("initContainers", [])]:
+            assert "DOCKER_HOST" not in {e["name"] for e in c.get("env", [])}
+            assert "dind" not in c["image"]
+            assert not any("docker" in m["name"] for m in c.get("volumeMounts", []))
