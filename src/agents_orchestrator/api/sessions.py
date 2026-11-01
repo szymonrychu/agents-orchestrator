@@ -14,7 +14,7 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import ValidationError
 
 from agents_orchestrator import rendering
-from agents_orchestrator.api import schemas
+from agents_orchestrator.api import schemas, secret_store
 from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.service_auth import calling_service
 from agents_orchestrator.cache.keys import ArchiveNameError
@@ -257,6 +257,8 @@ async def create_session(
                     409, "session_limit", f"at most {settings.max_sessions} sessions are allowed"
                 )
             if body.preset_id is None:
+                if spec.protected_env:
+                    raise _secret_unset(spec.protected_env)
                 session = await _insert(conn, body.slug, spec, created_by_service=creator)
             else:
                 session = await _create_from_preset(
@@ -266,6 +268,12 @@ async def create_session(
 
 
 _SLUG_ATTEMPTS = 5
+
+
+def _secret_unset(names: list[str]) -> ApiError:
+    return ApiError(
+        422, "secret_unset", "protected variables with no value: " + ", ".join(sorted(names))
+    )
 
 
 def check_archive_names(
@@ -341,10 +349,15 @@ async def _create_from_preset(
         derived = default_cache_key(preset.id)
         cache = spec.cache.model_copy(update={"restore_key": derived, "save_key": derived})
         spec = spec.model_copy(update={"cache": cache})
+    try:
+        versions = await secret_store.snapshot_versions(conn, preset.id, spec.protected_env)
+    except secret_store.SecretUnset as exc:
+        raise _secret_unset(exc.names) from None
     provenance = {
         "preset_id": preset.id,
         "preset_name": preset.name,
         "created_by_service": created_by_service,
+        "secret_versions": versions,
     }
     if slug is not None:
         return await _insert(conn, slug, spec, **provenance)

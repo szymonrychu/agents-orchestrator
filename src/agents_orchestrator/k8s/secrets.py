@@ -33,6 +33,14 @@ class SecretStoreError(Exception):
     """A secret write failed; the message never carries the value or a Kubernetes body."""
 
 
+class SecretUnset(SecretStoreError):
+    """Protected variables with no stored value; `names` lists them."""
+
+    def __init__(self, names: list[str]) -> None:
+        super().__init__("protected variables with no value: " + ", ".join(names))
+        self.names = names
+
+
 class PresetNotFound(SecretStoreError):
     """The preset a secret is set on does not exist; nothing was written."""
 
@@ -52,6 +60,42 @@ def secret_name(preset_id: uuid.UUID, name: str, version: int) -> str:
 
 def _meta(row: dict) -> SecretMeta:
     return SecretMeta(row["name"], True, row["version"], row["updated_at"])
+
+
+async def _lock(conn: psycopg.AsyncConnection, preset_id: uuid.UUID, name: str) -> None:
+    """Serialise writers and session snapshots of one variable until the transaction ends."""
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"{preset_id}/{name}",)
+    )
+
+
+async def snapshot_versions(
+    conn: psycopg.AsyncConnection, preset_id: uuid.UUID, names: list[str]
+) -> dict[str, str]:
+    """The Secret names a new session must reference, one per protected variable.
+
+    Call it inside the transaction that inserts the session. It takes the variable's lock, so a
+    rotation or removal waits until the session row is committed and its collection then sees the
+    reference (otherwise it could delete the version this session just read). Raises SecretUnset
+    for a name with no live value.
+    """
+    found: dict[str, str] = {}
+    missing: list[str] = []
+    for name in sorted(names):
+        await _lock(conn, preset_id, name)
+        cur = await conn.execute(
+            "SELECT version FROM preset_secrets"
+            " WHERE preset_id = %s AND name = %s AND retired_at IS NULL",
+            (preset_id, name),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            missing.append(name)
+        else:
+            found[name] = secret_name(preset_id, name, row[0])
+    if missing:
+        raise SecretUnset(missing)
+    return found
 
 
 async def list_secrets(conn: psycopg.AsyncConnection, preset_id: uuid.UUID) -> list[SecretMeta]:
@@ -78,9 +122,7 @@ async def set_secret(
     as dead and would delete the Secret just written.
     """
     async with conn.transaction():
-        await conn.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"{preset_id}/{name}",)
-        )
+        await _lock(conn, preset_id, name)
         cur = await conn.execute("SELECT 1 FROM presets WHERE id = %s", (preset_id,))
         if await cur.fetchone() is None:
             raise PresetNotFound(f"preset not found for secret {name}")
@@ -136,6 +178,13 @@ async def sync_declared(
     Then delete what no session still names.
     """
     async with conn.transaction():
+        cur = await conn.execute(
+            "SELECT name FROM preset_secrets WHERE preset_id = %s AND retired_at IS NULL"
+            " AND NOT (name = ANY(%s)) ORDER BY name",
+            (preset_id, declared),
+        )
+        for (name,) in await cur.fetchall():
+            await _lock(conn, preset_id, name)
         await conn.execute(
             "UPDATE preset_secrets SET retired_at = now()"
             " WHERE preset_id = %s AND retired_at IS NULL AND NOT (name = ANY(%s))",

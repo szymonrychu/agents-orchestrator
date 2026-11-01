@@ -37,6 +37,7 @@ from agents_orchestrator.k8s.labels import object_names, prefix, session_labels
 from agents_orchestrator.k8s.render import (
     WORKSPACE_VOLUME,
     agent_identity,
+    env_entries,
     workdir_mount,
     workdir_path,
 )
@@ -116,7 +117,7 @@ def render_init_job(session: Session, settings: Settings, scripts: list[str] | N
         "image": spec.image or settings.agent_image,
         "command": ["sh", "-c", WRAPPER, "agent-init", *chunks],
         "env": [
-            *({"name": k, "value": v} for k, v in sorted(spec.plain_env.items())),
+            *env_entries(session),
             {"name": WORKDIR_ENV, "value": workdir_path(spec)},
         ],
         "volumeMounts": [workdir_mount(spec)],

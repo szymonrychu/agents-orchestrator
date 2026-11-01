@@ -236,8 +236,10 @@ def _imports(path: Path) -> set[str]:
 
 def test_api_never_imports_k8s_or_wrapper():
     """Only api/workspace.py (the proxy seam, N1) may call wrappers; it and api/agent.py may
-    derive tokens. Nothing in api imports k8s or the reconciler."""
+    derive tokens. Nothing in api imports k8s or the reconciler, except api/secret_store.py, the
+    seam to the preset secret store (superleader-crud D5)."""
     always = ("agents_orchestrator.k8s", "agents_orchestrator.reconciler")
+    k8s_seam = "secret_store.py"
     wrapper = "agents_orchestrator.wrapper"
     tokens = "agents_orchestrator.tokens"
     seam = "workspace.py"
@@ -247,7 +249,8 @@ def test_api_never_imports_k8s_or_wrapper():
     assert seam in {f.name for f in files}
     for f in files:
         for n in _imports(f):
-            assert not n.startswith(always), f"{f.name} imports {n}"
+            if f.name != k8s_seam:
+                assert not n.startswith(always), f"{f.name} imports {n}"
             if f.name != seam:
                 assert not n.startswith(wrapper), f"{f.name} imports {n}"
             if f.name not in token_users:
