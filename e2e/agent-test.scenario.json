@@ -13,6 +13,7 @@
       {"text": "Note file written."}
     ]},
     {"match": "marathon", "steps": [{"text": "Working through the marathon."}, {"sleep": 300}, {"text": "Marathon work done."}]},
+    {"match": "self-initiated", "steps": [{"text": "Noted the self-restart."}]},
     {"match": "Continue the task where you left off", "steps": [{"text": "Resumed after the restart and finished."}]}
   ]
 }
