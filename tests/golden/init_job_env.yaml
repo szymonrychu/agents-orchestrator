@@ -1,0 +1,88 @@
+- apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: agent-alpha-init
+    namespace: agents
+    labels:
+      agents.szymonrichert.pl/session: alpha
+      app.kubernetes.io/managed-by: agents-orchestrator
+      agents.szymonrichert.pl/init: 'true'
+  spec:
+    backoffLimit: 0
+    activeDeadlineSeconds: 1800
+    template:
+      metadata:
+        labels:
+          agents.szymonrichert.pl/session: alpha
+          app.kubernetes.io/managed-by: agents-orchestrator
+          agents.szymonrichert.pl/init: 'true'
+      spec:
+        imagePullSecrets:
+        - name: regcred
+        restartPolicy: Never
+        serviceAccountName: default
+        automountServiceAccountToken: false
+        securityContext:
+          runAsUser: 1000
+          fsGroup: 1000
+        containers:
+        - name: init
+          image: harbor.example/containers/claude-code-wrapper:ca2ddf3
+          command:
+          - sh
+          - -c
+          - 'set -e
+
+            mkdir -p "$AGENT_INIT_WORKDIR"
+
+            cd "$AGENT_INIT_WORKDIR"
+
+            d=.agent-init
+
+            mkdir -p "$d"
+
+            printf ''*\n'' > "$d/.gitignore"
+
+            printf ''%s'' "$@" > "$d/init.sh"
+
+            code=0
+
+            sh -eu "$d/init.sh" > "$d/init.log" 2>&1 || code=$?
+
+            cat "$d/init.log"
+
+            exit "$code"
+
+            '
+          - agent-init
+          - '# init scripts of session alpha
+
+            # run once at session start by agents-orchestrator; edits through the
+            init scripts API or the orchestrator_init_scripts_edit tool apply to the
+            next session
+
+            # --- script 1 ---
+
+            true
+
+            '
+          env:
+          - name: API_KEY
+            valueFrom:
+              secretKeyRef:
+                name: ps-12345678-abcdef-v2
+                key: value
+          - name: EXP
+            value: $(LIT)-${X}
+          - name: LIT
+            value: a$$b $${X} $$(LIT)
+          - name: AGENT_INIT_WORKDIR
+            value: /workdir/workdir
+          volumeMounts:
+          - name: workspace
+            mountPath: /workdir
+            subPath: workdir
+        volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: agent-alpha-workspace

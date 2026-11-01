@@ -144,3 +144,27 @@ def test_the_wrapper_expands_the_rendered_reference(tmp_path, monkeypatch):
     path.write_text(yaml.safe_dump(cfg))
     loaded = load_config(path)
     assert loaded.hooks.onStart[-1].secret == canary
+
+
+def test_golden_pod_with_protected_and_expand_entries():
+    from test_render import golden
+
+    env = {
+        "API_KEY": {"protected": True},
+        "LIT": {"value": "a$b ${X} $(LIT)"},
+        "EXP": {"value": "$(LIT)-${X}", "expand": True},
+    }
+    objs = render.render_session(sess(env, versions=VERSIONS), make_settings(), TOKENS)
+    golden("session_env.yaml", [o for o in objs if o["kind"] in ("StatefulSet", "ConfigMap")])
+
+
+def test_golden_init_job_with_protected_and_expand_entries():
+    from test_render import golden
+
+    env = {
+        "API_KEY": {"protected": True},
+        "LIT": {"value": "a$b ${X} $(LIT)"},
+        "EXP": {"value": "$(LIT)-${X}", "expand": True},
+    }
+    job = render_init_job(sess(env, init_scripts=["true"]), make_settings())
+    golden("init_job_env.yaml", [job])

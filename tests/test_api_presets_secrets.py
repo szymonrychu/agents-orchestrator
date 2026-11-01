@@ -270,3 +270,107 @@ async def test_plain_string_env_entry_gets_a_clear_422(make_http):
         assert (
             "env.FOO must be an object {value, protected, expand}" in r.json()["error"]["message"]
         )
+
+
+# ---------------------------------------------------------------- atomic save (store failures)
+
+
+async def test_store_failure_on_put_leaves_the_old_state(make_http, kube, canary):
+    from agents_orchestrator.k8s.kube import KubeError
+
+    async with make_http() as http:
+        body = await create(http, "p", spec_with(canary, replicas=1))
+        before = (await http.get(f"{P}/{body['id']}")).json()
+        kube.fail(
+            "Secret",
+            store.secret_name(uuid.UUID(body["id"]), "API_KEY", 2),
+            KubeError("boom"),
+        )
+        r = await http.put(
+            f"{P}/{body['id']}",
+            json={"name": "renamed", "spec": spec_with(canary + "2", replicas=2)},
+        )
+        assert_error(r, 502, "secret_store_failed")
+        after = (await http.get(f"{P}/{body['id']}")).json()
+        assert after == before
+    assert secret_values(kube) == [canary]
+
+
+async def test_store_failure_on_create_saves_nothing(make_http, kube, canary, monkeypatch):
+    from agents_orchestrator.api import secret_store
+    from agents_orchestrator.k8s.secrets import SecretStoreError
+
+    async def boom(*args, **kwargs):
+        raise SecretStoreError("x")
+
+    monkeypatch.setattr(secret_store, "set_secret", boom)
+    async with make_http() as http:
+        r = await http.post(P, json={"name": "p", "spec": spec_with(canary)})
+        assert_error(r, 502, "secret_store_failed")
+        assert [p["name"] for p in (await http.get(P)).json()] == ["Default"]
+
+
+async def test_failure_after_the_writes_deletes_the_new_versions(
+    make_http, kube, canary, monkeypatch
+):
+    from agents_orchestrator.api import secret_store
+    from agents_orchestrator.k8s.secrets import SecretStoreError
+
+    async def boom(*args, **kwargs):
+        raise SecretStoreError("x")
+
+    async with make_http() as http:
+        body = await create(http, "p", spec_with(canary, replicas=1))
+        before = (await http.get(f"{P}/{body['id']}")).json()
+        monkeypatch.setattr(secret_store, "sync_declared", boom)
+        r = await http.put(
+            f"{P}/{body['id']}", json={"name": "p", "spec": spec_with(canary + "2", replicas=2)}
+        )
+        assert_error(r, 502, "secret_store_failed")
+        assert (await http.get(f"{P}/{body['id']}")).json() == before
+    v2 = store.secret_name(uuid.UUID(body["id"]), "API_KEY", 2)
+    assert v2 in kube.deleted("Secret")
+    assert secret_values(kube) == [canary]  # v1 is still live
+
+
+async def test_name_conflict_on_put_writes_no_secret(make_http, kube, canary):
+    async with make_http() as http:
+        await create(http, "taken", {})
+        body = await create(http, "p", spec_with(canary))
+        r = await http.put(
+            f"{P}/{body['id']}", json={"name": "taken", "spec": spec_with(canary + "2")}
+        )
+        assert_error(r, 409, "conflict")
+    assert secret_values(kube) == [canary]
+
+
+async def test_openapi_and_streams_never_carry_a_protected_value(pool, dsn, kube, canary):
+    from factories import insert_agent, insert_event
+    from test_api_streams import open_sse, serve
+
+    from agents_orchestrator.api import openapi
+
+    app = create_app(make_settings(dsn, allowed_cidrs="127.0.0.0/8"), pool, kube=kube)
+    async with serve(app) as srv:
+        async with srv.client() as http:
+            body = (await http.post(P, json={"name": "p", "spec": spec_with(canary)})).json()
+            made = (await http.post(C, json={"preset_id": body["id"], "slug": "s1"})).json()
+            agent = await insert_agent(pool, uuid.UUID(made["id"]))
+            await insert_event(pool, uuid.UUID(made["id"]), agent["id"], data={"text": "hello"})
+            page = await http.get(f"{C}/{made['id']}/events")
+            live_doc = await http.get("/api/v1/openapi.json")
+            assert page.status_code == 200 and live_doc.status_code == 200
+            assert canary not in page.text and canary not in live_doc.text
+        frames = []
+        for path in ("/api/v1/stream", f"/api/v1/sessions/{made['id']}/events/stream"):
+            async with open_sse(srv, path, params={"after_id": 0}) as sse:
+                for _ in range(3):
+                    try:
+                        frames.append(await sse.next(timeout=2))
+                    except Exception:
+                        break
+        assert canary not in json.dumps(frames, default=str)
+    assert canary not in openapi.export()
+    assert '"example"' not in json.dumps(
+        json.loads(openapi.export())["components"]["schemas"]["EnvVar"]
+    )

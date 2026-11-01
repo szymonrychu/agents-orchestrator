@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from fastapi import APIRouter, Request, Response
@@ -71,30 +73,57 @@ def _store_failed() -> ApiError:
     return ApiError(502, "secret_store_failed", "could not store a protected variable")
 
 
-async def _apply_secrets(
+async def _forget(kube, namespace: str, names: list[str]) -> None:
+    """Best effort: delete Secret versions written for a save that did not stick."""
+    for name in names:
+        with contextlib.suppress(Exception):
+            await kube.delete("Secret", namespace, name)
+
+
+async def _save(
     request: Request,
     conn,
     settings: Settings,
-    preset_id: uuid.UUID,
     spec: dict[str, Any],
     values: dict[str, SecretStr],
-) -> list[secret_store.SecretMeta]:
-    """Write the sent values as new versions, retire the variables the spec dropped and return
-    the preset's live secrets. A protected variable sent without a value is left as it is."""
+    save: Callable[[], Awaitable[repo.Preset]],
+) -> tuple[repo.Preset, list[secret_store.SecretMeta]]:
+    """Save the preset row and its secrets as one step; a failure leaves the old state.
+
+    The row save, the new Secret versions and the retirement of dropped variables share one
+    transaction. The new versions are written to Kubernetes before it commits, so when anything
+    fails the transaction rolls back and the versions written so far are deleted. The previous
+    versions are collected only after the commit. A protected variable sent without a value is
+    left as it is.
+    """
     declared = sorted(n for n, e in spec.get("env", {}).items() if e.get("protected"))
-    if values or await secret_store.has_rows(conn, preset_id):
-        kube = secret_store.kube_of(request)
-        try:
-            for name, value in values.items():
-                await secret_store.set_secret(
-                    conn, kube, settings.namespace, preset_id, name, value
+    created: list[str] = []
+    kube = None
+    try:
+        async with conn.transaction():
+            preset = await save()
+            if values or await secret_store.has_rows(conn, preset.id):
+                kube = secret_store.kube_of(request)
+                for name, value in values.items():
+                    meta = await secret_store.set_secret(
+                        conn, kube, settings.namespace, preset.id, name, value, collect=False
+                    )
+                    created.append(secret_store.secret_name(preset.id, name, meta.version))
+                await secret_store.sync_declared(
+                    conn, kube, settings.namespace, preset.id, declared, collect=False
                 )
-            await secret_store.sync_declared(conn, kube, settings.namespace, preset_id, declared)
-        except secret_store.PresetNotFound:
+    except secret_store.SecretStoreError as exc:
+        await _forget(kube, settings.namespace, created)
+        if isinstance(exc, secret_store.PresetNotFound):
             raise not_found("preset") from None
-        except secret_store.SecretStoreError:
-            raise _store_failed() from None
-    return (await secret_store.list_metas(conn, [preset_id])).get(preset_id, [])
+        raise _store_failed() from None
+    except BaseException:
+        if kube is not None:
+            await _forget(kube, settings.namespace, created)
+        raise
+    if kube is not None:
+        await secret_store.gc(conn, kube, settings.namespace, preset_id=preset.id)
+    return preset, (await secret_store.list_metas(conn, [preset.id])).get(preset.id, [])
 
 
 def _exists(name: str) -> ApiError:
@@ -131,10 +160,17 @@ async def create_preset(
     spec, values = await _validated(body, settings)
     async with pool.connection() as conn:
         try:
-            preset = await repo.create(conn, body.name, spec)
+            preset, metas = await _save(
+                request,
+                conn,
+                settings,
+                spec,
+                values,
+                lambda: repo.create(conn, body.name, spec),
+            )
         except repo.PresetExists:
             raise _exists(body.name) from None
-        return _view(preset, await _apply_secrets(request, conn, settings, preset.id, spec, values))
+        return _view(preset, metas)
 
 
 @router.get("/presets/{preset_id}", response_model=schemas.PresetView)
@@ -157,10 +193,15 @@ async def replace_preset(
             raise not_found("preset")
         spec, values = await _validated(body, settings, stored.spec, preset_id)
         try:
-            preset = await repo.update(conn, preset_id, body.name, spec)
-            return _view(
-                preset, await _apply_secrets(request, conn, settings, preset_id, spec, values)
+            preset, metas = await _save(
+                request,
+                conn,
+                settings,
+                spec,
+                values,
+                lambda: repo.update(conn, preset_id, body.name, spec),
             )
+            return _view(preset, metas)
         except repo.PresetNotFound:
             raise not_found("preset") from None
         except repo.PresetDefault as exc:
@@ -175,8 +216,18 @@ async def delete_preset(
 ) -> Response:
     async with pool.connection() as conn:
         try:
-            await repo.delete(conn, preset_id)
-            await _apply_secrets(request, conn, settings, preset_id, {}, {})
+            async with conn.transaction():
+                await repo.delete(conn, preset_id)
+                # no FK: the rows outlive the preset, so retire them here; gc then treats them
+                # as dead and deletes the versions no live session names
+                collect = await secret_store.has_rows(conn, preset_id)
+                if collect:
+                    kube = secret_store.kube_of(request)
+                    await secret_store.sync_declared(
+                        conn, kube, settings.namespace, preset_id, [], collect=False
+                    )
+            if collect:
+                await secret_store.gc(conn, kube, settings.namespace, preset_id=preset_id)
         except repo.PresetNotFound:
             raise not_found("preset") from None
         except repo.PresetDefault as exc:

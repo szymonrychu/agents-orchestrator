@@ -131,11 +131,15 @@ async def set_secret(
     preset_id: uuid.UUID,
     name: str,
     value: SecretStr,
+    *,
+    collect: bool = True,
 ) -> SecretMeta:
     """Store `value` as the next version of the preset's protected variable `name`.
 
     Returns metadata only. The preset must exist: garbage collection treats a row with no preset
-    as dead and would delete the Secret just written.
+    as dead and would delete the Secret just written. A caller whose transaction may still roll
+    back passes `collect=False` and calls `gc` after its commit, so the previous version is never
+    deleted for a write that did not stick.
     """
     async with conn.transaction():
         await _lock(conn, preset_id, name)
@@ -178,7 +182,8 @@ async def set_secret(
         )
         updated_at = (await cur.fetchone())[0]
     log.info("secret set: preset=%s name=%s version=%d", str(preset_id)[:8], name, version)
-    await gc(conn, kube, namespace, preset_id=preset_id, name=name)
+    if collect:
+        await gc(conn, kube, namespace, preset_id=preset_id, name=name)
     return SecretMeta(name, True, version, updated_at)
 
 
@@ -188,6 +193,8 @@ async def sync_declared(
     namespace: str,
     preset_id: uuid.UUID,
     declared: list[str],
+    *,
+    collect: bool = True,
 ) -> None:
     """Retire the secrets whose name left `declared`, the preset's protected variable names.
 
@@ -206,7 +213,8 @@ async def sync_declared(
             " WHERE preset_id = %s AND retired_at IS NULL AND NOT (name = ANY(%s))",
             (preset_id, declared),
         )
-    await gc(conn, kube, namespace, preset_id=preset_id)
+    if collect:
+        await gc(conn, kube, namespace, preset_id=preset_id)
 
 
 async def _referenced(conn: psycopg.AsyncConnection) -> set[str]:
