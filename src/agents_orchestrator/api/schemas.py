@@ -240,6 +240,14 @@ class MetaKubeAccess(BaseModel):
     available: bool
 
 
+class MetaDocker(BaseModel):
+    available: bool
+    storage: str
+    max_storage: str
+    max_cpu: str
+    max_memory: str
+
+
 class MetaHookEvent(BaseModel):
     name: str
     can_veto: bool
@@ -264,6 +272,7 @@ class Meta(BaseModel):
     discard_hook: Literal["none", "command", "url"]
     cache: MetaCache
     kube_access: MetaKubeAccess
+    docker: MetaDocker
     hook_events: list[MetaHookEvent]
     permission_modes: list[MetaPermissionMode]
 

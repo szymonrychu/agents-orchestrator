@@ -93,6 +93,25 @@ kubeAccess:
   # Annotations of the <fullname>-kube-access ServiceAccount only. Never copied from serviceAccount.annotations.
   annotations: {}
 
+# Docker-in-Docker sidecar for opted-in sessions (spec.docker): a privileged container in the
+# agent pod. Empty image = off (sessions with docker: true are refused). The image must be
+# pinned by semver tag like docker:27.3.1-dind (never latest or a sha); the render fails otherwise.
+docker:
+  image: ""
+  # Default sizeLimit of the /var/lib/docker emptyDir (exceeding it evicts the pod).
+  storage: 30Gi
+  cpu:
+    request: 500m
+    limit: "4"
+  memory:
+    request: 1Gi
+    limit: 8Gi
+  ephemeralRequest: 5Gi
+  # Caps for spec.docker_storage, docker_cpu and docker_memory.
+  maxStorage: 100Gi
+  maxCpu: "8"
+  maxMemory: 16Gi
+
 # This block is for setting up the ingress for more information can be found here: https://kubernetes.io/docs/concepts/services-networking/ingress/
 ingress:
   enabled: false

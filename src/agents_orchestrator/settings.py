@@ -18,6 +18,7 @@ from agents_orchestrator.spec import CACHE_MAX_BYTES_LIMIT, parse_quantity
 PREFIX = "ORCH_"
 MIN_MASTER_KEY_BYTES = 32
 _TAG_RE = re.compile(r"^v\d+\.\d+\.\d+$")
+_DOCKER_IMAGE_RE = re.compile(r"^[a-z0-9][a-z0-9._:/-]*:\d+\.\d+\.\d+-dind$")
 _SERVICE_TOKEN_RE = re.compile(r"^([a-z0-9][a-z0-9-]{0,62}):([0-9a-f]{64})$")
 
 CsvList = Annotated[list[str], NoDecode]
@@ -205,6 +206,18 @@ class Settings(BaseSettings):
     cache_s3_api_secret_access_key: str = Field(default="", repr=False)
 
     kube_access_service_account: str = ""
+    # Opt-in privileged Docker-in-Docker sidecar for agent pods (spec.docker). Empty image = off.
+    # Pinned by exact semver tag (docker:X.Y.Z-dind), never latest or a sha.
+    docker_image: str = ""
+    docker_storage: str = "30Gi"
+    docker_cpu_request: str = "500m"
+    docker_cpu_limit: str = "4"
+    docker_memory_request: str = "1Gi"
+    docker_memory_limit: str = "8Gi"
+    docker_ephemeral_request: str = "5Gi"
+    max_docker_storage: str = "100Gi"
+    max_docker_cpu: str = "8"
+    max_docker_memory: str = "16Gi"
     agent_service_account: str = "default"
 
     session_message_rate_per_minute: int = Field(default=10, ge=1)
@@ -372,6 +385,52 @@ class Settings(BaseSettings):
     def _check_ref(cls, v: str) -> str:
         if not _TAG_RE.match(v):
             raise _Bad(f"{v!r} must be a pinned release tag like v1.2.3, not a branch")
+        return v
+
+    @field_validator("docker_image")
+    @classmethod
+    def _check_docker_image(cls, v: str) -> str:
+        if v and not _DOCKER_IMAGE_RE.match(v):
+            raise _Bad(f"{v!r} must be pinned by semver tag like docker:27.3.1-dind")
+        return v
+
+    @field_validator(
+        "docker_storage",
+        "docker_cpu_request",
+        "docker_cpu_limit",
+        "docker_memory_request",
+        "docker_memory_limit",
+        "docker_ephemeral_request",
+        "max_docker_storage",
+        "max_docker_cpu",
+        "max_docker_memory",
+    )
+    @classmethod
+    def _check_docker_quantity(cls, v: str) -> str:
+        try:
+            if parse_quantity(v) <= 0:
+                raise ValueError("must be positive")
+        except ValueError as exc:
+            raise _Bad(f"{v!r}: {exc}") from None
+        return v
+
+    @field_validator("docker_cpu_limit", "docker_memory_limit")
+    @classmethod
+    def _check_docker_request_within_limit(cls, v: str, info: ValidationInfo) -> str:
+        res = info.field_name.removeprefix("docker_").removesuffix("_limit")  # type: ignore[union-attr]
+        req = info.data.get(f"docker_{res}_request")
+        if req is not None and parse_quantity(req) > parse_quantity(v):
+            raise _Bad(f"must not be below ORCH_DOCKER_{res.upper()}_REQUEST")
+        return v
+
+    @field_validator("max_docker_storage", "max_docker_cpu", "max_docker_memory")
+    @classmethod
+    def _check_docker_defaults_within_caps(cls, v: str, info: ValidationInfo) -> str:
+        res = info.field_name.removeprefix("max_docker_")  # type: ignore[union-attr]
+        default = f"docker_{res}" if res == "storage" else f"docker_{res}_limit"
+        value = info.data.get(default)
+        if value is not None and parse_quantity(value) > parse_quantity(v):
+            raise _Bad(f"{_var(default)}::must not exceed {_var(info.field_name)}")  # type: ignore[arg-type]
         return v
 
     @field_validator("master_key_file")
@@ -577,6 +636,10 @@ class Settings(BaseSettings):
     @property
     def kube_access_available(self) -> bool:
         return bool(self.kube_access_service_account)
+
+    @property
+    def docker_available(self) -> bool:
+        return bool(self.docker_image)
 
     def require_cache(self) -> None:
         """Refuse a bucket without the credentials and image the cache Jobs need."""

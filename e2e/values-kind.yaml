@@ -7,6 +7,11 @@ image:
 
 agentImage: agents-orchestrator-agent-test:e2e
 
+# Docker-in-Docker sidecar for the docker e2e: scripts/e2e.sh pulls this image on the host and
+# loads it into the kind node (no Harbor login, no pull secret, no registry mirror).
+docker:
+  image: docker:27.3.1-dind
+
 # postgres.url, masterKey.value and claude.token are generated per run by scripts/e2e.sh and
 # passed with --set-string at install time (no secret-shaped literal lives in the repo). The
 # test agent image runs the wrapper's fake claude, which never reads the claude token.

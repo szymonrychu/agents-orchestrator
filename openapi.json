@@ -2239,6 +2239,9 @@
             "title": "Discard Hook",
             "type": "string"
           },
+          "docker": {
+            "$ref": "#/components/schemas/MetaDocker"
+          },
           "efforts": {
             "items": {
               "type": "string"
@@ -2281,6 +2284,7 @@
           "discard_hook",
           "cache",
           "kube_access",
+          "docker",
           "hook_events",
           "permission_modes"
         ],
@@ -2394,6 +2398,39 @@
           "max_attempts"
         ],
         "title": "MetaDefaults",
+        "type": "object"
+      },
+      "MetaDocker": {
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "max_cpu": {
+            "title": "Max Cpu",
+            "type": "string"
+          },
+          "max_memory": {
+            "title": "Max Memory",
+            "type": "string"
+          },
+          "max_storage": {
+            "title": "Max Storage",
+            "type": "string"
+          },
+          "storage": {
+            "title": "Storage",
+            "type": "string"
+          }
+        },
+        "required": [
+          "available",
+          "storage",
+          "max_storage",
+          "max_cpu",
+          "max_memory"
+        ],
+        "title": "MetaDocker",
         "type": "object"
       },
       "MetaHookEvent": {
@@ -3262,6 +3299,53 @@
             ],
             "title": "Discard Hook Url"
           },
+          "docker": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Docker"
+          },
+          "docker_cpu": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Docker Cpu"
+          },
+          "docker_memory": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Docker Memory"
+          },
+          "docker_storage": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Docker Storage"
+          },
           "effort": {
             "anyOf": [
               {
@@ -3536,6 +3620,53 @@
               }
             ],
             "title": "Discard Hook Url"
+          },
+          "docker": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Docker"
+          },
+          "docker_cpu": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Docker Cpu"
+          },
+          "docker_memory": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Docker Memory"
+          },
+          "docker_storage": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Docker Storage"
           },
           "effort": {
             "anyOf": [
