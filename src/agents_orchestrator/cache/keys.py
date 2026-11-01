@@ -22,7 +22,14 @@ SUFFIX = ".tar.zst"
 
 
 class ArchiveNameError(ValueError):
-    """A name that breaks the archive name grammar."""
+    """A name that breaks the archive name grammar (or a template that does not render to one).
+
+    `line` is the template line when the failure came from the template.
+    """
+
+    def __init__(self, message: str, line: int | None = None) -> None:
+        super().__init__(message)
+        self.line = line
 
 
 def validate_name(name: str, *, allow_prefix: bool) -> str:

@@ -6,15 +6,19 @@ is what renders. `SAMPLES` is the single definition; `POST /templates/preview` s
 
 from __future__ import annotations
 
+import re
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
 from agents_common import templating
 from agents_common.templating import TemplateError
 
+from agents_orchestrator.cache.keys import ArchiveNameError, validate_name
+
 if TYPE_CHECKING:
     from agents_orchestrator.db.sessions import Session
 
-Surface = Literal["web_chat_start", "preset_text", "init_script"]
+Surface = Literal["web_chat_start", "preset_text", "init_script", "archive_name"]
 
 _COMMON: dict[str, Any] = {"session_slug": "sample-session", "preset_name": "Default"}
 _ENV: dict[str, str] = {"TZ": "UTC", "LANG": "C.UTF-8"}
@@ -25,17 +29,54 @@ SAMPLES: dict[str, dict[str, Any]] = {
     "web_chat_start": {**_COMMON, "user": "sample-user", "now": _NOW},
     "preset_text": {**_COMMON, "env": _ENV, "now": _NOW},
     "init_script": {**_COMMON, "env": _ENV},
+    # Values are already in the archive segment alphabet; `now` is fixed width so names sort.
+    "archive_name": {
+        "session_slug": "sample-session",
+        "preset_name": "default",
+        "now": "20260101t000000z",
+        "date": "2026-01-01",
+        "user": "sample-user",
+    },
 }
 
 _MARKERS = ("{{", "{%", "{#")
 
 
-def session_context(surface: Surface, session: Session) -> dict[str, Any]:
+_NOT_SEGMENT = re.compile(r"[^a-z0-9._-]+")
+
+
+def format_now(moment: datetime) -> str:
+    """Compact fixed-width UTC time (`20261031t120000z`): chronological as a string, and in the
+    archive segment alphabet (lowercase)."""
+    return moment.astimezone(UTC).strftime("%Y%m%dt%H%M%Sz")
+
+
+def _segment(value: str) -> str:
+    """`value` squeezed into the archive segment alphabet (may come out empty)."""
+    return _NOT_SEGMENT.sub("-", value.lower()).strip("-._")[:63].rstrip("-._")
+
+
+def _archive_context(session: Session, now: datetime) -> dict[str, Any]:
+    return {
+        "session_slug": _segment(session.slug),
+        "preset_name": _segment(session.preset_name or ""),
+        "now": format_now(now),
+        "date": now.astimezone(UTC).strftime("%Y-%m-%d"),
+        "user": _segment(session.created_by_service or ""),
+    }
+
+
+def session_context(
+    surface: Surface, session: Session, *, now: datetime | None = None
+) -> dict[str, Any]:
     """The render context of `surface` for a stored session.
 
     `now` is the session's creation time, not the wall clock: the rendered wrapper config is
     hashed into the pod template, so a clock value would roll the pods on every reconcile.
+    The `archive_name` surface alone takes a `now` override: a save name is rendered at save time.
     """
+    if surface == "archive_name":
+        return _archive_context(session, now or session.created_at)
     ctx: dict[str, Any] = {
         "session_slug": session.slug,
         "preset_name": session.preset_name or "",
@@ -44,6 +85,19 @@ def session_context(surface: Surface, session: Session) -> dict[str, Any]:
         "now": session.created_at.isoformat(),
     }
     return {k: ctx[k] for k in SAMPLES[surface]}
+
+
+def render_name(template: str, context: dict[str, Any], *, allow_prefix: bool) -> str:
+    """Render an archive name template, then validate the result against the name grammar.
+
+    Raises ArchiveNameError for a template that does not render (unknown variable, syntax, sandbox
+    violation; `line` set when known) and for output that breaks the grammar. Never rewrites.
+    """
+    try:
+        rendered = render_text(template, context)
+    except TemplateError as exc:
+        raise ArchiveNameError(exc.message, exc.line) from exc
+    return validate_name(rendered, allow_prefix=allow_prefix)
 
 
 def render_text(template: str, context: dict[str, Any]) -> str:
