@@ -215,6 +215,13 @@ class Settings(BaseSettings):
     chat_url: str = ""
     chat_token: str = Field(default="", repr=False)
 
+    # usage gate (agents-usage): url and service token come as a pair, or neither
+    usage_url: str = ""
+    usage_token: str = Field(default="", repr=False)
+    usage_quota_default: int = Field(default=100, ge=1, le=100)
+    usage_cache_seconds: float = Field(default=30, ge=1, le=600)
+    usage_timeout_seconds: float = Field(default=3, gt=0, le=30)
+
     # superleader admin relay upstreams (url and service token come as a pair, or neither)
     webhook_url: str = ""
     webhook_token: str = Field(default="", repr=False)
@@ -469,7 +476,7 @@ class Settings(BaseSettings):
                 raise _Bad("must not carry a query or fragment (the relay appends /chat/v1/...)")
         return v
 
-    @field_validator("webhook_url", "schedule_url", "connector_url")
+    @field_validator("webhook_url", "schedule_url", "connector_url", "usage_url")
     @classmethod
     def _check_admin_url(cls, v: str) -> str:
         if v:
@@ -480,7 +487,7 @@ class Settings(BaseSettings):
                 raise _Bad("must not carry a query or fragment (the relay appends the path)")
         return v
 
-    @field_validator("webhook_token", "schedule_token", "connector_token")
+    @field_validator("webhook_token", "schedule_token", "connector_token", "usage_token")
     @classmethod
     def _check_admin_pair(cls, v: str, info: ValidationInfo) -> str:
         name = (info.field_name or "").removesuffix("_token")
@@ -573,6 +580,10 @@ class Settings(BaseSettings):
     @property
     def chat_available(self) -> bool:
         return bool(self.chat_url)
+
+    @property
+    def usage_available(self) -> bool:
+        return bool(self.usage_url)
 
     @property
     def kube_access_available(self) -> bool:

@@ -611,6 +611,15 @@ class WorkspaceCache(_Strict):
         return v
 
 
+class UsageQuota(_Strict):
+    """Per-preset ceilings, in percent of the account's usage windows, below the default
+    (`ORCH_USAGE_QUOTA_DEFAULT`) at which starting or growing a session is refused. A metric
+    left unset uses the default."""
+
+    five_hour_pct: int | None = Field(default=None, ge=1, le=100)
+    seven_day_pct: int | None = Field(default=None, ge=1, le=100)
+
+
 class SessionSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -650,6 +659,9 @@ class SessionSpec(BaseModel):
     # Full read-write Kubernetes access in every namespace for the agent pods; refused until
     # ORCH_KUBE_ACCESS_SERVICE_ACCOUNT is set. Sparse: unset is not stored or dumped in a preset.
     kube_access: bool | None = Field(default=None, strict=True)
+    # Usage ceilings that refuse a session start or scale-up (see api/usage_gate.py). Sparse:
+    # unset is not stored or dumped in a preset.
+    usage_quota: UsageQuota | None = None
     # Workspace cache in S3; presence enables it. Sparse: unset is not stored or dumped.
     cache: WorkspaceCache | None = None
 

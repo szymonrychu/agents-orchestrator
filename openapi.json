@@ -3289,6 +3289,16 @@
             "title": "Static",
             "type": "boolean"
           },
+          "usage_quota": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageQuota"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "workdir": {
             "default": "workdir",
             "maxLength": 63,
@@ -3563,6 +3573,16 @@
             "default": false,
             "title": "Static",
             "type": "boolean"
+          },
+          "usage_quota": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageQuota"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "workdir": {
             "default": "workdir",
@@ -3988,6 +4008,40 @@
           "final_text"
         ],
         "title": "TurnView",
+        "type": "object"
+      },
+      "UsageQuota": {
+        "additionalProperties": false,
+        "description": "Per-preset ceilings, in percent of the account's usage windows, below the default\n(`ORCH_USAGE_QUOTA_DEFAULT`) at which starting or growing a session is refused. A metric\nleft unset uses the default.",
+        "properties": {
+          "five_hour_pct": {
+            "anyOf": [
+              {
+                "maximum": 100.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Five Hour Pct"
+          },
+          "seven_day_pct": {
+            "anyOf": [
+              {
+                "maximum": 100.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seven Day Pct"
+          }
+        },
+        "title": "UsageQuota",
         "type": "object"
       },
       "ValidationError": {
