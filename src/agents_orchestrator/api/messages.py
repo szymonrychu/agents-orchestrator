@@ -162,13 +162,21 @@ async def retry_message(message_id: int, pool: Pool) -> schemas.MessageAccepted:
     return schemas.MessageAccepted(message_id=message_id)
 
 
-async def enqueue_agent_command(conn, agent_id: uuid.UUID, kind: str) -> int:
+async def enqueue_agent_command(
+    conn,
+    agent_id: uuid.UUID,
+    kind: str,
+    issued_by_session: uuid.UUID | None = None,
+    note_message_id: int | None = None,
+) -> int:
     agent = await views.get_agent_ref(conn, agent_id)
     if agent is None:
         raise not_found("agent")
     if agent["gone_at"] is not None:
         raise ApiError(409, "agent_gone", "agent is gone")
-    return await queue.enqueue_command(conn, agent_id, kind)
+    return await queue.enqueue_command(
+        conn, agent_id, kind, issued_by_session=issued_by_session, note_message_id=note_message_id
+    )
 
 
 async def _command(agent_id: uuid.UUID, kind: str, pool) -> schemas.CommandAccepted:
@@ -193,11 +201,25 @@ async def restart_agent(agent_id: uuid.UUID, pool: Pool) -> schemas.CommandAccep
     return await _command(agent_id, "restart", pool)
 
 
-async def restart_all(conn, session_id: uuid.UUID) -> list[int]:
+async def restart_all(
+    conn,
+    session_id: uuid.UUID,
+    issued_by_session: uuid.UUID | None = None,
+    note_message_id: int | None = None,
+) -> list[int]:
     """One restart command per live agent of the session; the caller owns the transaction."""
     await _require_open_session(conn, session_id)
     agent_ids = await views.live_agent_ids(conn, session_id)
-    return [await queue.enqueue_command(conn, agent_id, "restart") for agent_id in agent_ids]
+    return [
+        await queue.enqueue_command(
+            conn,
+            agent_id,
+            "restart",
+            issued_by_session=issued_by_session,
+            note_message_id=note_message_id,
+        )
+        for agent_id in agent_ids
+    ]
 
 
 @router.post(
@@ -209,8 +231,11 @@ async def restart_session(session_id: uuid.UUID, pool: Pool) -> schemas.SessionR
         return schemas.SessionRestartAccepted(command_ids=await restart_all(conn, session_id))
 
 
-async def command_view(conn, command_id: int) -> schemas.CommandView:
-    row = await views.get_command(conn, command_id)
+async def command_view(
+    conn, command_id: int, issued_by_session: uuid.UUID | None = None
+) -> schemas.CommandView:
+    """A command; with `issued_by_session` only one that session issued, else 404."""
+    row = await views.get_command(conn, command_id, issued_by_session)
     if row is None:
         raise not_found("command")
     return schemas.CommandView(**row)

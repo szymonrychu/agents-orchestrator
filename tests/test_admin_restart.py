@@ -163,3 +163,62 @@ async def test_non_superleader_is_refused(pool, dsn, app):
     async with client_for(app, plain.leader_ip) as http:
         r = await http.post(f"{S}/rs-plain/restart", headers=headers(plain.id))
     assert_error(r, 403, "not_superleader")
+
+
+async def finish_restarts(pool, n, status="done"):
+    from agents_orchestrator.db import queue
+
+    for _ in range(n):
+        async with pool.connection() as conn:
+            cmd = await queue.claim_command(conn, ["restart"])
+            assert cmd is not None
+            assert await queue.complete_command(conn, cmd.id, status, {})
+
+
+async def held(pool, session_id):
+    (row,) = await q(
+        pool,
+        "SELECT (not_before IS NOT NULL AND not_before > now()) AS held FROM messages"
+        " WHERE session_id = %s",
+        (session_id,),
+    )
+    return row["held"]
+
+
+async def test_self_note_is_held_until_every_restart_command_finished(call, pool, boss):
+    assert (await call("POST", f"{S}/{boss.slug}/restart")).status_code == 202
+    assert await held(pool, boss.id)
+    async with pool.connection() as conn:
+        from agents_orchestrator.db import queue
+
+        assert await queue.claim_and_pick(conn) is None  # not deliverable while held
+    await finish_restarts(pool, 1)
+    assert await held(pool, boss.id)  # one agent still to restart
+    await finish_restarts(pool, 1)
+    assert not await held(pool, boss.id)
+
+
+async def test_a_failed_restart_still_releases_the_note(call, pool, boss):
+    pod = (await agents_of(pool, boss.id))[0]["pod_name"]
+    await call("POST", f"{S}/{boss.slug}/agents/{pod}/restart")
+    assert await held(pool, boss.id)
+    await finish_restarts(pool, 1, "failed")
+    assert not await held(pool, boss.id)
+
+
+async def test_commands_are_scoped_to_the_issuing_superleader(call, pool, app, boss):
+    other = await hive(pool, "rs-victim")
+    mine = (await call("POST", f"{S}/{other.slug}/restart")).json()["command_ids"][0]
+    assert (await call("GET", f"{ADMIN_PREFIX}/commands/{mine}")).status_code == 200
+    # a command made on the main port, and one issued by another superleader, are not visible
+    async with pool.connection() as conn:
+        from agents_orchestrator.db import queue
+
+        main_cmd = await queue.enqueue_command(
+            conn, (await agents_of(pool, other.id))[0]["id"], "restart"
+        )
+    assert_error(await call("GET", f"{ADMIN_PREFIX}/commands/{main_cmd}"), 404, "not_found")
+    rival = await alone(pool, "rs-rival", superleader=True)
+    async with client_for(app, rival.leader_ip) as http:
+        r = await http.get(f"{ADMIN_PREFIX}/commands/{mine}", headers=headers(rival.id))
+    assert_error(r, 404, "not_found")

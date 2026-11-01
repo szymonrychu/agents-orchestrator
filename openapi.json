@@ -4510,6 +4510,7 @@
     },
     "/agent/v1/admin/commands/{command_id}": {
       "get": {
+        "description": "Only a command this superleader issued; any other id is 404.",
         "operationId": "get_command_agent_v1_admin_commands__command_id__get",
         "parameters": [
           {

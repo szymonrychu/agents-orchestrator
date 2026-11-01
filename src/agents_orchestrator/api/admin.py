@@ -252,6 +252,12 @@ async def _self_restart(conn, settings: Settings, caller: sessions_repo.Session)
         )
 
 
+async def _hold_note(conn, caller: sessions_repo.Session, text: str) -> int:
+    """The self-restart note, held until the restart commands finished (the pod is gone by
+    then), so the old pod cannot take it and the hive cannot send it twice."""
+    return await q.enqueue_message(conn, caller.id, text, lane="priority", held=True)
+
+
 def _self_note(what: str, settings: Settings) -> str:
     now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%SZ")
     return (
@@ -273,13 +279,11 @@ async def restart_session(
     async with pool.connection() as conn, conn.transaction():
         target = await _target(conn, slug)
         own = target.id == caller.id
+        note_id = None
         if own:
             await _self_restart(conn, settings, caller)
-        ids = await messages_api.restart_all(conn, target.id)
-        if own:
-            await q.enqueue_message(
-                conn, caller.id, _self_note("your session", settings), lane="priority"
-            )
+            note_id = await _hold_note(conn, caller, _self_note("your session", settings))
+        ids = await messages_api.restart_all(conn, target.id, caller.id, note_id)
     return schemas.SessionRestartAccepted(command_ids=ids)
 
 
@@ -297,11 +301,13 @@ async def restart_agent(
             raise ApiError(409, "session_deleting", "session is being discarded")
         agent_id = await _member_id(conn, target.id, pod)
         own = target.id == caller.id
+        note_id = None
         if own:
             await _self_restart(conn, settings, caller)
-        command_id = await messages_api.enqueue_agent_command(conn, agent_id, "restart")
-        if own:
-            await q.enqueue_message(conn, caller.id, _self_note(pod, settings), lane="priority")
+            note_id = await _hold_note(conn, caller, _self_note(pod, settings))
+        command_id = await messages_api.enqueue_agent_command(
+            conn, agent_id, "restart", caller.id, note_id
+        )
     return schemas.CommandAccepted(command_id=command_id)
 
 
@@ -313,6 +319,8 @@ async def _member_id(conn, session_id: uuid.UUID, pod_name: str) -> uuid.UUID:
 
 
 @router.get("/commands/{command_id}", response_model=schemas.CommandView)
-async def get_command(command_id: int, pool: Pool) -> schemas.CommandView:
+async def get_command(command_id: int, request: Request, pool: Pool) -> schemas.CommandView:
+    """Only a command this superleader issued; any other id is 404."""
+    _, caller = caller_of(request)
     async with pool.connection() as conn:
-        return await messages_api.command_view(conn, command_id)
+        return await messages_api.command_view(conn, command_id, caller.id)

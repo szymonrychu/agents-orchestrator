@@ -143,8 +143,12 @@ async def enqueue_message(
     hop: int = 0,
     lane: str = "regular",
     carries_start_prompt: bool = False,
+    held: bool = False,
 ) -> int:
     """Queue a message; a session message carries its sender and hop (D8).
+
+    A `held` message is not deliverable until `release_note` clears its `not_before` (the hold
+    is a day, so a note whose commands never finish still expires).
 
     A message with a sender is untargeted, so the leader routing delivers it to whoever leads
     the target session at claim time.
@@ -160,8 +164,9 @@ async def enqueue_message(
         row = await _one(
             conn,
             "INSERT INTO messages (session_id, text, target_agent_id, sender_session_id,"
-            " sender_slug, hop, lane, carries_start_prompt)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            " sender_slug, hop, lane, carries_start_prompt, not_before)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s,"
+            " CASE WHEN %s THEN now() + interval '1 day' END) RETURNING id",
             (
                 session_id,
                 text,
@@ -171,6 +176,7 @@ async def enqueue_message(
                 hop,
                 lane,
                 carries_start_prompt,
+                held,
             ),
         )
         assert row is not None
@@ -763,14 +769,22 @@ async def verify_stale_dispatching(conn: psycopg.AsyncConnection, older_than_sec
 # ---------------------------------------------------------------- commands
 
 
-async def enqueue_command(conn: psycopg.AsyncConnection, agent_id: uuid.UUID, kind: str) -> int:
+async def enqueue_command(
+    conn: psycopg.AsyncConnection,
+    agent_id: uuid.UUID,
+    kind: str,
+    *,
+    issued_by_session: uuid.UUID | None = None,
+    note_message_id: int | None = None,
+) -> int:
     if kind not in COMMAND_KINDS:
         raise ValueError(f"unknown command kind {kind!r}")
     async with conn.transaction():
         row = await _one(
             conn,
-            "INSERT INTO commands (agent_id, kind) VALUES (%s, %s) RETURNING id",
-            (agent_id, kind),
+            "INSERT INTO commands (agent_id, kind, issued_by_session, note_message_id)"
+            " VALUES (%s, %s, %s, %s) RETURNING id",
+            (agent_id, kind, issued_by_session, note_message_id),
         )
         assert row is not None
         return row["id"]
@@ -799,12 +813,30 @@ async def complete_command(
     if status not in COMMAND_FINAL:
         raise ValueError(f"not a final command status: {status!r}")
     async with conn.transaction():
-        cur = await conn.execute(
+        row = await _one(
+            conn,
             "UPDATE commands SET status = %s, result = %s, finished_at = now()"
-            " WHERE id = %s AND status = 'running'",
+            " WHERE id = %s AND status = 'running' RETURNING note_message_id",
             (status, Jsonb(result) if result is not None else None, id),
         )
-        return cur.rowcount == 1
+        if row is None:
+            return False
+        if row["note_message_id"] is not None:
+            await release_note(conn, row["note_message_id"])
+        return True
+
+
+async def release_note(conn: psycopg.AsyncConnection, message_id: int) -> None:
+    """Make a held note deliverable once no command naming it is queued or running."""
+    released = await _transition(
+        conn,
+        "UPDATE messages SET not_before = NULL WHERE id = %(id)s AND status = 'queued'"
+        " AND NOT EXISTS (SELECT 1 FROM commands WHERE note_message_id = %(id)s"
+        "  AND status IN ('queued', 'running')) RETURNING session_id",
+        {"id": message_id},
+    )
+    if released is not None:
+        await notify(conn, "message_queued", {"session_id": str(released["session_id"])})
 
 
 # ---------------------------------------------------------------- checks
