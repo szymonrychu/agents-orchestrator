@@ -11,6 +11,11 @@ agentImage: agents-orchestrator-agent-test:e2e
 # loads it into the kind node (no Harbor login, no pull secret, no registry mirror).
 docker:
   image: docker:27.3.1-dind
+  # small request: the single-node kind on a 4 vCPU CI runner cannot fit the dind sidecar
+  # (default 500m) beside the session pods other e2e tests leave running
+  cpu:
+    request: 50m
+    limit: "4"
 
 # postgres.url, masterKey.value and claude.token are generated per run by scripts/e2e.sh and
 # passed with --set-string at install time (no secret-shaped literal lives in the repo). The
@@ -30,6 +35,9 @@ env:
   # back to the hostPath one.
   ORCH_PVC_STORAGE_CLASS: e2e-rwx
   ORCH_PVC_SIZE: 1Gi
+  # the single node of a 4 vCPU CI runner must fit every concurrent session pod: the default
+  # 500m request starved the docker e2e's init Job pod (FailedScheduling: Insufficient cpu)
+  ORCH_DEFAULT_CPU_REQUEST: 50m
   ORCH_RETRY_BACKOFF_BASE_SECONDS: "0.5"
   ORCH_RETRY_BACKOFF_MAX_SECONDS: "2"
   ORCH_RECONCILE_POLL_SECONDS: "3"
