@@ -380,7 +380,10 @@ async def set_permission_mode(
         if desired == "deleting":
             raise SessionBeingDeleted(str(session_id))
         patch = Jsonb({"permission_mode": mode})
-        merge = "jsonb_set(spec, '{wrapper}', COALESCE(spec->'wrapper', '{}'::jsonb) || %s)"
+        merge = (
+            "jsonb_set(spec, '{wrapper}', CASE WHEN jsonb_typeof(spec->'wrapper') = 'object'"
+            " THEN spec->'wrapper' ELSE '{}'::jsonb END || %s)"
+        )
         rows = await _fetch(
             conn,
             f"UPDATE sessions SET spec = {merge},"

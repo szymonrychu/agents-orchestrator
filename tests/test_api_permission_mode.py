@@ -146,3 +146,10 @@ async def test_set_permission_mode_unknown(pool):
     async with pool.connection() as conn:
         with pytest.raises(repo.SessionNotFound):
             await repo.set_permission_mode(conn, uuid.uuid4(), "auto")
+
+
+async def test_set_permission_mode_with_null_wrapper(pool):
+    s = await insert_session(pool, spec={"replicas": 1, "wrapper": None})
+    async with pool.connection() as conn:
+        got, _ = await repo.set_permission_mode(conn, s["id"], "auto")
+    assert got.spec.wrapper.permission_mode == "auto"
