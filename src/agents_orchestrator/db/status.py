@@ -108,11 +108,13 @@ async def upsert_status(
     last_seq: int,
     waiting: tuple[str, Timestamp] | None = None,
     bootstrap: tuple[dict[str, Any] | None, dict[str, Any] | None] = (None, None),
+    permission_mode: tuple[str | None, str | None] = (None, None),
 ) -> StateChange:
     """Seed the row from a wrapper snapshot on attach.
 
     Every column comes from the snapshot (a null context clears the gauge; `waiting` is
-    (reason, since) or None; `bootstrap` is (latest step, failed step)) except free_since,
+    (reason, since) or None; `bootstrap` is (latest step, failed step);
+    `permission_mode` is (state, reason)) except free_since,
     which moves to now() only when the snapshot is idle and the stored state was not.
     """
     _check_state(state)
@@ -125,7 +127,9 @@ async def upsert_status(
         " wrapper_idle_since=%s::timestamptz, current_turn_id=%s,"
         " context_used_tokens=%s, context_window_tokens=%s, context_pct=%s,"
         " last_seq=%s, waiting_reason=%s, waiting_since=%s::timestamptz,"
-        " bootstrap_step=%s, bootstrap_failure=%s, updated_at=now() WHERE agent_id=%s",
+        " bootstrap_step=%s, bootstrap_failure=%s,"
+        " permission_mode_state=%s, permission_mode_reason=%s,"
+        " updated_at=now() WHERE agent_id=%s",
         (
             state,
             change.became_idle,
@@ -139,6 +143,8 @@ async def upsert_status(
             waiting[1] if waiting else None,
             _jsonb(bootstrap[0]),
             _jsonb(bootstrap[1]),
+            permission_mode[0],
+            permission_mode[1],
             agent_id,
         ),
     )
@@ -198,6 +204,18 @@ async def set_waiting(
         "UPDATE agent_status SET waiting_reason=%s, waiting_since=COALESCE(%s::timestamptz, now()),"
         " updated_at=now() WHERE agent_id=%s",
         (reason, since, agent_id),
+    )
+
+
+async def set_permission_mode_unavailable(
+    conn: psycopg.AsyncConnection, agent_id: uuid.UUID, reason: str | None
+) -> None:
+    """The wrapper reported `permission_mode_unavailable`: the requested mode cannot be used."""
+    await _ensure_row(conn, agent_id)
+    await conn.execute(
+        "UPDATE agent_status SET permission_mode_state='unavailable', permission_mode_reason=%s,"
+        " updated_at=now() WHERE agent_id=%s",
+        (reason, agent_id),
     )
 
 

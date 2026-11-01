@@ -182,6 +182,7 @@ async def test_session_summary_state_and_gauge_max(http, pool):
         "failed": 1,
         "attention_agents": 0,
         "bootstrap_failed_agents": 0,
+        "permission_unavailable_agents": 0,
     }
     await set_agent_status(pool, a1["id"], state="busy", context_pct=62.5)
     summary = (await http.get("/api/v1/sessions")).json()[0]["summary"]
@@ -545,3 +546,26 @@ async def test_agent_attention_and_bootstrap_fields(http, pool):
     assert summary["state"] == "waiting"  # all idle: the name clash is left alone
     assert summary["attention_agents"] == 1
     assert summary["bootstrap_failed_agents"] == 1
+
+
+async def test_agent_view_and_summary_surface_permission_mode_unavailable(pool, dsn):
+    c = await insert_session(pool, slug="pmu")
+    a0 = await insert_agent(pool, c["id"], ready=True)
+    a1 = await insert_agent(pool, c["id"], ready=True)
+    await set_agent_status(pool, a0["id"], state="idle")
+    await set_agent_status(pool, a1["id"], state="idle")
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE agent_status SET permission_mode_state='unavailable',"
+            " permission_mode_reason='unavailable for this model' WHERE agent_id=%s",
+            (a0["id"],),
+        )
+    app = create_app(make_settings(dsn), pool)
+    async with client_for(app) as http:
+        agents = (await http.get(f"/api/v1/sessions/{c['id']}/agents")).json()
+        assert agents[0]["permission_mode_state"] == "unavailable"
+        assert agents[0]["permission_mode_reason"] == "unavailable for this model"
+        assert agents[1]["permission_mode_state"] is None
+        assert agents[1]["permission_mode_reason"] is None
+        summary = (await http.get(f"/api/v1/sessions/{c['id']}")).json()["summary"]
+        assert summary["permission_unavailable_agents"] == 1

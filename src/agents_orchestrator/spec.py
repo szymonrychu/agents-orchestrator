@@ -253,6 +253,10 @@ HOOK_EVENT_SPECS: tuple[HookEventSpec, ...] = (
     HookEventSpec("postLeave"),
     HookEventSpec("onStart", can_veto=True),
 )
+PERMISSION_MODES: tuple[dict[str, str], ...] = (
+    {"value": "bypassPermissions", "label": "Allow all"},
+    {"value": "auto", "label": "Auto"},
+)
 HOOK_EVENTS: tuple[str, ...] = tuple(s.name for s in HOOK_EVENT_SPECS)
 TOOL_EVENTS: tuple[str, ...] = tuple(s.name for s in HOOK_EVENT_SPECS if s.supports_matcher)
 HOOK_ACTIONS_MAX = 20
@@ -490,6 +494,7 @@ class WrapperSettings(_Strict):
     max_restarts: int | None = Field(default=None, ge=0, le=10)
     restart_continue_prompt: str | None = None
     turn_max_seconds: float | None = Field(default=None, ge=0)
+    permission_mode: Literal["bypassPermissions", "auto"] | None = None
     agent_commands: (
         list[Literal["compact", "context", "mcp", "reload-plugins", "reload-skills"]] | None
     ) = None

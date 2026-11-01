@@ -73,6 +73,8 @@ class SessionSummary(BaseModel):
     # `state` "waiting" above still means all agents idle and is not related to these
     attention_agents: int
     bootstrap_failed_agents: int
+    # agents whose wrapper reported the requested permission mode (auto) unavailable
+    permission_unavailable_agents: int
 
 
 class BackupRun(BaseModel):
@@ -121,6 +123,20 @@ class SessionView(BaseModel):
 
 class InitScriptsIn(BaseModel):
     scripts: list[str]
+
+
+class PermissionModeIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    permission_mode: Literal["bypassPermissions", "auto"]
+
+
+class PermissionModeView(BaseModel):
+    session_id: uuid.UUID
+    permission_mode: Literal["bypassPermissions", "auto"]
+    preset_id: uuid.UUID | None = None
+    preset_name: str | None = None
+    preset_updated: bool = False
 
 
 class InitStatus(BaseModel):
@@ -185,6 +201,9 @@ class AgentView(BaseModel):
     attention: AgentAttention | None  # null unless the agent waits on a person
     bootstrap: AgentBootstrapStep | None  # the latest bootstrap step
     bootstrap_failure: AgentBootstrapStep | None  # a failed bootstrap step, else null
+    # "unavailable" when the wrapper could not use the requested permission mode, else null
+    permission_mode_state: Literal["unavailable"] | None = None
+    permission_mode_reason: str | None = None
 
 
 class MetaResources(BaseModel):
@@ -230,6 +249,11 @@ class MetaHookEvent(BaseModel):
     interval_required: bool
 
 
+class MetaPermissionMode(BaseModel):
+    value: Literal["bypassPermissions", "auto"]
+    label: str
+
+
 class Meta(BaseModel):
     defaults: MetaDefaults
     agent_image: str
@@ -241,6 +265,7 @@ class Meta(BaseModel):
     cache: MetaCache
     kube_access: MetaKubeAccess
     hook_events: list[MetaHookEvent]
+    permission_modes: list[MetaPermissionMode]
 
 
 Lane = Literal["idle", "regular", "priority"]

@@ -27,6 +27,7 @@ from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import (
     HOOK_EVENT_SPECS,
     INIT_DIR,
+    PERMISSION_MODES,
     WORKDIR_ROOT,
     SessionSpec,
     SpecInvalid,
@@ -155,6 +156,8 @@ def agent_view(r: dict) -> schemas.AgentView:
         else None,
         bootstrap=_bootstrap_view(r["bootstrap_step"]),
         bootstrap_failure=_bootstrap_view(r["bootstrap_failure"]),
+        permission_mode_state=r["permission_mode_state"],
+        permission_mode_reason=r["permission_mode_reason"],
     )
 
 
@@ -222,6 +225,7 @@ async def meta(settings: Cfg) -> schemas.Meta:
         ),
         kube_access=schemas.MetaKubeAccess(available=settings.kube_access_available),
         hook_events=[schemas.MetaHookEvent(**asdict(e)) for e in HOOK_EVENT_SPECS],
+        permission_modes=[schemas.MetaPermissionMode(**m) for m in PERMISSION_MODES],
     )
 
 
@@ -511,6 +515,32 @@ async def put_init_scripts(
 ) -> schemas.InitScriptsView:
     async with pool.connection() as conn:
         return await edit_init_scripts(conn, session_id, body.scripts, settings)
+
+
+@router.put("/sessions/{session_id}/permission-mode", response_model=schemas.PermissionModeView)
+async def put_permission_mode(
+    session_id: uuid.UUID, body: schemas.PermissionModeIn, pool: Pool
+) -> schemas.PermissionModeView:
+    """Set `spec.wrapper.permission_mode` on the session and its source preset.
+
+    Applied by the normal config-hash rollout: idle pods restart, busy ones at the turn end.
+    """
+    async with pool.connection() as conn:
+        try:
+            session, preset_updated = await repo.set_permission_mode(
+                conn, session_id, body.permission_mode
+            )
+        except repo.SessionNotFound:
+            raise not_found("session") from None
+        except repo.SessionBeingDeleted:
+            raise ApiError(409, "conflict", "session is being deleted") from None
+    return schemas.PermissionModeView(
+        session_id=session.id,
+        permission_mode=body.permission_mode,
+        preset_id=session.preset_id,
+        preset_name=session.preset_name,
+        preset_updated=preset_updated,
+    )
 
 
 @router.get("/sessions/{session_id}/agents", response_model=list[schemas.AgentView])
