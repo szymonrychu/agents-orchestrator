@@ -99,13 +99,29 @@ async def snapshot_versions(
 
 
 async def list_secrets(conn: psycopg.AsyncConnection, preset_id: uuid.UUID) -> list[SecretMeta]:
+    return (await list_metas(conn, [preset_id])).get(preset_id, [])
+
+
+async def list_metas(
+    conn: psycopg.AsyncConnection, preset_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, list[SecretMeta]]:
+    """The live (not retired) secrets of each preset, by name."""
+    out: dict[uuid.UUID, list[SecretMeta]] = {}
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "SELECT name, version, updated_at FROM preset_secrets"
-            " WHERE preset_id = %s AND retired_at IS NULL ORDER BY name",
-            (preset_id,),
+            "SELECT preset_id, name, version, updated_at FROM preset_secrets"
+            " WHERE preset_id = ANY(%s) AND retired_at IS NULL ORDER BY preset_id, name",
+            (preset_ids,),
         )
-        return [_meta(r) for r in await cur.fetchall()]
+        for r in await cur.fetchall():
+            out.setdefault(r["preset_id"], []).append(_meta(r))
+    return out
+
+
+async def has_rows(conn: psycopg.AsyncConnection, preset_id: uuid.UUID) -> bool:
+    """True while any row of the preset remains, live or retired and not yet collected."""
+    cur = await conn.execute("SELECT 1 FROM preset_secrets WHERE preset_id = %s", (preset_id,))
+    return await cur.fetchone() is not None
 
 
 async def set_secret(

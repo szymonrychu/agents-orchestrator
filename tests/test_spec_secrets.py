@@ -184,4 +184,5 @@ async def test_preset_create_with_protected_variable(http):
     body = {"name": "d", "spec": {"env": {"TOK": prot()}, **hook(secret="${TOK}")}}
     r = await http.post(P, json=body)
     assert r.status_code == 201, r.text
-    assert r.json()["spec"]["env"] == {"TOK": {"protected": True}}  # sparse: as given
+    # reads show a protected variable as metadata (no value), here not yet set
+    assert r.json()["spec"]["env"] == {"TOK": {"protected": True, "expand": False, "set": False}}

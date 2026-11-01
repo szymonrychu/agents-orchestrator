@@ -10,6 +10,7 @@ import string
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from urllib.parse import urlparse
@@ -18,6 +19,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SecretStr,
     ValidationInfo,
     field_validator,
     model_serializer,
@@ -301,6 +303,11 @@ class EnvVar(_Strict):
     value: str | None = None
     protected: bool = Field(default=False, strict=True)
     expand: bool = Field(default=False, strict=True)
+    # Output only, set on reads of a protected variable (never stored, never accepted as input):
+    # whether a value exists, its Secret version and when it was written.
+    set: bool | None = None
+    version: int | None = None
+    updated_at: datetime | None = None
 
     @model_validator(mode="after")
     def _shape(self) -> EnvVar:
@@ -319,9 +326,31 @@ class EnvVar(_Strict):
     @model_serializer(mode="wrap")
     def _sparse(self, handler: Any) -> dict[str, Any]:
         data = handler(self)
-        if data.get("value") is None:
-            data.pop("value", None)
+        for key in ("value", "set", "version", "updated_at"):
+            if data.get(key) is None:
+                data.pop(key, None)
         return data
+
+
+class EnvVarIn(_Strict):
+    """The request form of an env variable: a protected one may carry its new value.
+
+    Only the api sees it; `SessionSpecIn.split` moves the value out so a `SessionSpec` never holds
+    one. Without a value a protected variable keeps its stored one.
+    """
+
+    value: SecretStr | None = None
+    protected: bool = Field(default=False, strict=True)
+    expand: bool = Field(default=False, strict=True)
+
+    @model_validator(mode="after")
+    def _shape(self) -> EnvVarIn:
+        if self.protected:
+            if self.expand:
+                raise ValueError("a protected variable ignores expand (not expanded); set it false")
+        elif self.value is None:
+            raise ValueError("a variable that is not protected needs a value")
+        return self
 
 
 _REF_RE = re.compile(r"\$\$|\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?P<default>:-[^}]*)?\}")
@@ -840,6 +869,35 @@ def _template_problems(spec: SessionSpec) -> list[str]:
         if error is not None:
             errors.append(f"{name}: {error}")
     return errors
+
+
+class SessionSpecIn(SessionSpec):
+    """A spec as the api receives it: protected variables may carry a value (`EnvVarIn`)."""
+
+    env: dict[str, EnvVarIn] = {}  # type: ignore[assignment]
+
+    def split(self) -> tuple[SessionSpec, dict[str, SecretStr]]:
+        """The storable spec (no protected value in it) and the protected values that were sent."""
+        values: dict[str, SecretStr] = {}
+        env: dict[str, EnvVar] = {}
+        for name, entry in self.env.items():
+            given = {k: getattr(entry, k) for k in entry.model_fields_set if k != "value"}
+            if entry.protected:
+                if entry.value is not None:
+                    values[name] = entry.value
+                env[name] = EnvVar(**given)
+            else:
+                assert entry.value is not None
+                env[name] = EnvVar(value=entry.value.get_secret_value(), **given)
+        fields = {
+            k: getattr(self, k)
+            for k in SessionSpec.model_fields
+            if k in self.model_fields_set and k != "env"
+        }
+        spec = SessionSpec.model_construct(
+            _fields_set=set(self.model_fields_set), **fields, env=env
+        )
+        return spec, values
 
 
 def validate_spec(spec: SessionSpec, settings: Settings, stored: SessionSpec | None = None) -> None:

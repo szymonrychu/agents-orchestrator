@@ -22,6 +22,7 @@ from agents_orchestrator.cache.save_rule import save_skip
 from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import leadership, presets, views
 from agents_orchestrator.db import sessions as repo
+from agents_orchestrator.secret_view import redact_spec, session_metas
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import (
     HOOK_EVENT_SPECS,
@@ -106,7 +107,7 @@ def _view(session: repo.Session, agg: dict | None, settings: Settings) -> schema
     return schemas.SessionView(
         id=session.id,
         slug=session.slug,
-        spec=session.spec,
+        spec=redact_spec(session.spec, session_metas(session.secret_versions, session.created_at)),
         desired=session.desired,
         status=session.status,
         generation=session.generation,
@@ -235,14 +236,15 @@ async def create_session(
     if body.spec is not None:
         if body.slug is None:
             raise ApiError(422, "invalid_request", "slug is required with spec")
-        cache = body.spec.cache
+        body_spec, _ignored = body.spec.split()  # a value has no preset to live in: refused below
+        cache = body_spec.cache
         if cache is not None and cache.restore_key is None and cache.save_key is None:
             raise ApiError(
                 422,
                 "invalid_request",
                 "cache.restore_key or cache.save_key is required without a preset",
             )
-        spec = await run_in_threadpool(check_spec, body.spec, settings)
+        spec = await run_in_threadpool(check_spec, body_spec, settings)
     if body.slug is not None:
         try:
             validate_slug(body.slug)

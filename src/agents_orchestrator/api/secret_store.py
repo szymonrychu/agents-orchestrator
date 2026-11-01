@@ -3,7 +3,7 @@
 The only api module that imports `agents_orchestrator.k8s` (pinned by
 `tests/test_api_sessions.py::test_api_never_imports_k8s_or_wrapper`), as `workspace.py` is for
 wrappers. Routes call the store through here; the Kubernetes client is built on first use, so an
-api that never writes a secret never needs cluster access.
+api that never writes a secret never needs Kubernetes access.
 """
 
 from __future__ import annotations
@@ -17,6 +17,8 @@ from agents_orchestrator.k8s.secrets import (
     SecretStoreError,
     SecretUnset,
     gc,
+    has_rows,
+    list_metas,
     set_secret,
     snapshot_versions,
     sync_declared,
@@ -30,7 +32,9 @@ __all__ = [
     "SecretUnset",
     "close_kube",
     "gc",
+    "has_rows",
     "kube_of",
+    "list_metas",
     "set_secret",
     "snapshot_versions",
     "sync_declared",

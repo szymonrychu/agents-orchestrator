@@ -820,7 +820,7 @@
           "spec": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/SessionSpec-Input"
+                "$ref": "#/components/schemas/SessionSpecIn"
               },
               {
                 "type": "null"
@@ -880,9 +880,13 @@
         "title": "DeleteArchives",
         "type": "object"
       },
-      "EnvVar-Input": {
+      "EnvVar": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "EnvVarIn": {
         "additionalProperties": false,
-        "description": "One session env variable, GitLab CI style: `{value, protected, expand}`.\n\nA protected variable is write-only: it carries no value here (the value lives in a\nKubernetes Secret and is rendered as `secretKeyRef`). `expand` gates `$` handling of a plain\nvalue; a protected variable ignores it because the kubelet does not expand `secretKeyRef`, so\n`protected` with `expand` is refused rather than silently ignored.",
+        "description": "The request form of an env variable: a protected one may carry its new value.\n\nOnly the api sees it; `SessionSpecIn.split` moves the value out so a `SessionSpec` never holds\none. Without a value a protected variable keeps its stored one.",
         "properties": {
           "expand": {
             "default": false,
@@ -897,7 +901,9 @@
           "value": {
             "anyOf": [
               {
-                "type": "string"
+                "format": "password",
+                "type": "string",
+                "writeOnly": true
               },
               {
                 "type": "null"
@@ -906,11 +912,7 @@
             "title": "Value"
           }
         },
-        "title": "EnvVar",
-        "type": "object"
-      },
-      "EnvVar-Output": {
-        "additionalProperties": true,
+        "title": "EnvVarIn",
         "type": "object"
       },
       "EventView": {
@@ -2492,7 +2494,7 @@
             "type": "string"
           },
           "spec": {
-            "$ref": "#/components/schemas/SessionSpec-Input",
+            "$ref": "#/components/schemas/SessionSpecIn",
             "default": {
               "env": {},
               "init_scripts": [],
@@ -2720,6 +2722,54 @@
         "title": "ScaleResult",
         "type": "object"
       },
+      "SecretIn": {
+        "additionalProperties": false,
+        "description": "The new value of one protected variable; it is never echoed.",
+        "properties": {
+          "value": {
+            "format": "password",
+            "minLength": 1,
+            "title": "Value",
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "title": "SecretIn",
+        "type": "object"
+      },
+      "SecretView": {
+        "description": "Metadata of a protected variable's stored value; the value is never returned.",
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "set": {
+            "title": "Set",
+            "type": "boolean"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "set",
+          "version",
+          "updated_at"
+        ],
+        "title": "SecretView",
+        "type": "object"
+      },
       "SessionBackup": {
         "description": "What a discard would save now; each flag is true only when that save would really run.\n\n`reason` is null when both run, else `no_session_cache` (no `spec.cache`),\n`cache_not_configured` (no S3 cache configured) or the save's skip reason, the workdir's first.",
         "properties": {
@@ -2868,7 +2918,7 @@
         "title": "SessionRestartAccepted",
         "type": "object"
       },
-      "SessionSpec-Input": {
+      "SessionSpec": {
         "additionalProperties": false,
         "properties": {
           "any_mcp_config": {
@@ -2957,7 +3007,7 @@
           },
           "env": {
             "additionalProperties": {
-              "$ref": "#/components/schemas/EnvVar-Input"
+              "$ref": "#/components/schemas/EnvVar"
             },
             "default": {},
             "title": "Env",
@@ -3129,8 +3179,9 @@
         "title": "SessionSpec",
         "type": "object"
       },
-      "SessionSpec-Output": {
+      "SessionSpecIn": {
         "additionalProperties": false,
+        "description": "A spec as the api receives it: protected variables may carry a value (`EnvVarIn`).",
         "properties": {
           "any_mcp_config": {
             "anyOf": [
@@ -3218,7 +3269,7 @@
           },
           "env": {
             "additionalProperties": {
-              "$ref": "#/components/schemas/EnvVar-Output"
+              "$ref": "#/components/schemas/EnvVarIn"
             },
             "default": {},
             "title": "Env",
@@ -3387,7 +3438,7 @@
             ]
           }
         },
-        "title": "SessionSpec",
+        "title": "SessionSpecIn",
         "type": "object"
       },
       "SessionSummary": {
@@ -3589,7 +3640,7 @@
             "type": "string"
           },
           "spec": {
-            "$ref": "#/components/schemas/SessionSpec-Output"
+            "$ref": "#/components/schemas/SessionSpec"
           },
           "static": {
             "title": "Static",
@@ -6350,6 +6401,65 @@
           }
         },
         "summary": "Copy Preset"
+      }
+    },
+    "/api/v1/presets/{preset}/secrets/{name}": {
+      "put": {
+        "description": "Set the value of a protected variable (a new version). The value is never echoed.",
+        "operationId": "set_preset_secret_api_v1_presets__preset__secrets__name__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "preset",
+            "required": true,
+            "schema": {
+              "title": "Preset",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SecretIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecretView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Preset Secret"
       }
     },
     "/api/v1/sessions": {
