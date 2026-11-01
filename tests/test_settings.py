@@ -418,7 +418,17 @@ def test_agent_usage_url_and_secret_come_as_a_pair(monkeypatch):
 
 def test_agent_usage_bad_url_refused(monkeypatch):
     monkeypatch.setenv("ORCH_AGENT_USAGE_SECRET", "agents-usage-ingest")
-    for bad in ("ftp://usage", "usage:8002", "http://", "http://usage/?q=1", "http://usage/#f"):
+    # the wrapper's usage.url check also refuses a trailing slash and a missing host
+    for bad in (
+        "ftp://usage",
+        "usage:8002",
+        "http://",
+        "http://:8002",
+        "http://usage/?q=1",
+        "http://usage/#f",
+        "http://usage:8002/",
+        "http://usage:8002/base/",
+    ):
         monkeypatch.setenv("ORCH_AGENT_USAGE_URL", bad)
         with pytest.raises(SettingsError) as exc:
             Settings()

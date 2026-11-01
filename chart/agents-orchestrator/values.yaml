@@ -200,7 +200,7 @@ env: {}
 agentImage: ""
 
 # Usage forwarding from the agent pods to agents-usage. url becomes ORCH_AGENT_USAGE_URL (the
-# agents-usage ingest listener, e.g. http://agents-usage:8002) and secretName becomes
+# agents-usage ingest listener, e.g. http://agents-usage:8002, no trailing slash) and secretName becomes
 # ORCH_AGENT_USAGE_SECRET: the Secret (key "token") holding the shared ingest token, which the
 # agent pods read as env CCW_USAGE_TOKEN. The chart only names the Secret and never holds the
 # token. Set both, or neither (forwarding is then off); one without the other fails the render.

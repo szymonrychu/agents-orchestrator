@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import json
+import copy
 
 import yaml
 from test_render import (
@@ -36,11 +36,26 @@ def config_hash(objs) -> str:
     return sts_of(objs)["spec"]["template"]["metadata"]["annotations"][render.HASH_ANNOTATION]
 
 
+def without_usage(objs, base):
+    """The ON render with the usage env var, config section and its hash effect removed."""
+    objs = copy.deepcopy(objs)
+    annotations = sts_of(objs)["spec"]["template"]["metadata"]["annotations"]
+    annotations[render.HASH_ANNOTATION] = config_hash(base)
+    container = container_of(objs)
+    container["env"] = [e for e in container["env"] if e["name"] != "CCW_USAGE_TOKEN"]
+    cm = by_kind(objs)["ConfigMap"]
+    config = yaml.safe_load(cm["data"]["config.yaml"])
+    del config["usage"]
+    cm["data"]["config.yaml"] = yaml.safe_dump(config, sort_keys=False)
+    return objs
+
+
 def test_off_by_default():
     objs = rendered()
     assert "CCW_USAGE_TOKEN" not in env_names(objs)
     assert "usage" not in config_of(objs)
     assert "usage" not in yaml.safe_load(by_kind(objs)["ConfigMap"]["data"]["config.yaml"])
+    assert without_usage(rendered(**ON), objs) == objs
 
 
 def test_on_for_default_image():
@@ -82,10 +97,7 @@ def test_forwards_usage_rule():
 
 
 def test_token_value_never_rendered():
-    token = "t0ps3cret-" + "x" * 32
     objs = rendered(**ON)
-    blob = json.dumps(objs)
-    assert token not in blob
     assert config_of(objs)["usage"]["token"] == "${CCW_USAGE_TOKEN}"
     assert "value" not in {e["name"]: e for e in container_of(objs)["env"]}["CCW_USAGE_TOKEN"]
     assert "CCW_USAGE_TOKEN" not in by_kind(objs)["Secret"]["stringData"]

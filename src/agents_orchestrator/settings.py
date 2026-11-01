@@ -544,7 +544,7 @@ class Settings(BaseSettings):
                 raise _Bad("must not carry a query or fragment (the relay appends /chat/v1/...)")
         return v
 
-    @field_validator("webhook_url", "schedule_url", "connector_url", "usage_url", "agent_usage_url")
+    @field_validator("webhook_url", "schedule_url", "connector_url", "usage_url")
     @classmethod
     def _check_admin_url(cls, v: str) -> str:
         if v:
@@ -553,6 +553,25 @@ class Settings(BaseSettings):
                 raise _Bad("must be an http or https URL")
             if parsed.query or parsed.fragment:
                 raise _Bad("must not carry a query or fragment (the relay appends the path)")
+        return v
+
+    @field_validator("agent_usage_url")
+    @classmethod
+    def _check_agent_usage_url(cls, v: str) -> str:
+        # Written into the agents' wrapper config as usage.url, whose own check also refuses
+        # a trailing slash and a missing host (a pod would fail config load).
+        if v:
+            try:
+                parsed = urlparse(v)
+                valid = parsed.scheme in ("http", "https") and parsed.hostname is not None
+            except ValueError:
+                valid = False
+            if not valid:
+                raise _Bad("must be an http or https URL with a host")
+            if parsed.query or parsed.fragment:
+                raise _Bad("must not carry a query or fragment (the relay appends the path)")
+            if v.endswith("/"):
+                raise _Bad("must not end with a slash (the wrapper refuses it)")
         return v
 
     @field_validator("webhook_token", "schedule_token", "connector_token", "usage_token")
