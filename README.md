@@ -480,6 +480,14 @@ The cache is off until `ORCH_CACHE_S3_BUCKET` is set; then the access key, the s
 | `ORCH_CACHE_IMAGE` | empty | image the cache Jobs run (required with a bucket) |
 | `ORCH_CACHE_MAX_BYTES` | `5368709120` | archive cap, 1 to 5 GiB |
 | `ORCH_CACHE_TIMEOUT_SECONDS` | `1800` | Job deadline, 60 to 86400; also sets the presigned URL lifetime |
+| `ORCH_CACHE_RETENTION_DAYS` | `30` | the sweep deletes archives older than this many days (at least 1) |
+| `ORCH_CACHE_KEEP_NEWEST` | `3` | the sweep always keeps this many newest archives per name group (at least 1) |
+| `ORCH_CACHE_SWEEP_INTERVAL_SECONDS` | `21600` | seconds between sweeps (at least 60; the reconciler leader runs them) |
+| `ORCH_CACHE_SWEEP_GRACE_SECONDS` | `ORCH_CACHE_TIMEOUT_SECONDS` + 600 | an archive younger than this is never deleted (it may be mid-save) |
+| `ORCH_CACHE_SWEEP_ENABLED` | `true` | run the sweep |
+| `ORCH_CACHE_SWEEP_DRY_RUN` | `true` | plan and log the sweep without deleting; set `false` after a verified preview |
+| `ORCH_CACHE_S3_API_ACCESS_KEY_ID` | empty | access key id of the api pod (list, get and delete only; set together with the secret) |
+| `ORCH_CACHE_S3_API_SECRET_ACCESS_KEY` | empty | secret key of the api pod; the archives endpoints answer 503 without the pair |
 
 `GET /api/v1/meta` returns `cache`: `{"available": <bool>, "max_bytes": <int>}`; `available` is true when a bucket is configured.
 
