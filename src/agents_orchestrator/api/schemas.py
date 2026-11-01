@@ -67,6 +67,10 @@ class SessionSummary(BaseModel):
     queued: int
     failed: int
     oldest_queued_at: datetime | None  # created_at of the oldest queued message
+    # agents waiting on a person (agent.attention set) and agents with a failed bootstrap step;
+    # `state` "waiting" above still means all agents idle and is not related to these
+    attention_agents: int
+    bootstrap_failed_agents: int
 
 
 class BackupRun(BaseModel):
@@ -145,6 +149,24 @@ class AgentContext(BaseModel):
     used_percentage: float | None
 
 
+class AgentAttention(BaseModel):
+    """The agent's claude is waiting on a person; `state` is unchanged by it."""
+
+    reason: str  # permission | dialog | question
+    since: datetime | None
+
+
+class AgentBootstrapStep(BaseModel):
+    """A wrapper bootstrap step. `message` is set on failure only: redacted by the wrapper and
+    truncated here."""
+
+    step: str
+    status: str  # running | succeeded | failed
+    message: str | None
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
 class AgentView(BaseModel):
     id: uuid.UUID
     ordinal: int
@@ -158,6 +180,9 @@ class AgentView(BaseModel):
     leader: bool
     peers: int
     gone: bool
+    attention: AgentAttention | None  # null unless the agent waits on a person
+    bootstrap: AgentBootstrapStep | None  # the latest bootstrap step
+    bootstrap_failure: AgentBootstrapStep | None  # a failed bootstrap step, else null
 
 
 class MetaResources(BaseModel):

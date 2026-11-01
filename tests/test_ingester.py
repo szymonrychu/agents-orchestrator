@@ -1085,3 +1085,111 @@ async def test_peers_view_recorded(harness, pool) -> None:
     assert status.peer_count({"enabled": False}) == 0
     assert status.peer_count({"enabled": False, "members": members}) == 0
     assert status.peer_count({"enabled": True, "members": members}) == 2
+
+
+# --------------------------------------------------------------------------- attention, bootstrap
+
+
+def _step(step: str, status: str, message: str | None = None) -> dict[str, Any]:
+    return {
+        "step": step,
+        "status": status,
+        "message": message,
+        "started_at": "2026-11-01T10:00:00+00:00",
+        "finished_at": None if status == "running" else "2026-11-01T10:00:05+00:00",
+    }
+
+
+async def test_attach_seeds_waiting_and_bootstrap_from_snapshot(harness, pool) -> None:
+    h = await harness()
+    h.fake.set_snapshot_waiting("question", "2026-11-01T10:01:00+00:00")
+    h.fake.set_bootstrap_steps(
+        [_step("session_dir", "succeeded"), _step("install_plugins", "failed", "boom")]
+    )
+    await h.start()
+    await h.stored_through(h.last_fake_seq())
+
+    row = await status_row(pool, h.agent_id)
+    assert row["waiting_reason"] == "question"
+    assert row["waiting_since"] == datetime.fromisoformat("2026-11-01T10:01:00+00:00")
+    assert row["bootstrap_step"]["step"] == "install_plugins"
+    assert row["bootstrap_failure"]["message"] == "boom"
+
+    # a cleared snapshot clears the columns on the next attach
+    await h.stop()
+    h.fake.set_snapshot_waiting(None)
+    h.fake.set_bootstrap_steps([])
+    await h.start()
+
+    async def cleared() -> bool:
+        r = await status_row(pool, h.agent_id)
+        return r["waiting_reason"] is None and r["bootstrap_step"] is None
+
+    await wait_until(cleared)
+    row = await status_row(pool, h.agent_id)
+    assert row["waiting_since"] is None and row["bootstrap_failure"] is None
+
+
+async def test_waiting_events_project_and_notify(harness, pool, listener) -> None:
+    h = await harness()
+    await h.start()
+    await h.stored_through(h.last_fake_seq())
+    mark = len(listener.on("status"))
+
+    h.fake.emit("waiting_started", {"reason": "permission", "since": "2026-11-01T10:02:00+00:00"})
+    await h.stored_through(h.last_fake_seq())
+    row = await status_row(pool, h.agent_id)
+    assert row["waiting_reason"] == "permission"
+    assert row["waiting_since"] == datetime.fromisoformat("2026-11-01T10:02:00+00:00")
+    assert row["state"] == "idle"  # the lifecycle state is untouched
+    assert len(listener.on("status")) > mark
+
+    # a reason change is ended(old) then started(new)
+    h.fake.emit("waiting_ended", {"reason": "permission"})
+    h.fake.emit("waiting_started", {"reason": "dialog", "since": "2026-11-01T10:03:00+00:00"})
+    await h.stored_through(h.last_fake_seq())
+    assert (await status_row(pool, h.agent_id))["waiting_reason"] == "dialog"
+
+    # an end for a reason that is no longer current does not clear the new one
+    h.fake.emit("waiting_ended", {"reason": "permission"})
+    h.fake.emit("waiting_ended", {"reason": "dialog"})
+    await h.stored_through(h.last_fake_seq())
+    row = await status_row(pool, h.agent_id)
+    assert row["waiting_reason"] is None and row["waiting_since"] is None
+
+
+async def test_dead_clears_waiting(harness, pool) -> None:
+    h = await harness()
+    await h.start()
+    h.fake.emit("waiting_started", {"reason": "question", "since": OLD_SINCE})
+    await h.stored_through(h.last_fake_seq())
+    h.fake.emit("session_state", {"state": "failed", "since": OLD_SINCE})
+    await h.stored_through(h.last_fake_seq())
+    row = await status_row(pool, h.agent_id)
+    assert row["state"] == "dead" and row["waiting_reason"] is None
+
+
+async def test_bootstrap_step_events_keep_latest_and_failure(harness, pool, listener) -> None:
+    h = await harness()
+    await h.start()
+    await h.stored_through(h.last_fake_seq())
+
+    h.fake.emit("bootstrap_step", _step("install_plugins", "running"))
+    await h.stored_through(h.last_fake_seq())
+    row = await status_row(pool, h.agent_id)
+    assert row["bootstrap_step"]["status"] == "running"
+    assert row["bootstrap_failure"] is None
+
+    long = "x" * 1000
+    h.fake.emit("bootstrap_step", _step("install_plugins", "failed", long))
+    h.fake.emit("bootstrap_step", _step("render_settings", "running"))
+    await h.stored_through(h.last_fake_seq())
+    row = await status_row(pool, h.agent_id)
+    assert row["bootstrap_step"]["step"] == "render_settings"
+    assert row["bootstrap_failure"]["step"] == "install_plugins"
+    assert len(row["bootstrap_failure"]["message"]) <= status.BOOTSTRAP_MESSAGE_MAX
+
+    # the same step succeeding later clears the failure
+    h.fake.emit("bootstrap_step", _step("install_plugins", "succeeded"))
+    await h.stored_through(h.last_fake_seq())
+    assert (await status_row(pool, h.agent_id))["bootstrap_failure"] is None

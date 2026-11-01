@@ -133,6 +133,12 @@ class _AgentStream:
                 context=snap.context.model_dump() if snap.context is not None else None,
                 current_turn_id=None if closed else snap.current_turn_id,
                 last_seq=self.last_seq,
+                waiting=(snap.waiting.reason, snap.waiting.since) if snap.waiting else None,
+                bootstrap=status.bootstrap_from_steps(
+                    [st.model_dump(mode="json") for st in snap.bootstrap.steps]
+                    if snap.bootstrap
+                    else []
+                ),
             )
             if change.became_idle:
                 await status.notify_agent_free(conn, ref.session_id, ref.agent_id)
@@ -228,6 +234,15 @@ class _AgentStream:
             return _Projected(closed=True)  # not projected: `_closed` reads the snapshot
         if env.type == "context":
             await status.set_context(conn, ref.agent_id, data)
+            await status.notify_status(conn, ref.session_id, ref.agent_id)
+        elif env.type == "waiting_started" and data.get("reason"):
+            await status.set_waiting(conn, ref.agent_id, str(data["reason"]), data.get("since"))
+            await status.notify_status(conn, ref.session_id, ref.agent_id)
+        elif env.type == "waiting_ended":
+            if await status.clear_waiting(conn, ref.agent_id, data.get("reason")):
+                await status.notify_status(conn, ref.session_id, ref.agent_id)
+        elif env.type == "bootstrap_step":
+            await status.apply_bootstrap_step(conn, ref.agent_id, data)
             await status.notify_status(conn, ref.session_id, ref.agent_id)
         elif env.type in _COMPACTION:
             # every compaction counts (D2), at the time the wrapper reported it (D3), and wakes

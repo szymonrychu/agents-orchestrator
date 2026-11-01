@@ -239,6 +239,29 @@ async def test_status_stream_snapshot_and_delta(srv, pool):
         assert [m["status"] for m in ms["messages"]] == ["queued"]
 
 
+async def test_status_stream_carries_attention(srv, pool):
+    cl = await insert_session(pool)
+    ag = await insert_agent(pool, cl["id"], ready=True)
+    await set_agent_status(pool, ag["id"], state="idle")
+    async with open_sse(srv, "/api/v1/stream") as sse:
+        snap = await sse.next()
+        agent = snap["data"]["sessions"][0]["agents"][0]
+        assert agent["attention"] is None and agent["bootstrap"] is None
+        async with pool.connection() as conn:
+            await conn.execute(
+                "UPDATE agent_status SET waiting_reason='permission',"
+                " waiting_since='2026-11-01T10:01:00+00:00' WHERE agent_id=%s",
+                (ag["id"],),
+            )
+            await notify(conn, "status", {"session_id": str(cl["id"])})
+        seen = {}
+        for _ in range(2):
+            f = await sse.next()
+            seen[f["event"]] = f["data"]
+        assert seen["agent_status"]["agent"]["attention"]["reason"] == "permission"
+        assert seen["session_status"]["session"]["summary"]["attention_agents"] == 1
+
+
 async def test_stream_recovers_from_lost_notify(srv, pool, dsn):
     cl, ag = await _seed(pool, 1)
     ag2 = await insert_agent(pool, cl["id"], ready=True)

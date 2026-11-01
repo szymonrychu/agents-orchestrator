@@ -22,6 +22,8 @@ STATUS_CHANNEL = "status"
 AGENT_FREE_CHANNEL = "agent_free"
 STATES = ("unknown", "booting", "idle", "busy", "dead")
 _CONTEXT_KEYS = ("used_tokens", "window_tokens", "used_percentage")
+BOOTSTRAP_MESSAGE_MAX = 240  # the wrapper already redacts and caps at 200; this is the backstop
+_BOOTSTRAP_KEYS = ("step", "status", "message", "started_at", "finished_at")
 
 Timestamp = datetime | str | None
 
@@ -43,6 +45,29 @@ class StateChange:
 def _check_state(state: str) -> None:
     if state not in STATES:
         raise ValueError(f"unknown agent state {state!r}")
+
+
+def bootstrap_step(raw: Mapping[str, Any]) -> dict[str, Any] | None:
+    """A wrapper bootstrap step object, reduced to its known keys with the message truncated.
+
+    The wrapper redacts failure messages; they pass through here only truncated.
+    """
+    if not raw.get("step"):
+        return None
+    step = {k: raw.get(k) for k in _BOOTSTRAP_KEYS}
+    message = step["message"]
+    if isinstance(message, str) and len(message) > BOOTSTRAP_MESSAGE_MAX:
+        step["message"] = message[: BOOTSTRAP_MESSAGE_MAX - 3] + "..."
+    return step
+
+
+def bootstrap_from_steps(
+    steps: list[Mapping[str, Any]],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """(latest step, first failed step) of a snapshot's `bootstrap.steps`."""
+    reduced = [b for b in map(bootstrap_step, steps) if b is not None]
+    failed = next((b for b in reduced if b["status"] == "failed"), None)
+    return (reduced[-1] if reduced else None), failed
 
 
 def _context_values(context: Mapping[str, Any] | None) -> tuple[Any, Any, Any]:
@@ -81,10 +106,13 @@ async def upsert_status(
     context: Mapping[str, Any] | None,
     current_turn_id: str | None,
     last_seq: int,
+    waiting: tuple[str, Timestamp] | None = None,
+    bootstrap: tuple[dict[str, Any] | None, dict[str, Any] | None] = (None, None),
 ) -> StateChange:
     """Seed the row from a wrapper snapshot on attach.
 
-    Every column comes from the snapshot (a null context clears the gauge) except free_since,
+    Every column comes from the snapshot (a null context clears the gauge; `waiting` is
+    (reason, since) or None; `bootstrap` is (latest step, failed step)) except free_since,
     which moves to now() only when the snapshot is idle and the stored state was not.
     """
     _check_state(state)
@@ -96,7 +124,8 @@ async def upsert_status(
         " free_since = CASE WHEN %s THEN now() ELSE free_since END,"
         " wrapper_idle_since=%s::timestamptz, current_turn_id=%s,"
         " context_used_tokens=%s, context_window_tokens=%s, context_pct=%s,"
-        " last_seq=%s, updated_at=now() WHERE agent_id=%s",
+        " last_seq=%s, waiting_reason=%s, waiting_since=%s::timestamptz,"
+        " bootstrap_step=%s, bootstrap_failure=%s, updated_at=now() WHERE agent_id=%s",
         (
             state,
             change.became_idle,
@@ -106,10 +135,18 @@ async def upsert_status(
             window,
             pct,
             last_seq,
+            waiting[0] if waiting else None,
+            waiting[1] if waiting else None,
+            _jsonb(bootstrap[0]),
+            _jsonb(bootstrap[1]),
             agent_id,
         ),
     )
     return change
+
+
+def _jsonb(value: Mapping[str, Any] | None) -> Jsonb | None:
+    return None if value is None else Jsonb(dict(value))
 
 
 async def set_state(
@@ -136,16 +173,74 @@ async def set_state(
         " free_since = CASE WHEN %s THEN now() ELSE free_since END,"
         " wrapper_idle_since=%s::timestamptz,"
         " current_turn_id = CASE WHEN %s THEN NULL ELSE current_turn_id END,"
+        " waiting_reason = CASE WHEN %s THEN NULL ELSE waiting_reason END,"
+        " waiting_since = CASE WHEN %s THEN NULL ELSE waiting_since END,"
         " updated_at=now() WHERE agent_id=%s",
         (
             state,
             change.became_idle,
             since if state == "idle" else None,
             state in ("idle", "dead"),
+            state == "dead",
+            state == "dead",
             agent_id,
         ),
     )
     return change
+
+
+async def set_waiting(
+    conn: psycopg.AsyncConnection, agent_id: uuid.UUID, reason: str, since: Timestamp
+) -> None:
+    """The wrapper is waiting on a person (waiting_started). Does not touch `state`."""
+    await _ensure_row(conn, agent_id)
+    await conn.execute(
+        "UPDATE agent_status SET waiting_reason=%s, waiting_since=COALESCE(%s::timestamptz, now()),"
+        " updated_at=now() WHERE agent_id=%s",
+        (reason, since, agent_id),
+    )
+
+
+async def clear_waiting(
+    conn: psycopg.AsyncConnection, agent_id: uuid.UUID, reason: str | None
+) -> bool:
+    """waiting_ended: clear only when `reason` is the stored one (None clears any).
+
+    A reason change is ended(old) then started(new), so a late end of an old reason must not
+    clear the new one. Returns whether a row was cleared.
+    """
+    await _ensure_row(conn, agent_id)
+    cur = await conn.execute(
+        "UPDATE agent_status SET waiting_reason=NULL, waiting_since=NULL, updated_at=now()"
+        " WHERE agent_id=%s AND waiting_reason IS NOT NULL"
+        " AND (%s::text IS NULL OR waiting_reason=%s)",
+        (agent_id, reason, reason),
+    )
+    return cur.rowcount > 0
+
+
+async def apply_bootstrap_step(
+    conn: psycopg.AsyncConnection, agent_id: uuid.UUID, raw: Mapping[str, Any]
+) -> None:
+    """A bootstrap_step event: it is the latest step; a failed one is also kept as the failure,
+    and the same step later succeeding clears that failure."""
+    step = bootstrap_step(raw)
+    if step is None:
+        return
+    await _ensure_row(conn, agent_id)
+    cur = await conn.execute(
+        "SELECT bootstrap_failure FROM agent_status WHERE agent_id=%s", (agent_id,)
+    )
+    failure = (await cur.fetchone())[0]
+    if step["status"] == "failed":
+        failure = step
+    elif failure is not None and failure.get("step") == step["step"]:
+        failure = None
+    await conn.execute(
+        "UPDATE agent_status SET bootstrap_step=%s, bootstrap_failure=%s, updated_at=now()"
+        " WHERE agent_id=%s",
+        (_jsonb(step), _jsonb(failure), agent_id),
+    )
 
 
 async def set_context(

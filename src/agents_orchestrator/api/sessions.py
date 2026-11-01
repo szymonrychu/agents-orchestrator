@@ -150,7 +150,16 @@ def agent_view(r: dict) -> schemas.AgentView:
         leader=bool(r.get("leader")),
         peers=len(r["peers"] or []),
         gone=r["gone_at"] is not None,
+        attention=schemas.AgentAttention(reason=r["waiting_reason"], since=r["waiting_since"])
+        if r["waiting_reason"]
+        else None,
+        bootstrap=_bootstrap_view(r["bootstrap_step"]),
+        bootstrap_failure=_bootstrap_view(r["bootstrap_failure"]),
     )
+
+
+def _bootstrap_view(step: dict | None) -> schemas.AgentBootstrapStep | None:
+    return schemas.AgentBootstrapStep(**step) if step else None
 
 
 async def _one_view(conn, session: repo.Session, settings: Settings) -> schemas.SessionView:
