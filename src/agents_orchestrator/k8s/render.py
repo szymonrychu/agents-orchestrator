@@ -369,7 +369,7 @@ def render_session(
 
     config_data = {
         "config.yaml": yaml.safe_dump(_ccw_config(session, settings), sort_keys=False),
-        "on-start.sh": render_on_start(spec, settings, slug, chat=not session.trigger_created),
+        "on-start.sh": render_on_start(spec, settings, slug),
     }
     config_hash = hashlib.sha256(json.dumps(config_data, sort_keys=True).encode()).hexdigest()
 

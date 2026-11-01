@@ -143,8 +143,12 @@ async def enqueue_message(
     hop: int = 0,
     lane: str = "regular",
     carries_start_prompt: bool = False,
+    held: bool = False,
 ) -> int:
     """Queue a message; a session message carries its sender and hop (D8).
+
+    A `held` message is not deliverable until `release_note` clears its `not_before` (the hold
+    is a day, so a note whose commands never finish still expires).
 
     A message with a sender is untargeted, so the leader routing delivers it to whoever leads
     the target session at claim time.
@@ -160,8 +164,9 @@ async def enqueue_message(
         row = await _one(
             conn,
             "INSERT INTO messages (session_id, text, target_agent_id, sender_session_id,"
-            " sender_slug, hop, lane, carries_start_prompt)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            " sender_slug, hop, lane, carries_start_prompt, not_before)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s,"
+            " CASE WHEN %s THEN now() + interval '1 day' END) RETURNING id",
             (
                 session_id,
                 text,
@@ -171,6 +176,7 @@ async def enqueue_message(
                 hop,
                 lane,
                 carries_start_prompt,
+                held,
             ),
         )
         assert row is not None
@@ -763,14 +769,22 @@ async def verify_stale_dispatching(conn: psycopg.AsyncConnection, older_than_sec
 # ---------------------------------------------------------------- commands
 
 
-async def enqueue_command(conn: psycopg.AsyncConnection, agent_id: uuid.UUID, kind: str) -> int:
+async def enqueue_command(
+    conn: psycopg.AsyncConnection,
+    agent_id: uuid.UUID,
+    kind: str,
+    *,
+    issued_by_session: uuid.UUID | None = None,
+    note_message_id: int | None = None,
+) -> int:
     if kind not in COMMAND_KINDS:
         raise ValueError(f"unknown command kind {kind!r}")
     async with conn.transaction():
         row = await _one(
             conn,
-            "INSERT INTO commands (agent_id, kind) VALUES (%s, %s) RETURNING id",
-            (agent_id, kind),
+            "INSERT INTO commands (agent_id, kind, issued_by_session, note_message_id)"
+            " VALUES (%s, %s, %s, %s) RETURNING id",
+            (agent_id, kind, issued_by_session, note_message_id),
         )
         assert row is not None
         return row["id"]
@@ -799,12 +813,40 @@ async def complete_command(
     if status not in COMMAND_FINAL:
         raise ValueError(f"not a final command status: {status!r}")
     async with conn.transaction():
-        cur = await conn.execute(
+        row = await _one(
+            conn,
             "UPDATE commands SET status = %s, result = %s, finished_at = now()"
-            " WHERE id = %s AND status = 'running'",
+            " WHERE id = %s AND status = 'running' RETURNING id",
             (status, Jsonb(result) if result is not None else None, id),
         )
-        return cur.rowcount == 1
+        return row is not None
+
+
+async def release_ready_notes(conn: psycopg.AsyncConnection) -> None:
+    """Release each held self-restart note whose restarted agents are all back up.
+
+    A restart command is `done` when its pod is deleted, which is before the replacement
+    exists, so completion releases nothing. A note is released once, for every restart command
+    naming it, the command ended without replacing a pod (failed, cancelled), its agent is gone,
+    or the agent is ready with a wrapper session created or resumed after the command finished
+    (the old pod, still terminating, has neither).
+    """
+    rows = await _all(
+        conn,
+        "UPDATE messages m SET not_before = NULL"
+        " WHERE m.status = 'queued' AND m.not_before > now()"
+        " AND EXISTS (SELECT 1 FROM commands c WHERE c.note_message_id = m.id)"
+        " AND NOT EXISTS (SELECT 1 FROM commands c JOIN agents a ON a.id = c.agent_id"
+        "  WHERE c.note_message_id = m.id AND (c.status IN ('queued', 'running')"
+        "   OR (c.status = 'done' AND a.gone_at IS NULL AND NOT (a.ready AND"
+        "    (coalesce(a.wrapper_session_created_at > c.finished_at, false)"
+        "     OR coalesce(a.wrapper_resumed_at > c.finished_at, false))))))"
+        " RETURNING m.session_id",
+        {},
+    )
+    for row in rows:
+        await _status(conn, row["session_id"])
+        await notify(conn, "message_queued", {"session_id": str(row["session_id"])})
 
 
 # ---------------------------------------------------------------- checks

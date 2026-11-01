@@ -178,6 +178,7 @@ def test_settings_configmap():
         "ORCH_NAMESPACE": "ns1",
         "ORCH_AGENT_IMAGE": "registry.example/wrapper:1",
         "ORCH_AGENT_PORT": "8001",
+        "ORCH_SELF_RESTART_COOLDOWN_SECONDS": "600",
         "ORCH_SERVICE_PORT": "8002",
         "ORCH_AGENT_API_URL": f"http://{FULL}-agents.ns1.svc:8001",
         "ORCH_CLAUDE_SECRET_NAME": f"{FULL}-claude",
@@ -409,3 +410,74 @@ def test_chat_absent_by_default():
         for c in items:
             assert "ORCH_CHAT_TOKEN" not in _env_names(c)
             assert "ORCH_CHAT_URL" not in _env_names(c)
+
+
+ADMIN_UPSTREAMS = {
+    "webhook": ("WEBHOOK", "http://agents-webhook-admin:8081"),
+    "schedule": ("SCHEDULE", "http://agents-schedule-admin:8081"),
+    "connector": ("CONNECTOR", "http://agents-matrix-connector-agents:8001/chat/v1/admin"),
+}
+
+
+def _admin_env(docs: list[dict]) -> dict[str, dict]:
+    api = next(c for c in _containers(docs)[f"{FULL}-api"] if c["name"] == "api")
+    return {e["name"]: e for e in api["env"]}
+
+
+def test_admin_upstreams_off_by_default():
+    docs = render(values(postgres={"url": URL}))
+    for items in _containers(docs).values():
+        for c in items:
+            assert not [n for n in _env_names(c) if n.startswith(("ORCH_WEBHOOK", "ORCH_SCHEDULE"))]
+            assert not [n for n in _env_names(c) if n.startswith("ORCH_CONNECTOR")]
+    assert not [n for n in by_kind(docs, "Secret") if "-admin-" in n]
+
+
+@pytest.mark.parametrize("name", ADMIN_UPSTREAMS)
+def test_admin_upstream_pair_inline_token_on_api_main_only(name):
+    prefix, url = ADMIN_UPSTREAMS[name]
+    tok = "".join(["marker", name, "value"])
+    docs = render(values(postgres={"url": URL}, admin={name: {"url": url, "token": tok}}))
+    env = _admin_env(docs)
+    assert env[f"ORCH_{prefix}_URL"] == {"name": f"ORCH_{prefix}_URL", "value": url}
+    assert env[f"ORCH_{prefix}_TOKEN"]["valueFrom"]["secretKeyRef"] == {
+        "name": f"{FULL}-admin-{name}",
+        "key": "token",
+    }
+    assert by_kind(docs, "Secret")[f"{FULL}-admin-{name}"]["stringData"] == {"token": tok}
+    for dep, items in _containers(docs).items():
+        for c in items:
+            if not _is_api_main(dep, c):
+                assert f"ORCH_{prefix}_URL" not in _env_names(c)
+                assert f"ORCH_{prefix}_TOKEN" not in _env_names(c)
+    for cm in by_kind(docs, "ConfigMap").values():
+        assert tok not in yaml.safe_dump(cm)
+        assert url not in yaml.safe_dump(cm)
+
+
+@pytest.mark.parametrize("name", ADMIN_UPSTREAMS)
+def test_admin_upstream_existing_secret_wins(name):
+    prefix, url = ADMIN_UPSTREAMS[name]
+    admin = {name: {"url": url, "token": "t", "existingSecret": "mine", "existingSecretKey": "k"}}
+    docs = render(values(postgres={"url": URL}, admin=admin))
+    ref = _admin_env(docs)[f"ORCH_{prefix}_TOKEN"]["valueFrom"]["secretKeyRef"]
+    assert ref == {"name": "mine", "key": "k"}
+    assert f"{FULL}-admin-{name}" not in by_kind(docs, "Secret")
+
+
+@pytest.mark.parametrize("name", ADMIN_UPSTREAMS)
+@pytest.mark.parametrize("half", ["url", "token", "existingSecret"])
+def test_admin_upstream_half_pair_fails_render(name, half):
+    _, url = ADMIN_UPSTREAMS[name]
+    err = render_error(
+        values(postgres={"url": URL}, admin={name: {half: url if half == "url" else "x"}})
+    )
+    assert f"admin.{name}" in err
+
+
+def test_self_restart_cooldown_default_and_override():
+    cm = by_kind(render(values(postgres={"url": URL})), "ConfigMap")[f"{FULL}-settings"]
+    assert cm["data"]["ORCH_SELF_RESTART_COOLDOWN_SECONDS"] == "600"
+    docs = render(values(postgres={"url": URL}, selfRestartCooldownSeconds=90))
+    cm = by_kind(docs, "ConfigMap")[f"{FULL}-settings"]
+    assert cm["data"]["ORCH_SELF_RESTART_COOLDOWN_SECONDS"] == "90"

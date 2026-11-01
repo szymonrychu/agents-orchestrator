@@ -19,10 +19,6 @@ from agents_orchestrator.spec import SessionSpec, validate_slug
 
 CHANNEL = "session_changed"
 
-# Service tokens (ORCH_SERVICE_TOKENS names) of the trigger services: their sessions work on
-# attacker-controlled text (PR, issue and alert bodies), so they never get the chat tools.
-TRIGGER_SERVICES = frozenset({"agents-webhook", "agents-schedule"})
-
 
 class SessionExists(Exception):
     """A session with this slug already has a row."""
@@ -65,12 +61,8 @@ class Session:
     created_by_service: str | None = None
     # {ENV_NAME: Secret name} of the protected variables, snapshotted at create
     secret_versions: dict[str, str] = field(default_factory=dict)
-
-    @property
-    def trigger_created(self) -> bool:
-        """True when a trigger service created the session; NULL (a user, or a session from before
-        the column existed) is not a trigger service."""
-        return self.created_by_service in TRIGGER_SERVICES
+    # the superleader session that created it through the admin routes
+    created_by_session: uuid.UUID | None = None
 
 
 def _from_row(row: dict[str, Any]) -> Session:
@@ -87,6 +79,7 @@ def _from_row(row: dict[str, Any]) -> Session:
         preset_name=row["preset_name"],
         created_by_service=row["created_by_service"],
         secret_versions=row["secret_versions"] or {},
+        created_by_session=row["created_by_session"],
     )
 
 
@@ -112,6 +105,7 @@ async def create(
     preset_name: str | None = None,
     created_by_service: str | None = None,
     secret_versions: dict[str, str] | None = None,
+    created_by_session: uuid.UUID | None = None,
 ) -> Session:
     validate_slug(slug)
     try:
@@ -119,7 +113,8 @@ async def create(
             rows = await _fetch(
                 conn,
                 "INSERT INTO sessions (id, slug, spec, preset_id, preset_name, created_by_service,"
-                " secret_versions) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING *",
+                " secret_versions, created_by_session)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
                 (
                     uuid.uuid4(),
                     slug,
@@ -128,6 +123,7 @@ async def create(
                     preset_name,
                     created_by_service,
                     Jsonb(secret_versions) if secret_versions else None,
+                    created_by_session,
                 ),
             )
             await _notify(conn, rows[0].id)

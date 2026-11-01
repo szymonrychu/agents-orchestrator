@@ -235,10 +235,10 @@ async def gc(
 ) -> None:
     """Delete, by name, every Secret version that is neither current nor named by a stored session.
 
-    Reads only our database. A retired row, or one whose preset is gone, has no current version;
-    its row is dropped once every version is deleted.
+    Reads only our database, the current versions first and the session references after them
+    (the order closes the race with a session being created). A retired row, or one whose
+    preset is gone, has no current version; its row is dropped once every version is deleted.
     """
-    referenced = await _referenced(conn)
     where, params = "", []
     if preset_id is not None:
         where += " AND ps.preset_id = %s"
@@ -255,6 +255,9 @@ async def gc(
             params,
         )
         found = await cur.fetchall()
+    # Read after the current versions: a create that snapshotted a version committed before the
+    # rotation that made it old, so a reference list read now always includes it.
+    referenced = await _referenced(conn)
     for row in found:
         await _sweep(conn, kube, namespace, row, referenced)
 
@@ -285,3 +288,51 @@ async def _sweep(conn, kube: KubeApi, namespace: str, row: dict, referenced: set
             "UPDATE preset_secrets SET swept = %s WHERE preset_id = %s AND name = %s",
             (swept, pid, name),
         )
+
+
+# ----------------------------------------------------- webhook credentials (superleader-crud D9)
+
+
+def webhook_secret_name(endpoint_id: int) -> str:
+    return f"webhook-{endpoint_id}-password"
+
+
+async def put_webhook_credential(
+    kube: KubeApi, namespace: str, endpoint_id: int, key: str, value: SecretStr
+) -> str:
+    """Store the credential an agents-webhook endpoint issued once, as `stringData[key]`.
+
+    `key` is `password` (basic mode) or `secret` (header, bearer, hmac). The Secret is replaced
+    whole, so a rotate that changes the mode leaves no stale key behind. The apply response is
+    dropped and errors carry no value. Returns the Secret name.
+    """
+    name = webhook_secret_name(endpoint_id)
+    try:
+        await kube.delete("Secret", namespace, name)
+        await kube.apply(
+            {
+                "apiVersion": "v1",
+                "kind": "Secret",
+                "metadata": {
+                    "name": name,
+                    "namespace": namespace,
+                    "labels": {MANAGED_BY_LABEL: MANAGED_BY},
+                },
+                "type": "Opaque",
+                "stringData": {key: value.get_secret_value()},
+            }
+        )
+    except KubeError as exc:
+        log.warning("webhook credential write failed: %s (%s)", name, type(exc).__name__)
+        raise SecretStoreError(f"could not store the credential of webhook {endpoint_id}") from None
+    log.info("webhook credential set: %s key=%s", name, key)
+    return name
+
+
+async def delete_webhook_credential(kube: KubeApi, namespace: str, endpoint_id: int) -> None:
+    """Remove the endpoint's credential Secret; a failure is logged, never raised."""
+    name = webhook_secret_name(endpoint_id)
+    try:
+        await kube.delete("Secret", namespace, name)
+    except KubeError as exc:
+        log.warning("webhook credential delete failed: %s (%s)", name, type(exc).__name__)

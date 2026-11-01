@@ -157,6 +157,48 @@ ConfigMap, the migrate init containers or the other components. Empty when the c
 {{- end }}
 
 {{/*
+Admin relay upstreams (admin.webhook, admin.schedule, admin.connector). Each needs url together
+with a token source (token or existingSecret); one without the other fails the render. Emits
+"<name>" lines for the configured ones.
+*/}}
+{{- define "agents-orchestrator.adminUpstreams" -}}
+{{- range $name := list "webhook" "schedule" "connector" -}}
+{{- $cfg := index ($.Values.admin | default dict) $name | default dict -}}
+{{- $token := or $cfg.token $cfg.existingSecret -}}
+{{- if and $cfg.url $token }}
+{{ $name }}
+{{- else if or $cfg.url $token }}
+{{- fail (printf "agents-orchestrator: set admin.%s.url together with admin.%s.token or admin.%s.existingSecret, or none of them" $name $name $name) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/* Name of the Secret holding ORCH_<NAME>_TOKEN of admin upstream .name: existingSecret wins. */}}
+{{- define "agents-orchestrator.adminSecretName" -}}
+{{- $cfg := index (.root.Values.admin | default dict) .name | default dict -}}
+{{- default (printf "%s-admin-%s" (include "agents-orchestrator.fullname" .root) .name) $cfg.existingSecret -}}
+{{- end }}
+
+{{/*
+ORCH_WEBHOOK/SCHEDULE/CONNECTOR _URL and _TOKEN env entries, each pair together. Only the api main
+container includes this; never the ConfigMap, the init containers or the other components.
+*/}}
+{{- define "agents-orchestrator.adminEnv" -}}
+{{- range $name := splitList "\n" (include "agents-orchestrator.adminUpstreams" . | trim) -}}
+{{- if $name }}
+{{- $cfg := index ($.Values.admin | default dict) $name }}
+- name: ORCH_{{ upper $name }}_URL
+  value: {{ $cfg.url | quote }}
+- name: ORCH_{{ upper $name }}_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "agents-orchestrator.adminSecretName" (dict "root" $ "name" $name) }}
+      key: {{ $cfg.existingSecretKey | default "token" }}
+{{- end }}
+{{- end -}}
+{{- end }}
+
+{{/*
 ORCH_AGENT_API_URL: the cluster-internal agents Service URL, unless env.ORCH_AGENT_API_URL overrides it.
 */}}
 {{- define "agents-orchestrator.agentApiUrl" -}}

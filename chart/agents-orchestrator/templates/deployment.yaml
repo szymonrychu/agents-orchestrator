@@ -29,6 +29,14 @@ spec:
         {{- if and (eq $component "api") $.Values.chat.token (not $.Values.chat.existingSecret) }}
         checksum/chat-secret: {{ $.Values.chat.token | sha256sum }}
         {{- end }}
+        {{- if eq $component "api" }}
+        {{- range $name := splitList "\n" (include "agents-orchestrator.adminUpstreams" $ | trim) }}
+        {{- $acfg := index ($.Values.admin | default dict) $name | default dict }}
+        {{- if and $name $acfg.token (not $acfg.existingSecret) }}
+        checksum/admin-{{ $name }}-secret: {{ $acfg.token | sha256sum }}
+        {{- end }}
+        {{- end }}
+        {{- end }}
         {{- with merge (deepCopy ($cfg.podAnnotations | default dict)) ($.Values.podAnnotations | default dict) }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -110,6 +118,9 @@ spec:
             - name: ORCH_HTTP_PORT
               value: "8000"
             {{- with include "agents-orchestrator.chatEnv" $ }}
+            {{- . | nindent 12 }}
+            {{- end }}
+            {{- with include "agents-orchestrator.adminEnv" $ }}
             {{- . | nindent 12 }}
             {{- end }}
           ports:

@@ -1095,3 +1095,40 @@ def test_lightkube_default_client_uses_env_config(monkeypatch, tmp_path):
     monkeypatch.setenv("KUBECONFIG", str(cfg))
     kube = LightkubeApi()
     assert kube.client._client.config.cluster.server == "http://from-kubeconfig.test"
+
+
+async def test_reconcile_pass_releases_a_held_note_once_the_replacement_is_up(env):
+    """A self-restart note stays held through the restart itself and is released by a later
+    pass, once the replacement agent is ready with a wrapper session attached after it."""
+    c = await env.session("alpha", replicas=1)
+    await env.rec.reconcile_once()
+    (agent,) = await env.agents(c.id)
+    (note,) = await env.rows(
+        "INSERT INTO messages (session_id, text, not_before)"
+        " VALUES (%s, 'note', now() + interval '1 day') RETURNING id",
+        (c.id,),
+    )
+    cmd = await insert_command(env.pool, agent.id, kind="restart")
+    await env.rows(
+        "UPDATE commands SET note_message_id = %s WHERE id = %s RETURNING id",
+        (note["id"], cmd["id"]),
+    )
+
+    async def held():
+        row = (
+            await env.rows(
+                "SELECT not_before > now() AS held FROM messages WHERE id = %s", (note["id"],)
+            )
+        )[0]
+        return row["held"]
+
+    await env.rec.reconcile_once()  # the pod is deleted; the replacement is not attached yet
+    assert env.kube.deleted("Pod") == ["agent-alpha-0"]
+    assert await held()
+    await env.rows(
+        "UPDATE agents SET ready = true, wrapper_session_created_at = clock_timestamp()"
+        " WHERE id = %s RETURNING id",
+        (agent.id,),
+    )
+    await env.rec.reconcile_once()
+    assert not await held()
