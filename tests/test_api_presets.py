@@ -244,3 +244,76 @@ async def test_reuse_running_agent_round_trip(http):
     assert r.status_code == 200, r.text
     assert "reuse_running_agent" not in r.json()["spec"]
     assert "reuse_running_agent" not in (await http.get(f"{P}/{made['id']}")).json()["spec"]
+
+
+async def test_create_default_not_manageable(http):
+    body = await make(http, "plain")
+    assert body["superleader_manageable"] is False
+
+
+async def test_create_manageable(http):
+    r = await http.post(P, json={"name": "m", "superleader_manageable": True})
+    assert r.status_code == 201, r.text
+    assert r.json()["superleader_manageable"] is True
+    got = (await http.get(f"{P}/{r.json()['id']}")).json()
+    assert got["superleader_manageable"] is True
+
+
+async def test_put_without_flag_keeps_it(http):
+    r = await http.post(P, json={"name": "m", "superleader_manageable": True})
+    pid = r.json()["id"]
+    r = await http.put(f"{P}/{pid}", json={"name": "m", "spec": {"replicas": 2}})
+    assert r.status_code == 200, r.text
+    assert r.json()["superleader_manageable"] is True
+
+
+async def test_put_sets_flag(http):
+    pid = (await make(http, "m"))["id"]
+    for value in (False, True):
+        r = await http.put(
+            f"{P}/{pid}", json={"name": "m", "spec": {}, "superleader_manageable": value}
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["superleader_manageable"] is value
+
+
+async def test_copy_keeps_flag(http):
+    managed = (await http.post(P, json={"name": "m", "superleader_manageable": True})).json()
+    plain = await make(http, "p")
+    c1 = await http.post(f"{P}/{managed['id']}/copy")
+    c2 = await http.post(f"{P}/{plain['id']}/copy")
+    assert c1.json()["superleader_manageable"] is True
+    assert c2.json()["superleader_manageable"] is False
+
+
+async def test_list_shows_flag(http):
+    await make(http, "p")
+    rows = (await http.get(P)).json()
+    assert rows and all(r["superleader_manageable"] is False for r in rows)
+
+
+async def test_put_flag_roundtrip_keeps_spec(pool, dsn):
+    from fakes.fake_kube import FakeKube
+
+    app = create_app(make_settings(dsn, max_replicas=4), pool, kube=FakeKube(namespace="agents"))
+    spec = {"env": {"API_KEY": {"protected": True, "value": "s3cret"}}}
+    async with client_for(app) as http:
+        r = await http.post(P, json={"name": "p", "spec": spec})
+        assert r.status_code == 201, r.text
+        first = (await http.get(f"{P}/{r.json()['id']}")).json()
+        # the read-only metadata of a protected variable is not accepted back as input
+        sent = {
+            "env": {
+                k: {f: v for f, v in e.items() if f not in ("set", "version", "updated_at")}
+                for k, e in first["spec"]["env"].items()
+            }
+        }
+        r = await http.put(
+            f"{P}/{first['id']}",
+            json={"name": first["name"], "spec": sent, "superleader_manageable": True},
+        )
+        assert r.status_code == 200, r.text
+        again = (await http.get(f"{P}/{first['id']}")).json()
+    assert again["spec"] == first["spec"]
+    assert again["spec"]["env"]["API_KEY"]["version"] == 1
+    assert again["superleader_manageable"] is True

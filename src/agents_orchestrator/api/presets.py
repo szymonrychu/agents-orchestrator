@@ -35,6 +35,7 @@ def _view(
         id=preset.id,
         name=preset.name,
         is_default=preset.is_default,
+        superleader_manageable=preset.superleader_manageable,
         spec=redact_spec_dict(preset.spec, metas),
         created_at=preset.created_at,
         updated_at=preset.updated_at,
@@ -145,19 +146,39 @@ def _copy_name(source: str, taken: set[str]) -> str:
         n += 1
 
 
-async def list_all(conn) -> list[schemas.PresetView]:
+def manageable_main_port_only() -> ApiError:
+    return ApiError(
+        422, "manageable_main_port_only", "superleader_manageable is set only on the main port"
+    )
+
+
+async def list_all(conn, only_manageable: bool = False) -> list[schemas.PresetView]:
     presets = await repo.list_presets(conn)
+    if only_manageable:
+        presets = [p for p in presets if p.superleader_manageable]
     metas = await secret_store.list_metas(conn, [p.id for p in presets])
     return [_view(p, metas.get(p.id)) for p in presets]
 
 
 async def create(
-    request: Request, conn, settings: Settings, body: schemas.PresetIn
+    request: Request,
+    conn,
+    settings: Settings,
+    body: schemas.PresetIn,
+    superleader: bool = False,
 ) -> schemas.PresetView:
+    if superleader and body.superleader_manageable is False:
+        raise manageable_main_port_only()
     spec, values = await _validated(body, settings)
+    manageable = superleader or bool(body.superleader_manageable)
     try:
         preset, metas = await _save(
-            request, conn, settings, spec, values, lambda: repo.create(conn, body.name, spec)
+            request,
+            conn,
+            settings,
+            spec,
+            values,
+            lambda: repo.create(conn, body.name, spec, manageable),
         )
     except repo.PresetExists:
         raise _exists(body.name) from None
@@ -173,8 +194,16 @@ async def get_one(conn, preset_id: uuid.UUID) -> schemas.PresetView:
 
 
 async def replace(
-    request: Request, conn, settings: Settings, preset_id: uuid.UUID, body: schemas.PresetIn
+    request: Request,
+    conn,
+    settings: Settings,
+    preset_id: uuid.UUID,
+    body: schemas.PresetIn,
+    superleader: bool = False,
 ) -> schemas.PresetView:
+    if superleader and body.superleader_manageable is False:
+        raise manageable_main_port_only()
+    flag = None if superleader else body.superleader_manageable
     stored = await repo.get(conn, preset_id)
     if stored is None:
         raise not_found("preset")
@@ -186,7 +215,7 @@ async def replace(
             settings,
             spec,
             values,
-            lambda: repo.update(conn, preset_id, body.name, spec),
+            lambda: repo.update(conn, preset_id, body.name, spec, flag),
         )
         return _view(preset, metas)
     except repo.PresetNotFound:
@@ -277,7 +306,7 @@ async def copy(conn, preset_id: uuid.UUID, explicit: str | None) -> schemas.Pres
         taken = {p.name.lower() for p in await repo.list_presets(conn)}
         name = explicit if explicit is not None else _copy_name(source.name, taken)
         try:
-            return _view(await repo.create(conn, name, spec))
+            return _view(await repo.create(conn, name, spec, source.superleader_manageable))
         except repo.PresetExists:
             if explicit is not None:
                 raise _exists(name) from None

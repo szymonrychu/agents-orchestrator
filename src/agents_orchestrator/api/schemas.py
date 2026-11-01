@@ -24,6 +24,7 @@ class PresetIn(BaseModel):
 
     name: str
     spec: SessionSpecIn = SessionSpecIn()
+    superleader_manageable: bool | None = None
 
 
 class SecretIn(BaseModel):
@@ -53,6 +54,7 @@ class PresetView(BaseModel):
     id: uuid.UUID
     name: str
     is_default: bool
+    superleader_manageable: bool
     spec: dict[str, Any]
     created_at: datetime
     updated_at: datetime
