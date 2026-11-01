@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal
-from urllib.parse import urlparse, urlsplit
+from urllib.parse import urlparse
 
 import yaml
 from pydantic import Field, ValidationError, ValidationInfo, field_validator, model_validator
@@ -209,8 +209,6 @@ class Settings(BaseSettings):
     # Opt-in privileged Docker-in-Docker sidecar for agent pods (spec.docker). Empty image = off.
     # Pinned by exact semver tag (docker:X.Y.Z-dind), never latest or a sha.
     docker_image: str = ""
-    # dockerd --registry-mirror: scheme optional (https assumed), no path (dockerd refuses one).
-    docker_registry_mirror: str = ""
     docker_storage: str = "30Gi"
     docker_cpu_request: str = "500m"
     docker_cpu_limit: str = "4"
@@ -394,22 +392,6 @@ class Settings(BaseSettings):
     def _check_docker_image(cls, v: str) -> str:
         if v and not _DOCKER_IMAGE_RE.match(v):
             raise _Bad(f"{v!r} must be pinned by semver tag like docker:27.3.1-dind")
-        return v
-
-    @field_validator("docker_registry_mirror")
-    @classmethod
-    def _check_docker_mirror(cls, v: str) -> str:
-        if not v:
-            return v
-        parsed = urlsplit(v if "://" in v else f"https://{v}")
-        if (
-            parsed.scheme not in ("http", "https")
-            or not parsed.netloc
-            or parsed.path not in ("", "/")
-            or parsed.query
-            or parsed.fragment
-        ):
-            raise _Bad(f"{v!r} must be [http(s)://]host[:port] with no path")
         return v
 
     @field_validator(

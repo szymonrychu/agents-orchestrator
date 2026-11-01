@@ -57,10 +57,10 @@ def test_enabled_flag_without_setting_fails_loudly() -> None:
         render.render_session(make_session(docker=True), make_settings(), TOKENS)
 
 
-@pytest.mark.parametrize("mirror", ["", "mirror.example:5000"], ids=["no-mirror", "mirror"])
-def test_enabled_flag_without_image_is_never_muted(mirror: str) -> None:
+@pytest.mark.parametrize("pull_secret", ["", "regcred"], ids=["no-login", "login"])
+def test_enabled_flag_without_image_is_never_muted(pull_secret: str) -> None:
     # Whatever else is configured, an enabled flag with ORCH_DOCKER_IMAGE unset raises at render.
-    settings = make_settings(docker_image="", docker_registry_mirror=mirror)
+    settings = make_settings(docker_image="", image_pull_secret=pull_secret)
     with pytest.raises(ValueError, match="ORCH_DOCKER_IMAGE"):
         render.render_session(make_session(docker=True, docker_storage="10Gi"), settings, TOKENS)
 
@@ -96,31 +96,45 @@ def test_dind_command_unix_socket_only() -> None:
     assert "ports" not in dind
 
 
-@pytest.mark.parametrize(
-    ("mirror", "flag"),
-    [
-        ("harbor.example", "--registry-mirror=https://harbor.example"),
-        ("http://m:5000", "--registry-mirror=http://m:5000"),
-    ],
-)
-def test_registry_mirror_only_when_set(mirror: str, flag: str) -> None:
-    dind = by_name(docker_pod(docker_registry_mirror=mirror)["initContainers"], "dind")
-    assert flag in dind["command"]
+def test_no_registry_mirror_flag() -> None:
+    # Harbor is used with login and prefixed pulls; plain docker.io pulls go direct.
+    dind = by_name(docker_pod()["initContainers"], "dind")
+    assert not any("registry-mirror" in a for a in dind["command"])
 
 
-def test_mirror_reuses_image_pull_secret_credentials() -> None:
-    pod = docker_pod(docker_registry_mirror="harbor.example", image_pull_secret="regcred")
+def test_harbor_login_from_image_pull_secret() -> None:
+    pod = docker_pod(image_pull_secret="regcred")
     vol = by_name(pod["volumes"], "docker-auth")
-    assert vol["secret"]["secretName"] == "regcred"
-    assert vol["secret"]["items"] == [{"key": ".dockerconfigjson", "path": "config.json"}]
+    assert vol["secret"] == {
+        "secretName": "regcred",
+        "items": [{"key": ".dockerconfigjson", "path": "config.json"}],
+    }
     dind = by_name(pod["initContainers"], "dind")
     assert mounts(dind)["docker-auth"] == {
         "name": "docker-auth",
         "mountPath": "/root/.docker",
         "readOnly": True,
     }
-    plain = docker_pod()
-    assert "docker-auth" not in {v["name"] for v in plain["volumes"]}
+    ccw = pod["containers"][0]
+    assert {"name": "DOCKER_CONFIG", "value": "/docker-config"} in ccw["env"]
+    assert {
+        "name": "docker-auth",
+        "mountPath": "/docker-config/config.json",
+        "subPath": "config.json",
+        "readOnly": True,
+    } in ccw["volumeMounts"]
+    # the config dir itself stays writable (buildx and contexts keep state there)
+    assert by_name(pod["volumes"], "docker-config") == {"name": "docker-config", "emptyDir": {}}
+    assert mounts(ccw)["docker-config"]["mountPath"] == "/docker-config"
+    assert "readOnly" not in mounts(ccw)["docker-config"]
+
+
+def test_no_login_without_image_pull_secret() -> None:
+    pod = docker_pod(image_pull_secret="")
+    assert not {"docker-auth", "docker-config"} & {v["name"] for v in pod["volumes"]}
+    ccw = pod["containers"][0]
+    assert "DOCKER_CONFIG" not in {e["name"] for e in ccw["env"]}
+    assert "docker-auth" not in mounts(by_name(pod["initContainers"], "dind"))
 
 
 def test_startup_probe_asks_dockerd() -> None:
@@ -197,6 +211,11 @@ def passthrough(session_kw: dict[str, Any]) -> list[str]:
     objs = render.render_session(make_session(**session_kw), settings(), TOKENS)
     (cm,) = (o for o in objs if o["kind"] == "ConfigMap")
     return yaml.safe_load(cm["data"]["config.yaml"])["claude"]["passthrough_env"]
+
+
+def test_docker_config_in_passthrough_with_login() -> None:
+    assert "DOCKER_CONFIG" in passthrough({"docker": True})
+    assert "DOCKER_CONFIG" not in passthrough({})
 
 
 def test_docker_host_in_passthrough_iff_docker_rendered() -> None:

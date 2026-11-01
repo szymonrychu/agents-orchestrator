@@ -67,7 +67,6 @@ def test_non_semver_images_rejected(image):
 
 def test_defaults():
     s = Settings()
-    assert s.docker_registry_mirror == ""
     assert s.docker_storage == "30Gi"
     assert s.docker_cpu_request == "500m"
     assert s.docker_cpu_limit == "4"
@@ -79,17 +78,8 @@ def test_defaults():
     assert s.max_docker_memory == "16Gi"
 
 
-@pytest.mark.parametrize("mirror", ["harbor.example", "https://harbor.example:5000", "http://m/"])
-def test_mirror_optional_and_settable(mirror):
-    assert Settings(docker_registry_mirror=mirror).docker_registry_mirror == mirror
-
-
-@pytest.mark.parametrize("mirror", ["harbor.example/proxy-dockerhub", "https://h/p?x=1", "ftp://h"])
-def test_mirror_with_path_or_bad_scheme_rejected(mirror):
-    # dockerd refuses a --registry-mirror with a path and would crash-loop the sidecar.
-    with pytest.raises(SettingsError) as exc:
-        Settings(docker_registry_mirror=mirror)
-    assert "ORCH_DOCKER_REGISTRY_MIRROR" in exc.value.problems
+def test_no_registry_mirror_setting():
+    assert not hasattr(Settings(), "docker_registry_mirror")
 
 
 def test_default_limits_within_caps():

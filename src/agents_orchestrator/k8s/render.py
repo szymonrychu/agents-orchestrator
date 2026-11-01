@@ -30,6 +30,7 @@ STARTUP_SLACK = 12
 # passes through only variables that exist).
 KUBE_PASSTHROUGH_ENV = ("KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT")
 DOCKER_PASSTHROUGH_ENV = ("DOCKER_HOST",)
+DOCKER_CONFIG_DIR = "/docker-config"
 AGENT_PASSTHROUGH_ENV = ("ORCH_AGENT_TOKEN", "ORCH_AGENT_URL", "ORCH_SESSION_ID", "POD_NAME")
 
 ASK_IN_WRITING_PROMPT = (
@@ -94,15 +95,12 @@ def _docker_init_containers(spec: SessionSpec, settings: Settings) -> list[dict[
         f"--host={DOCKER_HOST_URL}",
         f"--group={DOCKER_GID}",
     ]
-    if settings.docker_registry_mirror:
-        mirror = settings.docker_registry_mirror
-        command.append(f"--registry-mirror={mirror if '://' in mirror else f'https://{mirror}'}")
     mounts = [
         {"name": "docker-sock", "mountPath": DOCKER_SOCKET_DIR},
         {"name": "docker-data", "mountPath": "/var/lib/docker"},
         {"name": "lib-modules", "mountPath": "/lib/modules", "readOnly": True},
     ]
-    if settings.docker_registry_mirror and settings.image_pull_secret:
+    if settings.image_pull_secret:
         mounts.append({"name": "docker-auth", "mountPath": "/root/.docker", "readOnly": True})
     cli_dir = "/usr/local/libexec/docker/cli-plugins"
     return [
@@ -154,17 +152,18 @@ def _docker_volumes(spec: SessionSpec, settings: Settings) -> list[dict[str, Any
         {"name": "docker-cli", "emptyDir": {}},
         {"name": "lib-modules", "hostPath": {"path": "/lib/modules"}},
     ]
-    if settings.docker_registry_mirror and settings.image_pull_secret:
-        volumes.append(
+    if settings.image_pull_secret:
+        # Harbor login: the pull secret's config.json, for the CLI (agent) and the daemon (dind).
+        volumes += [
+            {"name": "docker-config", "emptyDir": {}},
             {
                 "name": "docker-auth",
                 "secret": {
                     "secretName": settings.image_pull_secret,
-                    "optional": True,
                     "items": [{"key": ".dockerconfigjson", "path": "config.json"}],
                 },
-            }
-        )
+            },
+        ]
     return volumes
 
 
@@ -312,7 +311,11 @@ def _apply_wrapper(cfg: dict[str, Any], wrapper: WrapperSettings, session: Sessi
 def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
     spec, slug = session.spec, session.slug
     kube_env = KUBE_PASSTHROUGH_ENV if kube_access_granted(spec, settings) else ()
-    docker_env = DOCKER_PASSTHROUGH_ENV if docker_enabled(spec, settings) else ()
+    docker_env = ()
+    if docker_enabled(spec, settings):
+        docker_env = DOCKER_PASSTHROUGH_ENV + (
+            ("DOCKER_CONFIG",) if settings.image_pull_secret else ()
+        )
     claude: dict[str, Any] = {
         "passthrough_env": sorted([*spec.env, *AGENT_PASSTHROUGH_ENV, *kube_env, *docker_env]),
         "env": {
@@ -479,6 +482,17 @@ def _container(session: Session, settings: Settings, names: dict[str, str]) -> d
                 "readOnly": True,
             },
         ]
+        if settings.image_pull_secret:
+            container["env"].append({"name": "DOCKER_CONFIG", "value": DOCKER_CONFIG_DIR})
+            container["volumeMounts"] += [
+                {"name": "docker-config", "mountPath": DOCKER_CONFIG_DIR},
+                {
+                    "name": "docker-auth",
+                    "mountPath": f"{DOCKER_CONFIG_DIR}/config.json",
+                    "subPath": "config.json",
+                    "readOnly": True,
+                },
+            ]
     if spec.resources is not None:
         resources = {k: v for k, v in spec.resources.model_dump().items() if v}
         if resources:
