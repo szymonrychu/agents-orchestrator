@@ -35,6 +35,17 @@ SESSION_TOOLS = ["sessions_list", "session_send"]
 INIT_SCRIPTS_TOOLS = ["init_scripts_get", "init_scripts_edit"]
 CHAT_TOOLS = ["chat_rooms", "chat_send", "chat_react", "chat_status"]
 TAIL_TOOLS = [*SESSION_TOOLS, *INIT_SCRIPTS_TOOLS, *CHAT_TOOLS]
+ADMIN_TOOLS = [
+    "presets_list", "preset_get", "preset_create", "preset_replace", "preset_delete",
+    "preset_copy", "session_get", "session_create", "session_discard", "session_restart",
+    "agent_restart", "command_get", "webhooks_list", "webhook_get_meta", "webhook_create",
+    "webhook_update", "webhook_clone", "webhook_rotate", "webhook_delete",
+    "webhook_filters_set", "webhook_events", "webhook_event", "webhook_template_preview",
+    "schedules_list", "schedule_get", "schedule_create", "schedule_update", "schedule_delete",
+    "schedule_run", "schedule_runs", "schedule_runs_all", "schedule_run_get",
+    "schedule_preview", "chat_admin_rooms", "chat_room_settings", "chat_rules",
+    "chat_rule_add", "chat_rule_delete", "secret_set",
+]  # fmt: skip
 SECRET = "s3cr3t-token-value"
 PLUGINS_REPO = "https://github.com/szymonrychu/any-mcp-tatara-plugins"
 PLUGINS_REF = Settings.model_fields["any_mcp_plugins_ref"].default
@@ -68,13 +79,14 @@ def entries(spec: SessionSpec, settings: Settings | None = None) -> dict:
 @pytest.mark.parametrize("messaging", [None, False, True])
 @pytest.mark.parametrize("static", [False, True])
 def test_alone_session_tools_entry(messaging, static):
-    """D11, D13: an alone session gets the session, init-scripts and chat tools, whatever
-    session_messaging says."""
+    """D11, D13: an alone session gets the session, init-scripts and chat tools; the admin tools
+    only with session_messaging."""
     spec = SessionSpec(replicas=1, static=static, session_messaging=messaging)
-    assert on_start.orchestrator_allow(spec) == TAIL_TOOLS
+    expected = [*TAIL_TOOLS, *ADMIN_TOOLS] if messaging else TAIL_TOOLS
+    assert on_start.orchestrator_allow(spec) == expected
     entry = entries(spec)["orchestrator"]
     assert entry["source"] == RESERVED_SOURCE and "plugin" not in entry
-    assert entry["allow"] == TAIL_TOOLS
+    assert entry["allow"] == expected
     assert entry["config"]["hive"] is False
     assert entry["config"]["max_replicas"] == 1
     cfg = written_config(on_start.render_on_start(spec, make_settings(), "alpha"))
@@ -93,12 +105,11 @@ def test_alone_session_tools_entry(messaging, static):
     ],
 )
 def test_hive_session_tools(messaging, spec_fields, hive_allow):
-    """D11, D13: hive tools, scale when scalable, then the session, init-scripts and chat tools
-    (the list ends with the chat tools), whatever session_messaging says."""
+    """D11, D13: hive tools, scale when scalable, then the session, init-scripts and chat tools,
+    then the admin tools only with session_messaging."""
     spec = SessionSpec(session_messaging=messaging, **spec_fields)
     allow = on_start.orchestrator_allow(spec)
-    assert allow == [*hive_allow, *TAIL_TOOLS]
-    assert allow[-len(CHAT_TOOLS) :] == CHAT_TOOLS
+    assert allow == [*hive_allow, *TAIL_TOOLS, *(ADMIN_TOOLS if messaging else [])]
     assert entries(spec)["orchestrator"]["allow"] == allow
 
 
@@ -433,3 +444,17 @@ def test_config_write_failure_still_fails(tmp_path):
     (root / ".ref").write_text("v1.0.0\n")
     (root / "etc").write_text("not a directory")
     assert _run_script(tmp_path).returncode != 0
+
+
+def test_golden_allowlist_superleader_leader_and_service_session():
+    """Golden rendered allowlists: the admin tools and secret_set exactly when session_messaging
+    is on, whoever created the session; a plain leader never gets them."""
+    hive = [*HIVE_TOOLS, "scale", *TAIL_TOOLS]
+    assert rendered_allow(None, replicas=2, session_messaging=True) == [*hive, *ADMIN_TOOLS]
+    assert rendered_allow(None, replicas=2) == hive
+    assert rendered_allow(None, replicas=2, session_messaging=False) == hive
+    assert rendered_allow("agents-webhook", replicas=2, session_messaging=True) == [
+        *hive,
+        *ADMIN_TOOLS,
+    ]
+    assert rendered_allow("agents-webhook", replicas=2) == hive

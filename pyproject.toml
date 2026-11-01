@@ -31,7 +31,7 @@ dev = [
     "ruff",
     "claude-code-wrapper @ git+https://github.com/szymonrychu/claude-code-wrapper@31917bfdf345dc8adfc97b40a1cfee37869cc7fe",
     "moto[server]>=5.2.4",
-    "any-mcp-tatara-orchestrator @ git+https://github.com/szymonrychu/any-mcp-tatara-plugins@v0.4.0#subdirectory=orchestration/orchestrator",
+    "any-mcp-tatara-orchestrator @ git+https://github.com/szymonrychu/any-mcp-tatara-plugins@v0.6.0#subdirectory=orchestration/orchestrator",
 ]
 
 [tool.uv]

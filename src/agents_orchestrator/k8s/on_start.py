@@ -31,6 +31,19 @@ HIVE_TOOLS = [
 SESSION_TOOLS = ["sessions_list", "session_send"]
 INIT_SCRIPTS_TOOLS = ["init_scripts_get", "init_scripts_edit"]
 CHAT_TOOLS = ["chat_rooms", "chat_send", "chat_react", "chat_status"]
+# Superleader admin tools: the plugin's declarative admin rows (any-mcp-tatara-plugins
+# orchestration/orchestrator admin.py) plus the local secret_set tool.
+ADMIN_TOOLS = [
+    "presets_list", "preset_get", "preset_create", "preset_replace", "preset_delete",
+    "preset_copy", "session_get", "session_create", "session_discard", "session_restart",
+    "agent_restart", "command_get", "webhooks_list", "webhook_get_meta", "webhook_create",
+    "webhook_update", "webhook_clone", "webhook_rotate", "webhook_delete",
+    "webhook_filters_set", "webhook_events", "webhook_event", "webhook_template_preview",
+    "schedules_list", "schedule_get", "schedule_create", "schedule_update", "schedule_delete",
+    "schedule_run", "schedule_runs", "schedule_runs_all", "schedule_run_get",
+    "schedule_preview", "chat_admin_rooms", "chat_room_settings", "chat_rules",
+    "chat_rule_add", "chat_rule_delete", "secret_set",
+]  # fmt: skip
 
 
 def orchestrator_allow(spec: SessionSpec) -> list[str]:
@@ -38,10 +51,15 @@ def orchestrator_allow(spec: SessionSpec) -> list[str]:
 
     Every session gets the session tools (D11), the init-scripts tools and the chat tools (D13),
     alone sessions included; the agent API decides what each caller may list, send, edit and say
-    in the chat (leader only), so the list never depends on `session_messaging`. Who created the
-    session does not change the list.
+    in the chat (leader only). The admin tools and `secret_set` are listed exactly when
+    `session_messaging` is enabled, whoever created the session.
     """
-    shared = [*SESSION_TOOLS, *INIT_SCRIPTS_TOOLS, *CHAT_TOOLS]
+    shared = [
+        *SESSION_TOOLS,
+        *INIT_SCRIPTS_TOOLS,
+        *CHAT_TOOLS,
+        *(ADMIN_TOOLS if spec.session_messaging else []),
+    ]
     if not spec.hive:
         return shared
     scale = [SCALE_TOOL] if spec.scalable else []
