@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from collections.abc import Callable, Coroutine
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response
@@ -17,14 +19,18 @@ from fastapi.exceptions import HTTPException, RequestValidationError
 from fastapi.routing import APIRoute
 from starlette.responses import Response as StarletteResponse
 
+from agents_orchestrator.api import messages as messages_api
 from agents_orchestrator.api import presets as presets_api
 from agents_orchestrator.api import schemas
 from agents_orchestrator.api import sessions as sessions_api
 from agents_orchestrator.api.agent import Caller
 from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.sessions import Cfg, Pool
+from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import events as events_repo
+from agents_orchestrator.db import queue as q
 from agents_orchestrator.db import sessions as sessions_repo
+from agents_orchestrator.settings import Settings
 
 log = logging.getLogger(__name__)
 
@@ -226,3 +232,87 @@ async def discard_session(
         if target.id == caller.id:
             raise ApiError(422, "own_session", "a session cannot discard itself")
         return await sessions_api.discard(conn, target.id, settings)
+
+
+# ---------------------------------------------------------------- restart (O8)
+
+
+async def _self_restart(conn, settings: Settings, caller: sessions_repo.Session) -> None:
+    """Claim the caller's cooldown slot or refuse with 429. Runs inside the restart's
+    transaction, so a failure later rolls the claim back and spends nothing."""
+    claim = await sessions_repo.claim_self_restart(
+        conn, caller.id, settings.self_restart_cooldown_seconds
+    )
+    if not claim.claimed:
+        raise ApiError(
+            429,
+            "restart_cooldown",
+            f"this session restarted itself recently; try again in {claim.retry_after} seconds",
+            retry_after=claim.retry_after,
+        )
+
+
+def _self_note(what: str, settings: Settings) -> str:
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%SZ")
+    return (
+        f"This restart was self-initiated: you asked for {what} to restart at {now}. "
+        f"Another self-restart is refused for {settings.self_restart_cooldown_seconds} seconds. "
+        "Do not restart again unless it is required."
+    )
+
+
+@router.post(
+    "/sessions/{slug}/restart", status_code=202, response_model=schemas.SessionRestartAccepted
+)
+async def restart_session(
+    slug: str, request: Request, pool: Pool, settings: Cfg
+) -> schemas.SessionRestartAccepted:
+    """Restart every live agent of a session. The caller's own session claims the self-restart
+    cooldown and gets one note, all in the same transaction as the commands."""
+    _, caller = caller_of(request)
+    async with pool.connection() as conn, conn.transaction():
+        target = await _target(conn, slug)
+        own = target.id == caller.id
+        if own:
+            await _self_restart(conn, settings, caller)
+        ids = await messages_api.restart_all(conn, target.id)
+        if own:
+            await q.enqueue_message(
+                conn, caller.id, _self_note("your session", settings), lane="priority"
+            )
+    return schemas.SessionRestartAccepted(command_ids=ids)
+
+
+@router.post(
+    "/sessions/{slug}/agents/{pod}/restart", status_code=202, response_model=schemas.CommandAccepted
+)
+async def restart_agent(
+    slug: str, pod: str, request: Request, pool: Pool, settings: Cfg
+) -> schemas.CommandAccepted:
+    """Restart one agent by pod name; an agent of the caller's own session is a self-restart."""
+    _, caller = caller_of(request)
+    async with pool.connection() as conn, conn.transaction():
+        target = await _target(conn, slug)
+        if target.desired == "deleting":
+            raise ApiError(409, "session_deleting", "session is being discarded")
+        agent_id = await _member_id(conn, target.id, pod)
+        own = target.id == caller.id
+        if own:
+            await _self_restart(conn, settings, caller)
+        command_id = await messages_api.enqueue_agent_command(conn, agent_id, "restart")
+        if own:
+            await q.enqueue_message(conn, caller.id, _self_note(pod, settings), lane="priority")
+    return schemas.CommandAccepted(command_id=command_id)
+
+
+async def _member_id(conn, session_id: uuid.UUID, pod_name: str) -> uuid.UUID:
+    for member in await agents_repo.list_members(conn, session_id):
+        if member["pod_name"] == pod_name:
+            return member["id"]
+    raise not_found(f"agent {pod_name}")
+
+
+@router.get("/commands/{command_id}", response_model=schemas.CommandView)
+async def get_command(command_id: int, pool: Pool) -> schemas.CommandView:
+    async with pool.connection() as conn:
+        return await messages_api.command_view(conn, command_id)
