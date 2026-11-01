@@ -61,10 +61,10 @@ def settings_for(dsn, **kw):
     kw.setdefault("cache_s3_endpoint", "http://rgw.example:80")
     kw.setdefault("cache_s3_bucket", "bucket")
     kw.setdefault("cache_s3_path_style", True)
-    kw.setdefault("cache_s3_access_key_id", "AKIARECONCILER")
+    kw.setdefault("cache_s3_access_key_id", "TESTIDRECONCILER")
     kw.setdefault("cache_s3_secret_access_key", "reconciler-example-secret")
     kw.setdefault("cache_image", "orch:1")
-    kw.setdefault("cache_s3_api_access_key_id", "AKIAAPIROLE")
+    kw.setdefault("cache_s3_api_access_key_id", "TESTIDAPIROLE")
     kw.setdefault("cache_s3_api_secret_access_key", "api-example-secret")
     return make_settings(dsn, **kw)
 
@@ -112,7 +112,7 @@ async def test_api_credentials_are_the_api_pair_not_the_reconciler_pair(pool, ds
     s3.objects = [obj("proj/a")]
     async with client(pool, dsn) as c:
         await c.get(A)
-    assert s3.creds[0] == ("AKIAAPIROLE", "api-example-secret")
+    assert s3.creds[0] == ("TESTIDAPIROLE", "api-example-secret")
 
 
 # ------------------------------------------------------------------ list
@@ -179,7 +179,7 @@ async def test_download_redirects_to_a_short_lived_presigned_get(pool, dsn, s3):
     assert (
         q["response-content-disposition"] == 'attachment; filename="proj_20261031t120000z.tar.zst"'
     )
-    assert "AKIAAPIROLE" in q["X-Amz-Credential"]  # signed with the api pair
+    assert "TESTIDAPIROLE" in q["X-Amz-Credential"]  # signed with the api pair
     assert "PUT" not in r.headers["location"]
 
 
@@ -257,7 +257,7 @@ async def test_delete_removes_unreferenced_old_archives(pool, dsn, s3, caplog):
             r = await c.request("DELETE", A, json={"keys": [f"{PRE}proj/a.tar.zst"]})
     assert r.json() == {"deleted": [f"{PRE}proj/a.tar.zst"], "refused": [], "errors": []}
     assert s3.deleted == [[f"{PRE}proj/a.tar.zst"]]
-    assert s3.creds[-1] == ("AKIAAPIROLE", "api-example-secret")
+    assert s3.creds[-1] == ("TESTIDAPIROLE", "api-example-secret")
     audit = [m for m in caplog.messages if m.startswith("audit: cache archives delete")]
     assert len(audit) == 1 and f"{PRE}proj/a.tar.zst" in audit[0]
 

@@ -186,3 +186,13 @@ async def test_bad_save_template_fails_the_save_but_not_the_discard(env):
     assert env.saves[-1]["reason"].startswith("bad_cache_key")
     assert env.saves_created() == 0
     assert await env.gone(c)
+
+
+async def test_save_name_rendering_into_the_reserved_prefix_fails_the_save(env):
+    c = await make(env, "proj", "{{ 'preset' ~ '-' }}{{ session_slug }}")
+    await finish_restore(env, c)
+    await env.delete(c)
+    await env.tick()
+    assert env.saves[-1]["state"] == "failed"
+    assert env.saves[-1]["reason"].startswith("bad_cache_key")
+    assert env.saves_created() == 0

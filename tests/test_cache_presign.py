@@ -21,7 +21,7 @@ from agents_orchestrator.cache.presign import object_name, presign
 from agents_orchestrator.settings import Settings
 
 SECRET = "s3cr3t-Access-Key-Value"
-ACCESS_KEY = "AKIATESTCACHE"
+ACCESS_KEY = "TESTIDTESTCACHE"
 
 
 def _settings(**kw) -> Settings:

@@ -25,7 +25,7 @@ from agents_orchestrator.tokens import SessionTokens
 AGENT_IMAGE = "harbor.example/containers/claude-code-wrapper:ca2ddf3"
 SPEC_IMAGE = "harbor.example/containers/custom-agent:1"
 CACHE_IMAGE = "harbor.example/containers/agents-orchestrator:abc1234"
-ACCESS_KEY = "AKIAEXAMPLEACCESSKEY"
+ACCESS_KEY = "TESTIDEXAMPLEACCESSKEY"
 SECRET_KEY = "s3cr3t-example-secret-access-key"
 URL = "https://s3.example/bucket/workspace-cache/k.tar.zst?X-Amz-Signature=abc"
 TOKENS = SessionTokens(auth="a" * 32, peer="p" * 32, agent="g" * 32)

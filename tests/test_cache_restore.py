@@ -51,7 +51,7 @@ class Env:
         base = {
             "cache_s3_endpoint": "http://rgw.example:80",
             "cache_s3_bucket": "bucket",
-            "cache_s3_access_key_id": "AKIAEXAMPLE",
+            "cache_s3_access_key_id": "TESTIDEXAMPLE",
             "cache_s3_secret_access_key": "s3cr3t",
             "cache_image": "harbor.example/orch:1",
         }

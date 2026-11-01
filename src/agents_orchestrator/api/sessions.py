@@ -30,6 +30,7 @@ from agents_orchestrator.spec import (
     SessionSpec,
     SpecInvalid,
     check_caller_cache_key,
+    check_rendered_cache_name,
     default_cache_key,
     fill_resource_defaults,
     generated_slug,
@@ -268,7 +269,11 @@ _SLUG_ATTEMPTS = 5
 
 
 def check_archive_names(
-    slug: str, spec: SessionSpec, preset_name: str | None, created_by_service: str | None
+    slug: str,
+    spec: SessionSpec,
+    preset_name: str | None,
+    created_by_service: str | None,
+    derived_key: str | None = None,
 ) -> None:
     """Render both cache key templates with this session's real context; 422 on a bad name.
 
@@ -284,8 +289,11 @@ def check_archive_names(
         if not template:
             continue
         try:
-            rendering.render_name(template, context, allow_prefix=field == "restore_key")
-        except ArchiveNameError as exc:
+            name = rendering.render_name(template, context, allow_prefix=field == "restore_key")
+            check_rendered_cache_name(name, field, derived_key)
+        except ValueError as exc:  # ArchiveNameError is a ValueError
+            if not isinstance(exc, ArchiveNameError):
+                raise ApiError(422, "invalid_request", str(exc)) from None
             where = f" (line {exc.line})" if exc.line else ""
             raise ApiError(422, "invalid_request", f"cache.{field}{where}: {exc}") from None
 
@@ -297,6 +305,7 @@ async def _insert(conn, slug: str, spec: SessionSpec, **provenance) -> repo.Sess
         spec,
         provenance.get("preset_name"),
         provenance.get("created_by_service"),
+        default_cache_key(provenance["preset_id"]) if provenance.get("preset_id") else None,
     )
     try:
         return await repo.create(conn, slug, spec, **provenance)
@@ -342,7 +351,12 @@ async def _create_from_preset(
     for _ in range(_SLUG_ATTEMPTS):
         generated = generated_slug(preset.name)
         await run_in_threadpool(
-            check_archive_names, generated, spec, preset.name, created_by_service
+            check_archive_names,
+            generated,
+            spec,
+            preset.name,
+            created_by_service,
+            default_cache_key(preset.id),
         )
         try:
             return await repo.create(conn, generated, spec, **provenance)

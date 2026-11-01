@@ -228,3 +228,17 @@ async def test_session_name_renders_with_the_real_context(pool, dsn):
         }
         r = await http.post(C, json={"slug": "alpha", "spec": spec})
         assert r.status_code == 201, r.text
+
+
+async def test_real_render_into_the_reserved_prefix_is_422(pool, dsn):
+    """The sample renders clean; this slug makes the key start with preset-."""
+    async with app_client(pool, dsn) as http:
+        spec = {"cache": {"save_key": "{{ session_slug }}-x"}}
+        r = await http.post(C, json={"slug": "preset", "spec": spec})
+        assert_error(r, 422, "invalid_request")
+        assert "prefix preset- is reserved" in r.json()["error"]["message"]
+        spec = {"cache": {"restore_key": "{{ session_slug }}/"}}
+        r = await http.post(C, json={"slug": "preset-abc", "spec": spec})
+        assert_error(r, 422, "invalid_request")
+        ok = await http.post(C, json={"slug": "presetx", "spec": {"cache": {"save_key": "k"}}})
+        assert ok.status_code == 201, ok.text

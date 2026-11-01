@@ -31,7 +31,7 @@ def _settings(**kw) -> Settings:
     kw.setdefault("cache_s3_endpoint", "http://rgw:80")
     kw.setdefault("cache_s3_bucket", "b")
     kw.setdefault("cache_s3_path_style", True)
-    kw.setdefault("cache_s3_access_key_id", "AKIATESTCACHE")
+    kw.setdefault("cache_s3_access_key_id", "TESTIDTESTCACHE")
     kw.setdefault("cache_s3_secret_access_key", "reconciler-example-secret")
     return Settings(**kw)
 
@@ -54,7 +54,7 @@ def stub(monkeypatch):
 
     monkeypatch.setattr(p, "_client", fake)
     first = p._client(
-        "http://rgw:80", "us-east-1", True, True, "AKIATESTCACHE", "reconciler-example-secret"
+        "http://rgw:80", "us-east-1", True, True, "TESTIDTESTCACHE", "reconciler-example-secret"
     )
     stubber = Stubber(first)
     stubber.activate()
@@ -201,19 +201,19 @@ def test_presign_get_rejects_keys_outside_the_prefix_or_suffix():
 
 
 def test_explicit_credentials_pick_another_client(stub):
-    creds = S3Credentials("AKIAAPIROLE", "api-example-secret")
+    creds = S3Credentials("TESTIDAPIROLE", "api-example-secret")
     _expect_list(stub, PREFIX, {"IsTruncated": False, "KeyCount": 0})
     # the reconciler client is the stubbed one; the api client is a different, unstubbed one
     list_archives(_settings(), PREFIX)
-    assert stub.calls[-1] == ("AKIATESTCACHE", "reconciler-example-secret")
+    assert stub.calls[-1] == ("TESTIDTESTCACHE", "reconciler-example-secret")
     url = presign_get(_settings(), f"{PREFIX}x.tar.zst", credentials=creds)
-    assert "AKIAAPIROLE" in url
-    assert stub.calls[-1] == ("AKIAAPIROLE", "api-example-secret")
+    assert "TESTIDAPIROLE" in url
+    assert stub.calls[-1] == ("TESTIDAPIROLE", "api-example-secret")
 
 
 def test_client_config_uses_when_required_checksums_timeouts_and_retries():
     client = p._client(
-        "http://rgw:80", "us-east-1", True, True, "AKIACFGCHECK", "cfg-example-secret"
+        "http://rgw:80", "us-east-1", True, True, "TESTIDCFGCHECK", "cfg-example-secret"
     )
     cfg = client.meta.config
     assert cfg.request_checksum_calculation == "when_required"

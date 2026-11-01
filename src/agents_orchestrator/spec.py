@@ -452,6 +452,15 @@ CACHE_KEY_RESERVED_PREFIX = "preset-"
 _CACHE_KEY_FIELDS = ("restore_key", "save_key")
 
 
+def check_rendered_cache_name(name: str, field: str, derived_key: str | None = None) -> None:
+    """Reject a rendered name whose first segment is in the `preset-` prefix reserved for derived
+    keys (`derived_key`, the session's own preset's, is the one exception)."""
+    if name.split("/")[0].startswith(CACHE_KEY_RESERVED_PREFIX) and name != derived_key:
+        raise ValueError(
+            f"cache.{field} prefix {CACHE_KEY_RESERVED_PREFIX} is reserved for preset-derived keys"
+        )
+
+
 def check_caller_cache_key(spec: SessionSpec, derived_key: str | None = None) -> None:
     """Reject a caller-supplied cache key in the prefix reserved for preset-derived keys.
 
@@ -471,11 +480,7 @@ def check_caller_cache_key(spec: SessionSpec, derived_key: str | None = None) ->
             )
         except ValueError:
             continue  # the grammar and template errors are validate_spec's to report
-        if name.split("/")[0].startswith(CACHE_KEY_RESERVED_PREFIX) and name != derived_key:
-            raise ValueError(
-                f"cache.{field} prefix {CACHE_KEY_RESERVED_PREFIX} is reserved "
-                "for preset-derived keys"
-            )
+        check_rendered_cache_name(name, field, derived_key)
 
 
 class WorkspaceCache(_Strict):

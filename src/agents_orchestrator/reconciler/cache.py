@@ -43,7 +43,7 @@ from typing import Any, Literal, get_args
 from psycopg_pool import AsyncConnectionPool
 
 from agents_orchestrator import rendering
-from agents_orchestrator.cache.keys import ArchiveNameError, list_prefix_for, object_name_for
+from agents_orchestrator.cache.keys import list_prefix_for, object_name_for
 from agents_orchestrator.cache.presign import CacheTarget, latest_under, presign, presign_object
 from agents_orchestrator.cache.save_rule import PODS_EXIST, save_skip
 from agents_orchestrator.db.sessions import Session
@@ -65,7 +65,7 @@ from agents_orchestrator.reconciler.checks import (
 )
 from agents_orchestrator.reconciler.init import REASON_MAX, StatusWriter
 from agents_orchestrator.settings import Settings
-from agents_orchestrator.spec import SESSIONS_EXCLUDE
+from agents_orchestrator.spec import SESSIONS_EXCLUDE, check_rendered_cache_name
 
 log = logging.getLogger(__name__)
 
@@ -395,11 +395,15 @@ class CacheRunner:
                 rendering.session_context("archive_name", session, now=now),
                 allow_prefix=op.action == "restore",
             )
+            # A plain name was checked against its preset at create (a derived key is allowed
+            # there, even once the preset is gone); a template must not render into the prefix.
+            literal = name if not any(m in template for m in rendering.MARKERS) else None
+            check_rendered_cache_name(name, f"{op.action}_key", literal)
             if not name.endswith("/"):
                 cache[field] = object_name_for(prefix, name)
                 return None
             listing = list_prefix_for(prefix, name)
-        except ArchiveNameError as exc:
+        except ValueError as exc:  # ArchiveNameError or a reserved prefix
             return "failed", f"bad_cache_key: {exc}"[:REASON_MAX]
         try:
             found = await asyncio.to_thread(latest_under, self.settings, listing)
