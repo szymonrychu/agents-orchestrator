@@ -2269,6 +2269,9 @@
             },
             "title": "Permission Modes",
             "type": "array"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/MetaUsage"
           }
         },
         "required": [
@@ -2282,7 +2285,8 @@
           "cache",
           "kube_access",
           "hook_events",
-          "permission_modes"
+          "permission_modes",
+          "usage"
         ],
         "title": "Meta",
         "type": "object"
@@ -2491,6 +2495,24 @@
           "limits"
         ],
         "title": "MetaResources",
+        "type": "object"
+      },
+      "MetaUsage": {
+        "properties": {
+          "configured": {
+            "title": "Configured",
+            "type": "boolean"
+          },
+          "quota_default_pct": {
+            "title": "Quota Default Pct",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "configured",
+          "quota_default_pct"
+        ],
+        "title": "MetaUsage",
         "type": "object"
       },
       "PermissionModeIn": {
@@ -6221,7 +6243,7 @@
     },
     "/agent/v1/admin/sessions": {
       "post": {
-        "description": "Same body and rules as the main port; the caller's session is recorded as the creator\nand `created_by_service` stays empty.",
+        "description": "Same body and rules as the main port, usage gate included; the caller's session is\nrecorded as the creator and `created_by_service` stays empty.",
         "operationId": "create_session_agent_v1_admin_sessions_post",
         "parameters": [
           {
@@ -8256,6 +8278,7 @@
     },
     "/agent/v1/scale": {
       "post": {
+        "description": "A scale-up over the usage quota is refused 409 `usage_quota`.",
         "operationId": "scale_agent_v1_scale_post",
         "parameters": [
           {
@@ -10439,7 +10462,7 @@
     },
     "/api/v1/sessions/{session_id}/scale": {
       "post": {
-        "description": "Set spec.replicas in place (no caller agent: the public route has no leader check).",
+        "description": "Set spec.replicas in place (no caller agent: the public route has no leader check).\nA scale-up over the usage quota is refused 409 `usage_quota`.",
         "operationId": "scale_session_api_v1_sessions__session_id__scale_post",
         "parameters": [
           {

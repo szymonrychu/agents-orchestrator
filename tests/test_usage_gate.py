@@ -7,12 +7,16 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 
+from agents_orchestrator.api.errors import ApiError
 from agents_orchestrator.api.usage_gate import (
     GATED_METRICS,
     Breach,
     UsageSource,
     UsageWindow,
     breach,
+    check,
+    enforce,
+    refusal,
 )
 from agents_orchestrator.spec import UsageQuota
 
@@ -284,3 +288,58 @@ async def test_source_never_logs_the_token(caplog):
         await src.current()
     assert "secret-token-value" not in caplog.text
     assert "secret-token-value" not in repr(src)
+
+
+def test_refusal_body():
+    resets = NOW + timedelta(hours=2, seconds=0.5)
+    err = refusal(Breach("seven_day", 85.0, 80, resets), NOW)
+    assert (err.status, err.code, err.retry_after) == (409, "usage_quota", 7201)
+    assert err.message == (
+        f"seven_day usage 85% is at or above the quota 80% until {resets.isoformat()}"
+    )
+    assert err.extra == {
+        "usage": {
+            "metric": "seven_day",
+            "percent": 85.0,
+            "limit": 80,
+            "resets_at": resets.isoformat(),
+        }
+    }
+
+
+def test_refusal_retry_after_at_least_one():
+    assert refusal(Breach("five_hour", 100.0, 100, NOW), NOW).retry_after == 1
+    assert refusal(Breach("five_hour", 100.0, 100, NOW - timedelta(hours=1)), NOW).retry_after == 1
+
+
+def test_check_raises_the_refusal_or_passes():
+    quota = UsageQuota(seven_day_pct=80)
+    with pytest.raises(ApiError) as caught:
+        check({"seven_day": W(85.0)}, quota, 100, NOW)
+    assert caught.value.code == "usage_quota"
+    assert caught.value.extra["usage"]["limit"] == 80
+    check({"seven_day": W(79.0)}, quota, 100, NOW)
+    check(None, quota, 100, NOW)
+
+
+def _current(percent):
+    resets = (datetime.now(UTC) + timedelta(days=1)).isoformat()
+    window = {"percent": percent, "resets_at": resets, "stale": False}
+    return httpx.Response(200, json={"windows": {"seven_day": window}})
+
+
+async def test_enforce_fetches_and_raises():
+    src = source(lambda request: _current(90.0))
+    with pytest.raises(ApiError) as caught:
+        await enforce(src, UsageQuota(seven_day_pct=80), 100)
+    assert caught.value.code == "usage_quota"
+    await enforce(src, None, 100)
+    await src.aclose()
+
+
+async def test_enforce_without_source_allows():
+    await enforce(None, UsageQuota(seven_day_pct=1), 1)
+
+
+async def test_enforce_unavailable_allows():
+    await enforce(source(lambda request: httpx.Response(503)), UsageQuota(seven_day_pct=1), 1)

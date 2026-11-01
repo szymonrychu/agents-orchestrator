@@ -25,7 +25,7 @@ from agents_orchestrator.api import schemas
 from agents_orchestrator.api import sessions as sessions_api
 from agents_orchestrator.api.agent import Caller
 from agents_orchestrator.api.errors import ApiError, not_found
-from agents_orchestrator.api.sessions import Cfg, Pool
+from agents_orchestrator.api.sessions import Cfg, Pool, Usage
 from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import events as events_repo
 from agents_orchestrator.db import presets as presets_repo
@@ -252,12 +252,14 @@ async def get_session(
 
 @router.post("/sessions", status_code=201, response_model=schemas.SessionView)
 async def create_session(
-    body: schemas.CreateSession, request: Request, pool: Pool, settings: Cfg
+    body: schemas.CreateSession, request: Request, pool: Pool, settings: Cfg, usage: Usage
 ) -> schemas.SessionView:
-    """Same body and rules as the main port; the caller's session is recorded as the creator
-    and `created_by_service` stays empty."""
+    """Same body and rules as the main port, usage gate included; the caller's session is
+    recorded as the creator and `created_by_service` stays empty."""
     _, caller = caller_of(request)
-    return await sessions_api.create(pool, settings, body, created_by_session=caller.id)
+    return await sessions_api.create(
+        pool, settings, body, created_by_session=caller.id, usage=usage
+    )
 
 
 @router.delete("/sessions/{slug}", status_code=202, response_model=schemas.SessionView)

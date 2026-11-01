@@ -20,7 +20,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from agents_orchestrator.api import schemas
 from agents_orchestrator.api import sessions as sessions_api
 from agents_orchestrator.api.errors import ApiError
-from agents_orchestrator.api.sessions import Cfg, Pool, edit_init_scripts, init_scripts_view
+from agents_orchestrator.api.sessions import (
+    Cfg,
+    Pool,
+    Usage,
+    edit_init_scripts,
+    gate_scale_up,
+    init_scripts_view,
+)
 from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import events as events_repo
 from agents_orchestrator.db import file_locks, leadership
@@ -145,7 +152,11 @@ _SCALE_STATUS = {**sessions_api.SCALE_STATUS, "not_leader": 403}
     response_model=schemas.ScaleResult,
     summary="Scale the caller's session (leader only)",
 )
-async def scale(agent: Caller, body: schemas.ScaleRequest, pool: Pool) -> schemas.ScaleResult:
+async def scale(
+    agent: Caller, body: schemas.ScaleRequest, pool: Pool, settings: Cfg, usage: Usage
+) -> schemas.ScaleResult:
+    """A scale-up over the usage quota is refused 409 `usage_quota`."""
+    await gate_scale_up(pool, usage, settings, agent.session_id, body.replicas)
     async with pool.connection() as conn:
         try:
             out = await sessions_repo.set_replicas(

@@ -1,5 +1,5 @@
 """The hard usage gate: where the account's usage stands (`UsageSource`) and whether a start
-or scale-up must be refused (`breach`).
+or scale-up must be refused (`breach`, raised as `refusal` by `check` and `enforce`).
 
 The usage service (agents-usage) answers `GET /usage/v1/current`. Missing, stale or reset data
 never gates: an unreachable service, a timeout, a bad answer, an absent or stale window all
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ from datetime import UTC, datetime
 import httpx
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictFloat, StrictInt, ValidationError
 
+from agents_orchestrator.api.errors import ApiError
 from agents_orchestrator.spec import UsageQuota
 
 log = logging.getLogger(__name__)
@@ -68,6 +70,46 @@ def breach(
         if window.percent >= limit:
             found.append(Breach(metric, window.percent, limit, window.resets_at))
     return max(found, key=lambda b: b.resets_at, default=None)
+
+
+def refusal(b: Breach, now: datetime) -> ApiError:
+    """409 `usage_quota` with the breach as `usage` and the seconds until it resets, at least 1,
+    as `retry_after` (body and `Retry-After` header)."""
+    resets_at = b.resets_at.isoformat()
+    return ApiError(
+        409,
+        "usage_quota",
+        f"{b.metric} usage {b.percent:g}% is at or above the quota {b.limit}% until {resets_at}",
+        retry_after=max(1, math.ceil((b.resets_at - now).total_seconds())),
+        extra={
+            "usage": {
+                "metric": b.metric,
+                "percent": b.percent,
+                "limit": b.limit,
+                "resets_at": resets_at,
+            }
+        },
+    )
+
+
+def check(
+    windows: dict[str, UsageWindow] | None,
+    quota: UsageQuota | None,
+    default_pct: int,
+    now: datetime,
+) -> None:
+    """Raise the refusal when the windows breach the quota; return otherwise."""
+    found = breach(windows, quota, default_pct, now)
+    if found is not None:
+        raise refusal(found, now)
+
+
+async def enforce(source: UsageSource | None, quota: UsageQuota | None, default_pct: int) -> None:
+    """Fetch the usage (cached) and `check` it; no source (gate off) allows."""
+    if source is None:
+        return
+    windows = await source.current()
+    check(windows, quota, default_pct, datetime.now(UTC))
 
 
 class _Window(BaseModel):

@@ -7,6 +7,7 @@ import contextlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from psycopg_pool import AsyncConnectionPool
@@ -35,6 +36,7 @@ from agents_orchestrator.api.listener import Listener
 from agents_orchestrator.api.origin import OriginAllowlist
 from agents_orchestrator.api.secret_store import KubeApi
 from agents_orchestrator.api.service_auth import ServiceGate
+from agents_orchestrator.api.usage_gate import UsageSource
 from agents_orchestrator.db.pool import open_pool
 from agents_orchestrator.settings import Settings
 
@@ -44,9 +46,21 @@ def create_app(
     pool: AsyncConnectionPool | None = None,
     stream_poll_seconds: float = streams.DEFAULT_POLL_SECONDS,
     kube: KubeApi | None = None,
+    usage_transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
     owns_pool = pool is None
     listener = Listener(settings.database_url)
+    usage = (
+        UsageSource(
+            settings.usage_url,
+            settings.usage_token,
+            settings.usage_cache_seconds,
+            settings.usage_timeout_seconds,
+            transport=usage_transport,
+        )
+        if settings.usage_available
+        else None
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -66,6 +80,8 @@ def create_app(
             await chat.close_client(app)
             await forward.close_client(app, admin_relay.STATE_ATTR)
             await secret_store.close_kube(app)
+            if usage is not None:
+                await usage.aclose()
             if owns_pool:
                 await app.state.pool.close()
 
@@ -86,6 +102,7 @@ def create_app(
     app.state.kube = kube  # given (tests) or built on first use by api.secret_store
     app.state.kube_owned = False
     app.state.stream_poll_seconds = stream_poll_seconds
+    app.state.usage = usage  # the usage gate's source; None when the gate is off
     errors.install(app)
     app.include_router(sessions.router)
     app.include_router(agent.router)
