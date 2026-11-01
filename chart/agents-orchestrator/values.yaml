@@ -246,6 +246,33 @@ chat:
   existingSecret: ""
   existingSecretKey: chat-token
 
+# Seconds between two restarts an agent asks for on its own session (ORCH_SELF_RESTART_COOLDOWN_SECONDS).
+selfRestartCooldownSeconds: 600
+
+# Superleader admin relay upstreams (/agent/v1/admin/webhooks, /schedules, /chats). Each of webhook,
+# schedule and connector: url becomes ORCH_<NAME>_URL (the connector's is its agent listener, the
+# relay appends /chat/v1/admin); ORCH_<NAME>_TOKEN, the service bearer sent upstream, comes from
+# existingSecret/existingSecretKey (default key "token"), or from the chart Secret
+# <fullname>-admin-<name> built from token (existingSecret wins). Env of the api main container
+# only, always together, never in the settings ConfigMap. Set url with a token source, or neither
+# (the relay then answers 503 upstream_unconfigured); one without the other fails the render.
+admin:
+  webhook:
+    url: ""
+    token: ""
+    existingSecret: ""
+    existingSecretKey: token
+  schedule:
+    url: ""
+    token: ""
+    existingSecret: ""
+    existingSecretKey: token
+  connector:
+    url: ""
+    token: ""
+    existingSecret: ""
+    existingSecretKey: token
+
 # Workspace cache: restore and save Jobs that move a capped tar.zst of a session workspace
 # to and from any S3-compatible object store. Empty cache.s3.bucket disables the cache and
 # renders no ORCH_CACHE_* setting. The access keys reach the reconciler container only

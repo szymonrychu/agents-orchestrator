@@ -176,3 +176,9 @@ def test_ingress_source_ranges_render() -> None:
     assert ing["metadata"]["annotations"] == {
         "nginx.ingress.kubernetes.io/denylist-source-range": "10.0.0.1/32"
     }
+
+
+def test_api_role_covers_webhook_credential_secrets() -> None:
+    """O10 writes webhook-<id>-password Secrets: create, patch, delete only; never read."""
+    role = _named("Role", f"{FULL}-api")
+    assert _rules(role) == {("", "secrets", ("create", "delete", "patch"))}

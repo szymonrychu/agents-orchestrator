@@ -164,6 +164,8 @@ A Postgres connection is required. Set exactly one of these; none, or more than 
 
 The master key and the Claude token each need a value or an `existingSecret`; with neither the render fails. The agent pods in the release namespace read the Claude Secret, so `existingSecret` must live there.
 
+The admin relay upstreams are optional, one block each under `admin.webhook`, `admin.schedule` and `admin.connector`. `admin.<name>.url` becomes `ORCH_WEBHOOK_URL`, `ORCH_SCHEDULE_URL` or `ORCH_CONNECTOR_URL`, and the token `ORCH_<NAME>_TOKEN` comes from `admin.<name>.existingSecret` (key `existingSecretKey`, default `token`) or else from the chart Secret `<fullname>-admin-<name>` built from `admin.<name>.token`. Same rules as chat: api main container only, always as a pair, never in the ConfigMap, the pod rolls when a chart-made token changes, url without a token source (or the reverse) fails the render. `selfRestartCooldownSeconds` (default 600) becomes `ORCH_SELF_RESTART_COOLDOWN_SECONDS`. The api Role already allows `create`, `patch` and `delete` on Secrets (never a read), which covers both protected preset variables and the `webhook-<id>-password` Secrets.
+
 The chat relay is optional. `chat.url` becomes `ORCH_CHAT_URL` and `ORCH_CHAT_TOKEN` comes from `chat.existingSecret` (key `chat.existingSecretKey`, default `chat-token`) or else from the chart Secret `<fullname>-chat` built from `chat.token`; `existingSecret` wins. `ORCH_CHAT_URL` (a plain value) and `ORCH_CHAT_TOKEN` (a `secretKeyRef`) are env of the api main container only, always together, never in the settings ConfigMap (not its migrate init container, not the dispatcher, ingester or reconciler), and the api pod rolls when the chart-made token changes (`checksum/chat-secret`). Set `chat.url` together with `chat.token` or `chat.existingSecret`, or none of them: one without the other fails the render naming all three. With none, neither variable renders and every `/agent/v1/chat/*` call answers 503 `chat_unconfigured`.
 
 ### Settings ConfigMap
@@ -1202,6 +1204,13 @@ Advisory locks on files, so agents claim what they edit and are warned before wr
 A superleader session (`session_messaging` set in its spec, whoever created the session: a user, a trigger service or the matrix connector) reaches the trigger services through `/agent/v1/admin/webhooks/*`, `/schedules/*` and `/chats/*`, which map 1:1 to the upstream admin routes (`ORCH_WEBHOOK_URL`, `ORCH_SCHEDULE_URL`, `ORCH_CONNECTOR_URL` with their tokens). After the superleader gate the upstream must be configured (503 `upstream_unconfigured`) and the body is capped at 256 KiB (413). The upstream gets only its service bearer, `X-Orch-Session` and `X-Orch-Slug`; its status and JSON come back unchanged, a failed or non-JSON call is 503 `upstream_unavailable`.
 
 Webhook credentials never reach the caller. A credential agents-webhook issues once (create, rotate, clone, a PATCH that changes the auth mode) is stored in the Secret `webhook-<id>-password` (key `password`, or `secret` for header, bearer and hmac) and the answer carries `password_secret` (the Secret name) and `key` instead. If the Secret cannot be written the call is 503 `credential_not_stored` and no value is returned; rotate the endpoint for a new one. Deleting the webhook deletes the Secret. A call with `X-Orch-Tool: local` also gets `credential: {key, value}` once, for the plugin's `to_file`.
+
+### Admin relay: secrets, cooldown and known risks
+
+- Secrets are protected variables: a preset env entry with `protected: true` is write-only (stored in a Secret, never shown, only overwritten); `expand` is ignored for protected entries. Webhook credentials are written to `webhook-<id>-password` Secrets and never returned to the agent.
+- A superleader restarting its own session is limited to one restart per `ORCH_SELF_RESTART_COOLDOWN_SECONDS` (default 600), then 429 `restart_cooldown`.
+- The flags (`session_messaging`, the admin and chat tools) are honoured whoever created the session; there is no refusal based on the creating service.
+- Risk R1 (documented only, no technical rule): a superleader can create a child session whose spec reads or forwards a protected variable's value inside that child, so a compromised superleader can exfiltrate secrets through a child session. Grant the flag only to sessions you trust.
 
 ## Bench
 
