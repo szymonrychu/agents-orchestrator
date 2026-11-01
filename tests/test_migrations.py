@@ -30,6 +30,7 @@ TABLES = {
     "commands",
     "checks",
     "presets",
+    "cache_sweeps",
     "schema_migrations",
 }
 
@@ -55,7 +56,7 @@ def test_fresh_database_gets_all_tables(empty_dsn):
     assert tables >= TABLES
     assert versions == [
         "0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0011", "0012",
-        "0013", "0014", "0015",
+        "0013", "0014", "0015", "0016",
     ]  # fmt: skip
 
 
@@ -82,6 +83,7 @@ def test_presets_migration_on_existing_sessions(empty_dsn, tmp_path):
         "0013",
         "0014",
         "0015",
+        "0016",
     ]
     with psycopg.connect(empty_dsn) as c:
         row = c.execute(
@@ -116,9 +118,9 @@ def test_concurrent_migrate_serialises(empty_dsn):
     [t.start() for t in threads]
     [t.join() for t in threads]
     assert not errors
-    assert sorted(len(r) for r in results) == [0, 14]
+    assert sorted(len(r) for r in results) == [0, 15]
     with psycopg.connect(empty_dsn) as c:
-        assert c.execute("SELECT count(*) FROM schema_migrations").fetchone()[0] == 14
+        assert c.execute("SELECT count(*) FROM schema_migrations").fetchone()[0] == 15
 
 
 async def test_events_unique_agent_session_seq(pool):
@@ -531,7 +533,7 @@ def test_0005_renames_clusters_to_sessions(empty_dsn, tmp_path):
             (unit, agent),
         )
     assert run_migrations(empty_dsn) == [
-        "0005", "0006", "0007", "0008", "0009", "0011", "0012", "0013", "0014", "0015",
+        "0005", "0006", "0007", "0008", "0009", "0011", "0012", "0013", "0014", "0015", "0016",
     ]  # fmt: skip
     with psycopg.connect(empty_dsn) as c:
         assert c.execute(
@@ -768,7 +770,7 @@ def test_escape_template_tokens_migration(empty_dsn, tmp_path):
             "INSERT INTO presets (id, name, spec) VALUES (gen_random_uuid(), 'old', %s)",
             (json.dumps(spec),),
         )
-    assert run_migrations(empty_dsn) == ["0013", "0014", "0015"]
+    assert run_migrations(empty_dsn) == ["0013", "0014", "0015", "0016"]
     with psycopg.connect(empty_dsn) as c:
         stored = [
             r[0]
@@ -817,7 +819,7 @@ def test_escape_template_tokens_migration_never_aborts_at_the_limit(empty_dsn, t
             "INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), 'big', %s)",
             (json.dumps(spec),),
         )
-    assert run_migrations(empty_dsn) == ["0013", "0014", "0015"]
+    assert run_migrations(empty_dsn) == ["0013", "0014", "0015", "0016"]
     with psycopg.connect(empty_dsn) as c:
         got = c.execute("SELECT spec FROM sessions WHERE slug='big'").fetchone()[0]
     assert got["init_scripts"] == [near, "{{ '{{' }}ok"]
@@ -852,7 +854,7 @@ def test_cache_keys_migration_splits_the_single_key(empty_dsn, tmp_path):
                 "INSERT INTO presets (id, name, spec) VALUES (gen_random_uuid(), %s, %s)",
                 (slug, json.dumps(spec)),
             )
-    assert run_migrations(empty_dsn) == ["0015"]
+    assert run_migrations(empty_dsn) == ["0015", "0016"]
     expected = {
         "keyed": {
             "replicas": 2,
