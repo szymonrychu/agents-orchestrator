@@ -70,7 +70,7 @@ class Env:
     async def create(self, slug: str = "alpha", cache: bool = True, **spec):
         """A new session row, with the workspace cache unless `cache` is False."""
         if cache:
-            spec["cache"] = {"key": CACHE_KEY}
+            spec["cache"] = {"restore_key": CACHE_KEY, "save_key": CACHE_KEY}
         async with self.pool.connection() as conn:
             c = await sessions.create(conn, slug, SessionSpec(**spec))
         if self.fake is not None:
@@ -308,7 +308,9 @@ async def _now(env):
 async def test_not_configured(pool, dsn):
     e = Env(pool, dsn, cache_s3_bucket="")
     async with pool.connection() as conn:
-        c = await sessions.create(conn, "alpha", SessionSpec(cache={"key": CACHE_KEY}))
+        c = await sessions.create(
+            conn, "alpha", SessionSpec(cache={"restore_key": CACHE_KEY, "save_key": CACHE_KEY})
+        )
     await e.tick()
     restore = (await e.cache(c.id))["restore"]
     assert (restore["state"], restore["reason"]) == ("failed", "not_configured")

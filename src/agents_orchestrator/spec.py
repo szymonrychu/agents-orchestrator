@@ -14,9 +14,17 @@ from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from agents_orchestrator import rendering
+from agents_orchestrator.cache.keys import validate_name
 
 if TYPE_CHECKING:
     from agents_orchestrator.settings import Settings
@@ -173,7 +181,7 @@ def source_plugin_name(source: str) -> str:
 
 INIT_SCRIPTS_MAX = 20
 
-CACHE_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
+CACHE_KEY_TEMPLATE_MAX = 256
 CACHE_EXCLUDE_MAX = 50
 CACHE_EXCLUDE_ENTRY_MAX = 256
 # Always left out of a cache archive, besides spec.cache.exclude.
@@ -441,30 +449,58 @@ def default_cache_key(preset_id: uuid.UUID) -> str:
 
 
 CACHE_KEY_RESERVED_PREFIX = "preset-"
+_CACHE_KEY_FIELDS = ("restore_key", "save_key")
 
 
 def check_caller_cache_key(spec: SessionSpec, derived_key: str | None = None) -> None:
     """Reject a caller-supplied cache key in the prefix reserved for preset-derived keys.
 
-    `derived_key` is the one reserved key the spec may carry (its own preset's). Applied at the
-    API input boundary only: derived specs the server writes never pass through it.
+    The check is on the first segment each key template renders to against the `archive_name`
+    sample. `derived_key` is the one reserved key the spec may carry (its own preset's). Applied at
+    the API input boundary only: derived specs the server writes never pass through it.
     """
-    key = spec.cache.key if spec.cache is not None else None
-    if key and key.startswith(CACHE_KEY_RESERVED_PREFIX) and key != derived_key:
-        raise ValueError(
-            f"cache.key prefix {CACHE_KEY_RESERVED_PREFIX} is reserved for preset-derived keys"
-        )
+    if spec.cache is None:
+        return
+    for field in _CACHE_KEY_FIELDS:
+        template = getattr(spec.cache, field)
+        if not template:
+            continue
+        try:
+            name = rendering.render_name(
+                template, rendering.SAMPLES["archive_name"], allow_prefix=field == "restore_key"
+            )
+        except ValueError:
+            continue  # the grammar and template errors are validate_spec's to report
+        if name.split("/")[0].startswith(CACHE_KEY_RESERVED_PREFIX) and name != derived_key:
+            raise ValueError(
+                f"cache.{field} prefix {CACHE_KEY_RESERVED_PREFIX} is reserved "
+                "for preset-derived keys"
+            )
 
 
 class WorkspaceCache(_Strict):
-    key: str | None = None
+    """`restore_key` and `save_key` are Jinja templates (surface `archive_name`).
+
+    None is unset: a preset-derived session gets `default_cache_key` for both when both are None.
+    An empty string is explicit: empty `restore_key` is a fresh start, empty `save_key` is
+    restore-only. A restore_key ending in `/` restores the newest archive under that prefix.
+    """
+
+    restore_key: str | None = None
+    save_key: str | None = None
     exclude: list[str] = []
 
-    @field_validator("key")
+    @field_validator(*_CACHE_KEY_FIELDS)
     @classmethod
-    def _check_key(cls, v: str | None) -> str | None:
-        if v is not None and not CACHE_KEY_RE.match(v):
-            raise ValueError(f"cache key must match {CACHE_KEY_RE.pattern}")
+    def _check_key(cls, v: str | None, info: ValidationInfo) -> str | None:
+        if v is None:
+            return v
+        if len(v) > CACHE_KEY_TEMPLATE_MAX:
+            raise ValueError(f"at most {CACHE_KEY_TEMPLATE_MAX} characters")
+        if v and not any(m in v for m in rendering.MARKERS):
+            # A plain name is checked here; a template renders in validate_spec (spec time), as
+            # the sandbox is a child process and a stored spec is parsed on every read.
+            validate_name(v, allow_prefix=info.field_name == "restore_key")
         return v
 
     @field_validator("exclude")
@@ -662,7 +698,7 @@ def _config_plugin_names(config: dict[str, Any]) -> set[str]:
 
 def _template_problems(spec: SessionSpec) -> list[str]:
     """One message per spec text field whose Jinja template does not validate or render."""
-    fields: list[tuple[str, str, Literal["web_chat_start", "preset_text", "init_script"]]] = [
+    fields: list[tuple[str, str, rendering.Surface]] = [
         (f"init_scripts[{i}]", script, "init_script") for i, script in enumerate(spec.init_scripts)
     ]
     if spec.start_prompt is not None:
@@ -683,11 +719,20 @@ def _template_problems(spec: SessionSpec) -> list[str]:
             fields.append(
                 ("wrapper.restart_continue_prompt", wrapper.restart_continue_prompt, "preset_text")
             )
+    if spec.cache is not None:
+        for field in _CACHE_KEY_FIELDS:
+            if getattr(spec.cache, field):
+                fields.append((f"cache.{field}", getattr(spec.cache, field), "archive_name"))
     errors: list[str] = []
     for name, template, surface in fields:
         error, rendered = rendering.problem(template, surface, spec.env)
         if error is None and rendered is not None:
-            if name == "wrapper.auto_compact.instructions" and (
+            if surface == "archive_name":
+                try:
+                    validate_name(rendered, allow_prefix=name == "cache.restore_key")
+                except ValueError as exc:
+                    error = f"renders to {rendered!r}: {exc}"
+            elif name == "wrapper.auto_compact.instructions" and (
                 _INSTRUCTIONS_CONTROL.search(rendered) or len(rendered) > INSTRUCTIONS_MAX
             ):
                 error = "renders to more than one line, control characters or too many characters"

@@ -219,7 +219,9 @@ async def test_save_skipped_when_cache_unavailable_now(pool, dsn):
     async with pool.connection() as conn:
         from agents_orchestrator.spec import SessionSpec
 
-        c = await sessions.create(conn, "alpha", SessionSpec(cache={"key": CACHE_KEY}))
+        c = await sessions.create(
+            conn, "alpha", SessionSpec(cache={"restore_key": CACHE_KEY, "save_key": CACHE_KEY})
+        )
     await e.tick()
     await e.patch_restore(c.id, state="restored", reason=None, job=None)
     await e.delete(c)

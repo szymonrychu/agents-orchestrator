@@ -15,7 +15,7 @@ from agents_orchestrator.cache.save_rule import save_skip
 from agents_orchestrator.db.pool import notify
 
 T0 = datetime(2026, 10, 28, 9, 0, tzinfo=UTC)
-CACHED = {"cache": {"key": "k1"}}
+CACHED = {"cache": {"restore_key": "k1", "save_key": "k1"}}
 RESTORED = {"state": "restored", "finished_at": T0.isoformat(), "bytes": 10, "reason": None}
 SAVED = {
     "state": "saved",

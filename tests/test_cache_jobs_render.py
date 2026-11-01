@@ -56,7 +56,11 @@ def make_session(slug: str = "alpha", **spec: Any) -> Session:
         "image": SPEC_IMAGE,
         "workdir": "repo",
         "env": {"SPEC_VAR": "x", "AWS_PROFILE": "agent"},
-        "cache": {"key": "preset-0123456789abcdef", "exclude": ["node_modules", "*.log"]},
+        "cache": {
+            "restore_key": "preset-0123456789abcdef",
+            "save_key": "preset-0123456789abcdef",
+            "exclude": ["node_modules", "*.log"],
+        },
         **spec,
     }
     return Session(

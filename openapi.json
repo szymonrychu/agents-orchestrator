@@ -2315,7 +2315,8 @@
             "enum": [
               "web_chat_start",
               "preset_text",
-              "init_script"
+              "init_script",
+              "archive_name"
             ],
             "title": "Surface",
             "type": "string"
@@ -3401,6 +3402,7 @@
       },
       "WorkspaceCache": {
         "additionalProperties": false,
+        "description": "`restore_key` and `save_key` are Jinja templates (surface `archive_name`).\n\nNone is unset: a preset-derived session gets `default_cache_key` for both when both are None.\nAn empty string is explicit: empty `restore_key` is a fresh start, empty `save_key` is\nrestore-only. A restore_key ending in `/` restores the newest archive under that prefix.",
         "properties": {
           "exclude": {
             "default": [],
@@ -3410,7 +3412,7 @@
             "title": "Exclude",
             "type": "array"
           },
-          "key": {
+          "restore_key": {
             "anyOf": [
               {
                 "type": "string"
@@ -3419,7 +3421,18 @@
                 "type": "null"
               }
             ],
-            "title": "Key"
+            "title": "Restore Key"
+          },
+          "save_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Save Key"
           }
         },
         "title": "WorkspaceCache",

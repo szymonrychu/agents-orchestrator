@@ -350,11 +350,9 @@ class CacheRunner:
     async def _begin(self, session: Session, op: CacheOp) -> dict[str, Any]:
         cache = dict(session.status.get("cache") or {})
         if not op.sessions:
-            key = session.spec.cache.key or "" if session.spec.cache else ""
-            cache["key"] = cache.get("key") or key
-            cache["object"] = cache.get("object") or (
-                object_name(self.settings, key) if key else None
-            )
+            key = self._key(session, op)
+            cache["key"] = key
+            cache["object"] = object_name(self.settings, key) if key else None
         run = {
             "state": "running",
             "started_at": (await self._now()).isoformat(),
@@ -365,6 +363,14 @@ class CacheRunner:
         }
         cache = await self._write(session, cache, op, run)
         return await self._start(session, cache, op, run)
+
+    @staticmethod
+    def _key(session: Session, op: CacheOp) -> str:
+        """The workdir cache name of this action: `restore_key` to restore, `save_key` to save."""
+        cache = session.spec.cache
+        if cache is None:
+            return ""
+        return (cache.save_key if op.action == "save" else cache.restore_key) or ""
 
     async def _start(
         self, session: Session, cache: dict[str, Any], op: CacheOp, run: dict[str, Any]

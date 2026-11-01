@@ -39,7 +39,7 @@ SAMPLES: dict[str, dict[str, Any]] = {
     },
 }
 
-_MARKERS = ("{{", "{%", "{#")
+MARKERS = ("{{", "{%", "{#")
 
 
 _NOT_SEGMENT = re.compile(r"[^a-z0-9._-]+")
@@ -102,7 +102,7 @@ def render_name(template: str, context: dict[str, Any], *, allow_prefix: bool) -
 
 def render_text(template: str, context: dict[str, Any]) -> str:
     """Render `template`; text without Jinja markers is returned as is (no child process)."""
-    if not any(m in template for m in _MARKERS):
+    if not any(m in template for m in MARKERS):
         return template
     return templating.render(template, context)
 

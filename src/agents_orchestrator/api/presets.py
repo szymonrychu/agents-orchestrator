@@ -137,10 +137,12 @@ async def delete_preset(preset_id: uuid.UUID, pool: Pool) -> Response:
 
 
 def _without_derived_key(spec: dict[str, Any], preset_id: uuid.UUID) -> dict[str, Any]:
-    """The copy derives its own key, so a key equal to the source's derived key is dropped."""
+    """The copy derives its own keys, so keys equal to the source's derived key are dropped."""
     cache = spec.get("cache")
-    if isinstance(cache, dict) and cache.get("key") == default_cache_key(preset_id):
-        return {**spec, "cache": {k: v for k, v in cache.items() if k != "key"}}
+    derived = default_cache_key(preset_id)
+    if isinstance(cache, dict) and derived in (cache.get("restore_key"), cache.get("save_key")):
+        keys = ("restore_key", "save_key")
+        return {**spec, "cache": {k: v for k, v in cache.items() if k not in keys}}
     return spec
 
 

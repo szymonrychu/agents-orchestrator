@@ -229,8 +229,13 @@ async def create_session(
     if body.spec is not None:
         if body.slug is None:
             raise ApiError(422, "invalid_request", "slug is required with spec")
-        if body.spec.cache is not None and body.spec.cache.key is None:
-            raise ApiError(422, "invalid_request", "cache.key is required without a preset")
+        cache = body.spec.cache
+        if cache is not None and cache.restore_key is None and cache.save_key is None:
+            raise ApiError(
+                422,
+                "invalid_request",
+                "cache.restore_key or cache.save_key is required without a preset",
+            )
         spec = await run_in_threadpool(check_spec, body.spec, settings)
     if body.slug is not None:
         try:
@@ -288,8 +293,9 @@ async def _create_from_preset(
         raise ApiError(422, "invalid_request", f"preset '{preset.name}': {exc}") from None
     except ApiError as exc:
         raise ApiError(422, "invalid_request", f"preset '{preset.name}': {exc.message}") from None
-    if spec.cache is not None and spec.cache.key is None:
-        cache = spec.cache.model_copy(update={"key": default_cache_key(preset.id)})
+    if spec.cache is not None and spec.cache.restore_key is None and spec.cache.save_key is None:
+        derived = default_cache_key(preset.id)
+        cache = spec.cache.model_copy(update={"restore_key": derived, "save_key": derived})
         spec = spec.model_copy(update={"cache": cache})
     provenance = {
         "preset_id": preset.id,

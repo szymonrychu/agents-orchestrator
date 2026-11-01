@@ -48,7 +48,10 @@ def make_session(**spec: Any) -> Session:
         spec=SessionSpec.model_validate(
             {
                 "init_scripts": ["echo hi"],
-                "cache": {"key": "preset-0123456789abcdef"},
+                "cache": {
+                    "restore_key": "preset-0123456789abcdef",
+                    "save_key": "preset-0123456789abcdef",
+                },
                 **spec,
             }
         ),
