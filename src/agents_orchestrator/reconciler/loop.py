@@ -149,6 +149,7 @@ class Reconciler:
 
     async def reconcile_once(self) -> None:
         await self._run_restarts()
+        await self._release_notes()
         await self._run_rebootstraps()
         await self.checks.run_once()
         async with self.pool.connection() as conn:
@@ -583,6 +584,10 @@ class Reconciler:
                 status, result = "failed", {"error": str(exc) or type(exc).__name__}
             async with self.pool.connection() as conn:
                 await queue.complete_command(conn, cmd.id, status, result)
+
+    async def _release_notes(self) -> None:
+        async with self.pool.connection() as conn:
+            await queue.release_ready_notes(conn)
 
     async def _restart(self, cmd: queue.Command) -> tuple[str, dict[str, Any]]:
         async with self.pool.connection() as conn:

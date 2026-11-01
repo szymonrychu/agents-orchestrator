@@ -816,27 +816,37 @@ async def complete_command(
         row = await _one(
             conn,
             "UPDATE commands SET status = %s, result = %s, finished_at = now()"
-            " WHERE id = %s AND status = 'running' RETURNING note_message_id",
+            " WHERE id = %s AND status = 'running' RETURNING id",
             (status, Jsonb(result) if result is not None else None, id),
         )
-        if row is None:
-            return False
-        if row["note_message_id"] is not None:
-            await release_note(conn, row["note_message_id"])
-        return True
+        return row is not None
 
 
-async def release_note(conn: psycopg.AsyncConnection, message_id: int) -> None:
-    """Make a held note deliverable once no command naming it is queued or running."""
-    released = await _transition(
+async def release_ready_notes(conn: psycopg.AsyncConnection) -> None:
+    """Release each held self-restart note whose restarted agents are all back up.
+
+    A restart command is `done` when its pod is deleted, which is before the replacement
+    exists, so completion releases nothing. A note is released once, for every restart command
+    naming it, the command ended without replacing a pod (failed, cancelled), its agent is gone,
+    or the agent is ready with a wrapper session created or resumed after the command finished
+    (the old pod, still terminating, has neither).
+    """
+    rows = await _all(
         conn,
-        "UPDATE messages SET not_before = NULL WHERE id = %(id)s AND status = 'queued'"
-        " AND NOT EXISTS (SELECT 1 FROM commands WHERE note_message_id = %(id)s"
-        "  AND status IN ('queued', 'running')) RETURNING session_id",
-        {"id": message_id},
+        "UPDATE messages m SET not_before = NULL"
+        " WHERE m.status = 'queued' AND m.not_before > now()"
+        " AND EXISTS (SELECT 1 FROM commands c WHERE c.note_message_id = m.id)"
+        " AND NOT EXISTS (SELECT 1 FROM commands c JOIN agents a ON a.id = c.agent_id"
+        "  WHERE c.note_message_id = m.id AND (c.status IN ('queued', 'running')"
+        "   OR (c.status = 'done' AND a.gone_at IS NULL AND NOT (a.ready AND"
+        "    (coalesce(a.wrapper_session_created_at > c.finished_at, false)"
+        "     OR coalesce(a.wrapper_resumed_at > c.finished_at, false))))))"
+        " RETURNING m.session_id",
+        {},
     )
-    if released is not None:
-        await notify(conn, "message_queued", {"session_id": str(released["session_id"])})
+    for row in rows:
+        await _status(conn, row["session_id"])
+        await notify(conn, "message_queued", {"session_id": str(row["session_id"])})
 
 
 # ---------------------------------------------------------------- checks

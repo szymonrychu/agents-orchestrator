@@ -185,24 +185,81 @@ async def held(pool, session_id):
     return row["held"]
 
 
-async def test_self_note_is_held_until_every_restart_command_finished(call, pool, boss):
+async def replace_pods(pool, session_id):
+    """The replacement pods are up: ready, with a wrapper session attached after the restart."""
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE agents SET ready = true, wrapper_session_created_at = clock_timestamp()"
+            " WHERE session_id = %s",
+            (session_id,),
+        )
+
+
+async def release(pool):
+    from agents_orchestrator.db import queue
+
+    async with pool.connection() as conn:
+        await queue.release_ready_notes(conn)
+
+
+async def test_self_note_stays_held_while_the_old_pod_terminates(call, pool, boss):
+    from agents_orchestrator.db import queue
+
     assert (await call("POST", f"{S}/{boss.slug}/restart")).status_code == 202
     assert await held(pool, boss.id)
     async with pool.connection() as conn:
-        from agents_orchestrator.db import queue
-
         assert await queue.claim_and_pick(conn) is None  # not deliverable while held
-    await finish_restarts(pool, 1)
-    assert await held(pool, boss.id)  # one agent still to restart
-    await finish_restarts(pool, 1)
+    await finish_restarts(pool, 2)  # the pods are deleted; the old ones are still terminating
+    await release(pool)
+    assert await held(pool, boss.id)
+
+
+async def test_self_note_is_released_when_every_replacement_is_up(call, pool, boss):
+    await call("POST", f"{S}/{boss.slug}/restart")
+    await finish_restarts(pool, 2)
+    first = (await agents_of(pool, boss.id))[0]["id"]
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE agents SET wrapper_session_created_at = clock_timestamp() WHERE id = %s",
+            (first,),
+        )
+    await release(pool)
+    assert await held(pool, boss.id)  # one replacement still missing
+    await replace_pods(pool, boss.id)
+    await release(pool)
     assert not await held(pool, boss.id)
 
 
-async def test_a_failed_restart_still_releases_the_note(call, pool, boss):
+async def test_a_resumed_replacement_releases_the_note(call, pool, boss):
     pod = (await agents_of(pool, boss.id))[0]["pod_name"]
     await call("POST", f"{S}/{boss.slug}/agents/{pod}/restart")
+    await finish_restarts(pool, 1)
+    await release(pool)
     assert await held(pool, boss.id)
-    await finish_restarts(pool, 1, "failed")
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE agents SET wrapper_resumed_at = clock_timestamp() WHERE session_id = %s"
+            " AND pod_name = %s",
+            (boss.id, pod),
+        )
+    await release(pool)
+    assert not await held(pool, boss.id)
+
+
+async def test_a_failed_restart_releases_the_note(call, pool, boss):
+    pod = (await agents_of(pool, boss.id))[0]["pod_name"]
+    await call("POST", f"{S}/{boss.slug}/agents/{pod}/restart")
+    await finish_restarts(pool, 1, "failed")  # no pod was replaced
+    await release(pool)
+    assert not await held(pool, boss.id)
+
+
+async def test_a_gone_agent_does_not_hold_the_note(call, pool, boss):
+    await call("POST", f"{S}/{boss.slug}/restart")
+    await finish_restarts(pool, 2)
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE agents SET gone_at = now() WHERE session_id = %s", (boss.id,))
+    await release(pool)
     assert not await held(pool, boss.id)
 
 
