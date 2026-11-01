@@ -31,6 +31,9 @@ STARTUP_SLACK = 12
 KUBE_PASSTHROUGH_ENV = ("KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT")
 AGENT_PASSTHROUGH_ENV = ("ORCH_AGENT_TOKEN", "ORCH_AGENT_URL", "ORCH_SESSION_ID", "POD_NAME")
 
+AGENT_USAGE_TOKEN_ENV = "CCW_USAGE_TOKEN"
+AGENT_USAGE_SECRET_KEY = "token"
+
 ASK_IN_WRITING_PROMPT = (
     "The AskUserQuestion tool is disabled and nobody answers interactive questions. "
     "When you need a decision or information from the user, ask in writing in your reply: "
@@ -70,6 +73,16 @@ def pod_identity(spec: SessionSpec, settings: Settings) -> dict[str, Any]:
             "automountServiceAccountToken": True,
         }
     return agent_identity(settings)
+
+
+def forwards_usage(spec: SessionSpec, settings: Settings) -> bool:
+    """Whether the agent pods forward their usage to agents-usage.
+
+    Only the default image: the wrapper config is strict, so an older wrapper image would refuse
+    the `usage` section. A pod on another image forwards nothing; usage is account-wide, so the
+    other agents still report it.
+    """
+    return settings.agent_usage_enabled and (not spec.image or spec.image == settings.agent_image)
 
 
 def pod_url(slug: str, pod: str, settings: Settings) -> str:
@@ -272,6 +285,12 @@ def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
                 for i in range(spec.max_replicas or spec.replicas)
             ],
         }
+    if forwards_usage(spec, settings):
+        cfg["usage"] = {
+            "url": settings.agent_usage_url,
+            "token": "${" + AGENT_USAGE_TOKEN_ENV + "}",
+            "agent": "${POD_NAME}",
+        }
     if spec.wrapper:
         _apply_wrapper(cfg, spec.wrapper, session)
     return cfg
@@ -321,6 +340,16 @@ def _container(session: Session, settings: Settings, names: dict[str, str]) -> d
             "name": "CLAUDE_CODE_OAUTH_TOKEN",
             **_secret_ref(settings.claude_secret_name, "CLAUDE_CODE_OAUTH_TOKEN"),
         },
+        *(
+            [
+                {
+                    "name": AGENT_USAGE_TOKEN_ENV,
+                    **_secret_ref(settings.agent_usage_secret, AGENT_USAGE_SECRET_KEY),
+                }
+            ]
+            if forwards_usage(spec, settings)
+            else []
+        ),
         {"name": "ORCH_AGENT_TOKEN", **_secret_ref(names["secret"], "ORCH_AGENT_TOKEN")},
         {"name": "ORCH_SESSION_ID", "value": str(session.id)},
         *(

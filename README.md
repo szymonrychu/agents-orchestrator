@@ -105,6 +105,8 @@ Every process reads `ORCH_*` variables (the contract `agents-orchestrator-settin
 | `ORCH_USAGE_QUOTA_DEFAULT` | `100` | api | percent (1 to 100) of the `five_hour` and `seven_day` usage windows at which a start is refused when the preset sets no `usage_quota` for that window; a window gates when its percent is at or above the limit, so 100 gates at the real limit |
 | `ORCH_USAGE_CACHE_SECONDS` | `30` | api | seconds (1 to 600) the usage answer is cached, a failed read included |
 | `ORCH_USAGE_TIMEOUT_SECONDS` | `3` | api | seconds (above 0, at most 30) the usage read may take before it counts as unavailable; unavailable, stale or absent data never gates |
+| `ORCH_AGENT_USAGE_URL` | empty | reconciler | http or https base URL of the agents-usage ingest listener (no query or fragment); when set, agent pods on the default image forward their statusLine rate limits there (see Usage forwarding). Set together with `ORCH_AGENT_USAGE_SECRET` or neither, else a settings error naming both. Needs a claude-code-wrapper agent image of 0.8.0 or newer |
+| `ORCH_AGENT_USAGE_SECRET` | empty | reconciler | name of the Kubernetes Secret (a DNS-1123 subdomain, key `token`) holding the shared ingest token; rendered into agent pods as a `secretKeyRef` for env `CCW_USAGE_TOKEN`. Only the name is ever configured here, never the token. Set together with `ORCH_AGENT_USAGE_URL` or neither |
 
 ## Commands
 
@@ -177,7 +179,7 @@ The chat relay is optional. `chat.url` becomes `ORCH_CHAT_URL` and `ORCH_CHAT_TO
 
 ### Settings ConfigMap
 
-`<fullname>-settings` carries `ORCH_NAMESPACE` (the release namespace), `ORCH_AGENT_IMAGE` (`agentImage`, required), `ORCH_CLAUDE_SECRET_NAME` (`claude.existingSecret` or `<fullname>-claude`), `ORCH_AGENT_SERVICE_ACCOUNT` (`<fullname>-agent` with `serviceAccount.create`, else `default`) and, only with `kubeAccess.enabled`, `ORCH_KUBE_ACCESS_SERVICE_ACCOUNT` (`<fullname>-kube-access`; without it `kube_access` sessions are refused); the chat relay variables are not in it (see Secrets). Every entry of `env` is added verbatim; each key must start with `ORCH_` or the render fails naming it. No secret value is ever written to the ConfigMap; the database URL and master key reach the containers through `secretKeyRef`.
+`<fullname>-settings` carries `ORCH_NAMESPACE` (the release namespace), `ORCH_AGENT_IMAGE` (`agentImage`, required), `ORCH_CLAUDE_SECRET_NAME` (`claude.existingSecret` or `<fullname>-claude`), `ORCH_AGENT_SERVICE_ACCOUNT` (`<fullname>-agent` with `serviceAccount.create`, else `default`) and, only with `kubeAccess.enabled`, `ORCH_KUBE_ACCESS_SERVICE_ACCOUNT` (`<fullname>-kube-access`; without it `kube_access` sessions are refused); the chat relay variables are not in it (see Secrets). With `agentUsage.url` and `agentUsage.secretName` both set it also carries `ORCH_AGENT_USAGE_URL` and `ORCH_AGENT_USAGE_SECRET` (the Secret name only, never the token; one without the other fails the render; needs a wrapper `agentImage` of 0.8.0 or newer, see Usage forwarding). Every entry of `env` is added verbatim; each key must start with `ORCH_` or the render fails naming it. No secret value is ever written to the ConfigMap; the database URL and master key reach the containers through `secretKeyRef`.
 
 ### Service API
 
@@ -1098,6 +1100,15 @@ With `ORCH_USAGE_URL` and `ORCH_USAGE_TOKEN` set, the api reads the account's Cl
 - Rule: only the `five_hour` and `seven_day` windows gate. A window gates when its percent is at or above the limit: the session's `spec.usage_quota` value for that window, else `ORCH_USAGE_QUOTA_DEFAULT` (default 100, the real limit). A create judges the resolved spec (the preset snapshot or the raw spec), a scale-up the session's own snapshot. With several breaches the one with the latest `resets_at` is reported, since that is when a start can succeed.
 - Fail open: an unset gate, an unreachable, failing or slow usage service, a bad answer, and an absent, stale or already reset window never gate; the read logs one warning per cache period.
 - Refusal: 409 `{"error": {"code": "usage_quota", "message": "<metric> usage <percent>% is at or above the quota <limit>% until <resets_at>", "retry_after": <seconds until resets_at, at least 1>, "usage": {"metric": "<five_hour or seven_day>", "percent": <float>, "limit": <int>, "resets_at": "<ISO 8601>"}}}` with the header `Retry-After: <retry_after>`. A refused create stores nothing and creates no Kubernetes object: the usage is read before the create lock and judged inside the create transaction, which the refusal rolls back. A refused scale leaves `spec.replicas` as it was.
+
+### Usage forwarding
+
+With `ORCH_AGENT_USAGE_URL` and `ORCH_AGENT_USAGE_SECRET` set, the reconciler renders the claude-code-wrapper 0.8.0 `usage` config section into the pods of every session that runs the default image (no `spec.image`, or one equal to `ORCH_AGENT_IMAGE`):
+
+- config.yaml gains `usage: {url: <ORCH_AGENT_USAGE_URL>, token: "${CCW_USAGE_TOKEN}", agent: "${POD_NAME}"}`; the wrapper expands the references from the pod env and forwards the statusLine `rate_limits` to agents-usage.
+- The pod env gains `CCW_USAGE_TOKEN` as a `secretKeyRef` to `ORCH_AGENT_USAGE_SECRET` (key `token`), next to `CLAUDE_CODE_OAUTH_TOKEN`. The orchestrator renders only the Secret name; it never reads, stores or logs the token. `CCW_USAGE_TOKEN` is not in `claude.passthrough_env`, so the claude process never sees it.
+- Off by default and additive: with the pair unset nothing in the rendered objects changes. The wrapper config is strict, so the section is rendered only for the default image, which the deployment must pin to 0.8.0 or newer whenever the URL is set. A session on another image does not forward; nothing is lost, because usage is account-wide and the other agents still report it.
+- Enabling it changes the config hash, so pods roll to pick it up like any config change (idle pods first, see Reconcile loop).
 
 ## Agent API
 

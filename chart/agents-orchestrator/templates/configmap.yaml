@@ -12,6 +12,7 @@
 {{- $claude := include "agents-orchestrator.claudeSecretName" . }}
 {{- $_ := include "agents-orchestrator.chatEnabled" . }}
 {{- $_ := include "agents-orchestrator.adminUpstreams" . }}
+{{- $agentUsage := include "agents-orchestrator.agentUsageEnabled" . }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -29,6 +30,10 @@ data:
   ORCH_AGENT_SERVICE_ACCOUNT: {{ ternary (printf "%s-agent" (include "agents-orchestrator.fullname" .)) "default" .Values.serviceAccount.create | quote }}
   {{- if .Values.kubeAccess.enabled }}
   ORCH_KUBE_ACCESS_SERVICE_ACCOUNT: {{ printf "%s-kube-access" (include "agents-orchestrator.fullname" .) | quote }}
+  {{- end }}
+  {{- if $agentUsage }}
+  ORCH_AGENT_USAGE_URL: {{ .Values.agentUsage.url | quote }}
+  ORCH_AGENT_USAGE_SECRET: {{ .Values.agentUsage.secretName | quote }}
   {{- end }}
   {{- with .Values.cache }}
   {{- if .s3.bucket }}

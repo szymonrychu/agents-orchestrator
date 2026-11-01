@@ -34,6 +34,23 @@ ingress:
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
 ```
 
+## Agent usage forwarding
+
+`agentUsage` makes the agent pods forward their Claude usage to agents-usage. It is off by
+default (both values empty) and renders nothing then.
+
+| Value | Default | Setting |
+|---|---|---|
+| `agentUsage.url` | `""` (off) | `ORCH_AGENT_USAGE_URL` |
+| `agentUsage.secretName` | `""` (off) | `ORCH_AGENT_USAGE_SECRET` |
+
+Set both or neither; one without the other fails the render. `secretName` names a Secret in the
+release namespace with the shared ingest token under the key `token` (for agents-usage, the
+Secret `agents-usage-ingest`); the agent pods read it as env `CCW_USAGE_TOKEN`. The chart only
+names the Secret and never holds the token. Both settings go into the settings ConfigMap. It
+needs an `agentImage` of claude-code-wrapper 0.8.0 or newer, because an older wrapper refuses
+the `usage` config section; a session on another image (`spec.image`) does not forward.
+
 ## Workspace cache
 
 The reconciler can restore a session workspace from, and save it to, any S3-compatible object

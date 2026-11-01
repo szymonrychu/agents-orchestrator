@@ -204,3 +204,17 @@ ORCH_AGENT_API_URL: the cluster-internal agents Service URL, unless env.ORCH_AGE
 {{- define "agents-orchestrator.agentApiUrl" -}}
 {{- default (printf "http://%s-agents.%s.svc:%v" (include "agents-orchestrator.fullname" .) .Release.Namespace .Values.agentApi.port) (index .Values.env "ORCH_AGENT_API_URL") -}}
 {{- end }}
+
+{{/*
+"true" when agent usage forwarding is configured, empty when it is off. agentUsage.url and
+agentUsage.secretName go together; one without the other fails the render. The Secret is
+only named here: the chart never holds the ingest token.
+*/}}
+{{- define "agents-orchestrator.agentUsageEnabled" -}}
+{{- $u := .Values.agentUsage | default dict -}}
+{{- if and $u.url $u.secretName -}}
+true
+{{- else if or $u.url $u.secretName -}}
+{{- fail "agents-orchestrator: set agentUsage.url together with agentUsage.secretName, or none of them" -}}
+{{- end -}}
+{{- end }}

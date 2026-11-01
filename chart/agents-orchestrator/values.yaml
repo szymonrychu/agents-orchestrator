@@ -180,6 +180,17 @@ env: {}
 # becomes ORCH_AGENT_IMAGE).
 agentImage: ""
 
+# Usage forwarding from the agent pods to agents-usage. url becomes ORCH_AGENT_USAGE_URL (the
+# agents-usage ingest listener, e.g. http://agents-usage:8002) and secretName becomes
+# ORCH_AGENT_USAGE_SECRET: the Secret (key "token") holding the shared ingest token, which the
+# agent pods read as env CCW_USAGE_TOKEN. The chart only names the Secret and never holds the
+# token. Set both, or neither (forwarding is then off); one without the other fails the render.
+# Needs agentImage claude-code-wrapper >= 0.8.0: an older wrapper refuses the usage config
+# section. Sessions on another image (spec.image) do not forward.
+agentUsage:
+  url: ""
+  secretName: ""
+
 # Postgres connection. A connection is required: set exactly one of
 #   1. cnpg.enabled=true              (the chart creates a CloudNativePG Cluster)
 #   2. postgres.existingSecret        (an existing Secret holding a connection URI)

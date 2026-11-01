@@ -49,6 +49,9 @@ def _csv(value: object) -> object:
     return value
 
 
+_SUBDOMAIN = re.compile(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*")
+
+
 class _Bad(ValueError):
     """Validation failure that already names its variable(s)."""
 
@@ -221,6 +224,12 @@ class Settings(BaseSettings):
     usage_quota_default: int = Field(default=100, ge=1, le=100)
     usage_cache_seconds: float = Field(default=30, ge=1, le=600)
     usage_timeout_seconds: float = Field(default=3, gt=0, le=30)
+
+    # usage forwarding from agent pods (claude-code-wrapper >= 0.8.0 `usage` section): the
+    # agents-usage ingest URL and the Secret name (key `token`) holding the shared ingest token.
+    # Pod-side only; the token value never reaches the orchestrator. Pair, or neither.
+    agent_usage_url: str = ""
+    agent_usage_secret: str = ""
 
     # superleader admin relay upstreams (url and service token come as a pair, or neither)
     webhook_url: str = ""
@@ -476,7 +485,7 @@ class Settings(BaseSettings):
                 raise _Bad("must not carry a query or fragment (the relay appends /chat/v1/...)")
         return v
 
-    @field_validator("webhook_url", "schedule_url", "connector_url", "usage_url")
+    @field_validator("webhook_url", "schedule_url", "connector_url", "usage_url", "agent_usage_url")
     @classmethod
     def _check_admin_url(cls, v: str) -> str:
         if v:
@@ -507,6 +516,16 @@ class Settings(BaseSettings):
                 "set ORCH_CACHE_S3_API_ACCESS_KEY_ID and ORCH_CACHE_S3_API_SECRET_ACCESS_KEY "
                 "together, or neither"
             )
+        return v
+
+    @field_validator("agent_usage_secret")
+    @classmethod
+    def _check_agent_usage_pair(cls, v: str, info: ValidationInfo) -> str:
+        if v and (len(v) > 253 or not _SUBDOMAIN.fullmatch(v)):
+            raise _Bad("must be a Kubernetes Secret name (a DNS-1123 subdomain)")
+        url = info.data.get("agent_usage_url")
+        if url is not None and bool(url) != bool(v):
+            raise _Bad("set ORCH_AGENT_USAGE_URL and ORCH_AGENT_USAGE_SECRET together, or neither")
         return v
 
     @field_validator("chat_token")
@@ -584,6 +603,10 @@ class Settings(BaseSettings):
     @property
     def usage_available(self) -> bool:
         return bool(self.usage_url)
+
+    @property
+    def agent_usage_enabled(self) -> bool:
+        return bool(self.agent_usage_url)
 
     @property
     def kube_access_available(self) -> bool:
