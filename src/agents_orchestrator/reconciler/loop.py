@@ -40,12 +40,12 @@ from agents_orchestrator.k8s.labels import object_names, session_labels
 from agents_orchestrator.k8s.render import pod_url, render_session
 from agents_orchestrator.reconciler.cache import CacheGate, CacheRunner
 from agents_orchestrator.reconciler.checks import CheckRunner
-from agents_orchestrator.reconciler.discard_hook import HookResult, resolve_hook, run_discard_hook
+from agents_orchestrator.reconciler.discard_hook import HookResult, resolve_hooks, run_discard_hook
 from agents_orchestrator.reconciler.init import InitGate, InitRunner
 from agents_orchestrator.reconciler.rollout import BUSY, LEADS, Replacer, agent_pods, terminating
 from agents_orchestrator.reconciler.sweeper import CacheSweeper
 from agents_orchestrator.reconciler.wrapper_sessions import WrapperSessionBootstrapper
-from agents_orchestrator.settings import Settings
+from agents_orchestrator.settings import DiscardHook, Settings
 from agents_orchestrator.tokens import tokens_for
 
 log = logging.getLogger(__name__)
@@ -169,49 +169,46 @@ class Reconciler:
     async def pre_discard(self, session: Session) -> bool:
         """The gate before a discard deletes anything (D15): True lets the deletion proceed.
 
-        With no hook, or after the export was delivered, it is True. Otherwise the history
-        export goes to the hook: success records `discard_hook_delivered` (database clock), a
-        failure records `discard_hook_failed`, `discard_hook_failures` and
-        `discard_hook_next_at` and returns False, so nothing is deleted. The hook is retried
-        once the database clock passes `discard_hook_next_at`.
+        Every owed hook (`_owed_hooks`: the settings hook, then the session's own URL, minus
+        those already delivered) gets the history export, each on its own stream, and each runs
+        whatever the others did, so one hook's outage never holds another's delivery. A success
+        adds the hook's name to `discard_hook_delivered` (database clock) at once, so it is
+        never sent again. Any failure records `discard_hook_failed` (`<name>: <reason>` of the
+        first failing hook), `discard_hook_failures` and `discard_hook_next_at` (one shared
+        backoff) and returns False, so nothing is deleted. The owed hooks are retried once the
+        database clock passes `discard_hook_next_at`; True only when nothing is owed.
         """
-        hook = resolve_hook(session, self.settings)
-        status = session.status
-        if hook is None or status.get("discard_hook_delivered"):
+        delivered, owed = self._owed_hooks(session)
+        if not owed:
             return True
+        status = session.status
         next_at = status.get("discard_hook_next_at")
-        async with self.pool.connection() as conn:
-            if (
-                next_at
-                and (
-                    await (
-                        await conn.execute("SELECT %s::timestamptz > now()", (next_at,))
-                    ).fetchone()
-                )[0]
-            ):
-                return False
-            try:
-                result = await run_discard_hook(
-                    hook,
-                    session,
-                    export_session_history(conn, session.id),
-                    self.settings.discard_hook_timeout_seconds,
-                    transport=self.hook_transport,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                log.exception("discard hook of session %s crashed", session.slug)
-                result = HookResult(False, f"{type(exc).__name__}: {exc}")
-        if result.ok:
+        if next_at:
             async with self.pool.connection() as conn:
-                now = (await (await conn.execute("SELECT now()")).fetchone())[0]
-            await self._write_status(
-                session,
-                {"discard_hook_delivered": now.isoformat()},
-                session.observed_generation,
-                drop=_HOOK_FAILURE_KEYS,
-            )
+                cur = await conn.execute("SELECT %s::timestamptz > now()", (next_at,))
+                if (await cur.fetchone())[0]:
+                    return False
+        failed = ""
+        for hook in owed:
+            result = await self._run_hook(hook, session)
+            if result.ok:
+                delivered[hook.name] = (await self._db_now()).isoformat()
+                last = hook is owed[-1] and not failed
+                await self._write_status(
+                    session,
+                    {"discard_hook_delivered": dict(delivered)},
+                    session.observed_generation,
+                    drop=_HOOK_FAILURE_KEYS if last else (),
+                )
+            else:
+                log.warning(
+                    "discard hook %s of session %s failed: %s",
+                    hook.name,
+                    session.slug,
+                    result.reason,
+                )
+                failed = failed or f"{hook.name}: {result.reason}"
+        if not failed:
             return True
         failures = int(status.get("discard_hook_failures", 0)) + 1
         delay = self.settings.retry_delay_seconds(failures)
@@ -221,17 +218,42 @@ class Reconciler:
                     await conn.execute("SELECT now() + make_interval(secs => %s)", (delay,))
                 ).fetchone()
             )[0]
-        log.warning("discard hook of session %s failed: %s", session.slug, result.reason)
         await self._write_status(
             session,
             {
-                "discard_hook_failed": result.reason,
+                "discard_hook_failed": failed,
                 "discard_hook_failures": failures,
                 "discard_hook_next_at": retry_at.isoformat(),
             },
             session.observed_generation,
         )
         return False
+
+    def _owed_hooks(self, session: Session) -> tuple[dict[str, str], list[DiscardHook]]:
+        """(what was delivered, the hooks still owed). A non-object `discard_hook_delivered`
+        (written before hooks were tracked by name) reads as nothing delivered."""
+        delivered = session.status.get("discard_hook_delivered")
+        if not isinstance(delivered, dict):
+            delivered = {}
+        owed = [h for h in resolve_hooks(session, self.settings) if h.name not in delivered]
+        return dict(delivered), owed
+
+    async def _run_hook(self, hook: DiscardHook, session: Session) -> HookResult:
+        """One hook fed a fresh export stream; a crash is a failure, never an escape."""
+        async with self.pool.connection() as conn:
+            try:
+                return await run_discard_hook(
+                    hook,
+                    session,
+                    export_session_history(conn, session.id),
+                    self.settings.discard_hook_timeout_seconds,
+                    transport=self.hook_transport,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.exception("discard hook %s of session %s crashed", hook.name, session.slug)
+                return HookResult(False, f"{type(exc).__name__}: {exc}")
 
     # ------------------------------------------------------------------ an active session
 
@@ -500,9 +522,7 @@ class Reconciler:
         and logs what it could not confirm. True means the export and the saves may run.
         """
         status = session.status
-        hook_owed = resolve_hook(session, self.settings) is not None and not status.get(
-            "discard_hook_delivered"
-        )
+        hook_owed = bool(self._owed_hooks(session)[1])
         save_owed = self.cache.save_owed(session) or self.cache.save_owed(session, "sessions")
         if not hook_owed and not save_owed:
             return True

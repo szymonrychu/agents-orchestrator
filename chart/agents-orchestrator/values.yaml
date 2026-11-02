@@ -307,9 +307,10 @@ usageQuotaDefault: 100
 # Seconds between two restarts an agent asks for on its own session (ORCH_SELF_RESTART_COOLDOWN_SECONDS).
 selfRestartCooldownSeconds: 600
 
-# Superleader admin relay upstreams (/agent/v1/admin/webhooks, /schedules, /chats). Each of webhook,
-# schedule and connector: url becomes ORCH_<NAME>_URL (the connector's is its agent listener, the
-# relay appends /chat/v1/admin); ORCH_<NAME>_TOKEN, the service bearer sent upstream, comes from
+# Superleader admin relay upstreams (/agent/v1/admin/webhooks, /schedules, /chats, /history). Each of
+# webhook, schedule, connector and history: url becomes ORCH_<NAME>_URL (the connector's is its agent
+# listener, the relay appends /chat/v1/admin; the history one is the agents-history service
+# listener); ORCH_<NAME>_TOKEN, the service bearer sent upstream, comes from
 # existingSecret/existingSecretKey (default key "token"), or from the chart Secret
 # <fullname>-admin-<name> built from token (existingSecret wins). Env of the api main container
 # only, always together, never in the settings ConfigMap. Set url with a token source, or neither
@@ -330,6 +331,25 @@ admin:
     token: ""
     existingSecret: ""
     existingSecretKey: token
+  history:
+    url: ""
+    token: ""
+    existingSecret: ""
+    existingSecretKey: token
+
+# Pre-discard settings hook that feeds the session history service (ORCH_DISCARD_HOOK_URL): every
+# discard POSTs the session export there before anything is deleted. url becomes
+# ORCH_DISCARD_HOOK_URL in the settings ConfigMap (the api reports the hook kind in /meta);
+# ORCH_DISCARD_HOOK_TOKEN, the bearer sent with that URL hook only, comes from
+# existingSecret/existingSecretKey, or from the chart Secret <fullname>-discard-hook built from token
+# (existingSecret wins). The token is env of the reconciler main container only, never in the
+# ConfigMap. Set url with a token source, or neither (no settings hook); one without the other
+# fails the render.
+discardHook:
+  url: ""
+  token: ""
+  existingSecret: ""
+  existingSecretKey: token
 
 # Workspace cache: restore and save Jobs that move a capped tar.zst of a session workspace
 # to and from any S3-compatible object store. Empty cache.s3.bucket disables the cache and
