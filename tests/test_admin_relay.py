@@ -136,7 +136,7 @@ def seed(rig) -> None:
     scheds = [make("schedule", "ScheduleView", n, preset_id=by[n]) for n in (7, 8, 10)]
     runs = [make("schedule", "RunView", n, schedule_id=ident("schedule", n)) for n in (7, 8, 9)]
     runs[2]["schedule_id"] = ident("schedule", 99)  # a schedule the upstream does not list
-    rooms = [make("connector", "RoomView", n, preset_id=by[n]) for n in (7, 8, 9)]
+    rooms = [make("connector", "RoomView", n, preset_id=by[n]) for n in (7, 8, 9, 10)]
     for name, fake in rig.fakes.items():
         for key in admin_ops(name):
             fake.answers[key] = fu.success_sample(fake, key)
@@ -450,8 +450,8 @@ def ids(response, field: str = "id") -> set[str]:
 async def test_lists_filtered(rig, service, template, field):
     r = await rig.call("GET", relay_url(service, template))
     assert r.status_code == 200
-    # object 10 (endpoint, schedule) sits on the visible privileged preset: listed, not writable
-    seen = (7, 10) if template in ("/endpoints", "/schedules") else (7,)
+    # object 10 (endpoint, schedule, room) sits on the visible privileged preset: listed, not writable
+    seen = (7, 10) if template in ("/endpoints", "/schedules", "/rooms") else (7,)
     assert ids(r, field) == {str(ident(service, n)) for n in seen}
 
 
@@ -666,6 +666,7 @@ PRIVILEGED_WRITES = [
     ("schedule", "POST", "/schedules"),
     ("schedule", "PUT", "/schedules/{schedule_id}"),
     ("schedule", "POST", "/schedules/{schedule_id}/run"),
+    ("connector", "PUT", "/rooms/{room_id}/settings"),
 ]
 PRIV_BODY = [r for r in PRIVILEGED_WRITES if r in BODY]
 PRIV_STORED = [r for r in PRIVILEGED_WRITES if r in STORED]

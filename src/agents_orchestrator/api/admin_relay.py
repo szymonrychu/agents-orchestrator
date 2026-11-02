@@ -147,7 +147,7 @@ GUARDS: dict[tuple[str, str, str], Guard] = {
     ("schedule", "POST", "/schedules/{schedule_id}/run"): Guard(stored=_S, privileged=True),
     ("schedule", "GET", "/schedules/{schedule_id}/runs"): Guard(stored=_S),
     ("connector", "GET", "/rooms"): Guard(list_filter="preset_id"),
-    ("connector", "PUT", "/rooms/{room_id}/settings"): Guard(body_preset=True, stored=_R),
+    ("connector", "PUT", "/rooms/{room_id}/settings"): Guard(body_preset=True, stored=_R, privileged=True),
     ("connector", "GET", "/rules"): Guard(),
     ("connector", "POST", "/rules"): Guard(),
     ("connector", "DELETE", "/rules/{rule_id}"): Guard(),
