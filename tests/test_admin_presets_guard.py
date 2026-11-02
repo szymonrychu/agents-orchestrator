@@ -152,11 +152,11 @@ async def test_put_unchanged_grants_passes(call, human, seed):
     assert r.json()["spec"]["kube_access"] is True
 
 
-async def test_admin_put_refuses_removing_protected_env(call, seed):
+async def test_admin_put_may_remove_protected_env(call, seed):
     pid = await seed({"env": {"K": {"protected": True}}})
     r = await call("PUT", f"{A}/{pid}", json={"name": "seeded", "spec": {"env": {}}})
-    assert_error(r, 403, "human_only_field")
-    assert r.json()["error"]["fields"] == ["env.K"]
+    assert r.status_code == 200, r.text
+    assert "K" not in r.json()["spec"].get("env", {})
 
 
 async def test_put_against_changed_row_is_409(pool, settings, seed, monkeypatch):
@@ -377,11 +377,11 @@ async def test_patch_adds_protected_declaration(call, seed):
     assert r.json()["spec"]["env"]["N"]["protected"] is True
 
 
-async def test_patch_null_removes_protected_is_403(call, seed):
+async def test_patch_null_removes_protected_env(call, seed):
     pid = await seed({"env": {"K": {"protected": True}}})
     r = await call("PATCH", f"{A}/{pid}", json={"spec": {"env": {"K": None}}})
-    assert_error(r, 403, "human_only_field")
-    assert r.json()["error"]["fields"] == ["env.K"]
+    assert r.status_code == 200, r.text
+    assert "K" not in r.json()["spec"].get("env", {})
 
 
 async def test_patch_toward_safe_passes(call, seed):

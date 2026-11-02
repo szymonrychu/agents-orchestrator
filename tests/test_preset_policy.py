@@ -64,11 +64,11 @@ def test_permission_lists():
     assert human_only_changes({}, p(["A"], None)) == ["wrapper.permissions.allow"]
 
 
-def test_protected_env_cannot_be_removed_or_unprotected():
+def test_protected_env_is_not_human_only():
     stored = {"env": {"K": {"protected": True}}}
-    assert human_only_changes(stored, {"env": {}}) == ["env.K"]
-    assert human_only_changes(stored, {}) == ["env.K"]
-    assert human_only_changes(stored, {"env": {"K": {"value": "v"}}}) == ["env.K"]
+    assert human_only_changes(stored, {"env": {}}) == []
+    assert human_only_changes(stored, {}) == []
+    assert human_only_changes(stored, {"env": {"K": {"value": "v"}}}) == []
     assert (
         human_only_changes(stored, {"env": {"K": {"protected": True}, "N": {"protected": True}}})
         == []

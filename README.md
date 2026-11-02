@@ -1320,7 +1320,7 @@ Each preset has a `superleader_manageable` switch (default false, main port only
   - `discard_hook_url`: may be removed, never set to a different value.
   - `wrapper.permission_mode`: unset means `bypassPermissions`; may become `auto`, never any other change.
   - `wrapper.permissions.deny`: entries may be added, never removed. `wrapper.permissions.allow`: entries may be removed, never added.
-  - `env.<NAME>` of a stored protected variable: may not be removed or unprotected.
+  - Environment variables, protected ones included, are not human-only: an agent may add, remove, unprotect and update them. A secret value is never readable or echoed and is set only through the secret route (`secret_in_spec`).
   - Admin copy never answers 403: the copy has `kube_access`, `session_messaging`, `docker` (with its sizes) and `discard_hook_url` removed, and keeps the source's `wrapper.permission_mode` and `wrapper.permissions`. The main-port copy is unchanged.
   - A replace is a compare-and-swap on `updated_at`: if a human changed the preset after the superleader read it, the call is 409 `conflict` and must be retried from a fresh read.
   - `PATCH /agent/v1/admin/presets/{ref}` takes `{name?, labels?, spec?}`; `spec` is an RFC 7396 merge patch of the stored spec (objects merge, `null` deletes a key, arrays replace), so what the patch does not name is kept, including stored protected variables and their Secret versions. Same validation, 403 guard and 422 texts as PUT. A protected `env` entry that carries a `value` is 422 `secret_in_spec` (set it through the secret route). It retries up to three times when a concurrent edit lands between its read and write, then answers 409 `conflict`. Renaming the default preset is 409 `preset_default`.

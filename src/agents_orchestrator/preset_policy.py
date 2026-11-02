@@ -10,7 +10,6 @@ and false equal:
   never any other change.
 - wrapper.permissions.deny: entries may be added, never removed.
 - wrapper.permissions.allow: entries may be removed, never added.
-- env.<NAME> of a stored protected variable: may not be removed or unprotected.
 
 All functions work on JSON dicts as stored (model_dump(mode="json",
 exclude_unset=True)) and never mutate their inputs. The main port never calls
@@ -71,11 +70,6 @@ def human_only_changes(stored: dict[str, Any], new: dict[str, Any]) -> list[str]
         out.append("wrapper.permissions.allow")
     if not _entries(s_perm.get("deny")) <= _entries(n_perm.get("deny")):
         out.append("wrapper.permissions.deny")
-
-    new_env = _dict(new.get("env"))
-    for name, entry in _dict(stored.get("env")).items():
-        if _dict(entry).get("protected") and not _dict(new_env.get(name)).get("protected"):
-            out.append(f"env.{name}")
     return sorted(out)
 
 
