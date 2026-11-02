@@ -15,6 +15,7 @@ from agents_orchestrator.api import schemas, secret_store
 from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.sessions import Cfg, Pool, check_spec
 from agents_orchestrator.db import presets as repo
+from agents_orchestrator.preset_policy import changed_paths, human_only_changes
 from agents_orchestrator.secret_view import EnvMeta, redact_spec_dict
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import SessionSpec, default_cache_key
@@ -50,16 +51,43 @@ def _checked_name(name: str) -> str:
         raise ApiError(422, "invalid_request", str(exc)) from None
 
 
+def human_only_refused(paths: list[str]) -> ApiError:
+    return ApiError(
+        403,
+        "human_only_field",
+        f"only a human can change: {', '.join(paths)}",
+        extra={"fields": paths},
+    )
+
+
+def _note_fields(request: Request, paths: list[str]) -> None:
+    """Hand the changed (or refused) paths to the admin audit; paths only, never values."""
+    request.state.preset_fields = sorted(paths)
+
+
 async def _validated(
     body: schemas.PresetIn,
     settings: Settings,
     stored: dict[str, Any] | None = None,
     preset_id: uuid.UUID | None = None,
+    human_only_base: dict[str, Any] | None = None,
+    request: Request | None = None,
 ) -> tuple[dict[str, Any], dict[str, SecretStr]]:
     """Check name and spec; return the spec as the caller sent it (no defaults filled) and the
-    protected values it carried, which never go into the spec."""
+    protected values it carried, which never go into the spec.
+
+    With `human_only_base` (the stored spec, `{}` on create) the human-only fields may only move
+    toward safe, else 403 before anything is written."""
     _checked_name(body.name)
     spec, values = body.spec.split()
+    if human_only_base is not None:
+        refused = human_only_changes(
+            human_only_base, spec.model_dump(mode="json", exclude_unset=True)
+        )
+        if refused:
+            if request is not None:
+                _note_fields(request, refused)
+            raise human_only_refused(refused)
     stored_spec = None
     if stored is not None:
         try:
@@ -170,7 +198,9 @@ async def create(
 ) -> schemas.PresetView:
     if superleader and body.superleader_manageable is False:
         raise manageable_main_port_only()
-    spec, values = await _validated(body, settings)
+    spec, values = await _validated(
+        body, settings, human_only_base={} if superleader else None, request=request
+    )
     manageable = superleader or bool(body.superleader_manageable)
     try:
         preset, metas = await _save(
@@ -183,6 +213,10 @@ async def create(
         )
     except repo.PresetExists:
         raise _exists(body.name) from None
+    if superleader:
+        _note_fields(
+            request, changed_paths({}, spec) + ["name"] + (["labels"] if body.labels else [])
+        )
     return _view(preset, metas)
 
 
@@ -208,7 +242,15 @@ async def replace(
     stored = await repo.get(conn, preset_id)
     if stored is None:
         raise not_found("preset")
-    spec, values = await _validated(body, settings, stored.spec, preset_id)
+    spec, values = await _validated(
+        body,
+        settings,
+        stored.spec,
+        preset_id,
+        human_only_base=stored.spec if superleader else None,
+        request=request,
+    )
+    expected = stored.updated_at if superleader else None
     try:
         preset, metas = await _save(
             request,
@@ -216,15 +258,24 @@ async def replace(
             settings,
             spec,
             values,
-            lambda: repo.update(conn, preset_id, body.name, spec, flag, body.labels),
+            lambda: repo.update(conn, preset_id, body.name, spec, flag, body.labels, expected),
         )
-        return _view(preset, metas)
     except repo.PresetNotFound:
         raise not_found("preset") from None
+    except repo.PresetChanged:
+        raise ApiError(409, "conflict", "the preset changed since it was read; retry") from None
     except repo.PresetDefault as exc:
         raise _default_error(exc) from None
     except repo.PresetExists:
         raise _exists(body.name) from None
+    if superleader:
+        paths = changed_paths(stored.spec, spec)
+        if body.name != stored.name:
+            paths.append("name")
+        if body.labels is not None and body.labels != stored.labels:
+            paths.append("labels")
+        _note_fields(request, paths)
+    return _view(preset, metas)
 
 
 async def remove(request: Request, conn, settings: Settings, preset_id: uuid.UUID) -> None:

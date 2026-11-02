@@ -1315,6 +1315,13 @@ Each preset has a `superleader_manageable` switch (default false, main port only
 
 - Admin preset routes: list omits hidden presets; get, replace, copy, delete and secrets of a hidden preset are 404. Presets created through the admin API are manageable.
 - Admin session create needs a `preset_id` of a manageable preset (a raw `spec` is 422 `preset_required`; a hidden preset is 404) and is gated like the main port (409 `usage_quota`, see Usage gate); a session of a hidden preset, or with a null preset, is 404 on every admin session route and absent from the list.
+- Human-only fields: admin create and replace (PUT) answer 403 `human_only_field` (with `error.fields`, the sorted paths) when the body would move one of these away from safe, compared to the stored row (`{}` on create). Nothing is written. Turning a field off or leaving it as stored passes.
+  - `kube_access`, `session_messaging`, `docker`: may be turned off, never on (absent, null and false are equal).
+  - `discard_hook_url`: may be removed, never set to a different value.
+  - `wrapper.permission_mode`: unset means `bypassPermissions`; may become `auto`, never any other change.
+  - `wrapper.permissions.deny`: entries may be added, never removed. `wrapper.permissions.allow`: entries may be removed, never added.
+  - `env.<NAME>` of a stored protected variable: may not be removed or unprotected.
+  - A replace is a compare-and-swap on `updated_at`: if a human changed the preset after the superleader read it, the call is 409 `conflict` and must be retried from a fresh read.
 - Sending `superleader_manageable` through the admin API is 422 `manageable_main_port_only` when false; the admin API cannot hide a preset.
 - Relay (`/agent/v1/admin/webhooks`, `/schedules`, `/chats`, `/history`): a body naming a hidden or null preset, or a stored object on one, is 404 and never forwarded. Lists (endpoints, events, schedules, runs, rooms, history sessions) are filtered after the upstream page, so a page of `events` or `runs` full of hidden items comes back short or empty; a single event or run of a hidden preset is 404. Objects with a null preset (for example chat rooms without a preset) are hidden. A list answer that is not a JSON list is 502 `upstream_shape`.
 - Cross-session messaging (`/agent/v1/sessions`) is not filtered by this switch.
@@ -1322,6 +1329,7 @@ Each preset has a `superleader_manageable` switch (default false, main port only
 ### Admin relay: secrets, cooldown and known risks
 
 - Secrets are protected variables: a preset env entry with `protected: true` is write-only (stored in a Secret, never shown, only overwritten); `expand` is ignored for protected entries. Webhook credentials are written to `webhook-<id>-password` Secrets and never returned to the agent.
+- The audit row and log line of an admin preset write carry `fields` (the changed paths, or the refused paths of a 403), never values. The human-only guard above closes the escalation where a superleader set grants through admin create or replace.
 - A superleader restarting its own session is limited to one restart per `ORCH_SELF_RESTART_COOLDOWN_SECONDS` (default 600), then 429 `restart_cooldown`.
 - The flags (`session_messaging`, the admin and chat tools) are honoured whoever created the session; there is no refusal based on the creating service.
 - Risk R1 (documented only, no technical rule): a superleader can create a child session whose spec reads or forwards a protected variable's value inside that child, so a compromised superleader can exfiltrate secrets through a child session. Grant the flag only to sessions you trust.

@@ -66,14 +66,16 @@ async def _audit(request: Request, status: int) -> None:
         return  # refused at the gate: not an admin call
     agent, session = admitted
     secrets = sorted(set(request.state.admin_secrets))
+    fields = getattr(request.state, "preset_fields", None)
     path = request.url.path
     log.info(
-        "admin %s %s -> %s session=%s secrets=%s",
+        "admin %s %s -> %s session=%s secrets=%s%s",
         request.method,
         path,
         status,
         session.slug,
         secrets,
+        "" if fields is None else f" fields={fields}",
     )
     data = {
         "method": request.method,
@@ -82,6 +84,8 @@ async def _audit(request: Request, status: int) -> None:
         "session": session.slug,
         "secrets": secrets,
     }
+    if fields is not None:
+        data["fields"] = fields
     try:
         async with request.app.state.pool.connection() as conn:
             await events_repo.insert_events(
