@@ -1190,12 +1190,12 @@ The leader grows or shrinks its own session. Body `{replicas}`; sets `spec.repli
 
 The leader closes its own session once it is idle. Body `{reason}`, 1 to 500 characters after stripping, no other field. Records the request (`close_requested_at`, `close_reason`); the sweeper discards the session once it is idle for the grace `ORCH_CLOSE_GRACE_SECONDS` (default 30), see Self-close under Autoclose, so the calling turn finishes and its answer stays readable. Response 202 `{session_id, close_requested_at, close_reason, already_requested, grace_seconds}`. A repeat call keeps the first request: `already_requested` is true and the reason and time are the first ones. The request can be cancelled with `DELETE /api/v1/sessions/{session_id}/close` until the session is flipped. Errors, checked in this order, and a refusal records nothing:
 
+- 401 `unauthorized` and 403 `forbidden`: the caller is not identified as an agent of a session, see the errors at the top of the agent API section;
+- 422 `invalid_request`: the reason is empty, blank or longer than 500 characters, or the body has another field (request validation);
 - 403 `not_leader`: the caller is not its session's current leader (the only agent of an alone session counts as leader);
 - 422 `own_session`: the session is a superleader session (`session_messaging` true); the user discards it;
 - 409 `session_deleting`: the session is already being discarded;
-- 404 `not_found`: the session row is gone;
-- 422 `invalid_request`: the reason is empty, blank or longer than 500 characters, or the body has another field (checked before the others, by request validation);
-- plus the 401 and 403 above.
+- 404 `not_found`: the session row is gone.
 
 Served only on the agent port. Backs the plugin tool `orchestrator_self_close`.
 

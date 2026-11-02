@@ -10,6 +10,7 @@ from test_api_agent import IP0, IP1, client_for, headers, make_settings, set_ip
 from test_api_sessions import assert_error
 
 from agents_orchestrator.api.app import create_app
+from agents_orchestrator.db import sessions as sessions_repo
 
 
 async def close_columns(pool, session_id) -> tuple:
@@ -107,4 +108,17 @@ async def test_not_on_main_port(pool, dsn):
     async with httpx.AsyncClient(transport=transport, base_url="http://orch:8000") as pub:
         r = await pub.post("/agent/v1/close", json={"reason": "done"}, headers=headers(c["id"]))
     assert r.status_code == 404, r.text
+    assert (await close_columns(pool, c["id"]))[:2] == (None, None)
+
+
+async def test_session_gone_between_checks_is_404(pool, dsn, monkeypatch):
+    """The row can vanish after the caller was identified; the writer's SessionNotFound is 404."""
+    c, _, _ = await hive(pool)
+
+    async def gone(conn, session_id, reason):
+        raise sessions_repo.SessionNotFound(str(session_id))
+
+    monkeypatch.setattr(sessions_repo, "request_close", gone)
+    r = await post_close(pool, dsn, c["id"], {"reason": "done"})
+    assert_error(r, 404, "not_found")
     assert (await close_columns(pool, c["id"]))[:2] == (None, None)
