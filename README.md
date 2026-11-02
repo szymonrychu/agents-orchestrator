@@ -80,12 +80,13 @@ Every process reads `ORCH_*` variables (the contract `agents-orchestrator-settin
 | `ORCH_AMBIGUOUS_DEADLINE_SECONDS` | `600` | dispatcher, ingester | deadline after which an ambiguous send fails (> settle) |
 | `ORCH_DISCARD_HOOK_COMMAND` | empty | api, reconciler | pre-discard hook command (exclusive with URL) |
 | `ORCH_DISCARD_HOOK_URL` | empty | api, reconciler | pre-discard hook http(s) webhook URL |
+| `ORCH_DISCARD_HOOK_TOKEN` | empty | reconciler | bearer token sent as `Authorization: Bearer` with the `ORCH_DISCARD_HOOK_URL` hook only; needs the URL, refused with the command, never logged |
 | `ORCH_DISCARD_HOOK_TIMEOUT_SECONDS` | `120` | api, reconciler | discard hook timeout |
 | `ORCH_SCALE_DRAIN_SECONDS` | `900` | reconciler | scale-down drain deadline (> 0): after it the StatefulSet gets the target replicas even while a draining agent is busy |
 | `ORCH_ANY_MCP_REPO` | `https://github.com/szymonrychu/any-mcp` | api, reconciler | any-mcp git repository |
 | `ORCH_ANY_MCP_REF` | `v0.5.0` | api, reconciler | any-mcp pinned release tag vX.Y.Z (never a branch) |
 | `ORCH_ANY_MCP_PLUGINS_REPO` | `https://github.com/szymonrychu/any-mcp-tatara-plugins` | api, reconciler | any-mcp plugins git repository (holds the orchestrator plugin) |
-| `ORCH_ANY_MCP_PLUGINS_REF` | `v0.10.0` | api, reconciler | any-mcp plugins pinned release tag vX.Y.Z (never a branch) |
+| `ORCH_ANY_MCP_PLUGINS_REF` | `v0.11.0` | api, reconciler | any-mcp plugins pinned release tag vX.Y.Z (never a branch) |
 | `ORCH_ON_START_TIMEOUT_SECONDS` | `600` | api, reconciler | onStart hook timeout |
 | `ORCH_KUBE_ACCESS_SERVICE_ACCOUNT` | empty | api, reconciler | ServiceAccount (bound to the `cluster-admin` ClusterRole by the chart) that pods of a `kube_access` session run as; empty refuses `spec.kube_access: true` with 422 and `GET /api/v1/meta` reports `kube_access.available` false |
 | `ORCH_DOCKER_IMAGE` | empty | api, reconciler | Docker-in-Docker image of the privileged sidecar of a `docker` session, pinned by semver tag like `docker:27.3.1-dind` (`latest`, `dind` and sha pins are refused at startup); empty refuses `spec.docker: true` with 422 and `GET /api/v1/meta` reports `docker.available` false |
@@ -109,6 +110,8 @@ Every process reads `ORCH_*` variables (the contract `agents-orchestrator-settin
 | `ORCH_SCHEDULE_TOKEN` | empty | api | service bearer the admin relay presents to that upstream (`Authorization: Bearer`); secret, never in a repr, a log line or an error body. Set together with `ORCH_SCHEDULE_URL` or neither |
 | `ORCH_CONNECTOR_URL` | empty | api | http or https base URL of the matrix connector agent listener; the superleader admin relay (`/agent/v1/admin/chats/*`) calls `/chat/v1/admin/...`. No query or fragment. Set together with `ORCH_CONNECTOR_TOKEN` or neither; empty answers those calls 503 `upstream_unconfigured` |
 | `ORCH_CONNECTOR_TOKEN` | empty | api | service bearer the admin relay presents to that upstream (`Authorization: Bearer`); secret, never in a repr, a log line or an error body. Set together with `ORCH_CONNECTOR_URL` or neither |
+| `ORCH_HISTORY_URL` | empty | api | http or https base URL of the agents-history service listener; the superleader admin relay (`/agent/v1/admin/history/*`) calls `/history/v1/...`. No query or fragment. Set together with `ORCH_HISTORY_TOKEN` or neither; empty answers those calls 503 `upstream_unconfigured` |
+| `ORCH_HISTORY_TOKEN` | empty | api | service bearer the admin relay presents to that upstream (`Authorization: Bearer`); secret, never in a repr, a log line or an error body. Set together with `ORCH_HISTORY_URL` or neither |
 | `ORCH_USAGE_URL` | empty | api | http or https base URL of the agents-usage listener; the usage gate reads `{ORCH_USAGE_URL}/usage/v1/current`. No query or fragment. Set together with `ORCH_USAGE_TOKEN` or neither; empty turns the gate off (every start is allowed) |
 | `ORCH_USAGE_TOKEN` | empty | api | service bearer the usage gate presents to agents-usage (`Authorization: Bearer`); secret, never in a repr, a log line or an error body. Set together with `ORCH_USAGE_URL` or neither, else a settings error naming both |
 | `ORCH_USAGE_QUOTA_DEFAULT` | `100` | api | percent (1 to 100) of the `five_hour` and `seven_day` usage windows at which a start is refused when the preset sets no `usage_quota` for that window; a window gates when its percent is at or above the limit, so 100 gates at the real limit |
@@ -146,7 +149,7 @@ CI (`.github/workflows/ci.yaml`, job `images`) builds the orchestrator image fro
 
 - Orchestrator image: `harbor.szymonrichert.pl/containers/agents-orchestrator:<sha7>`, where `<sha7>` is the first seven characters of the commit sha. Tags are immutable; there is no `latest`.
 - Agent image: no agent image is built here. Agent pods run the claude-code-wrapper image named by `ORCH_AGENT_IMAGE`; the recommended one is `harbor.szymonrichert.pl/containers/claude-code-wrapper:0.7.0`. This is the value for the chart's `agentImage` and agents-helmfile, and the commit the dev dependency `claude-code-wrapper` in `pyproject.toml` is pinned to, so config validation tests the wrapper the agents run.
-- any-mcp: it reaches agent pods through the rendered onStart hook, not through an image. The `any-mcp` dependency in `pyproject.toml` and `ORCH_ANY_MCP_REF` pin the same release tag (`v0.5.0`). The dev dependency `any-mcp-tatara-orchestrator` in `pyproject.toml` (the orchestrator plugin from the plugins repo) and `ORCH_ANY_MCP_PLUGINS_REF` pin the same plugins release tag (`v0.10.0`).
+- any-mcp: it reaches agent pods through the rendered onStart hook, not through an image. The `any-mcp` dependency in `pyproject.toml` and `ORCH_ANY_MCP_REF` pin the same release tag (`v0.5.0`). The dev dependency `any-mcp-tatara-orchestrator` in `pyproject.toml` (the orchestrator plugin from the plugins repo) and `ORCH_ANY_MCP_PLUGINS_REF` pin the same plugins release tag (`v0.11.0`).
 - The onStart script (`k8s/on_start.py`, ConfigMap key `on-start.sh`) runs before claude starts, on every pod start: it installs any-mcp into `/opt/any-mcp` when `/opt/any-mcp/.ref` differs from `ORCH_ANY_MCP_REF`, writes the session's any-mcp config to `/opt/any-mcp/etc/any-mcp.yaml`, runs `/opt/any-mcp/bin/any-mcp plugins install --config /opt/any-mcp/etc/any-mcp.yaml` (every run, so every `plugins[].source` of the config is installed into the any-mcp venv, branch and tag refs refreshed), then `/opt/any-mcp/bin/any-mcp --help`. The orchestrator plugin is one of those sources: the reserved entry is `source: git::<ORCH_ANY_MCP_PLUGINS_REPO>//orchestration/orchestrator?ref=<ORCH_ANY_MCP_PLUGINS_REF>` (no `plugin` key), installed as the package `any-mcp-tatara-orchestrator`. The rendered `plugins` list is the base config's entries (the spec's `any_mcp_config`, else the `ORCH_ANY_MCP_CONFIG_FILE` default), then one `{name, source}` per `spec.any_mcp_sources` entry in order, then the reserved entry (omitted without `ORCH_AGENT_API_URL`; the sources are rendered either way). A failed install does not block the session: the script logs `on-start: <step> failed (exit N)` to stderr, exits 0 and the hook is `on_error: allow`, so the pod stays Ready without the failed piece. Changing `ORCH_ANY_MCP_PLUGINS_REPO`, `ORCH_ANY_MCP_PLUGINS_REF` or a session's sources changes the config hash and rolls its pods.
 
 ## Helm chart
@@ -179,10 +182,12 @@ A Postgres connection is required. Set exactly one of these; none, or more than 
 | `<fullname>-master-key` | `masterKey.existingSecretKey` (default `master-key`) | `masterKey.value` is set | `masterKey.existingSecret` + `existingSecretKey` |
 | `<fullname>-claude` | `CLAUDE_CODE_OAUTH_TOKEN` | `claude.token` is set | `claude.existingSecret` + `existingSecretKey` |
 | `<fullname>-chat` | `chat.existingSecretKey` (default `chat-token`) | `chat.token` is set and `chat.existingSecret` is not | `chat.existingSecret` + `existingSecretKey` |
+| `<fullname>-admin-<name>` (`<name>` is `webhook`, `schedule`, `connector` or `history`) | `admin.<name>.existingSecretKey` (default `token`) | `admin.<name>.token` is set and `admin.<name>.existingSecret` is not | `admin.<name>.existingSecret` + `existingSecretKey` |
+| `<fullname>-discard-hook` | `discardHook.existingSecretKey` (default `token`) | `discardHook.token` is set and `discardHook.existingSecret` is not | `discardHook.existingSecret` + `existingSecretKey` |
 
 The master key and the Claude token each need a value or an `existingSecret`; with neither the render fails. The agent pods in the release namespace read the Claude Secret, so `existingSecret` must live there.
 
-The admin relay upstreams are optional, one block each under `admin.webhook`, `admin.schedule` and `admin.connector`. `admin.<name>.url` becomes `ORCH_WEBHOOK_URL`, `ORCH_SCHEDULE_URL` or `ORCH_CONNECTOR_URL`, and the token `ORCH_<NAME>_TOKEN` comes from `admin.<name>.existingSecret` (key `existingSecretKey`, default `token`) or else from the chart Secret `<fullname>-admin-<name>` built from `admin.<name>.token`. Same rules as chat: api main container only, always as a pair, never in the ConfigMap, the pod rolls when a chart-made token changes, url without a token source (or the reverse) fails the render. `selfRestartCooldownSeconds` (default 600) becomes `ORCH_SELF_RESTART_COOLDOWN_SECONDS`. The api Role already allows `create`, `patch` and `delete` on Secrets (never a read), which covers both protected preset variables and the `webhook-<id>-password` Secrets.
+The admin relay upstreams are optional, one block each under `admin.webhook`, `admin.schedule`, `admin.connector` and `admin.history`. `admin.<name>.url` becomes `ORCH_WEBHOOK_URL`, `ORCH_SCHEDULE_URL`, `ORCH_CONNECTOR_URL` or `ORCH_HISTORY_URL`, and the token `ORCH_<NAME>_TOKEN` comes from `admin.<name>.existingSecret` (key `existingSecretKey`, default `token`) or else from the chart Secret `<fullname>-admin-<name>` built from `admin.<name>.token`. Same rules as chat: api main container only, always as a pair, never in the ConfigMap, the pod rolls when a chart-made token changes, url without a token source (or the reverse) fails the render. `discardHook.url` becomes `ORCH_DISCARD_HOOK_URL` in the settings ConfigMap (the api reports the hook kind in `/meta`), and `ORCH_DISCARD_HOOK_TOKEN` comes from `discardHook.existingSecret` (key `existingSecretKey`, default `token`) or else from the chart Secret `<fullname>-discard-hook` built from `discardHook.token`; the token is env of the reconciler main container only, never in the ConfigMap, the pod rolls when a chart-made token changes, and url without a token source (or the reverse) fails the render. `selfRestartCooldownSeconds` (default 600) becomes `ORCH_SELF_RESTART_COOLDOWN_SECONDS`. The api Role already allows `create`, `patch` and `delete` on Secrets (never a read), which covers both protected preset variables and the `webhook-<id>-password` Secrets.
 
 The chat relay is optional. `chat.url` becomes `ORCH_CHAT_URL` and `ORCH_CHAT_TOKEN` comes from `chat.existingSecret` (key `chat.existingSecretKey`, default `chat-token`) or else from the chart Secret `<fullname>-chat` built from `chat.token`; `existingSecret` wins. `ORCH_CHAT_URL` (a plain value) and `ORCH_CHAT_TOKEN` (a `secretKeyRef`) are env of the api main container only, always together, never in the settings ConfigMap (not its migrate init container, not the dispatcher, ingester or reconciler), and the api pod rolls when the chart-made token changes (`checksum/chat-secret`). Set `chat.url` together with `chat.token` or `chat.existingSecret`, or none of them: one without the other fails the render naming all three. With none, neither variable renders and every `/agent/v1/chat/*` call answers 503 `chat_unconfigured`.
 
@@ -392,25 +397,27 @@ A deleting session first passes the pre-discard gate, then loses every labelled 
 
 `DELETE /api/v1/sessions/{id}` marks the session `deleting`; the reconciler then removes everything, in this order:
 
-1. **Quiesce** (only when a hook is configured and has not yet delivered): the StatefulSet is scaled to zero and the reconciler waits until no agent pod is left, then gives the ingester `ORCH_DISCARD_DRAIN_SECONDS` (5) to store the last events of their streams. The wait is bounded by `ORCH_DISCARD_QUIESCE_TIMEOUT_SECONDS` (120) from the start of the discard; after that the discard logs a warning and goes on.
-2. **Export** the full history as JSONL.
-3. **Hook**: deliver the export; a failed hook blocks the deletion and is retried with backoff.
+1. **Quiesce** (only while any configured hook has not yet delivered): the StatefulSet is scaled to zero and the reconciler waits until no agent pod is left, then gives the ingester `ORCH_DISCARD_DRAIN_SECONDS` (5) to store the last events of their streams. The wait is bounded by `ORCH_DISCARD_QUIESCE_TIMEOUT_SECONDS` (120) from the start of the discard; after that the discard logs a warning and goes on.
+2. **Export** the full history as JSONL, one stream per hook.
+3. **Hooks**: deliver the export to every hook not yet delivered; a failed hook blocks the deletion and is retried with backoff, the delivered ones are not sent again.
 4. **Delete** everything.
 
 A discard deletes the session's Kubernetes objects (check Jobs, the init Job, StatefulSet and its pods, headless Service, ConfigMap, the Secret by name and the RWX PVC with the workspace) and, last, the session row, which cascades its whole chat history: agents, messages, turns, commands, checks and events.
 
 ### Hook
 
-An optional hook receives the full history export before anything is deleted. None is configured by default. The hook comes from, in order of precedence:
+Optional hooks receive the full history export before anything is deleted. None is configured by default. A discard runs every configured hook, in this order, each with its own export stream:
 
-1. `spec.discard_hook_url` of the session (a webhook URL, http or https only);
-2. `ORCH_DISCARD_HOOK_COMMAND` (a shell command) or `ORCH_DISCARD_HOOK_URL` (a webhook URL), set at most one.
+1. `settings`: `ORCH_DISCARD_HOOK_COMMAND` (a shell command) or `ORCH_DISCARD_HOOK_URL` (a webhook URL), set at most one;
+2. `session`: `spec.discard_hook_url` of the session (a webhook URL, http or https only).
 
-A command comes only from settings, never from the spec: the API has no auth and the reconciler holds the Kubernetes credentials. Both kinds are bounded by `ORCH_DISCARD_HOOK_TIMEOUT_SECONDS` (120).
+The settings hook always runs, also for a session that sets its own URL (user decision: it feeds the session history service). A command comes only from settings, never from the spec: the API has no auth and the reconciler holds the Kubernetes credentials. Every hook is bounded by `ORCH_DISCARD_HOOK_TIMEOUT_SECONDS` (120).
+
+`ORCH_DISCARD_HOOK_TOKEN` (reconciler only) is sent as `Authorization: Bearer <token>` with the settings URL hook, and never with a session's own URL, which is user-controlled. It needs `ORCH_DISCARD_HOOK_URL`, is refused with `ORCH_DISCARD_HOOK_COMMAND` or unless it is printable ASCII without whitespace (0x21 to 0x7E), is hidden from the settings repr and is never logged.
 
 ### Export format
 
-JSONL, one JSON object per line, each with a `kind`. The first line is the `session` record (`id`, `slug`, `spec`, `created_at`, `close_requested_at` and `close_reason`: when and why the leader asked to close the session, both null when it did not, see Self-close under Autoclose). Then come the `agent`, `message`, `turn`, `command`, `check` and `event` records of the session, each kind in id order (turns in `started_at` order); a record carries the table's columns. A `command` record's own kind column is named `command_kind`. Timestamps are ISO 8601 UTC. The export is streamed from the database with server-side cursors, so a long history is never held in memory. The session is already `deleting` and the API refuses new messages, so, with the agents quiesced first, the history includes every event the agents produced.
+JSONL, one JSON object per line, each with a `kind`. The first line is the `session` record (`id`, `slug`, `spec`, `created_at`, the provenance `preset_id`, `preset_name`, `created_by_service`, `created_by_session`, each `null` when unset; `preset_id` is also `null` once the preset is deleted, `preset_name` keeps the name it had at creation; and `close_requested_at` and `close_reason`: when and why the leader asked to close the session, both null when it did not, see Self-close under Autoclose). Then come the `agent`, `message`, `turn`, `command`, `check` and `event` records of the session, each kind in id order (turns in `started_at` order); a record carries the table's columns. A `command` record's own kind column is named `command_kind`. Timestamps are ISO 8601 UTC. The export is streamed from the database with server-side cursors, so a long history is never held in memory. The session is already `deleting` and the API refuses new messages, so, with the agents quiesced first, the history includes every event the agents produced.
 
 ### Breaking change, 2026-10-25
 
@@ -422,13 +429,13 @@ Run through `sh -c` with the JSONL on stdin, `ORCH_SESSION_ID` and `ORCH_SESSION
 
 ### Webhook contract
 
-An HTTP `POST` of the JSONL, streamed, with `Content-Type: application/x-ndjson`, `X-Orch-Session-Id` and `X-Orch-Session-Slug`. Any 2xx is success; any other status, a connection error or a timeout is a failure.
+An HTTP `POST` of the JSONL, streamed, with `Content-Type: application/x-ndjson`, `X-Orch-Session-Id` and `X-Orch-Session-Slug`, plus `Authorization: Bearer` on the settings URL when `ORCH_DISCARD_HOOK_TOKEN` is set. Any 2xx is success; any other status, a connection error or a timeout is a failure.
 
 ### Delivery and retries
 
-Delivery is at-least-once. Success writes `status.discard_hook_delivered` (database time), after which the export is never sent again, also not after a reconciler restart. A crash between the hook accepting and that write sends the export a second time, so a receiver must tolerate duplicates (the session `id` identifies them).
+Delivery is at-least-once, per hook. Each success adds the hook's name to the object `status.discard_hook_delivered` (`{"settings": "<time>", "session": "<time>"}`, database time), after which that hook is never sent the export again, also not after a reconciler restart. A crash between a hook accepting and that write sends the export a second time, so a receiver must tolerate duplicates (the session `id` identifies them). A `discard_hook_delivered` that is not an object (written by an earlier version, before hooks were tracked by name) counts as nothing delivered, so every hook runs again.
 
-A failing hook holds the discard: nothing is deleted, the session stays `deleting`, and the status records `discard_hook_failed` (the reason), `discard_hook_failures` (the count) and `discard_hook_next_at`. The hook is retried on a later reconcile once the database clock passes `discard_hook_next_at`, with the backoff `ORCH_RETRY_BACKOFF_BASE_SECONDS` doubling up to `ORCH_RETRY_BACKOFF_MAX_SECONDS`. One session's failing hook never stops the other sessions reconciling.
+Each owed hook runs whatever the others did: a failing settings hook never holds the session's own hook back, nor the other way round. Any failure holds the discard: nothing is deleted, the session stays `deleting`, and the status records `discard_hook_failed` (`<name>: <reason>` of the first failing hook, for example `session: status 500`), `discard_hook_failures` (the count, shared by the hooks) and `discard_hook_next_at`. The hooks not yet delivered are retried on a later reconcile once the database clock passes `discard_hook_next_at`, with the backoff `ORCH_RETRY_BACKOFF_BASE_SECONDS` doubling up to `ORCH_RETRY_BACKOFF_MAX_SECONDS`. One session's failing hook never stops the other sessions reconciling.
 
 ### Autoclose
 
@@ -493,8 +500,8 @@ Save never follows symlinks, skips sockets, FIFOs and device files, and skips ev
 Besides the restore and save Jobs, three things manage the archives in the bucket.
 
 - Versioned saves: a `save_key` such as `proj/{{ now }}` writes a new object per save, and a `restore_key` ending in `/` (`proj/`) restores the newest one. Names carry the fixed-width lowercase stamp, so they sort chronologically; the listing prefix keeps its `/`, so `foo/` never matches `foo-bar/`, and only direct children of the prefix count.
-- The cleanup sweep: the reconciler (a singleton, so one sweep at a time) lists the whole prefix every `ORCH_CACHE_SWEEP_INTERVAL_SECONDS` (6 hours; the last sweep time is read from the `cache_sweeps` row, so a restart does not repeat it) and deletes an archive only when it is beyond the newest `ORCH_CACHE_KEEP_NEWEST` of its group, older than `ORCH_CACHE_RETENTION_DAYS` and than `ORCH_CACHE_SWEEP_GRACE_SECONDS`, and not protected. A group is everything up to the last `/` of the name (`proj/<stamp>` groups under `proj/`; a flat name groups alone and is never deleted for being old); the newest by modification time and the greatest key of a group are never deleted. Transcripts (`sessions/<slug>`) are deleted by age alone. Protected keys are read from the database right before the delete (a second time after planning): the `restore_resolved` and `save_resolved` keys, the names the specs render to, and the transcripts object of every stored session, which covers sessions being discarded and cache runs in flight. Deletes go in batches of 1000 with per-key errors logged, and the run summary is stored in `cache_sweeps` (written by the reconciler only) and returned as `last_sweep` by the cleanup preview. `ORCH_CACHE_SWEEP_DRY_RUN` defaults to `true`: it plans and logs only.
-- The archives routes (`/api/v1/cache/...`) list, download, preview the cleanup and delete archives with the api pod's own key pair (`ORCH_CACHE_S3_API_*`); see the API section.
+- The cleanup sweep: the reconciler (a singleton, so one sweep at a time) lists the whole prefix every sweep interval (`ORCH_CACHE_SWEEP_INTERVAL_SECONDS`, 6 hours; the last sweep time is read from the `cache_sweeps` row, so a restart does not repeat it) and deletes an archive only when it is beyond the newest `ORCH_CACHE_KEEP_NEWEST` of its group, older than `ORCH_CACHE_RETENTION_DAYS` and than `ORCH_CACHE_SWEEP_GRACE_SECONDS`, and not protected. A group is everything up to the last `/` of the name (`proj/<stamp>` groups under `proj/`; a flat name groups alone and is never deleted for being old); the newest by modification time and the greatest key of a group are never deleted. Transcripts (`sessions/<slug>`) are deleted by age alone. Protected keys are read from the database right before the delete (a second time after planning): the `restore_resolved` and `save_resolved` keys, the names the specs render to, and the transcripts object of every stored session, which covers sessions being discarded and cache runs in flight. Deletes go in batches of 1000 with per-key errors logged, and the run summary is stored in `cache_sweeps` (written by the reconciler only) and returned as `last_sweep` by the cleanup preview. `ORCH_CACHE_SWEEP_DRY_RUN` defaults to `true`: it plans and logs only. The six knobs (enabled, dry run, retention days, keep newest, interval, grace) are a stored policy: the `ORCH_CACHE_*` values are only the seed, used until a policy is saved with `PUT /api/v1/cache/cleanup/settings` (Settings > Backups in the web UI); from then on the database row wins, and later changes to the environment do not touch it (`GET` shows both the saved policy and the environment defaults). The sweeper re-reads the policy every pass and wakes at once when it is saved or when a run is requested. `POST /api/v1/cache/cleanup/run` asks for one sweep now, through the same planner and safety guards, even when the schedule is disabled (`dry_run` still applies); the reconciler runs it on its next wake and the request stays pending until a sweep has started at or after it. The preview and the manual delete grace check use the same stored policy.
+- The archive routes (list, download, cleanup preview and delete under `/api/v1/cache/...`) use the api pod's own key pair (`ORCH_CACHE_S3_API_*`); the cleanup settings and run routes (`/api/v1/cache/cleanup/settings`, `/api/v1/cache/cleanup/run`) need only the database. See the API section.
 
 ### Transcripts
 
@@ -533,12 +540,12 @@ The cache is off until `ORCH_CACHE_S3_BUCKET` is set; then the access key, the s
 | `ORCH_CACHE_MAX_BYTES` | `5368709120` | archive cap, 1 to 5 GiB |
 | `ORCH_CACHE_TIMEOUT_SECONDS` | `1800` | Job deadline, 60 to 86400; also sets the presigned URL lifetime |
 | `ORCH_SELF_RESTART_COOLDOWN_SECONDS` | `600` | api | minimum seconds between two restarts an agent asks for on its own session; a second claim inside the window is refused with 429 `restart_cooldown` and `retry_after` (at least 1) |
-| `ORCH_CACHE_RETENTION_DAYS` | `30` | the sweep deletes archives older than this many days (at least 1) |
-| `ORCH_CACHE_KEEP_NEWEST` | `3` | the sweep always keeps this many newest archives per name group (at least 1) |
-| `ORCH_CACHE_SWEEP_INTERVAL_SECONDS` | `21600` | seconds between sweeps (at least 60; the reconciler leader runs them) |
-| `ORCH_CACHE_SWEEP_GRACE_SECONDS` | `ORCH_CACHE_TIMEOUT_SECONDS` + 600 | an archive younger than this is never deleted (it may be mid-save) |
-| `ORCH_CACHE_SWEEP_ENABLED` | `true` | run the sweep |
-| `ORCH_CACHE_SWEEP_DRY_RUN` | `true` | plan and log the sweep without deleting; set `false` after a verified preview |
+| `ORCH_CACHE_RETENTION_DAYS` | `30` | the sweep deletes archives older than this many days (1 to 3650); seed until saved in the UI |
+| `ORCH_CACHE_KEEP_NEWEST` | `3` | the sweep always keeps this many newest archives per name group (1 to 1000); seed until saved in the UI |
+| `ORCH_CACHE_SWEEP_INTERVAL_SECONDS` | `21600` | seconds between sweeps (60 to 2592000; the reconciler leader runs them); seed until saved in the UI |
+| `ORCH_CACHE_SWEEP_GRACE_SECONDS` | `ORCH_CACHE_TIMEOUT_SECONDS` + 600 | an archive younger than this is never deleted (0 to 604800; it may be mid-save); seed until saved in the UI |
+| `ORCH_CACHE_SWEEP_ENABLED` | `true` | run the sweep; seed until saved in the UI |
+| `ORCH_CACHE_SWEEP_DRY_RUN` | `true` | plan and log the sweep without deleting; set `false` after a verified preview; seed until saved in the UI |
 | `ORCH_CACHE_S3_API_ACCESS_KEY_ID` | empty | access key id of the api pod (list, get and delete only; set together with the secret) |
 | `ORCH_CACHE_S3_API_SECRET_ACCESS_KEY` | empty | secret key of the api pod; the archives endpoints answer 503 without the pair |
 
@@ -575,6 +582,9 @@ The rule "services talk only through the queue or HTTP APIs, with no shared stat
 | `leadership_requests` | api inserts; the dispatcher decides rows (`applied` or `rejected`) only through `WHERE status = 'queued'` guarded updates |
 | `session_leaders` | dispatcher |
 | `file_locks` | api |
+| `cache_sweep_settings` | api (`PUT /api/v1/cache/cleanup/settings`); the reconciler sweeper only reads it |
+| `cache_sweep_requests` | api (`POST /api/v1/cache/cleanup/run`); the reconciler sweeper only reads it |
+| `cache_sweeps` | reconciler (the sweeper); the api only reads it for the cleanup preview |
 
 ### NOTIFY channels and polling fallbacks
 
@@ -588,8 +598,9 @@ NOTIFY payloads are wake-up hints that carry ids only. Every loop also polls, be
 | `status` | `{session_id}` | ingester, dispatcher, reconciler | status stream |
 | `leadership_requested` | `{session_id}` | api (leadership routes, and a scale-down to a count at or below the leader's ordinal); ingester on a `compacting` or `compacted` event | dispatcher |
 | `leader_changed` | `{session_id, agent_id, epoch, reason}` | dispatcher (leadership pass) | hive-state push, session stream |
+| `cache_sweep_changed` | `{}` | api (`PUT` cleanup settings, `POST` cleanup run) | reconciler sweeper |
 
-Polling fallbacks: dispatcher `ORCH_DISPATCH_POLL_SECONDS` (2 s), reconciler `ORCH_RECONCILE_POLL_SECONDS` (10 s), ingester stream refresh `ORCH_INGEST_REFRESH_SECONDS` (5 s); the api SSE streams re-read on a 5 s poll when no NOTIFY arrives.
+Polling fallbacks: dispatcher `ORCH_DISPATCH_POLL_SECONDS` (2 s), reconciler `ORCH_RECONCILE_POLL_SECONDS` (10 s), reconciler sweeper (60 s; the `cache_sweep_changed` wake-up), ingester stream refresh `ORCH_INGEST_REFRESH_SECONDS` (5 s); the api SSE streams re-read on a 5 s poll when no NOTIFY arrives.
 
 ### Hive
 
@@ -710,6 +721,9 @@ Plain SQL migrations (`src/agents_orchestrator/db/migrations`), psycopg 3, no OR
 | `leadership_requests` | queue: `handover` (from the leader) or `user` requests with target agent, epoch, status (`queued`, `applied`, `rejected`); the api inserts, and the reconciler a `rollout` handover from an idle leader; the dispatcher decides |
 | `session_leaders` | one row per hive: leader agent, `epoch`, `since`, `reason` (`initial`, `user`, `handover: <reason>`, `leader_lost`, `lease_expired`, `scale_down`, `compaction`), `unready_since`, feed cursor and pushed hive-state hash; the dispatcher is the only writer (see Leadership) |
 | `checks` | queue: a shell command run as a Kubernetes Job; exit code and log tail |
+| `cache_sweep_settings` | one row (`id = 1`): the stored cleanup policy (enabled, dry run, retention days, keep newest, interval, grace), written only by the api (migration `0025`) |
+| `cache_sweep_requests` | one row (`id = 1`): `requested_at` of the last run-now request, written only by the api; a request is pending until a sweep has started at or after it (migration `0025`) |
+| `cache_sweeps` | one row: the last sweep summary (`result`, including `started_at`), written only by the reconciler sweeper |
 
 ## API
 
@@ -773,11 +787,23 @@ Query `key` (the full object key). Answers 302 with `Cache-Control: no-store` an
 
 ### `GET /api/v1/cache/cleanup/preview`
 
-What the cleanup sweep would delete now: the same planner as the reconciler's sweep, read-only. Response 200 `{"would_delete": [{"key", "size", "reason"}], "count", "total_bytes", "retention_days", "keep_newest", "grace_seconds", "sweep_enabled", "sweep_dry_run", "last_sweep": <last sweep result or null>}` with `Cache-Control: no-store`. An archive is listed only when it is beyond the newest `ORCH_CACHE_KEEP_NEWEST` of its group, older than `ORCH_CACHE_RETENTION_DAYS` and than the grace period, and referenced by no session; the newest object of a group is never listed. Errors: 503 `unavailable`.
+What the cleanup sweep would delete now: the same planner as the reconciler's sweep, read-only. Response 200 `{"would_delete": [{"key", "size", "reason"}], "count", "total_bytes", "retention_days", "keep_newest", "grace_seconds", "sweep_enabled", "sweep_dry_run", "last_sweep": <last sweep result or null>}` with `Cache-Control: no-store`. It uses the stored policy (see `GET /api/v1/cache/cleanup/settings`; the `ORCH_CACHE_*` environment values apply until a policy is saved), and `retention_days`, `keep_newest`, `grace_seconds`, `sweep_enabled` and `sweep_dry_run` in the response are the values of that policy. An archive is listed only when it is beyond the newest `keep_newest` of its group, older than `retention_days` and than the grace period, and referenced by no session; the newest object of a group is never listed. Errors: 503 `unavailable`.
+
+### `GET /api/v1/cache/cleanup/settings`
+
+The sweep policy in force. Response 200 with `Cache-Control: no-store`: `{"policy": {"enabled", "dry_run", "retention_days", "keep_newest", "interval_seconds", "grace_seconds"}, "defaults": {the same six fields from the ORCH_CACHE_* environment}, "source": "database" | "environment", "updated_at": <time or null>, "run_requested_at": <time or null>, "run_pending": bool, "last_sweep": <last sweep result or null>}`. `source` is `environment` (and `policy` equals `defaults`) until a policy is saved; after that the saved row wins and `defaults` still shows the environment. `run_pending` is true from a run request until a sweep has started at or after it. Needs only the database, not the api S3 key pair.
+
+### `PUT /api/v1/cache/cleanup/settings`
+
+Replaces the whole policy. Body (all six fields required, extra fields rejected): `{"enabled": bool, "dry_run": bool, "retention_days": 1..3650, "keep_newest": 1..1000, "interval_seconds": 60..2592000, "grace_seconds": 0..604800}`. Response 200 with the same body as `GET`, `Cache-Control: no-store`. The sweeper picks it up at once. Every call writes an `audit:` log line with the caller, the old policy (or `env`) and the new one. Needs only the database. Errors: 422 `invalid_request` (a missing, unknown or out-of-bounds field; nothing is stored).
+
+### `POST /api/v1/cache/cleanup/run`
+
+Asks the reconciler for one sweep now (no body). It uses the stored policy, the same planner and every safety guard (the protected set, the grace period, `dry_run`), and runs even when the policy is disabled. Repeated requests before the sweep starts collapse into one. Response 202 with the same body as `GET` (`run_pending` true, `run_requested_at` set), `Cache-Control: no-store`; poll `GET /api/v1/cache/cleanup/settings` for `run_pending` and `last_sweep`. Writes an `audit:` log line with the caller. Needs only the database; the sweep itself needs the reconciler's S3 key pair, and without it the request stays pending.
 
 ### `DELETE /api/v1/cache/archives`
 
-Body `{"keys": ["<full object key>", ...]}` (1 to 1000 keys, extra fields rejected). Deletes the keys the server re-checks right before deleting: a key outside the grammar, a missing one, one a session references and one younger than the grace period are refused, each with a reason, and never sent to S3. Response 200 `{"deleted": [key], "refused": [{"key", "reason"}], "errors": [{"key", "code", "message"}]}`; `errors` are the per-key failures S3 reported for a delete it accepted. Every call writes an `audit:` log line with the caller (the service name or the peer address), the deleted keys and the counts. Errors: 422 `invalid_request` (bad body), 503 `unavailable`. These four routes are on the main port only: the service port does not serve them.
+Body `{"keys": ["<full object key>", ...]}` (1 to 1000 keys, extra fields rejected). Deletes the keys the server re-checks right before deleting: a key outside the grammar, a missing one, one a session references and one younger than the grace period are refused, each with a reason, and never sent to S3. Response 200 `{"deleted": [key], "refused": [{"key", "reason"}], "errors": [{"key", "code", "message"}]}`; `errors` are the per-key failures S3 reported for a delete it accepted. Every call writes an `audit:` log line with the caller (the service name or the peer address), the deleted keys and the counts. Errors: 422 `invalid_request` (bad body), 503 `unavailable`. These four routes and the three cleanup settings and run routes are on the main port only: the service port does not serve them.
 
 ### `GET /api/v1/sessions`
 
@@ -1291,7 +1317,17 @@ Advisory locks on files, so agents claim what they edit and are warned before wr
 
 ## Admin relay (superleader)
 
-A superleader session (`session_messaging` set in its spec, whoever created the session: a user, a trigger service or the matrix connector) reaches the trigger services through `/agent/v1/admin/webhooks/*`, `/schedules/*` and `/chats/*`, which map 1:1 to the upstream admin routes (`ORCH_WEBHOOK_URL`, `ORCH_SCHEDULE_URL`, `ORCH_CONNECTOR_URL` with their tokens). After the superleader gate the upstream must be configured (503 `upstream_unconfigured`) and the body is capped at 256 KiB (413). The upstream gets only its service bearer, `X-Orch-Session` and `X-Orch-Slug`; its status and JSON come back unchanged, a failed or non-JSON call is 503 `upstream_unavailable`.
+A superleader session (`session_messaging` set in its spec, whoever created the session: a user, a trigger service or the matrix connector) reaches the trigger services through `/agent/v1/admin/webhooks/*`, `/schedules/*`, `/chats/*` and `/history/*`, which map 1:1 to the upstream admin routes (`ORCH_WEBHOOK_URL`, `ORCH_SCHEDULE_URL`, `ORCH_CONNECTOR_URL`, `ORCH_HISTORY_URL` with their tokens). After the superleader gate the upstream must be configured (503 `upstream_unconfigured`) and the body is capped at 256 KiB (413). The upstream gets only its service bearer, `X-Orch-Session` and `X-Orch-Slug`; its status and JSON come back unchanged, a failed or non-JSON call is 503 `upstream_unavailable`.
+
+The history routes are read and search only; the superleader cannot delete a stored session (deleting is for the user, through the web UI), so there is no DELETE route and any other method is 405 with nothing sent upstream:
+
+| Relay route | Upstream route | Notes |
+|-------------|----------------|-------|
+| `GET /agent/v1/admin/history/sessions` | `GET /history/v1/sessions` | the query string is passed on (`q`, `regex`, `from`, `to`, `preset`, `session`, `limit`, `before_id`); only sessions of manageable presets are shown |
+| `GET /agent/v1/admin/history/sessions/{session_id}` | `GET /history/v1/sessions/{session_id}` | 404 for a session of a hidden preset, with no preset, or unknown |
+| `GET /agent/v1/admin/history/sessions/{session_id}/records` | `GET /history/v1/sessions/{session_id}/records` | the session is looked up first (one extra upstream call); a hidden or unknown session is 404 and its records are never requested |
+
+The list is paged upstream by `before_id` and the relay filters the page it got, so a page can come back short or empty. When the upstream page was full, the answer carries `X-Next-Before-Id` (the smallest id of that page, hidden rows included), also on an empty page; send it as `before_id` to continue. No header means the end.
 
 Webhook credentials never reach the caller. A credential agents-webhook issues once (create, rotate, clone, a PATCH that changes the auth mode) is stored in the Secret `webhook-<id>-password` (key `password`, or `secret` for header, bearer and hmac) and the answer carries `password_secret` (the Secret name) and `key` instead. If the Secret cannot be written the call is 503 `credential_not_stored` and no value is returned; rotate the endpoint for a new one. Deleting the webhook deletes the Secret. A call with `X-Orch-Tool: local` also gets `credential: {key, value}` once, for the plugin's `to_file`.
 
@@ -1302,7 +1338,7 @@ Each preset has a `superleader_manageable` switch (default false, main port only
 - Admin preset routes: list omits hidden presets; get, replace, copy, delete and secrets of a hidden preset are 404. Presets created through the admin API are manageable.
 - Admin session create needs a `preset_id` of a manageable preset (a raw `spec` is 422 `preset_required`; a hidden preset is 404) and is gated like the main port (409 `usage_quota`, see Usage gate); a session of a hidden preset, or with a null preset, is 404 on every admin session route and absent from the list.
 - Sending `superleader_manageable` through the admin API is 422 `manageable_main_port_only` when false; the admin API cannot hide a preset.
-- Relay (`/agent/v1/admin/webhooks`, `/schedules`, `/chats`): a body naming a hidden or null preset, or a stored object on one, is 404 and never forwarded. Lists (endpoints, events, schedules, runs, rooms) are filtered after the upstream page, so a page of `events` or `runs` full of hidden items comes back short or empty; a single event or run of a hidden preset is 404. Objects with a null preset (for example chat rooms without a preset) are hidden. A list answer that is not a JSON list is 502 `upstream_shape`.
+- Relay (`/agent/v1/admin/webhooks`, `/schedules`, `/chats`, `/history`): a body naming a hidden or null preset, or a stored object on one, is 404 and never forwarded. Lists (endpoints, events, schedules, runs, rooms, history sessions) are filtered after the upstream page, so a page of `events` or `runs` full of hidden items comes back short or empty; a single event or run of a hidden preset is 404. Objects with a null preset (for example chat rooms without a preset) are hidden. A list answer that is not a JSON list is 502 `upstream_shape`.
 - Cross-session messaging (`/agent/v1/sessions`) is not filtered by this switch.
 
 ### Admin relay: secrets, cooldown and known risks

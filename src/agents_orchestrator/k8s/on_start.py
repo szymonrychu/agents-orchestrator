@@ -40,7 +40,8 @@ TASK_TOOLS = [
     "decision_ask", "decision_withdraw", "todo_set", "todo_update", "session_labels_set",
 ]  # fmt: skip
 # Superleader admin tools: the plugin's declarative admin rows (any-mcp-tatara-plugins
-# orchestration/orchestrator admin.py) plus the local secret_set tool.
+# orchestration/orchestrator admin.py) plus the local secret_set tool. History is read and search
+# only: there is no history delete tool, deleting a stored session is for the user (web UI).
 ADMIN_TOOLS = [
     "presets_list", "preset_get", "preset_create", "preset_replace", "preset_delete",
     "preset_copy", "session_get", "session_create", "session_discard", "session_restart",
@@ -50,7 +51,8 @@ ADMIN_TOOLS = [
     "schedules_list", "schedule_get", "schedule_create", "schedule_update", "schedule_delete",
     "schedule_run", "schedule_runs", "schedule_runs_all", "schedule_run_get",
     "schedule_preview", "chat_admin_rooms", "chat_room_settings", "chat_rules",
-    "chat_rule_add", "chat_rule_delete", "secret_set",
+    "chat_rule_add", "chat_rule_delete", "secret_set", "history_search", "history_get",
+    "history_records",
 ]  # fmt: skip
 
 

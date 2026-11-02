@@ -1,4 +1,4 @@
-"""Admin relay routes of the agent port: webhooks, schedules and chats (superleader-crud D10).
+"""Admin relay routes of the agent port: webhooks, schedules, chats and history (D10).
 
 Each route maps 1:1 to an upstream admin route and is registered on the admin router, so the
 superleader gate and the audit cover it. The gate runs first, then the upstream must be
@@ -15,6 +15,15 @@ holds one `Guard` per route: a body naming a hidden or null preset, or a stored 
 PATCH and clone. Lists are filtered (a non-list answer is 502 `upstream_shape`) and a single
 event or run of a hidden preset is 404. An object without a preset counts as hidden. Run
 objects are mapped to their preset through one upstream `GET /schedules`.
+
+History is read-only for the superleader: three GET routes and no DELETE (deleting a stored
+session is for the user, through the web UI), so the router answers any other method 405 and
+nothing reaches the upstream. The session list is paged upstream by `before_id`, and agents-history
+has no set filter, so the relay filters the page it got and, when that page was full, sends the
+upstream's next cursor in `X-Next-Before-Id` (also on an empty page, so a caller can tell "keep
+paging" from "end"). The records of a session are checked against one upstream lookup of that
+single session (`GET /sessions/{session_id}`): hidden, null-preset or unknown is 404 and the
+records are never requested.
 """
 
 from __future__ import annotations
@@ -39,6 +48,8 @@ from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.settings import Settings
 
 LOCAL_TOOL_HEADER = "x-orch-tool"
+NEXT_CURSOR_HEADER = "X-Next-Before-Id"
+HISTORY_DEFAULT_LIMIT = 50  # the page size agents-history uses without `limit`
 CREDENTIAL_KEYS = ("password", "secret")
 
 # (method, path below the service prefix, success status). The relay path is
@@ -75,11 +86,18 @@ _CHATS = [
     ("POST", "/rules", 201),
     ("DELETE", "/rules/{rule_id}", 204),
 ]
+# Read and search only: the superleader has no delete path (user decision, Q6).
+_HISTORY = [
+    ("GET", "/sessions", 200),
+    ("GET", "/sessions/{session_id}", 200),
+    ("GET", "/sessions/{session_id}/records", 200),
+]
 # name -> (relay prefix, upstream prefix, label, routes)
 SERVICES: dict[str, tuple[str, str, str, list[tuple[str, str, int]]]] = {
     "webhook": ("/webhooks", "/webhooks/api/v1", "webhook admin relay", _WEBHOOKS),
     "schedule": ("/schedules", "/schedules/api/v1", "schedule admin relay", _SCHEDULES),
     "connector": ("/chats", "/chat/v1/admin", "chat admin relay", _CHATS),
+    "history": ("/history", "/history/v1", "history admin relay", _HISTORY),
 }
 STATE_ATTR = "admin_http"
 
@@ -89,9 +107,10 @@ class Guard:
     """What the superleader's remit changes on one relay route (see the module docstring)."""
 
     body_preset: bool = False
-    stored: Literal["endpoint", "schedule", "room"] | None = None
+    stored: Literal["endpoint", "schedule", "room", "history_session"] | None = None
     list_filter: Literal["preset_id", "schedule_id"] | None = None
     answer: Literal["preset_id", "schedule_id"] | None = None
+    cursor: bool = False  # a full list page also answers the upstream's next `before_id`
 
 
 _E, _S, _R = "endpoint", "schedule", "room"
@@ -122,6 +141,9 @@ GUARDS: dict[tuple[str, str, str], Guard] = {
     ("connector", "GET", "/rules"): Guard(),
     ("connector", "POST", "/rules"): Guard(),
     ("connector", "DELETE", "/rules/{rule_id}"): Guard(),
+    ("history", "GET", "/sessions"): Guard(list_filter="preset_id", cursor=True),
+    ("history", "GET", "/sessions/{session_id}"): Guard(answer="preset_id"),
+    ("history", "GET", "/sessions/{session_id}/records"): Guard(stored="history_session"),
 }
 # stored object kind -> (upstream list path below the service prefix, id field, path parameter)
 _STORED = {
@@ -129,6 +151,9 @@ _STORED = {
     "schedule": ("/schedules", "id", "schedule_id"),
     "room": ("/rooms", "room_id", "room_id"),
 }
+# stored object kind -> (upstream path of the one object below the service prefix, path
+# parameter that fills it): kinds whose list is paged, so the object is looked up on its own
+_STORED_ONE = {"history_session": ("/sessions/{session_id}", "session_id")}
 # routes whose answer may carry a credential the upstream issues once
 _ISSUING = {
     ("POST", "/endpoints"),
@@ -258,6 +283,12 @@ async def _stored_hidden(request: Request, settings: Settings, service: str, gua
     """True when the object a route acts on is on a preset the superleader may not manage;
     an object the upstream does not list is 404."""
     visible = await _visible(request)
+    if guard.stored in _STORED_ONE:
+        template, param = _STORED_ONE[guard.stored]
+        path = _fill(template, {param: request.path_params[param]})
+        one = await _upstream_json(_bare(request), settings, service, path)
+        preset = one.get("preset_id") if isinstance(one, dict) else None
+        return preset is None or str(preset) not in visible
     list_path, id_field, param = _STORED[guard.stored]
     wanted = request.path_params[param]
     items = await _upstream_json(_bare(request), settings, service, list_path)
@@ -309,6 +340,22 @@ async def _filter_answer(
     return content
 
 
+def _next_cursor(request: Request, guard: Guard, status: int, content: bytes) -> dict[str, str]:
+    """`X-Next-Before-Id` for a list route with a cursor: the smallest id of the upstream page,
+    taken before the preset filter, when that page was full (more may follow)."""
+    if not (guard.cursor and 200 <= status < 300 and content):
+        return {}
+    page = json.loads(content)
+    if not isinstance(page, list):
+        return {}
+    limit = request.query_params.get("limit", "")
+    size = int(limit) if limit.isascii() and limit.isdigit() else HISTORY_DEFAULT_LIMIT
+    ids = [i["id"] for i in page if isinstance(i, dict) and type(i.get("id")) is int]
+    if not ids or len(page) < size:
+        return {}
+    return {NEXT_CURSOR_HEADER: str(min(ids))}
+
+
 def _handler(service: str, method: str, template: str) -> Callable[..., Awaitable[Response]]:
     _, upstream_prefix, _, _ = SERVICES[service]
     issuing = service == "webhook" and (method, template) in _ISSUING
@@ -328,6 +375,7 @@ def _handler(service: str, method: str, template: str) -> Callable[..., Awaitabl
         status, content = await forward_core.forward(
             request, target, method, path, body, str(session.id), session.slug, empty_ok=True
         )
+        headers = _next_cursor(request, guard, status, content)
         content = await _filter_answer(request, settings, guard, status, content)
         if service == "webhook":
             if content:
@@ -339,7 +387,9 @@ def _handler(service: str, method: str, template: str) -> Callable[..., Awaitabl
                     await secret_store.delete_webhook_credential(
                         secret_store.kube_of(request), settings.namespace, int(endpoint_id)
                     )
-        return Response(content, status, media_type="application/json" if content else None)
+        return Response(
+            content, status, headers, media_type="application/json" if content else None
+        )
 
     relay.__name__ = "relay_" + service + "_" + method.lower() + _slug(template)
     return relay
@@ -347,6 +397,17 @@ def _handler(service: str, method: str, template: str) -> Callable[..., Awaitabl
 
 def _slug(template: str) -> str:
     return re.sub(r"\W+", "_", template).rstrip("_")
+
+
+def _cursor_responses(service: str, method: str, template: str) -> dict[int | str, Any]:
+    """The OpenAPI entry that documents `X-Next-Before-Id` on a list route with a cursor."""
+    if not GUARDS[(service, method, template)].cursor:
+        return {}
+    header = {
+        "description": "Smallest id of the upstream page when it was full: pass it as `before_id`",
+        "schema": {"type": "string"},
+    }
+    return {200: {"description": "Successful Response", "headers": {NEXT_CURSOR_HEADER: header}}}
 
 
 def _register() -> None:
@@ -358,6 +419,7 @@ def _register() -> None:
                 methods=[method],
                 status_code=success,
                 response_class=Response,
+                responses=_cursor_responses(service, method, template),
                 operation_id="admin_" + service + "_" + method.lower() + _slug(template),
                 summary=f"{method} {service} {template}",
                 tags=["admin"],

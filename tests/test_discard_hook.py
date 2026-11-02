@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -156,6 +157,40 @@ async def test_export_jsonl_kinds_and_order(env):
                 assert datetime.fromisoformat(value).utcoffset() == timedelta(0)
 
 
+async def test_export_session_record_has_provenance(env):
+    preset_id = uuid.uuid4()
+    await env.sql("INSERT INTO presets (id, name, spec) VALUES (%s, 'bench', '{}')", (preset_id,))
+    async with env.pool.connection() as conn:
+        c = await sessions.create(
+            conn,
+            "alpha",
+            SessionSpec(),
+            preset_id=preset_id,
+            preset_name="bench",
+            created_by_service="agents-schedule",
+        )
+        child = await sessions.create(conn, "bravo", SessionSpec(), created_by_session=c.id)
+        bare = await sessions.create(conn, "charlie", SessionSpec())
+
+    head = (await env.export(c.id))[0]
+    assert head["kind"] == "session"
+    assert head["preset_id"] == str(preset_id) and head["preset_name"] == "bench"
+    assert head["created_by_service"] == "agents-schedule" and head["created_by_session"] is None
+
+    head = (await env.export(child.id))[0]
+    assert head["created_by_session"] == str(c.id) and head["created_by_service"] is None
+    assert head["preset_id"] is None and head["preset_name"] is None
+
+    head = (await env.export(bare.id))[0]
+    for key in ("preset_id", "preset_name", "created_by_service", "created_by_session"):
+        assert head[key] is None, key
+
+    # the preset may later change or go: the record keeps the snapshotted name
+    await env.sql("DELETE FROM presets WHERE id = %s", (preset_id,))
+    head = (await env.export(c.id))[0]
+    assert head["preset_id"] is None and head["preset_name"] == "bench"
+
+
 async def test_export_session_record_carries_close_request(env):
     c = await env.session("alpha")
     async with env.pool.connection() as conn:
@@ -214,38 +249,227 @@ async def test_command_hook_gets_export_then_discard_proceeds(pool, dsn, tmp_pat
     assert env.kube.names("StatefulSet") == []
 
 
-async def test_webhook_hook_and_spec_precedence(env):
+class Recorder:
+    """A MockTransport handler recording each request, answering per host (default 204)."""
+
+    def __init__(self) -> None:
+        self.requests: list[httpx.Request] = []
+        self.status: dict[str, int] = {}
+
+    async def __call__(self, request: httpx.Request) -> httpx.Response:
+        await request.aread()
+        self.requests.append(request)
+        return httpx.Response(self.status.get(request.url.host, 204))
+
+    def urls(self) -> list[str]:
+        return [str(r.url) for r in self.requests]
+
+
+def url_hooks(env: Env, token: str = "") -> Recorder:
+    """Settings URL https://settings.example/hook (bearer `token`), answered by a Recorder."""
+    env.settings.discard_hook_command = ""
+    env.settings.discard_hook_url = "https://settings.example/hook"
+    env.settings.discard_hook_token = token
+    recorder = Recorder()
+    env.rec.hook_transport = httpx.MockTransport(recorder)
+    return recorder
+
+
+async def retry_now(env: Env, session_id) -> None:
+    """Move the backoff gate into the past, as if the clock passed `discard_hook_next_at`."""
+    await env.sql(
+        "UPDATE sessions SET status = jsonb_set(status, '{discard_hook_next_at}',"
+        " to_jsonb((now() - interval '1 second')::text)) WHERE id = %s",
+        (session_id,),
+    )
+
+
+async def test_settings_and_session_hooks_both_get_the_export(env):
     c = await env.session("alpha", discard_hook_url="https://spec.example/hook")
     await populate(env, c)
     expected = await env.export(c.id)
-    requests: list[httpx.Request] = []
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        await request.aread()
-        requests.append(request)
-        return httpx.Response(204)
-
-    env.settings.discard_hook_url = "https://settings.example/hook"
-    env.settings.discard_hook_command = ""
-    env.rec.hook_transport = httpx.MockTransport(handler)
+    recorder = url_hooks(env)
     await env.discard(c.id)
     await env.rec.reconcile_once()
 
-    assert [str(r.url) for r in requests] == ["https://spec.example/hook"]
-    req = requests[0]
-    assert req.method == "POST"
-    assert req.headers["content-type"] == "application/x-ndjson"
-    assert req.headers["x-orch-session-id"] == str(c.id)
-    assert req.headers["x-orch-session-slug"] == "alpha"
-    assert [json.loads(x) for x in req.content.decode().splitlines()] == expected
+    assert recorder.urls() == ["https://settings.example/hook", "https://spec.example/hook"]
+    for req in recorder.requests:
+        assert req.method == "POST"
+        assert req.headers["content-type"] == "application/x-ndjson"
+        assert req.headers["x-orch-session-id"] == str(c.id)
+        assert req.headers["x-orch-session-slug"] == "alpha"
+        assert [json.loads(x) for x in req.content.decode().splitlines()] == expected
     assert await env.get(c.id) is None
 
-    # no spec URL: the settings webhook is used
+    # no spec URL: the settings webhook alone
     d = await env.session("bravo")
-    requests.clear()
+    recorder.requests.clear()
     await env.discard(d.id)
     await env.rec.reconcile_once()
-    assert [str(r.url) for r in requests] == ["https://settings.example/hook"]
+    assert recorder.urls() == ["https://settings.example/hook"]
+    assert await env.get(d.id) is None
+
+
+async def test_bearer_only_on_settings_url(env):
+    c = await env.session("alpha", discard_hook_url="https://spec.example/hook")
+    recorder = url_hooks(env, token="t0k3n")
+    await env.discard(c.id)
+    await env.rec.reconcile_once()
+
+    assert recorder.urls() == ["https://settings.example/hook", "https://spec.example/hook"]
+    assert recorder.requests[0].headers["authorization"] == "Bearer t0k3n"
+    assert "authorization" not in recorder.requests[1].headers
+    assert await env.get(c.id) is None
+
+
+async def test_delivered_hook_is_not_rerun(env):
+    c = await env.session("alpha", discard_hook_url="https://spec.example/hook")
+    recorder = url_hooks(env)
+    recorder.status["spec.example"] = 500
+    await env.discard(c.id)
+    await env.rec.reconcile_once()
+
+    got = await env.get(c.id)
+    assert got is not None and got.desired == "deleting"
+    assert set(got.status["discard_hook_delivered"]) == {"settings"}
+    assert got.status["discard_hook_failed"] == "session: status 500"
+    assert got.status["discard_hook_failures"] == 1
+    assert recorder.urls() == ["https://settings.example/hook", "https://spec.example/hook"]
+
+    await env.rec.reconcile_once()  # still backing off: no hook runs
+    assert len(recorder.requests) == 2
+
+    recorder.requests.clear()
+    recorder.status.clear()
+    await retry_now(env, c.id)
+    await env.rec.reconcile_once()
+    assert recorder.urls() == ["https://spec.example/hook"]
+    assert await env.get(c.id) is None
+
+    # the other way round: a settings hook outage never blocks the session's own hook
+    d = await env.session("bravo", discard_hook_url="https://spec.example/hook")
+    recorder.requests.clear()
+    recorder.status["settings.example"] = 500
+    await env.discard(d.id)
+    await env.rec.reconcile_once()
+    got = await env.get(d.id)
+    assert got is not None
+    assert recorder.urls() == ["https://settings.example/hook", "https://spec.example/hook"]
+    assert set(got.status["discard_hook_delivered"]) == {"session"}
+    assert got.status["discard_hook_failed"] == "settings: status 500"
+
+    recorder.requests.clear()
+    recorder.status.clear()
+    await retry_now(env, d.id)
+    await env.rec.reconcile_once()
+    assert recorder.urls() == ["https://settings.example/hook"]
+    assert await env.get(d.id) is None
+
+
+async def test_both_hooks_failing_names_the_first(env):
+    c = await env.session("alpha", discard_hook_url="https://spec.example/hook")
+    recorder = url_hooks(env)
+    recorder.status = {"settings.example": 502, "spec.example": 500}
+    await env.discard(c.id)
+    await env.rec.reconcile_once()
+    got = await env.get(c.id)
+    assert got is not None
+    assert recorder.urls() == ["https://settings.example/hook", "https://spec.example/hook"]
+    assert got.status["discard_hook_failed"] == "settings: status 502"
+    assert got.status["discard_hook_failures"] == 1
+    assert "discard_hook_delivered" not in got.status
+
+
+async def test_command_hook_and_session_url(env, tmp_path):
+    env.settings.discard_hook_command = env.command_hook()
+    c = await env.session("alpha", discard_hook_url="https://spec.example/hook")
+    await env.rec.reconcile_once()
+    await populate(env, c)
+    expected = await env.export(c.id)
+    recorder = Recorder()
+    env.rec.hook_transport = httpx.MockTransport(recorder)
+    await env.discard(c.id)
+    # a pass that delivers both but cannot finish: an object lingers
+    real_remaining = env.rec._remaining
+
+    async def lingering(slug):
+        return ["Pod/agent-alpha-0"]
+
+    env.rec._remaining = lingering
+    await env.rec.reconcile_once()
+
+    sent = [json.loads(x) for x in (tmp_path / "out.jsonl").read_text().splitlines()]
+    assert sent == expected
+    assert recorder.urls() == ["https://spec.example/hook"]
+    assert [json.loads(x) for x in recorder.requests[0].content.decode().splitlines()] == expected
+    got = await env.get(c.id)
+    assert got is not None and set(got.status["discard_hook_delivered"]) == {"settings", "session"}
+    for value in got.status["discard_hook_delivered"].values():
+        assert abs(datetime.now(UTC) - datetime.fromisoformat(value)) < timedelta(minutes=1)
+
+    env.rec._remaining = real_remaining
+    await env.rec.reconcile_once()
+    assert env.calls() == 1 and len(recorder.requests) == 1
+    assert await env.get(c.id) is None
+
+
+async def test_non_object_delivered_reruns_all(env):
+    c = await env.session("alpha", discard_hook_url="https://spec.example/hook")
+    recorder = url_hooks(env)
+    await env.sql(
+        "UPDATE sessions SET status = status || jsonb_build_object("
+        "'discard_hook_delivered', '2026-11-01T00:00:00+00:00'::text) WHERE id = %s",
+        (c.id,),
+    )
+    await env.discard(c.id)
+    await env.rec.reconcile_once()
+    assert recorder.urls() == ["https://settings.example/hook", "https://spec.example/hook"]
+    assert await env.get(c.id) is None
+
+
+async def test_quiesce_waits_while_any_hook_undelivered(env):
+    env.settings.discard_hook_command = env.command_hook()
+    c = await env.session("alpha", replicas=2, discard_hook_url="https://spec.example/hook")
+    await env.rec.reconcile_once()
+    assert len(env.kube.names("Pod")) == 2
+    recorder = Recorder()
+    env.rec.hook_transport = httpx.MockTransport(recorder)
+    env.kube.controller_paused = True
+    await env.discard(c.id)
+    await env.sql(
+        "UPDATE sessions SET status = status || jsonb_build_object('discard_hook_delivered',"
+        " jsonb_build_object('settings', now()::text)) WHERE id = %s",
+        (c.id,),
+    )
+
+    await env.rec.reconcile_once()
+    assert env.kube.applied("StatefulSet")[-1].obj["spec"]["replicas"] == 0
+    got = await env.get(c.id)
+    assert got is not None and "waiting for agent pods" in got.status["message"]
+    assert recorder.requests == [] and env.calls() == 0
+
+    for name in env.kube.names("Pod"):
+        await env.kube.delete_pod("agents", name)
+    await env.rec.reconcile_once()
+    assert recorder.urls() == ["https://spec.example/hook"]
+    assert env.calls() == 0  # the settings hook already delivered
+    assert await env.get(c.id) is None
+
+
+async def test_token_never_logged(env, caplog):
+    c = await env.session("alpha", discard_hook_url="https://spec.example/hook")
+    recorder = url_hooks(env, token="t0k3n")
+    recorder.status["settings.example"] = 500
+    with caplog.at_level("DEBUG"):
+        await env.discard(c.id)
+        await env.rec.reconcile_once()
+    got = await env.get(c.id)
+    assert got is not None and got.status["discard_hook_failed"] == "settings: status 500"
+    assert recorder.requests[0].headers["authorization"] == "Bearer t0k3n"
+    assert caplog.records  # the failure is logged
+    assert all("t0k3n" not in r.getMessage() for r in caplog.records)
+    assert "t0k3n" not in caplog.text
+    assert "t0k3n" not in json.dumps(got.status)
 
 
 async def test_webhook_failures(env):
@@ -400,7 +624,7 @@ async def test_delivered_hook_not_resent_and_history_deleted(pool, dsn, tmp_path
     await env.rec.reconcile_once()
     got = await env.get(c.id)
     assert got is not None and env.calls() == 1
-    delivered = datetime.fromisoformat(got.status["discard_hook_delivered"])
+    delivered = datetime.fromisoformat(got.status["discard_hook_delivered"]["settings"])
     assert abs(datetime.now(UTC) - delivered) < timedelta(minutes=1)
     assert "discard_hook_failed" not in got.status
 

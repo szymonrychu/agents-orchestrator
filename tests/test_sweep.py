@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import logging
 import random
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from agents_orchestrator.cache import sweep
+from agents_orchestrator.cache.policy import SweepPolicy
 from agents_orchestrator.cache.presign import ArchiveObject, DeleteFailure
 from agents_orchestrator.cache.sweep import plan_sweep, protected_keys, referenced_keys, run_sweep
 from agents_orchestrator.db import sessions
@@ -303,6 +305,10 @@ def wire(monkeypatch, fake):
     monkeypatch.setattr(sweep, "delete_keys", fake.delete)
 
 
+def policy_for(settings, *, dry_run):
+    return replace(SweepPolicy.from_settings(settings), dry_run=dry_run)
+
+
 def stale() -> list[ArchiveObject]:
     return versions("proj", [1, 40, 50, 60])
 
@@ -310,18 +316,31 @@ def stale() -> list[ArchiveObject]:
 async def test_dry_run_plans_but_never_deletes(monkeypatch):
     fake = Fake(stale(), [set()])
     wire(monkeypatch, fake)
-    res = await run_sweep(settings_for(cache_keep_newest=1), fake.protected, fake.now, dry_run=True)
+    s = settings_for(cache_keep_newest=1)
+    res = await run_sweep(s, fake.protected, fake.now, policy=policy_for(s, dry_run=True))
     assert fake.deleted == []
     assert (res.dry_run, res.listed, res.planned, res.deleted) == (True, 4, 3, 0)
     assert res.planned_bytes == 300 and res.error is None
 
 
+async def test_run_sweep_plans_with_the_policy_not_the_settings(monkeypatch):
+    fake = Fake(stale(), [set()])
+    wire(monkeypatch, fake)
+    s = settings_for(cache_keep_newest=3)
+    res = await run_sweep(
+        s,
+        fake.protected,
+        fake.now,
+        policy=replace(SweepPolicy.from_settings(s), keep_newest=1, dry_run=True),
+    )
+    assert (res.dry_run, res.planned) == (True, 3)
+
+
 async def test_real_run_deletes_the_plan_and_summarises(monkeypatch):
     fake = Fake(stale(), [set()])
     wire(monkeypatch, fake)
-    res = await run_sweep(
-        settings_for(cache_keep_newest=1), fake.protected, fake.now, dry_run=False
-    )
+    s = settings_for(cache_keep_newest=1)
+    res = await run_sweep(s, fake.protected, fake.now, policy=policy_for(s, dry_run=False))
     assert sorted(k for batch in fake.deleted for k in batch) == sorted(o.key for o in stale()[1:])
     assert (res.deleted, res.deleted_bytes, len(res.failures)) == (3, 300, 0)
     assert res.to_dict()["deleted"] == 3 and res.to_dict()["finished_at"]
@@ -331,9 +350,8 @@ async def test_protection_is_rechecked_right_before_deleting(monkeypatch):
     objs = stale()
     fake = Fake(objs, [set(), {objs[1].key}])  # the second read sees a new reference
     wire(monkeypatch, fake)
-    res = await run_sweep(
-        settings_for(cache_keep_newest=1), fake.protected, fake.now, dry_run=False
-    )
+    s = settings_for(cache_keep_newest=1)
+    res = await run_sweep(s, fake.protected, fake.now, policy=policy_for(s, dry_run=False))
     assert objs[1].key not in {k for batch in fake.deleted for k in batch}
     assert res.skipped_protected == 1 and res.deleted == 2
 
@@ -344,9 +362,8 @@ async def test_per_key_errors_are_logged_and_counted(monkeypatch, caplog):
     fake.fail[objs[2].key] = DeleteFailure(objs[2].key, "AccessDenied", "nope")
     wire(monkeypatch, fake)
     with caplog.at_level(logging.WARNING):
-        res = await run_sweep(
-            settings_for(cache_keep_newest=1), fake.protected, fake.now, dry_run=False
-        )
+        s = settings_for(cache_keep_newest=1)
+        res = await run_sweep(s, fake.protected, fake.now, policy=policy_for(s, dry_run=False))
     assert res.deleted == 2 and [f.key for f in res.failures] == [objs[2].key]
     assert res.to_dict()["failed"] == 1
     assert "AccessDenied" in caplog.text
@@ -359,12 +376,14 @@ async def test_a_listing_failure_is_recorded_not_raised(monkeypatch):
         raise RuntimeError("s3 down")
 
     monkeypatch.setattr(sweep, "list_archives", boom)
-    res = await run_sweep(settings_for(), fake.protected, fake.now, dry_run=False)
+    s = settings_for()
+    res = await run_sweep(s, fake.protected, fake.now, policy=policy_for(s, dry_run=False))
     assert res.error and "s3 down" in res.error and res.finished_at is not None
 
 
 async def test_nothing_planned_calls_no_delete(monkeypatch):
     fake = Fake(versions("proj", [1, 2]), [set()])
     wire(monkeypatch, fake)
-    res = await run_sweep(settings_for(), fake.protected, fake.now, dry_run=False)
+    s = settings_for()
+    res = await run_sweep(s, fake.protected, fake.now, policy=policy_for(s, dry_run=False))
     assert fake.deleted == [] and res.planned == 0

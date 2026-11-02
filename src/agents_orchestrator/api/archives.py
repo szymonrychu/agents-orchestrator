@@ -1,17 +1,22 @@
 """Cache archives: list, download, cleanup preview and manual delete.
 
 These routes use the api pod's own S3 key pair (`ORCH_CACHE_S3_API_*`, list/get/delete only; the
-reconciler keeps the read/write pair that presigns uploads). Without that pair every route answers
-503 `unavailable`. The api never signs a PUT: it presigns a GET (five minutes, forced download
-name) and redirects to it, so the archive bytes never pass through the api.
+reconciler keeps the read/write pair that presigns uploads). Without that pair every route that
+touches S3 answers 503 `unavailable`. The api never signs a PUT: it presigns a GET (five minutes,
+forced download name) and redirects to it, so the archive bytes never pass through the api.
 
 A key is accepted only inside the cache prefix, ending `.tar.zst`, and either a valid archive
 name (`cache.keys.validate_name`) or a transcripts object `sessions/<segment>`. The delete
 re-checks everything server side against the database and the bucket right before it deletes: a
 key a session references, one younger than the sweep grace period, a missing one, or an invalid
 one is refused with its own reason and never sent to S3. Every delete writes an audit log line.
-The routes sit on the main port only: the service port serves a fixed route list that does not
-include them (`api/service_auth.py`).
+The sweep policy (retention, keep-newest, grace, enabled, dry-run, interval) is read from
+`cache_sweep_settings`, else the `ORCH_CACHE_*` environment (`db.cache_sweep_settings.effective`),
+by the preview and the delete grace check. `GET`/`PUT /cache/cleanup/settings` read and replace
+the saved policy and `POST /cache/cleanup/run` asks the reconciler for one sweep now; these three
+need only the database (no S3 pair): the api writes `cache_sweep_settings` and
+`cache_sweep_requests`, the reconciler's sweeper acts on them. The routes sit on the main port
+only: the service port serves a fixed route list that does not include them (`api/service_auth.py`).
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ import re
 from datetime import datetime, timedelta
 from typing import Annotated
 
+import psycopg
 from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import RedirectResponse
 from psycopg_pool import AsyncConnectionPool
@@ -32,8 +38,9 @@ from agents_orchestrator.api.service_auth import calling_service
 from agents_orchestrator.api.sessions import Cfg, Pool
 from agents_orchestrator.cache import presign as s3
 from agents_orchestrator.cache.keys import CACHE_KEY_RE, SUFFIX, ArchiveNameError, validate_name
+from agents_orchestrator.cache.policy import SweepPolicy
 from agents_orchestrator.cache.sweep import SESSIONS_GROUP, plan_sweep, referenced_keys
-from agents_orchestrator.db import cache_sweeps
+from agents_orchestrator.db import cache_sweep_settings, cache_sweeps
 from agents_orchestrator.settings import Settings
 
 log = logging.getLogger(__name__)
@@ -76,6 +83,29 @@ def _download_name(name: str) -> str:
 async def _protected(pool: AsyncConnectionPool, settings: Settings) -> dict[str, list[str]]:
     async with pool.connection() as conn:
         return await referenced_keys(conn, settings)
+
+
+async def _policy(conn: psycopg.AsyncConnection, settings: Settings) -> SweepPolicy:
+    return (await cache_sweep_settings.effective(conn, settings)).policy
+
+
+async def _settings_view(
+    conn: psycopg.AsyncConnection, settings: Settings
+) -> schemas.CleanupSettingsView:
+    effective = await cache_sweep_settings.effective(conn, settings)
+    return schemas.CleanupSettingsView(
+        policy=schemas.SweepPolicyView(**effective.policy.to_dict()),
+        defaults=schemas.SweepPolicyView(**SweepPolicy.from_settings(settings).to_dict()),
+        source=effective.source,
+        updated_at=effective.updated_at,
+        run_requested_at=await cache_sweep_settings.requested_at(conn),
+        run_pending=await cache_sweep_settings.run_pending(conn),
+        last_sweep=await cache_sweeps.last(conn),
+    )
+
+
+def _caller(request: Request) -> str:
+    return calling_service(request) or (request.client.host if request.client else "unknown")
 
 
 async def _db_now(pool: AsyncConnectionPool) -> datetime:
@@ -142,18 +172,18 @@ async def cleanup_preview(pool: Pool, settings: Cfg, response: Response) -> sche
     )
     refs = await _protected(pool, settings)
     now = await _db_now(pool)
-    grace = settings.cache_sweep_grace_seconds or 0
+    async with pool.connection() as conn:
+        policy = await _policy(conn, settings)
+        last = await cache_sweeps.last(conn)
     plan = plan_sweep(
         objects,
         refs,
         now,
-        retention_days=settings.cache_retention_days,
-        keep_newest=settings.cache_keep_newest,
-        grace_seconds=grace,
+        retention_days=policy.retention_days,
+        keep_newest=policy.keep_newest,
+        grace_seconds=policy.grace_seconds,
         prefix=settings.cache_s3_prefix,
     )
-    async with pool.connection() as conn:
-        last = await cache_sweeps.last(conn)
     response.headers["Cache-Control"] = "no-store"
     return schemas.CleanupPreview(
         would_delete=[
@@ -161,13 +191,53 @@ async def cleanup_preview(pool: Pool, settings: Cfg, response: Response) -> sche
         ],
         count=len(plan.deletes),
         total_bytes=plan.bytes,
-        retention_days=settings.cache_retention_days,
-        keep_newest=settings.cache_keep_newest,
-        grace_seconds=grace,
-        sweep_enabled=settings.cache_sweep_enabled,
-        sweep_dry_run=settings.cache_sweep_dry_run,
+        retention_days=policy.retention_days,
+        keep_newest=policy.keep_newest,
+        grace_seconds=policy.grace_seconds,
+        sweep_enabled=policy.enabled,
+        sweep_dry_run=policy.dry_run,
         last_sweep=last,
     )
+
+
+@router.get("/cache/cleanup/settings", response_model=schemas.CleanupSettingsView)
+async def get_cleanup_settings(
+    pool: Pool, settings: Cfg, response: Response
+) -> schemas.CleanupSettingsView:
+    response.headers["Cache-Control"] = "no-store"
+    async with pool.connection() as conn:
+        return await _settings_view(conn, settings)
+
+
+@router.put("/cache/cleanup/settings", response_model=schemas.CleanupSettingsView)
+async def put_cleanup_settings(
+    body: schemas.SweepPolicyIn, request: Request, pool: Pool, settings: Cfg, response: Response
+) -> schemas.CleanupSettingsView:
+    new = SweepPolicy(**body.model_dump())
+    async with pool.connection() as conn:
+        stored = await cache_sweep_settings.get(conn)
+        await cache_sweep_settings.put(conn, new)
+        view = await _settings_view(conn, settings)
+    log.info(
+        "audit: cache cleanup settings by=%s old=%s new=%s",
+        _caller(request),
+        stored.policy.to_dict() if stored else "env",
+        new.to_dict(),
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return view
+
+
+@router.post("/cache/cleanup/run", status_code=202, response_model=schemas.CleanupSettingsView)
+async def request_cleanup_run(
+    request: Request, pool: Pool, settings: Cfg, response: Response
+) -> schemas.CleanupSettingsView:
+    async with pool.connection() as conn:
+        await cache_sweep_settings.request_run(conn)
+        view = await _settings_view(conn, settings)
+    log.info("audit: cache cleanup run requested by=%s", _caller(request))
+    response.headers["Cache-Control"] = "no-store"
+    return view
 
 
 @router.delete("/cache/archives", response_model=schemas.ArchiveDeleteResult)
@@ -191,7 +261,9 @@ async def delete_archives(
             s3.list_archives, settings, settings.cache_s3_prefix, credentials=creds
         )
         by_key = {o.key: o for o in listed}
-        young = await _db_now(pool) - timedelta(seconds=settings.cache_sweep_grace_seconds or 0)
+        async with pool.connection() as conn:
+            grace = (await _policy(conn, settings)).grace_seconds
+        young = await _db_now(pool) - timedelta(seconds=grace)
         refs = await _protected(pool, settings)  # the last read before the delete
         for key in valid:
             obj = by_key.get(key)
@@ -215,7 +287,7 @@ async def delete_archives(
     )
     failed = {f.key for f in failures}
     deleted = [k for k in deletable if k not in failed]
-    who = calling_service(request) or (request.client.host if request.client else "unknown")
+    who = _caller(request)
     log.info(
         "audit: cache archives delete by=%s requested=%d deleted=%s refused=%d errors=%d",
         who,

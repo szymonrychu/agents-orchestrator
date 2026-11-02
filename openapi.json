@@ -717,6 +717,75 @@
         "title": "CleanupPreview",
         "type": "object"
       },
+      "CleanupSettingsView": {
+        "properties": {
+          "defaults": {
+            "$ref": "#/components/schemas/SweepPolicyView"
+          },
+          "last_sweep": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Sweep"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/SweepPolicyView"
+          },
+          "run_pending": {
+            "title": "Run Pending",
+            "type": "boolean"
+          },
+          "run_requested_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Requested At"
+          },
+          "source": {
+            "enum": [
+              "database",
+              "environment"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "policy",
+          "defaults",
+          "source",
+          "updated_at",
+          "run_requested_at",
+          "run_pending",
+          "last_sweep"
+        ],
+        "title": "CleanupSettingsView",
+        "type": "object"
+      },
       "CloseRequest": {
         "additionalProperties": false,
         "properties": {
@@ -4316,6 +4385,92 @@
         "title": "SessionView",
         "type": "object"
       },
+      "SweepPolicyIn": {
+        "additionalProperties": false,
+        "description": "The whole sweep policy; every field is required (a PUT replaces the saved policy).",
+        "properties": {
+          "dry_run": {
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "grace_seconds": {
+            "maximum": 604800.0,
+            "minimum": 0.0,
+            "title": "Grace Seconds",
+            "type": "integer"
+          },
+          "interval_seconds": {
+            "maximum": 2592000.0,
+            "minimum": 60.0,
+            "title": "Interval Seconds",
+            "type": "integer"
+          },
+          "keep_newest": {
+            "maximum": 1000.0,
+            "minimum": 1.0,
+            "title": "Keep Newest",
+            "type": "integer"
+          },
+          "retention_days": {
+            "maximum": 3650.0,
+            "minimum": 1.0,
+            "title": "Retention Days",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "enabled",
+          "dry_run",
+          "retention_days",
+          "keep_newest",
+          "interval_seconds",
+          "grace_seconds"
+        ],
+        "title": "SweepPolicyIn",
+        "type": "object"
+      },
+      "SweepPolicyView": {
+        "properties": {
+          "dry_run": {
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "grace_seconds": {
+            "title": "Grace Seconds",
+            "type": "integer"
+          },
+          "interval_seconds": {
+            "title": "Interval Seconds",
+            "type": "integer"
+          },
+          "keep_newest": {
+            "title": "Keep Newest",
+            "type": "integer"
+          },
+          "retention_days": {
+            "title": "Retention Days",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "enabled",
+          "dry_run",
+          "retention_days",
+          "keep_newest",
+          "interval_seconds",
+          "grace_seconds"
+        ],
+        "title": "SweepPolicyView",
+        "type": "object"
+      },
       "TerminalList": {
         "properties": {
           "terminals": {
@@ -5403,6 +5558,191 @@
         },
         "summary": "Get Command",
         "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/agent/v1/admin/history/sessions": {
+      "get": {
+        "operationId": "admin_history_get_sessions",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "headers": {
+              "X-Next-Before-Id": {
+                "description": "Smallest id of the upstream page when it was full: pass it as `before_id`",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "GET history /sessions",
+        "tags": [
+          "admin",
+          "admin"
+        ]
+      }
+    },
+    "/agent/v1/admin/history/sessions/{session_id}": {
+      "get": {
+        "operationId": "admin_history_get_sessions_session_id",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "GET history /sessions/{session_id}",
+        "tags": [
+          "admin",
+          "admin"
+        ]
+      }
+    },
+    "/agent/v1/admin/history/sessions/{session_id}/records": {
+      "get": {
+        "operationId": "admin_history_get_sessions_session_id_records",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "GET history /sessions/{session_id}/records",
+        "tags": [
+          "admin",
           "admin"
         ]
       }
@@ -9973,6 +10313,78 @@
           }
         },
         "summary": "Cleanup Preview"
+      }
+    },
+    "/api/v1/cache/cleanup/run": {
+      "post": {
+        "operationId": "request_cleanup_run_api_v1_cache_cleanup_run_post",
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CleanupSettingsView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Request Cleanup Run"
+      }
+    },
+    "/api/v1/cache/cleanup/settings": {
+      "get": {
+        "operationId": "get_cleanup_settings_api_v1_cache_cleanup_settings_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CleanupSettingsView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Cleanup Settings"
+      },
+      "put": {
+        "operationId": "put_cleanup_settings_api_v1_cache_cleanup_settings_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SweepPolicyIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CleanupSettingsView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Cleanup Settings"
       }
     },
     "/api/v1/checks/{check_id}": {
