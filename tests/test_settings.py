@@ -434,6 +434,34 @@ def test_usage_url_and_token_come_as_a_pair(monkeypatch):
     assert token not in str(exc.value)
 
 
+def test_history_pair(monkeypatch):
+    pair = "set ORCH_HISTORY_URL and ORCH_HISTORY_TOKEN together, or neither"
+    s = Settings()
+    assert (s.history_url, s.history_token) == ("", "")
+    assert s.admin_upstream("history") is None
+    token = "history-" + secrets.token_hex(16)
+    monkeypatch.setenv("ORCH_HISTORY_URL", "http://agents-history:8001")
+    with pytest.raises(SettingsError) as exc:
+        Settings()
+    assert pair in str(exc.value)
+    monkeypatch.delenv("ORCH_HISTORY_URL")
+    monkeypatch.setenv("ORCH_HISTORY_TOKEN", token)
+    with pytest.raises(SettingsError) as exc:
+        Settings()
+    assert pair in str(exc.value)
+    assert token not in str(exc.value)
+    monkeypatch.setenv("ORCH_HISTORY_URL", "http://agents-history:8001")
+    s = Settings()
+    assert s.admin_upstream("history") == ("http://agents-history:8001", token)
+    assert token not in repr(s)
+    for bad in ("ftp://history", "history:8001", "http://", "http://history/?q=1", "http://h/#f"):
+        monkeypatch.setenv("ORCH_HISTORY_URL", bad)
+        with pytest.raises(SettingsError) as exc:
+            Settings()
+        assert "ORCH_HISTORY_URL" in exc.value.problems, bad
+        assert token not in str(exc.value)
+
+
 def test_agent_usage_settings(monkeypatch):
     s = Settings()
     assert (s.agent_usage_url, s.agent_usage_secret) == ("", "")

@@ -260,6 +260,8 @@ class Settings(BaseSettings):
     schedule_token: str = Field(default="", repr=False)
     connector_url: str = ""
     connector_token: str = Field(default="", repr=False)
+    history_url: str = ""
+    history_token: str = Field(default="", repr=False)
 
     def __init__(self, **values: object) -> None:
         try:
@@ -565,7 +567,7 @@ class Settings(BaseSettings):
                 raise _Bad("must not carry a query or fragment (the relay appends /chat/v1/...)")
         return v
 
-    @field_validator("webhook_url", "schedule_url", "connector_url", "usage_url")
+    @field_validator("webhook_url", "schedule_url", "connector_url", "history_url", "usage_url")
     @classmethod
     def _check_admin_url(cls, v: str) -> str:
         if v:
@@ -595,7 +597,9 @@ class Settings(BaseSettings):
                 raise _Bad("must not end with a slash (the wrapper refuses it)")
         return v
 
-    @field_validator("webhook_token", "schedule_token", "connector_token", "usage_token")
+    @field_validator(
+        "webhook_token", "schedule_token", "connector_token", "history_token", "usage_token"
+    )
     @classmethod
     def _check_admin_pair(cls, v: str, info: ValidationInfo) -> str:
         name = (info.field_name or "").removesuffix("_token")
@@ -691,7 +695,7 @@ class Settings(BaseSettings):
         return self.cache_s3_api_access_key_id, self.cache_s3_api_secret_access_key
 
     def admin_upstream(self, name: str) -> tuple[str, str] | None:
-        """(url, token) of the admin relay upstream `webhook`, `schedule` or `connector`."""
+        """(url, token) of the admin relay upstream: webhook, schedule, connector or history."""
         url = getattr(self, f"{name}_url")
         return (url, getattr(self, f"{name}_token")) if url else None
 

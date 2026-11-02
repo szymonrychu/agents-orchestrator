@@ -44,7 +44,8 @@ ADMIN_TOOLS = [
     "schedules_list", "schedule_get", "schedule_create", "schedule_update", "schedule_delete",
     "schedule_run", "schedule_runs", "schedule_runs_all", "schedule_run_get",
     "schedule_preview", "chat_admin_rooms", "chat_room_settings", "chat_rules",
-    "chat_rule_add", "chat_rule_delete", "secret_set",
+    "chat_rule_add", "chat_rule_delete", "secret_set", "history_search", "history_get",
+    "history_records",
 ]  # fmt: skip
 SECRET = "s3cr3t-token-value"
 PLUGINS_REPO = "https://github.com/szymonrychu/any-mcp-tatara-plugins"
@@ -74,6 +75,14 @@ def written_config(script: str) -> dict:
 def entries(spec: SessionSpec, settings: Settings | None = None) -> dict:
     cfg = written_config(on_start.render_on_start(spec, settings or make_settings(), "alpha"))
     return {p["name"]: p for p in cfg.get("plugins", [])}
+
+
+def test_history_tools_are_read_and_search_only():
+    """The superleader reads and searches stored sessions; no tool deletes one (user decision)."""
+    history = [t for t in on_start.ADMIN_TOOLS if "history" in t]
+    assert history == ["history_search", "history_get", "history_records"]
+    assert not [t for t in on_start.ADMIN_TOOLS if "history" in t and "delete" in t]
+    assert on_start.ADMIN_TOOLS == ADMIN_TOOLS
 
 
 @pytest.mark.parametrize("messaging", [None, False, True])

@@ -1,4 +1,5 @@
-"""O9: the admin relay forwards superleader calls to webhook, schedule and connector upstreams.
+"""O9: the admin relay forwards superleader calls to the webhook, schedule, connector and history
+upstreams.
 
 The upstreams are `FakeUpstream`s held to the OpenAPI documents vendored in `tests/fakes` (each
 `*_openapi.source` names the commit it was copied from), so the relay's idea of every route is
@@ -28,7 +29,9 @@ from agents_orchestrator.settings import Settings
 
 HOSTS = {"webhook": "http://webhook.test", "schedule": "http://schedule.test"}
 HOSTS["connector"] = "http://connector.test"
+HOSTS["history"] = "http://history.test"
 DOCS = {name: fu.load(name) for name in HOSTS}
+NEXT = "x-next-before-id"
 RELAY_PREFIX = {name: spec[0] for name, spec in admin_relay.SERVICES.items()}
 UPSTREAM_PREFIX = {name: spec[1] for name, spec in admin_relay.SERVICES.items()}
 
@@ -107,8 +110,8 @@ ID_FIELD["RoomView"] = "room_id"
 
 
 def ident(service: str, n: int | str, sample=None):
-    """Object id `n` as the upstream spells it: schedules and runs use UUIDs."""
-    if service == "schedule":
+    """Object id `n` as the upstream spells it: schedules, runs and history sessions use UUIDs."""
+    if service in ("schedule", "history"):
         return f"00000000-0000-4000-8000-{int(n):012d}"
     return n if isinstance(sample, int) else str(n)
 
@@ -149,6 +152,25 @@ def seed(rig) -> None:
         next(r for r in runs if str(r["id"]) == p["run_id"]),
     )
     c.answers[("GET", "/chat/v1/admin/rooms")] = (200, rooms)
+    seed_history(rig, by)
+
+
+def history_session(schema: str, n: int, preset) -> dict:
+    """A history session: database id `n`, session UUID `ident("history", n)`."""
+    obj = fu.sample(DOCS["history"], {"$ref": f"#/components/schemas/{schema}"})
+    obj.update(id=n, session_id=ident("history", n), preset_id=preset)
+    return obj
+
+
+def seed_history(rig, by: dict) -> None:
+    rig.summaries = [history_session("SessionSummary", n, by[n]) for n in (7, 8, 9)]
+    details = [history_session("SessionDetail", n, by[n]) for n in (7, 8, 9)]
+    missing = (404, {"error": {"code": "not_found", "message": "no such session"}})
+    fake = rig.fakes["history"]
+    fake.answers[("GET", "/history/v1/sessions")] = lambda call, p: (200, rig.summaries)
+    fake.answers[("GET", "/history/v1/sessions/{session_id}")] = lambda call, p: next(
+        ((200, d) for d in details if d["session_id"] == p["session_id"]), missing
+    )
 
 
 SEEDED = {
@@ -159,6 +181,8 @@ SEEDED = {
     ("GET", "/schedules/api/v1/runs"),
     ("GET", "/schedules/api/v1/runs/{run_id}"),
     ("GET", "/chat/v1/admin/rooms"),
+    ("GET", "/history/v1/sessions"),
+    ("GET", "/history/v1/sessions/{session_id}"),
 }
 
 
@@ -525,3 +549,81 @@ async def test_null_preset_room_hidden(rig):
     url = relay_url("connector", "/rooms/{room_id}/settings", 9)
     assert_error(await rig.call("PUT", url, json=body), 404, "not_found")
     assert not _sent(rig, "connector", "PUT", "/rooms/{room_id}/settings", 9)
+
+
+# ------------------------------------------------------------------------------ the history
+
+
+def history_paths(rig) -> list[str]:
+    return [c.path for c in rig.fakes["history"].calls]
+
+
+async def test_history_list_filtered_by_preset(rig):
+    r = await rig.call("GET", relay_url("history", "/sessions"))
+    assert r.status_code == 200
+    # visible, hidden and null presets in the upstream page: only the visible one is shown
+    assert ids(r, "session_id") == {ident("history", 7)}
+    assert NEXT not in r.headers  # a short page is the end: no cursor
+
+
+async def test_history_list_full_page_carries_the_upstream_cursor(rig):
+    r = await rig.call("GET", relay_url("history", "/sessions"), params={"limit": 3})
+    assert ids(r, "session_id") == {ident("history", 7)}
+    assert r.headers[NEXT] == "7"  # the smallest id of the upstream page, hidden rows included
+    rig.summaries[:] = rig.summaries[1:]  # a page of hidden sessions only: [] and still a cursor
+    r = await rig.call("GET", relay_url("history", "/sessions"), params={"limit": 2})
+    assert r.status_code == 200 and r.json() == []
+    assert r.headers[NEXT] == "8"
+    r = await rig.call("GET", relay_url("history", "/sessions"), params={"limit": 3})
+    assert NEXT not in r.headers  # two rows for a limit of three: the end
+
+
+async def test_history_get_hidden_is_404(rig):
+    for n in (8, 9):
+        r = await rig.call("GET", relay_url("history", "/sessions/{session_id}", n))
+        assert_error(r, 404, "not_found")
+    r = await rig.call("GET", relay_url("history", "/sessions/{session_id}"))
+    assert r.status_code == 200 and r.json()["session_id"] == ident("history", 7)
+
+
+async def test_history_records_hidden_never_forwarded(rig):
+    for n in (8, 9):  # hidden preset, no preset
+        r = await rig.call("GET", relay_url("history", "/sessions/{session_id}/records", n))
+        assert_error(r, 404, "not_found")
+    lookups = [f"/history/v1/sessions/{ident('history', n)}" for n in (8, 9)]
+    assert history_paths(rig) == lookups  # the lookups only: no /records call
+    r = await rig.call("GET", relay_url("history", "/sessions/{session_id}/records"))
+    assert r.status_code == 200
+    assert history_paths(rig)[-1] == f"/history/v1/sessions/{ident('history', 7)}/records"
+
+
+async def test_history_lookup_404(rig):
+    r = await rig.call("GET", relay_url("history", "/sessions/{session_id}/records", 404))
+    assert_error(r, 404, "not_found")
+    assert history_paths(rig) == [f"/history/v1/sessions/{ident('history', 404)}"]
+
+
+async def test_history_lookup_is_bare_and_the_records_call_keeps_the_query(rig):
+    url = relay_url("history", "/sessions/{session_id}/records")
+    r = await rig.call("GET", url, params={"q": "needle", "limit": 5})
+    assert r.status_code == 200
+    lookup, records = rig.fakes["history"].calls
+    assert lookup.query == "" and records.query == "q=needle&limit=5"
+
+
+async def test_history_delete_refused(rig):
+    """The superleader cannot delete a stored session (user decision Q6): the router has no
+    DELETE route, so it answers 405 and nothing reaches the upstream, visible session or not."""
+    for n in (7, 8):
+        r = await rig.call("DELETE", relay_url("history", "/sessions/{session_id}", n))
+        assert r.status_code == 405, r.text
+        assert r.headers["allow"] == "GET"
+    assert rig.fakes["history"].calls == []  # no DELETE and no lookup
+
+
+async def test_history_query_string_passed(rig):
+    r = await rig.call("GET", ADMIN_PREFIX + "/history/sessions?q=needle&regex=true")
+    assert r.status_code == 200
+    (call,) = rig.fakes["history"].calls
+    assert call.path == "/history/v1/sessions" and call.query == "q=needle&regex=true"
+    assert call.headers["authorization"] == f"Bearer {rig.tokens['history']}"
