@@ -2787,6 +2787,20 @@
       "PresetIn": {
         "additionalProperties": false,
         "properties": {
+          "labels": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Labels"
+          },
           "name": {
             "title": "Name",
             "type": "string"
@@ -2838,6 +2852,13 @@
             "title": "Is Default",
             "type": "boolean"
           },
+          "labels": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Labels",
+            "type": "array"
+          },
           "name": {
             "title": "Name",
             "type": "string"
@@ -2862,6 +2883,7 @@
           "name",
           "is_default",
           "superleader_manageable",
+          "labels",
           "spec",
           "created_at",
           "updated_at"
@@ -3124,6 +3146,23 @@
           "last_transcripts_backup"
         ],
         "title": "SessionBackup",
+        "type": "object"
+      },
+      "SessionLabelsIn": {
+        "additionalProperties": false,
+        "properties": {
+          "labels": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Labels",
+            "type": "array"
+          }
+        },
+        "required": [
+          "labels"
+        ],
+        "title": "SessionLabelsIn",
         "type": "object"
       },
       "SessionMessageIn": {
@@ -4049,6 +4088,14 @@
           "init_edited_since_run": {
             "title": "Init Edited Since Run",
             "type": "boolean"
+          },
+          "labels": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Labels",
+            "type": "array"
           },
           "leader_agent_id": {
             "anyOf": [
@@ -9530,7 +9577,29 @@
     },
     "/api/v1/sessions": {
       "get": {
+        "description": "All sessions; `label` (repeatable) keeps live sessions that carry any of the labels.",
         "operationId": "list_sessions_api_v1_sessions_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "label",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Label"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -9545,6 +9614,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "List Sessions"
@@ -10349,6 +10428,57 @@
           }
         },
         "summary": "Put Init Scripts"
+      }
+    },
+    "/api/v1/sessions/{session_id}/labels": {
+      "patch": {
+        "description": "Replace the session's labels (an editable snapshot of its preset's).",
+        "operationId": "patch_labels_api_v1_sessions__session_id__labels_patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionLabelsIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Labels"
       }
     },
     "/api/v1/sessions/{session_id}/leader": {

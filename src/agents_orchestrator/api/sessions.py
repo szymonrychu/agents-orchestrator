@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from agents_common.templating import TemplateError
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from psycopg_pool import AsyncConnectionPool
 from pydantic import ValidationError
@@ -23,6 +23,7 @@ from agents_orchestrator.cache.save_rule import save_skip
 from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import leadership, presets, views
 from agents_orchestrator.db import sessions as repo
+from agents_orchestrator.labels import normalize_labels
 from agents_orchestrator.secret_view import redact_spec, session_metas
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import (
@@ -135,6 +136,7 @@ def _view(session: repo.Session, agg: dict | None, settings: Settings) -> schema
         backup=_backup(session, settings),
         created_by_service=session.created_by_service,
         created_by_session=session.created_by_session,
+        labels=session.labels,
     )
 
 
@@ -248,9 +250,16 @@ async def meta(settings: Cfg) -> schemas.Meta:
 
 
 @router.get("/sessions", response_model=list[schemas.SessionView])
-async def list_sessions(pool: Pool, settings: Cfg) -> list[schemas.SessionView]:
+async def list_sessions(
+    pool: Pool, settings: Cfg, label: Annotated[list[str] | None, Query()] = None
+) -> list[schemas.SessionView]:
+    """All sessions; `label` (repeatable) keeps live sessions that carry any of the labels."""
+    try:
+        wanted = normalize_labels(label) if label else None
+    except ValueError as exc:
+        raise ApiError(422, "invalid_request", str(exc)) from None
     async with pool.connection() as conn:
-        found = await repo.list_sessions(conn)
+        found = await repo.list_sessions(conn, wanted)
         aggs = await views.session_aggregates(conn)
     return [_view(c, aggs.get(c.id), settings) for c in found]
 
@@ -423,6 +432,7 @@ async def _create_from_preset(
         "created_by_service": created_by_service,
         "secret_versions": versions,
         "created_by_session": created_by_session,
+        "labels": preset.labels,
     }
     if slug is not None:
         return await _insert(conn, slug, spec, **provenance)
@@ -569,6 +579,19 @@ async def put_permission_mode(
         preset_name=session.preset_name,
         preset_updated=preset_updated,
     )
+
+
+@router.patch("/sessions/{session_id}/labels", response_model=schemas.SessionView)
+async def patch_labels(
+    session_id: uuid.UUID, body: schemas.SessionLabelsIn, pool: Pool, settings: Cfg
+) -> schemas.SessionView:
+    """Replace the session's labels (an editable snapshot of its preset's)."""
+    async with pool.connection() as conn:
+        try:
+            session = await repo.set_labels(conn, session_id, body.labels)
+        except repo.SessionNotFound:
+            raise not_found("session") from None
+        return await one_view(conn, session, settings)
 
 
 @router.get("/sessions/{session_id}/agents", response_model=list[schemas.AgentView])
