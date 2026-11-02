@@ -205,6 +205,51 @@ def test_discard_hook_command_or_url(monkeypatch):
         Settings()
 
 
+def test_discard_hook_token_needs_url(monkeypatch, caplog):
+    monkeypatch.setenv("ORCH_DISCARD_HOOK_TOKEN", "t0k3n")
+    with pytest.raises(SettingsError) as exc:
+        Settings()
+    assert "ORCH_DISCARD_HOOK_TOKEN" in exc.value.problems
+    assert "t0k3n" not in str(exc.value)
+    monkeypatch.setenv("ORCH_DISCARD_HOOK_URL", "https://history.example/hook")
+    s = Settings()
+    assert s.discard_hook_token == "t0k3n"
+    assert s.discard_hook() == DiscardHook(
+        "url", "https://history.example/hook", "settings", token="t0k3n"
+    )
+    for bad in ("t0k3n\n", "t0 k3n", "t0k3n\x07", "t0k\u00e9n", "t0k3n\u00a0", "t0k3n\x7f"):
+        monkeypatch.setenv("ORCH_DISCARD_HOOK_TOKEN", bad)
+        with caplog.at_level("DEBUG"), pytest.raises(SettingsError) as exc:
+            Settings()
+        assert "ORCH_DISCARD_HOOK_TOKEN" in exc.value.problems, repr(bad)
+        shown = str(exc.value) + repr(exc.value) + repr(exc.value.problems) + caplog.text
+        shown = shown.replace("ORCH_DISCARD_HOOK_TOKEN", "")
+        for part in ("t0", "k3", "3n", "k\u00e9", "\u00e9n", "\u00a0", "\x7f", "\x07"):
+            assert part not in shown, (repr(bad), part)
+    monkeypatch.delenv("ORCH_DISCARD_HOOK_TOKEN")
+    assert Settings().discard_hook() == DiscardHook("url", "https://history.example/hook")
+
+
+def test_discard_hook_token_refused_with_command(monkeypatch):
+    monkeypatch.setenv("ORCH_DISCARD_HOOK_COMMAND", "/bin/export")
+    monkeypatch.setenv("ORCH_DISCARD_HOOK_TOKEN", "t0k3n")
+    with pytest.raises(SettingsError) as exc:
+        Settings()
+    assert "ORCH_DISCARD_HOOK_TOKEN" in exc.value.problems
+    assert "ORCH_DISCARD_HOOK_COMMAND" in exc.value.problems["ORCH_DISCARD_HOOK_TOKEN"]
+    assert "t0k3n" not in str(exc.value)
+
+
+def test_discard_hook_token_hidden_in_repr(monkeypatch):
+    monkeypatch.setenv("ORCH_DISCARD_HOOK_URL", "https://history.example/hook")
+    monkeypatch.setenv("ORCH_DISCARD_HOOK_TOKEN", "t0k3n")
+    settings = Settings()
+    hook = settings.discard_hook()
+    assert hook is not None and hook.token == "t0k3n"
+    assert "t0k3n" not in repr(settings) and "t0k3n" not in str(settings)
+    assert "t0k3n" not in repr(hook) and "t0k3n" not in str(hook)
+
+
 def test_any_mcp_ref_must_be_release_tag(monkeypatch):
     monkeypatch.setenv("ORCH_ANY_MCP_REF", "v1.2.3")
     assert Settings().any_mcp_ref == "v1.2.3"
@@ -415,6 +460,34 @@ def test_usage_url_and_token_come_as_a_pair(monkeypatch):
         Settings()
     assert "set ORCH_USAGE_URL and ORCH_USAGE_TOKEN together, or neither" in str(exc.value)
     assert token not in str(exc.value)
+
+
+def test_history_pair(monkeypatch):
+    pair = "set ORCH_HISTORY_URL and ORCH_HISTORY_TOKEN together, or neither"
+    s = Settings()
+    assert (s.history_url, s.history_token) == ("", "")
+    assert s.admin_upstream("history") is None
+    token = "history-" + secrets.token_hex(16)
+    monkeypatch.setenv("ORCH_HISTORY_URL", "http://agents-history:8001")
+    with pytest.raises(SettingsError) as exc:
+        Settings()
+    assert pair in str(exc.value)
+    monkeypatch.delenv("ORCH_HISTORY_URL")
+    monkeypatch.setenv("ORCH_HISTORY_TOKEN", token)
+    with pytest.raises(SettingsError) as exc:
+        Settings()
+    assert pair in str(exc.value)
+    assert token not in str(exc.value)
+    monkeypatch.setenv("ORCH_HISTORY_URL", "http://agents-history:8001")
+    s = Settings()
+    assert s.admin_upstream("history") == ("http://agents-history:8001", token)
+    assert token not in repr(s)
+    for bad in ("ftp://history", "history:8001", "http://", "http://history/?q=1", "http://h/#f"):
+        monkeypatch.setenv("ORCH_HISTORY_URL", bad)
+        with pytest.raises(SettingsError) as exc:
+            Settings()
+        assert "ORCH_HISTORY_URL" in exc.value.problems, bad
+        assert token not in str(exc.value)
 
 
 def test_agent_usage_settings(monkeypatch):

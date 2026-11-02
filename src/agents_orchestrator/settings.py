@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
@@ -41,8 +41,15 @@ class SettingsError(ValueError):
 
 @dataclass(frozen=True)
 class DiscardHook:
+    """A pre-discard hook: the settings one (command or URL) or a session's own URL.
+
+    `token` is the bearer sent with a URL hook; only the settings URL ever carries one.
+    """
+
     kind: Literal["command", "url"]
     target: str
+    name: Literal["settings", "session"] = "settings"
+    token: str = field(default="", repr=False)
 
 
 def _var(field: str) -> str:
@@ -177,6 +184,8 @@ class Settings(BaseSettings):
 
     discard_hook_command: str = ""
     discard_hook_url: str = ""
+    # bearer for the settings URL hook only, never sent to a session's own discard_hook_url
+    discard_hook_token: str = Field(default="", repr=False)
     discard_hook_timeout_seconds: float = 120
     discard_quiesce_timeout_seconds: float = 120
     discard_drain_seconds: float = 5
@@ -262,6 +271,8 @@ class Settings(BaseSettings):
     schedule_token: str = Field(default="", repr=False)
     connector_url: str = ""
     connector_token: str = Field(default="", repr=False)
+    history_url: str = ""
+    history_token: str = Field(default="", repr=False)
 
     def __init__(self, **values: object) -> None:
         try:
@@ -544,6 +555,18 @@ class Settings(BaseSettings):
                 raise _Bad("must be an http or https URL")
         return v
 
+    @field_validator("discard_hook_token")
+    @classmethod
+    def _check_hook_token(cls, v: str, info: ValidationInfo) -> str:
+        if v and info.data.get("discard_hook_command"):
+            raise _Bad("not used with ORCH_DISCARD_HOOK_COMMAND (a bearer for the URL hook only)")
+        if v and info.data.get("discard_hook_url") == "":
+            raise _Bad("needs ORCH_DISCARD_HOOK_URL")
+        if not re.fullmatch(r"[\x21-\x7e]*", v):
+            # an illegal header value would echo the token into the failure reason and the log
+            raise _Bad("must be printable ASCII without whitespace")
+        return v
+
     @field_validator("chat_url", "taskboard_url")
     @classmethod
     def _check_relay_url(cls, v: str) -> str:
@@ -555,7 +578,7 @@ class Settings(BaseSettings):
                 raise _Bad("must not carry a query or fragment (the relay appends the API path)")
         return v
 
-    @field_validator("webhook_url", "schedule_url", "connector_url", "usage_url")
+    @field_validator("webhook_url", "schedule_url", "connector_url", "history_url", "usage_url")
     @classmethod
     def _check_admin_url(cls, v: str) -> str:
         if v:
@@ -585,7 +608,9 @@ class Settings(BaseSettings):
                 raise _Bad("must not end with a slash (the wrapper refuses it)")
         return v
 
-    @field_validator("webhook_token", "schedule_token", "connector_token", "usage_token")
+    @field_validator(
+        "webhook_token", "schedule_token", "connector_token", "history_token", "usage_token"
+    )
     @classmethod
     def _check_admin_pair(cls, v: str, info: ValidationInfo) -> str:
         name = (info.field_name or "").removesuffix("_token")
@@ -689,7 +714,7 @@ class Settings(BaseSettings):
         return self.cache_s3_api_access_key_id, self.cache_s3_api_secret_access_key
 
     def admin_upstream(self, name: str) -> tuple[str, str] | None:
-        """(url, token) of the admin relay upstream `webhook`, `schedule` or `connector`."""
+        """(url, token) of the admin relay upstream: webhook, schedule, connector or history."""
         url = getattr(self, f"{name}_url")
         return (url, getattr(self, f"{name}_token")) if url else None
 
@@ -763,5 +788,5 @@ class Settings(BaseSettings):
         if self.discard_hook_command:
             return DiscardHook("command", self.discard_hook_command)
         if self.discard_hook_url:
-            return DiscardHook("url", self.discard_hook_url)
+            return DiscardHook("url", self.discard_hook_url, token=self.discard_hook_token)
         return None

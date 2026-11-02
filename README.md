@@ -79,6 +79,7 @@ Every process reads `ORCH_*` variables (the contract `agents-orchestrator-settin
 | `ORCH_AMBIGUOUS_DEADLINE_SECONDS` | `600` | dispatcher, ingester | deadline after which an ambiguous send fails (> settle) |
 | `ORCH_DISCARD_HOOK_COMMAND` | empty | api, reconciler | pre-discard hook command (exclusive with URL) |
 | `ORCH_DISCARD_HOOK_URL` | empty | api, reconciler | pre-discard hook http(s) webhook URL |
+| `ORCH_DISCARD_HOOK_TOKEN` | empty | reconciler | bearer token sent as `Authorization: Bearer` with the `ORCH_DISCARD_HOOK_URL` hook only; needs the URL, refused with the command, never logged |
 | `ORCH_DISCARD_HOOK_TIMEOUT_SECONDS` | `120` | api, reconciler | discard hook timeout |
 | `ORCH_SCALE_DRAIN_SECONDS` | `900` | reconciler | scale-down drain deadline (> 0): after it the StatefulSet gets the target replicas even while a draining agent is busy |
 | `ORCH_ANY_MCP_REPO` | `https://github.com/szymonrychu/any-mcp` | api, reconciler | any-mcp git repository |
@@ -108,6 +109,8 @@ Every process reads `ORCH_*` variables (the contract `agents-orchestrator-settin
 | `ORCH_SCHEDULE_TOKEN` | empty | api | service bearer the admin relay presents to that upstream (`Authorization: Bearer`); secret, never in a repr, a log line or an error body. Set together with `ORCH_SCHEDULE_URL` or neither |
 | `ORCH_CONNECTOR_URL` | empty | api | http or https base URL of the matrix connector agent listener; the superleader admin relay (`/agent/v1/admin/chats/*`) calls `/chat/v1/admin/...`. No query or fragment. Set together with `ORCH_CONNECTOR_TOKEN` or neither; empty answers those calls 503 `upstream_unconfigured` |
 | `ORCH_CONNECTOR_TOKEN` | empty | api | service bearer the admin relay presents to that upstream (`Authorization: Bearer`); secret, never in a repr, a log line or an error body. Set together with `ORCH_CONNECTOR_URL` or neither |
+| `ORCH_HISTORY_URL` | empty | api | http or https base URL of the agents-history service listener; the superleader admin relay (`/agent/v1/admin/history/*`) calls `/history/v1/...`. No query or fragment. Set together with `ORCH_HISTORY_TOKEN` or neither; empty answers those calls 503 `upstream_unconfigured` |
+| `ORCH_HISTORY_TOKEN` | empty | api | service bearer the admin relay presents to that upstream (`Authorization: Bearer`); secret, never in a repr, a log line or an error body. Set together with `ORCH_HISTORY_URL` or neither |
 | `ORCH_USAGE_URL` | empty | api | http or https base URL of the agents-usage listener; the usage gate reads `{ORCH_USAGE_URL}/usage/v1/current`. No query or fragment. Set together with `ORCH_USAGE_TOKEN` or neither; empty turns the gate off (every start is allowed) |
 | `ORCH_USAGE_TOKEN` | empty | api | service bearer the usage gate presents to agents-usage (`Authorization: Bearer`); secret, never in a repr, a log line or an error body. Set together with `ORCH_USAGE_URL` or neither, else a settings error naming both |
 | `ORCH_USAGE_QUOTA_DEFAULT` | `100` | api | percent (1 to 100) of the `five_hour` and `seven_day` usage windows at which a start is refused when the preset sets no `usage_quota` for that window; a window gates when its percent is at or above the limit, so 100 gates at the real limit |
@@ -178,10 +181,12 @@ A Postgres connection is required. Set exactly one of these; none, or more than 
 | `<fullname>-master-key` | `masterKey.existingSecretKey` (default `master-key`) | `masterKey.value` is set | `masterKey.existingSecret` + `existingSecretKey` |
 | `<fullname>-claude` | `CLAUDE_CODE_OAUTH_TOKEN` | `claude.token` is set | `claude.existingSecret` + `existingSecretKey` |
 | `<fullname>-chat` | `chat.existingSecretKey` (default `chat-token`) | `chat.token` is set and `chat.existingSecret` is not | `chat.existingSecret` + `existingSecretKey` |
+| `<fullname>-admin-<name>` (`<name>` is `webhook`, `schedule`, `connector` or `history`) | `admin.<name>.existingSecretKey` (default `token`) | `admin.<name>.token` is set and `admin.<name>.existingSecret` is not | `admin.<name>.existingSecret` + `existingSecretKey` |
+| `<fullname>-discard-hook` | `discardHook.existingSecretKey` (default `token`) | `discardHook.token` is set and `discardHook.existingSecret` is not | `discardHook.existingSecret` + `existingSecretKey` |
 
 The master key and the Claude token each need a value or an `existingSecret`; with neither the render fails. The agent pods in the release namespace read the Claude Secret, so `existingSecret` must live there.
 
-The admin relay upstreams are optional, one block each under `admin.webhook`, `admin.schedule` and `admin.connector`. `admin.<name>.url` becomes `ORCH_WEBHOOK_URL`, `ORCH_SCHEDULE_URL` or `ORCH_CONNECTOR_URL`, and the token `ORCH_<NAME>_TOKEN` comes from `admin.<name>.existingSecret` (key `existingSecretKey`, default `token`) or else from the chart Secret `<fullname>-admin-<name>` built from `admin.<name>.token`. Same rules as chat: api main container only, always as a pair, never in the ConfigMap, the pod rolls when a chart-made token changes, url without a token source (or the reverse) fails the render. `selfRestartCooldownSeconds` (default 600) becomes `ORCH_SELF_RESTART_COOLDOWN_SECONDS`. The api Role already allows `create`, `patch` and `delete` on Secrets (never a read), which covers both protected preset variables and the `webhook-<id>-password` Secrets.
+The admin relay upstreams are optional, one block each under `admin.webhook`, `admin.schedule`, `admin.connector` and `admin.history`. `admin.<name>.url` becomes `ORCH_WEBHOOK_URL`, `ORCH_SCHEDULE_URL`, `ORCH_CONNECTOR_URL` or `ORCH_HISTORY_URL`, and the token `ORCH_<NAME>_TOKEN` comes from `admin.<name>.existingSecret` (key `existingSecretKey`, default `token`) or else from the chart Secret `<fullname>-admin-<name>` built from `admin.<name>.token`. Same rules as chat: api main container only, always as a pair, never in the ConfigMap, the pod rolls when a chart-made token changes, url without a token source (or the reverse) fails the render. `discardHook.url` becomes `ORCH_DISCARD_HOOK_URL` in the settings ConfigMap (the api reports the hook kind in `/meta`), and `ORCH_DISCARD_HOOK_TOKEN` comes from `discardHook.existingSecret` (key `existingSecretKey`, default `token`) or else from the chart Secret `<fullname>-discard-hook` built from `discardHook.token`; the token is env of the reconciler main container only, never in the ConfigMap, the pod rolls when a chart-made token changes, and url without a token source (or the reverse) fails the render. `selfRestartCooldownSeconds` (default 600) becomes `ORCH_SELF_RESTART_COOLDOWN_SECONDS`. The api Role already allows `create`, `patch` and `delete` on Secrets (never a read), which covers both protected preset variables and the `webhook-<id>-password` Secrets.
 
 The chat relay is optional. `chat.url` becomes `ORCH_CHAT_URL` and `ORCH_CHAT_TOKEN` comes from `chat.existingSecret` (key `chat.existingSecretKey`, default `chat-token`) or else from the chart Secret `<fullname>-chat` built from `chat.token`; `existingSecret` wins. `ORCH_CHAT_URL` (a plain value) and `ORCH_CHAT_TOKEN` (a `secretKeyRef`) are env of the api main container only, always together, never in the settings ConfigMap (not its migrate init container, not the dispatcher, ingester or reconciler), and the api pod rolls when the chart-made token changes (`checksum/chat-secret`). Set `chat.url` together with `chat.token` or `chat.existingSecret`, or none of them: one without the other fails the render naming all three. With none, neither variable renders and every `/agent/v1/chat/*` call answers 503 `chat_unconfigured`.
 
@@ -391,25 +396,27 @@ A deleting session first passes the pre-discard gate, then loses every labelled 
 
 `DELETE /api/v1/sessions/{id}` marks the session `deleting`; the reconciler then removes everything, in this order:
 
-1. **Quiesce** (only when a hook is configured and has not yet delivered): the StatefulSet is scaled to zero and the reconciler waits until no agent pod is left, then gives the ingester `ORCH_DISCARD_DRAIN_SECONDS` (5) to store the last events of their streams. The wait is bounded by `ORCH_DISCARD_QUIESCE_TIMEOUT_SECONDS` (120) from the start of the discard; after that the discard logs a warning and goes on.
-2. **Export** the full history as JSONL.
-3. **Hook**: deliver the export; a failed hook blocks the deletion and is retried with backoff.
+1. **Quiesce** (only while any configured hook has not yet delivered): the StatefulSet is scaled to zero and the reconciler waits until no agent pod is left, then gives the ingester `ORCH_DISCARD_DRAIN_SECONDS` (5) to store the last events of their streams. The wait is bounded by `ORCH_DISCARD_QUIESCE_TIMEOUT_SECONDS` (120) from the start of the discard; after that the discard logs a warning and goes on.
+2. **Export** the full history as JSONL, one stream per hook.
+3. **Hooks**: deliver the export to every hook not yet delivered; a failed hook blocks the deletion and is retried with backoff, the delivered ones are not sent again.
 4. **Delete** everything.
 
 A discard deletes the session's Kubernetes objects (check Jobs, the init Job, StatefulSet and its pods, headless Service, ConfigMap, the Secret by name and the RWX PVC with the workspace) and, last, the session row, which cascades its whole chat history: agents, messages, turns, commands, checks and events.
 
 ### Hook
 
-An optional hook receives the full history export before anything is deleted. None is configured by default. The hook comes from, in order of precedence:
+Optional hooks receive the full history export before anything is deleted. None is configured by default. A discard runs every configured hook, in this order, each with its own export stream:
 
-1. `spec.discard_hook_url` of the session (a webhook URL, http or https only);
-2. `ORCH_DISCARD_HOOK_COMMAND` (a shell command) or `ORCH_DISCARD_HOOK_URL` (a webhook URL), set at most one.
+1. `settings`: `ORCH_DISCARD_HOOK_COMMAND` (a shell command) or `ORCH_DISCARD_HOOK_URL` (a webhook URL), set at most one;
+2. `session`: `spec.discard_hook_url` of the session (a webhook URL, http or https only).
 
-A command comes only from settings, never from the spec: the API has no auth and the reconciler holds the Kubernetes credentials. Both kinds are bounded by `ORCH_DISCARD_HOOK_TIMEOUT_SECONDS` (120).
+The settings hook always runs, also for a session that sets its own URL (user decision: it feeds the session history service). A command comes only from settings, never from the spec: the API has no auth and the reconciler holds the Kubernetes credentials. Every hook is bounded by `ORCH_DISCARD_HOOK_TIMEOUT_SECONDS` (120).
+
+`ORCH_DISCARD_HOOK_TOKEN` (reconciler only) is sent as `Authorization: Bearer <token>` with the settings URL hook, and never with a session's own URL, which is user-controlled. It needs `ORCH_DISCARD_HOOK_URL`, is refused with `ORCH_DISCARD_HOOK_COMMAND` or unless it is printable ASCII without whitespace (0x21 to 0x7E), is hidden from the settings repr and is never logged.
 
 ### Export format
 
-JSONL, one JSON object per line, each with a `kind`. The first line is the `session` record (`id`, `slug`, `spec`, `created_at`). Then come the `agent`, `message`, `turn`, `command`, `check` and `event` records of the session, each kind in id order (turns in `started_at` order); a record carries the table's columns. A `command` record's own kind column is named `command_kind`. Timestamps are ISO 8601 UTC. The export is streamed from the database with server-side cursors, so a long history is never held in memory. The session is already `deleting` and the API refuses new messages, so, with the agents quiesced first, the history includes every event the agents produced.
+JSONL, one JSON object per line, each with a `kind`. The first line is the `session` record (`id`, `slug`, `spec`, `created_at`, and the provenance `preset_id`, `preset_name`, `created_by_service`, `created_by_session`, each `null` when unset; `preset_id` is also `null` once the preset is deleted, `preset_name` keeps the name it had at creation). Then come the `agent`, `message`, `turn`, `command`, `check` and `event` records of the session, each kind in id order (turns in `started_at` order); a record carries the table's columns. A `command` record's own kind column is named `command_kind`. Timestamps are ISO 8601 UTC. The export is streamed from the database with server-side cursors, so a long history is never held in memory. The session is already `deleting` and the API refuses new messages, so, with the agents quiesced first, the history includes every event the agents produced.
 
 ### Breaking change, 2026-10-25
 
@@ -421,13 +428,13 @@ Run through `sh -c` with the JSONL on stdin, `ORCH_SESSION_ID` and `ORCH_SESSION
 
 ### Webhook contract
 
-An HTTP `POST` of the JSONL, streamed, with `Content-Type: application/x-ndjson`, `X-Orch-Session-Id` and `X-Orch-Session-Slug`. Any 2xx is success; any other status, a connection error or a timeout is a failure.
+An HTTP `POST` of the JSONL, streamed, with `Content-Type: application/x-ndjson`, `X-Orch-Session-Id` and `X-Orch-Session-Slug`, plus `Authorization: Bearer` on the settings URL when `ORCH_DISCARD_HOOK_TOKEN` is set. Any 2xx is success; any other status, a connection error or a timeout is a failure.
 
 ### Delivery and retries
 
-Delivery is at-least-once. Success writes `status.discard_hook_delivered` (database time), after which the export is never sent again, also not after a reconciler restart. A crash between the hook accepting and that write sends the export a second time, so a receiver must tolerate duplicates (the session `id` identifies them).
+Delivery is at-least-once, per hook. Each success adds the hook's name to the object `status.discard_hook_delivered` (`{"settings": "<time>", "session": "<time>"}`, database time), after which that hook is never sent the export again, also not after a reconciler restart. A crash between a hook accepting and that write sends the export a second time, so a receiver must tolerate duplicates (the session `id` identifies them). A `discard_hook_delivered` that is not an object (written by an earlier version, before hooks were tracked by name) counts as nothing delivered, so every hook runs again.
 
-A failing hook holds the discard: nothing is deleted, the session stays `deleting`, and the status records `discard_hook_failed` (the reason), `discard_hook_failures` (the count) and `discard_hook_next_at`. The hook is retried on a later reconcile once the database clock passes `discard_hook_next_at`, with the backoff `ORCH_RETRY_BACKOFF_BASE_SECONDS` doubling up to `ORCH_RETRY_BACKOFF_MAX_SECONDS`. One session's failing hook never stops the other sessions reconciling.
+Each owed hook runs whatever the others did: a failing settings hook never holds the session's own hook back, nor the other way round. Any failure holds the discard: nothing is deleted, the session stays `deleting`, and the status records `discard_hook_failed` (`<name>: <reason>` of the first failing hook, for example `session: status 500`), `discard_hook_failures` (the count, shared by the hooks) and `discard_hook_next_at`. The hooks not yet delivered are retried on a later reconcile once the database clock passes `discard_hook_next_at`, with the backoff `ORCH_RETRY_BACKOFF_BASE_SECONDS` doubling up to `ORCH_RETRY_BACKOFF_MAX_SECONDS`. One session's failing hook never stops the other sessions reconciling.
 
 ### Autoclose
 
@@ -1281,7 +1288,17 @@ Advisory locks on files, so agents claim what they edit and are warned before wr
 
 ## Admin relay (superleader)
 
-A superleader session (`session_messaging` set in its spec, whoever created the session: a user, a trigger service or the matrix connector) reaches the trigger services through `/agent/v1/admin/webhooks/*`, `/schedules/*` and `/chats/*`, which map 1:1 to the upstream admin routes (`ORCH_WEBHOOK_URL`, `ORCH_SCHEDULE_URL`, `ORCH_CONNECTOR_URL` with their tokens). After the superleader gate the upstream must be configured (503 `upstream_unconfigured`) and the body is capped at 256 KiB (413). The upstream gets only its service bearer, `X-Orch-Session` and `X-Orch-Slug`; its status and JSON come back unchanged, a failed or non-JSON call is 503 `upstream_unavailable`.
+A superleader session (`session_messaging` set in its spec, whoever created the session: a user, a trigger service or the matrix connector) reaches the trigger services through `/agent/v1/admin/webhooks/*`, `/schedules/*`, `/chats/*` and `/history/*`, which map 1:1 to the upstream admin routes (`ORCH_WEBHOOK_URL`, `ORCH_SCHEDULE_URL`, `ORCH_CONNECTOR_URL`, `ORCH_HISTORY_URL` with their tokens). After the superleader gate the upstream must be configured (503 `upstream_unconfigured`) and the body is capped at 256 KiB (413). The upstream gets only its service bearer, `X-Orch-Session` and `X-Orch-Slug`; its status and JSON come back unchanged, a failed or non-JSON call is 503 `upstream_unavailable`.
+
+The history routes are read and search only; the superleader cannot delete a stored session (deleting is for the user, through the web UI), so there is no DELETE route and any other method is 405 with nothing sent upstream:
+
+| Relay route | Upstream route | Notes |
+|-------------|----------------|-------|
+| `GET /agent/v1/admin/history/sessions` | `GET /history/v1/sessions` | the query string is passed on (`q`, `regex`, `from`, `to`, `preset`, `session`, `limit`, `before_id`); only sessions of manageable presets are shown |
+| `GET /agent/v1/admin/history/sessions/{session_id}` | `GET /history/v1/sessions/{session_id}` | 404 for a session of a hidden preset, with no preset, or unknown |
+| `GET /agent/v1/admin/history/sessions/{session_id}/records` | `GET /history/v1/sessions/{session_id}/records` | the session is looked up first (one extra upstream call); a hidden or unknown session is 404 and its records are never requested |
+
+The list is paged upstream by `before_id` and the relay filters the page it got, so a page can come back short or empty. When the upstream page was full, the answer carries `X-Next-Before-Id` (the smallest id of that page, hidden rows included), also on an empty page; send it as `before_id` to continue. No header means the end.
 
 Webhook credentials never reach the caller. A credential agents-webhook issues once (create, rotate, clone, a PATCH that changes the auth mode) is stored in the Secret `webhook-<id>-password` (key `password`, or `secret` for header, bearer and hmac) and the answer carries `password_secret` (the Secret name) and `key` instead. If the Secret cannot be written the call is 503 `credential_not_stored` and no value is returned; rotate the endpoint for a new one. Deleting the webhook deletes the Secret. A call with `X-Orch-Tool: local` also gets `credential: {key, value}` once, for the plugin's `to_file`.
 
@@ -1292,7 +1309,7 @@ Each preset has a `superleader_manageable` switch (default false, main port only
 - Admin preset routes: list omits hidden presets; get, replace, copy, delete and secrets of a hidden preset are 404. Presets created through the admin API are manageable.
 - Admin session create needs a `preset_id` of a manageable preset (a raw `spec` is 422 `preset_required`; a hidden preset is 404) and is gated like the main port (409 `usage_quota`, see Usage gate); a session of a hidden preset, or with a null preset, is 404 on every admin session route and absent from the list.
 - Sending `superleader_manageable` through the admin API is 422 `manageable_main_port_only` when false; the admin API cannot hide a preset.
-- Relay (`/agent/v1/admin/webhooks`, `/schedules`, `/chats`): a body naming a hidden or null preset, or a stored object on one, is 404 and never forwarded. Lists (endpoints, events, schedules, runs, rooms) are filtered after the upstream page, so a page of `events` or `runs` full of hidden items comes back short or empty; a single event or run of a hidden preset is 404. Objects with a null preset (for example chat rooms without a preset) are hidden. A list answer that is not a JSON list is 502 `upstream_shape`.
+- Relay (`/agent/v1/admin/webhooks`, `/schedules`, `/chats`, `/history`): a body naming a hidden or null preset, or a stored object on one, is 404 and never forwarded. Lists (endpoints, events, schedules, runs, rooms, history sessions) are filtered after the upstream page, so a page of `events` or `runs` full of hidden items comes back short or empty; a single event or run of a hidden preset is 404. Objects with a null preset (for example chat rooms without a preset) are hidden. A list answer that is not a JSON list is 502 `upstream_shape`.
 - Cross-session messaging (`/agent/v1/sessions`) is not filtered by this switch.
 
 ### Admin relay: secrets, cooldown and known risks
