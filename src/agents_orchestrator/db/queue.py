@@ -52,6 +52,7 @@ class Claim:
     previous_dispatched_at: datetime | None
     sender_slug: str | None
     lane: str = "regular"
+    attachments: tuple[StoredAttachment, ...] = ()  # filled by the dispatcher after the claim
 
 
 @dataclass(frozen=True)

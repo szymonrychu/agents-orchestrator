@@ -8,6 +8,7 @@ which keeps it honest. Turns stay `running` until a test calls `complete_turn`.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import functools
 import json
@@ -43,6 +44,7 @@ DOWNLOAD_CHUNK_BYTES = 1 << 20
 _ATTR_CHAR_SAFE = "!#$&+^`|"
 RESUMABLE = ("stopped", "failed", "dead")
 _NOTE_KEY = re.compile(r"^[a-z0-9_]{1,40}$")
+_ATTACHMENT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _CLOSE = object()
 
 log = logging.getLogger(__name__)
@@ -288,6 +290,8 @@ class FakeWrapper:
         self.turn_metadata: list[dict[str, Any]] = []
         self.turn_lanes: list[str] = []
         self.turn_message_ids: list[str | None] = []  # the message_id of every POST /turns
+        # the `attachments` of every POST /turns that reached the workdir (None when absent)
+        self.turn_attachments: list[list[dict[str, Any]] | None] = []
         self._priority_hold = 0.0
         self._priority_ids: dict[str, str] = {}
         self._status_code: str | None = None
@@ -734,6 +738,9 @@ class FakeWrapper:
                 turn = ses.turns[known]
                 return {"turn_id": known, "state": turn.state, "duplicate": True}
             self._write_turn_files(ses, body.get("files"))
+            attachments = body.get("attachments")
+            self._write_turn_attachments(ses, message_id, attachments)
+            self.turn_attachments.append(attachments)
             turn = _Turn(self._new_id("turn-"), text, metadata, _now())
             if lane == "priority" and message_id is not None:
                 self._priority_ids[message_id] = turn.turn_id
@@ -1195,6 +1202,33 @@ class FakeWrapper:
             target = _confine(Path(ses.backing_dir), rel)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
+
+    def _write_turn_attachments(self, ses: _Session, message_id: Any, attachments: Any) -> None:
+        """The turn `attachments` field, as the real wrapper writes it: bytes under
+        `.attachments/<message_id>/<name>` plus `.attachments/.gitignore`; a repeat overwrites."""
+        if attachments is None:
+            return
+        if not isinstance(attachments, list) or not isinstance(message_id, str) or not message_id:
+            raise _Err(400, "invalid_attachment", "attachments need a list and a message_id")
+        decoded: list[tuple[str, bytes]] = []
+        for item in attachments:
+            if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+                raise _Err(400, "invalid_attachment", "attachment must be an object with a name")
+            if not _ATTACHMENT_NAME.fullmatch(item["name"]):
+                raise _Err(400, "invalid_attachment", "bad attachment name")
+            try:
+                data = base64.b64decode(item.get("data_b64", ""), validate=True)
+            except (ValueError, TypeError) as exc:
+                raise _Err(400, "invalid_attachment", "data_b64 is not base64") from exc
+            if not data:
+                raise _Err(400, "invalid_attachment", "empty attachment")
+            decoded.append((item["name"], data))
+        root = _confine(Path(ses.backing_dir), ".attachments")
+        folder = _confine(Path(ses.backing_dir), f".attachments/{message_id}")
+        folder.mkdir(parents=True, exist_ok=True)
+        (root / ".gitignore").write_text("*\n", encoding="utf-8")
+        for name, data in decoded:
+            (folder / name).write_bytes(data)
 
     @staticmethod
     async def _json_body(request: Request) -> dict[str, Any]:

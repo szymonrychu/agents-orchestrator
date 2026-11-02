@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import time
 import uuid
 
@@ -601,3 +602,82 @@ async def test_idle_lane_409_requeue_has_no_backoff(env):
     await d.drain()
     await d.aclose()
     assert (await env.message(m["id"]))["not_before"] is None
+
+
+PNG = b"\x89PNG\r\n\x1a\nbytes"
+
+
+async def _enqueue_with_attachment(env, **kw) -> int:
+    async with env.pool.connection() as conn:
+        return await q.enqueue_message(
+            conn,
+            env.cid,
+            "look at this",
+            attachments=[q.StoredAttachment("s.png", "image/png", PNG)],
+            **kw,
+        )
+
+
+async def test_dispatch_passes_attachments_and_names_paths(env):
+    await env.agent()
+    mid = await _enqueue_with_attachment(env)
+    d = env.dispatcher()
+    await d.drain()
+    await d.aclose()
+    assert (await env.message(mid))["status"] == "sent"
+    assert env.fake.turn_message_ids == [f"orch-{mid}"]
+    assert env.fake.turn_attachments == [
+        [
+            {
+                "name": "s.png",
+                "mime": "image/png",
+                "data_b64": base64.b64encode(PNG).decode(),
+            }
+        ]
+    ]
+    assert env.fake.turn_texts == [
+        "look at this\n\nAttached files (paths relative to your working directory; Read each"
+        f" one): .attachments/orch-{mid}/s.png"
+    ]
+    assert (env.fake.workdir() / f".attachments/orch-{mid}/s.png").read_bytes() == PNG
+
+
+async def test_requeued_message_resends_attachments(env):
+    await env.agent()
+    mid = await _enqueue_with_attachment(env)
+    env.fake.fail_turn_after_receive(409)  # the files are written, then the wrapper says busy
+    d = env.dispatcher()
+    await d.drain()
+    assert (await env.message(mid))["status"] == "queued"
+    env.fake.fail_turn_after_receive(None)
+    await asyncio.sleep(0.35)
+    await d.drain()
+    await d.aclose()
+    assert (await env.message(mid))["status"] == "sent"
+    assert env.fake.turn_message_ids == [f"orch-{mid}", f"orch-{mid}"]
+    assert len(env.fake.turn_attachments) == 2
+    assert env.fake.turn_attachments[0] == env.fake.turn_attachments[1]
+    assert env.fake.turn_attachments[1][0]["name"] == "s.png"
+    assert (env.fake.workdir() / f".attachments/orch-{mid}/s.png").read_bytes() == PNG
+
+
+async def test_wrapper_without_attachment_support_fails_rejected(env):
+    await env.agent()
+    mid = await _enqueue_with_attachment(env)
+    env.fake.set_turn_status(422, "invalid_request")  # wrapper 0.8.1 refuses the field
+    d = env.dispatcher()
+    await d.drain()
+    await d.aclose()
+    row = await env.message(mid)
+    assert (row["status"], row["error"]) == ("failed", "rejected")
+
+
+async def test_message_without_attachments_sends_no_message_id_on_regular_lane(env):
+    await env.agent()
+    await env.msg(text="plain", lane="regular")
+    d = env.dispatcher()
+    await d.drain()
+    await d.aclose()
+    assert env.fake.turn_message_ids == [None]
+    assert env.fake.turn_attachments == [None]
+    assert env.fake.turn_texts == ["plain"]

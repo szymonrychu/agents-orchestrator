@@ -7,6 +7,7 @@ The `real` leg needs ORCH_TEST_WRAPPER_IMAGE (see tests/fakes/real_wrapper.py) a
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import time
@@ -522,6 +523,27 @@ async def test_files_errors(leg: Leg) -> None:
         assert resp.status_code == 404 and resp.json()["error"]["code"] == "not_found"
         async with httpx.AsyncClient(base_url=leg.base_url) as anon:
             assert (await anon.get(url)).status_code == 401
+
+
+async def test_turn_attachments_written(leg: Leg) -> None:
+    sid = await leg.create()
+    data = b"\x89PNG\r\n\x1a\nbytes"
+    resp = await leg.submit(
+        sid,
+        "see file",
+        message_id="orch-77",
+        attachments=[
+            {"name": "s.png", "mime": "image/png", "data_b64": base64.b64encode(data).decode()}
+        ],
+    )
+    assert resp.status_code == 202, resp.text
+    await leg.finish(sid, resp.json()["turn_id"])
+    url = f"/v1/sessions/{sid}/files/download"
+    got = await leg.http.get(url, params={"path": ".attachments/orch-77/s.png"})
+    assert got.status_code == 200, got.text
+    assert got.content == data
+    ignore = await leg.http.get(url, params={"path": ".attachments/.gitignore"})
+    assert ignore.status_code == 200 and ignore.content == b"*\n"
 
 
 async def test_files_download(leg: Leg) -> None:
