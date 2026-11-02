@@ -480,7 +480,12 @@ def _container(session: Session, settings: Settings, names: dict[str, str]) -> d
             "periodSeconds": PROBE_PERIOD,
             "failureThreshold": startup_failures,
         },
-        "livenessProbe": {"httpGet": {"path": "/healthz", "port": port}, "periodSeconds": 10},
+        "livenessProbe": {
+            "httpGet": {"path": "/healthz", "port": port},
+            "periodSeconds": 10,
+            "timeoutSeconds": settings.agent_liveness_timeout_seconds,
+            "failureThreshold": settings.agent_liveness_failure_threshold,
+        },
         "readinessProbe": {"httpGet": {"path": "/readyz", "port": port}, "periodSeconds": 10},
         "volumeMounts": [
             workdir_mount(spec),
@@ -588,7 +593,11 @@ def render_session(
     }
     pod_spec: dict[str, Any] = {
         **pod_identity(spec, settings),
-        "securityContext": {"runAsUser": 1000, "fsGroup": 1000},
+        "securityContext": {
+            "runAsUser": 1000,
+            "fsGroup": 1000,
+            "fsGroupChangePolicy": settings.agent_fs_group_change_policy,
+        },
         "terminationGracePeriodSeconds": settings.agent_termination_grace_seconds,
         "containers": [_container(session, settings, names)],
         "volumes": [

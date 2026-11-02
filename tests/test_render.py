@@ -308,6 +308,8 @@ def test_on_start_hook_and_startup_probe():
     assert c["startupProbe"]["periodSeconds"] == 5
     assert c["startupProbe"]["failureThreshold"] == 600 // 5 + 12
     assert c["livenessProbe"]["httpGet"]["path"] == "/healthz"
+    assert c["livenessProbe"]["timeoutSeconds"] == 5
+    assert c["livenessProbe"]["failureThreshold"] == 6
     assert c["readinessProbe"]["httpGet"]["path"] == "/readyz"
     odd = container_of(
         render.render_session(make_session(), make_settings(on_start_timeout_seconds=601), TOKENS)
@@ -456,7 +458,28 @@ def test_shutdown_below_grace_and_resources():
     assert pod["terminationGracePeriodSeconds"] == 90
     assert config_of(objs)["limits"]["shutdown_timeout_seconds"] < 90
     assert pod["containers"][0]["resources"] == {"limits": {"cpu": "1"}}
-    assert pod["securityContext"] == {"runAsUser": 1000, "fsGroup": 1000}
+    assert pod["securityContext"] == {
+        "runAsUser": 1000,
+        "fsGroup": 1000,
+        "fsGroupChangePolicy": "OnRootMismatch",
+    }
+
+
+def test_agent_pod_start_settings_override():
+    objs = render.render_session(
+        make_session(),
+        make_settings(
+            agent_fs_group_change_policy="Always",
+            agent_liveness_timeout_seconds=10,
+            agent_liveness_failure_threshold=12,
+        ),
+        TOKENS,
+    )
+    pod = sts_of(objs)["spec"]["template"]["spec"]
+    assert pod["securityContext"]["fsGroupChangePolicy"] == "Always"
+    liveness = pod["containers"][0]["livenessProbe"]
+    assert liveness["timeoutSeconds"] == 10
+    assert liveness["failureThreshold"] == 12
 
 
 def test_render_is_pure():

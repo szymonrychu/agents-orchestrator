@@ -146,6 +146,10 @@ class Settings(BaseSettings):
     wrapper_port: int = 8080
     cluster_domain: str = "cluster.local"
     agent_termination_grace_seconds: int = 90
+    # OnRootMismatch skips kubelet's recursive fsGroup chown of the workspace PVC on every start.
+    agent_fs_group_change_policy: Literal["OnRootMismatch", "Always"] = "OnRootMismatch"
+    agent_liveness_timeout_seconds: int = Field(default=5, ge=1)
+    agent_liveness_failure_threshold: int = Field(default=6, ge=1)
 
     http_host: str = "0.0.0.0"
     http_port: int = 8000

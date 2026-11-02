@@ -120,6 +120,7 @@
         securityContext:
           runAsUser: 1000
           fsGroup: 1000
+          fsGroupChangePolicy: OnRootMismatch
         terminationGracePeriodSeconds: 90
         containers:
         - name: ccw
@@ -171,6 +172,8 @@
               path: /healthz
               port: 8080
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
           readinessProbe:
             httpGet:
               path: /readyz
