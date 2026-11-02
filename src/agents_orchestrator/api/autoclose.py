@@ -5,9 +5,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
+from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from agents_orchestrator import inactivity
@@ -23,29 +24,45 @@ AUTOCLOSE_POLL_SECONDS = 10
 async def sweep(pool: AsyncConnectionPool, settings: Settings) -> None:
     """Each poll until cancelled, in order: close due sessions, release inactivity closes an
     inbound message answered, discard inactivity closes past their deadline, request inactivity
-    closes, send reminders, discard idle closing sessions. A failed pass is retried. The limits
-    are passed on every poll, so they apply to running sessions."""
+    closes, send reminders, discard idle closing sessions. Each step runs on its own connection
+    and a step that fails is logged and skipped: the other steps still run, and the failed one
+    is retried next poll. The limits are passed on every poll, so they apply to running
+    sessions."""
+
+    async def close_expired(conn: AsyncConnection) -> None:
+        for session_id in await sessions.close_expired(conn):
+            log.info("autoclose: session %s is due, discarding", session_id)
+
+    steps: list[tuple[str, Callable[[AsyncConnection], Awaitable[object]]]] = [
+        ("close_expired", close_expired),
+        ("release_inactive_close", sessions.release_inactive_close),
+        ("close_overdue", sessions.close_overdue),
+        (
+            "close_inactive",
+            lambda conn: sessions.close_inactive(
+                conn,
+                settings.inactivity_close_seconds,
+                settings.inactivity_handoff_seconds,
+                _close_notice(settings),
+            ),
+        ),
+        (
+            "remind_inactive",
+            lambda conn: sessions.remind_inactive(
+                conn, settings.inactivity_reminder_seconds, _reminder_notice(settings)
+            ),
+        ),
+        ("discard_idle", lambda conn: sessions.discard_idle(conn, settings.close_grace_seconds)),
+    ]
     while True:
-        try:
-            async with pool.connection() as conn:
-                for session_id in await sessions.close_expired(conn):
-                    log.info("autoclose: session %s is due, discarding", session_id)
-                await sessions.release_inactive_close(conn)
-                await sessions.close_overdue(conn)
-                await sessions.close_inactive(
-                    conn,
-                    settings.inactivity_close_seconds,
-                    settings.inactivity_handoff_seconds,
-                    _close_notice(settings),
-                )
-                await sessions.remind_inactive(
-                    conn, settings.inactivity_reminder_seconds, _reminder_notice(settings)
-                )
-                await sessions.discard_idle(conn, settings.close_grace_seconds)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            log.exception("autoclose pass failed; retrying next poll")
+        for name, step in steps:
+            try:
+                async with pool.connection() as conn:
+                    await step(conn)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("autoclose step %s failed; retrying next poll", name)
         await asyncio.sleep(AUTOCLOSE_POLL_SECONDS)
 
 

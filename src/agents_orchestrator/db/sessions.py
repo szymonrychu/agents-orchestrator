@@ -355,6 +355,16 @@ async def cancel_close(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> 
         return rows[0]
 
 
+async def touch_update(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> None:
+    """Count a user-visible update by an agent (a chat post, a taskboard write): stamp
+    `last_update_at`. No NOTIFY and no generation bump: nothing reacts to it. A deleting or
+    unknown session is left alone."""
+    await conn.execute(
+        "UPDATE sessions SET last_update_at = now() WHERE id = %s AND desired = 'active'",
+        (session_id,),
+    )
+
+
 async def close_expired(conn: psycopg.AsyncConnection) -> list[uuid.UUID]:
     """Flip active sessions past their autoclose time to deleting (the request_delete write)."""
     async with conn.transaction():
@@ -442,13 +452,14 @@ async def _sweep_each(
     predicate: str,
     params: dict[str, Any],
     columns: str,
-    act: Callable[[uuid.UUID, dict[str, Any]], Awaitable[str]],
+    act: Callable[[uuid.UUID, dict[str, Any]], Awaitable[str | None]],
 ) -> list[uuid.UUID]:
     """Run `act` on every session of `source` matching `predicate`; returns those it ran on.
 
     Per candidate, in its own transaction: lock the session row first, then re-evaluate the
     predicate in a fresh statement (selecting `columns`) and call `act(id, row)` only when it
-    still holds; `act` writes and returns the line logged after the commit. `enqueue_message`
+    still holds; `act` writes and returns the line logged after the commit, or None when its
+    own status-guarded write matched no row (nothing was done). `enqueue_message`
     takes the same row lock (FOR SHARE) before inserting, so a message committed first is seen
     by the re-check, and one arriving later waits for the commit."""
     async with conn.transaction():
@@ -467,7 +478,8 @@ async def _sweep_each(
                 row = await cur.fetchone()
             if row is not None:
                 line = await act(session_id, row)
-                await _notify(conn, session_id)
+                if line is not None:
+                    await _notify(conn, session_id)
         if line is not None:
             log.info("%s", line)
             done.append(session_id)
@@ -479,8 +491,14 @@ async def release_inactive_close(conn: psycopg.AsyncConnection) -> list[uuid.UUI
     `cancel_close`: the close fields are cleared and the quiet clock restarts. A self-close is
     never released this way."""
 
-    async def release(session_id: uuid.UUID, _: dict[str, Any]) -> str:
-        await conn.execute(f"UPDATE sessions SET {_CLEAR_CLOSE} WHERE id = %s", (session_id,))
+    async def release(session_id: uuid.UUID, _: dict[str, Any]) -> str | None:
+        cur = await conn.execute(
+            f"UPDATE sessions SET {_CLEAR_CLOSE}"
+            " WHERE id = %s AND desired = 'active' AND close_kind = 'inactivity'",
+            (session_id,),
+        )
+        if cur.rowcount == 0:
+            return None
         return f"inactivity: session {session_id} got a message, close cancelled"
 
     return await _sweep_each(conn, "sessions s", _RELEASE_PREDICATE, {}, "s.id", release)
@@ -507,15 +525,18 @@ async def close_inactive(
     'inactivity', the reason, a deadline `handoff_seconds` away, and the `inactivity_close`
     notice `compose(session, last_update, deadline)` to the leader, in one transaction."""
 
-    async def close(session_id: uuid.UUID, row: dict[str, Any]) -> str:
+    async def close(session_id: uuid.UUID, row: dict[str, Any]) -> str | None:
         reason = close_reason(row["quiet_seconds"], row["close_seconds"])
-        [session] = await _fetch(
+        rows = await _fetch(
             conn,
             "UPDATE sessions SET close_requested_at = now(), close_kind = 'inactivity',"
             " close_reason = %s, close_deadline_at = now() + make_interval(secs => %s)"
-            " WHERE id = %s RETURNING *",
+            " WHERE id = %s AND desired = 'active' AND close_requested_at IS NULL RETURNING *",
             (reason, handoff_seconds, session_id),
         )
+        if not rows:
+            return None
+        [session] = rows
         assert session.close_deadline_at is not None
         text = compose(session, row["quiet"], session.close_deadline_at)
         await enqueue_message(conn, session_id, text, lane="regular", notice=NOTICE_CLOSE)
@@ -540,12 +561,16 @@ async def remind_inactive(
     `compose(session, last_update, live_agent_count)` to the leader, in one transaction. Never
     while an agent waits on a person, or while the reminder is off (0)."""
 
-    async def remind(session_id: uuid.UUID, row: dict[str, Any]) -> str:
-        [session] = await _fetch(
+    async def remind(session_id: uuid.UUID, row: dict[str, Any]) -> str | None:
+        rows = await _fetch(
             conn,
-            "UPDATE sessions SET inactivity_reminded_at = now() WHERE id = %s RETURNING *",
+            "UPDATE sessions SET inactivity_reminded_at = now()"
+            " WHERE id = %s AND desired = 'active' RETURNING *",
             (session_id,),
         )
+        if not rows:
+            return None
+        [session] = rows
         text = compose(session, row["quiet"], row["pods"])
         await enqueue_message(conn, session_id, text, lane="regular", notice=NOTICE_REMINDER)
         return f"inactivity: session {session_id} reminded"

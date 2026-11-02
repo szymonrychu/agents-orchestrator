@@ -111,6 +111,8 @@ async def _relay(request: Request, agent: Caller, pool: Pool, settings: Cfg, pat
     status, content = await forward_core.forward(
         request, target, request.method, "/tasks" + path, body, str(own.id), own.slug, query=query
     )
+    if request.method != "GET":
+        await forward_core.touch_on_success(pool, own.id, status)
     return Response(content, status, media_type="application/json")
 
 

@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 
 import psycopg
+import pytest
 from factories import insert_session
 
 from agents_orchestrator import inactivity
@@ -176,3 +178,52 @@ async def test_sweeper_sends_inactivity_notices(dsn, pool, monkeypatch):
     assert "discarded 30 s after your turn ends" in text
     row = await _row(pool, silent["id"])
     assert row["close_kind"] == "inactivity" and row["desired"] == "active"
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        "close_expired",
+        "release_inactive_close",
+        "close_overdue",
+        "close_inactive",
+        "remind_inactive",
+        "discard_idle",
+    ],
+)
+async def test_failing_step_does_not_skip_the_others(monkeypatch, pool, caplog, broken):
+    """A step that raises on every poll is logged and the other steps still run each poll."""
+    monkeypatch.setattr(autoclose, "AUTOCLOSE_POLL_SECONDS", 0.05)
+    calls: list[str] = []
+
+    def step(name):
+        async def run(conn, *args):
+            calls.append(name)
+            if name == broken:
+                raise RuntimeError(f"{name} is broken")
+            return []
+
+        return run
+
+    names = [
+        "close_expired",
+        "release_inactive_close",
+        "close_overdue",
+        "close_inactive",
+        "remind_inactive",
+        "discard_idle",
+    ]
+    for name in names:
+        monkeypatch.setattr(sessions, name, step(name))
+    caplog.set_level(logging.ERROR, logger=autoclose.__name__)
+    task = asyncio.create_task(autoclose.sweep(pool, Settings(database_url="x", agent_image="i")))
+    for _ in range(100):
+        if len(calls) >= 2 * len(names):  # two full polls
+            break
+        await asyncio.sleep(0.05)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert calls[: 2 * len(names)] == names * 2
+    failures = [r for r in caplog.records if broken in r.getMessage()]
+    assert failures and all(r.exc_info for r in failures)

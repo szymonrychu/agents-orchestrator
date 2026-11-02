@@ -489,3 +489,67 @@ async def test_no_reminder_right_after_migration_backfill(pool):
     assert await _remind(pool) == []
     assert await _close(pool) == []
     assert await _notices(pool, s["id"]) == []
+
+
+def _race_before_act(monkeypatch, sql: str) -> None:
+    """Run `sql` (one `%s`, the session id) inside the sweep's transaction after the lock and the
+    re-check but before the act statement: the row changed between check and write."""
+    real = sessions._sweep_each
+
+    async def wrapped(conn, source, predicate, params, columns, act):
+        async def raced(session_id, row):
+            await conn.execute(sql, (session_id,))
+            return await act(session_id, row)
+
+        return await real(conn, source, predicate, params, columns, raced)
+
+    monkeypatch.setattr(sessions, "_sweep_each", wrapped)
+
+
+async def test_release_write_is_status_guarded(pool, monkeypatch):
+    s, _ = await _session(pool)
+    await _shift(pool, s["id"], 14405)
+    assert await _close(pool) == [s["id"]]
+    await _enqueue(pool, s["id"])
+    before = await _row(pool, s["id"])
+    _race_before_act(monkeypatch, "UPDATE sessions SET desired = 'deleting' WHERE id = %s")
+    assert await _release(pool) == []
+    row = await _row(pool, s["id"])
+    assert _close_fields(row) == _close_fields(before)
+    assert row["last_update_at"] == before["last_update_at"]
+
+
+async def test_close_write_is_status_guarded(pool, monkeypatch):
+    s, _ = await _session(pool)
+    await _shift(pool, s["id"], 14405)
+    _race_before_act(
+        monkeypatch,
+        "UPDATE sessions SET close_requested_at = now(), close_kind = 'self',"
+        " close_reason = 'done' WHERE id = %s",
+    )
+    assert await _close(pool) == []
+    row = await _row(pool, s["id"])
+    assert (row["close_kind"], row["close_reason"], row["close_deadline_at"]) == (
+        "self",
+        "done",
+        None,
+    )
+    assert await _notices(pool, s["id"]) == []
+
+
+async def test_close_write_skips_a_deleting_session(pool, monkeypatch):
+    s, _ = await _session(pool)
+    await _shift(pool, s["id"], 14405)
+    _race_before_act(monkeypatch, "UPDATE sessions SET desired = 'deleting' WHERE id = %s")
+    assert await _close(pool) == []
+    assert (await _row(pool, s["id"]))["close_requested_at"] is None
+    assert await _notices(pool, s["id"]) == []
+
+
+async def test_remind_write_is_status_guarded(pool, monkeypatch):
+    s, _ = await _session(pool)
+    await _shift(pool, s["id"], 3700)
+    _race_before_act(monkeypatch, "UPDATE sessions SET desired = 'deleting' WHERE id = %s")
+    assert await _remind(pool) == []
+    assert (await _row(pool, s["id"]))["inactivity_reminded_at"] is None
+    assert await _notices(pool, s["id"]) == []

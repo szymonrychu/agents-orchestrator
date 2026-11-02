@@ -531,3 +531,34 @@ async def test_cancel_close_refuses_deleting(pool):
             await sessions.cancel_close(conn, s["id"])
     requested_at, reason = await _close_columns(pool, s["id"])
     assert requested_at is not None and reason == "done"
+
+
+async def test_touch_update_stamps_an_active_session_only(pool, dsn):
+    active = await insert_session(pool)
+    gone = await insert_session(pool)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE sessions SET last_update_at = now() - interval '5 h',"
+            " desired = CASE WHEN id = %s THEN 'deleting' ELSE desired END"
+            " WHERE id IN (%s, %s)",
+            (gone["id"], active["id"], gone["id"]),
+        )
+        cur = await conn.execute(
+            "SELECT id, last_update_at, generation FROM sessions WHERE id IN (%s, %s)",
+            (active["id"], gone["id"]),
+        )
+        before = {r[0]: r[1:] for r in await cur.fetchall()}
+    async with _Listener(dsn) as lis, pool.connection() as conn:
+        await sessions.touch_update(conn, active["id"])
+        await sessions.touch_update(conn, gone["id"])
+        await sessions.touch_update(conn, uuid.uuid4())  # unknown: no error
+        assert await lis.payloads() == []  # no NOTIFY
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT id, last_update_at, generation, now() FROM sessions WHERE id IN (%s, %s)",
+            (active["id"], gone["id"]),
+        )
+        after = {r[0]: r[1:] for r in await cur.fetchall()}
+    assert abs((after[active["id"]][2] - after[active["id"]][0]).total_seconds()) < 2
+    assert after[active["id"]][1] == before[active["id"]][1]  # no generation bump
+    assert after[gone["id"]][:2] == before[gone["id"]]
