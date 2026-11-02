@@ -128,8 +128,8 @@ GUARDS: dict[tuple[str, str, str], Guard] = {
     ("webhook", "POST", "/endpoints/{id}/clone"): Guard(
         body_preset=True, stored=_E, privileged=True
     ),
-    ("webhook", "PUT", "/endpoints/{id}/filters"): Guard(stored=_E),
-    ("webhook", "POST", "/endpoints/{id}/rotate"): Guard(stored=_E),
+    ("webhook", "PUT", "/endpoints/{id}/filters"): Guard(stored=_E, privileged=True),
+    ("webhook", "POST", "/endpoints/{id}/rotate"): Guard(stored=_E, privileged=True),
     ("webhook", "GET", "/events"): Guard(list_filter="preset_id"),
     ("webhook", "GET", "/events/{id}"): Guard(answer="preset_id"),
     ("webhook", "GET", "/meta"): Guard(),

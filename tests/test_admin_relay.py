@@ -661,6 +661,8 @@ PRIVILEGED_WRITES = [
     ("webhook", "POST", "/endpoints"),
     ("webhook", "PATCH", "/endpoints/{id}"),
     ("webhook", "POST", "/endpoints/{id}/clone"),
+    ("webhook", "PUT", "/endpoints/{id}/filters"),
+    ("webhook", "POST", "/endpoints/{id}/rotate"),
     ("schedule", "POST", "/schedules"),
     ("schedule", "PUT", "/schedules/{schedule_id}"),
     ("schedule", "POST", "/schedules/{schedule_id}/run"),
@@ -727,7 +729,6 @@ async def test_relay_hidden_privileged_is_404(rig):
     ("service", "method", "template"),
     [
         ("webhook", "DELETE", "/endpoints/{id}"),
-        ("webhook", "POST", "/endpoints/{id}/rotate"),
         ("schedule", "DELETE", "/schedules/{schedule_id}"),
     ],
 )
