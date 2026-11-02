@@ -412,7 +412,12 @@ async def test_patch_hidden_preset_404(call, human):
 async def test_patch_default_preset_rename_409(call, human):
     default = next(p for p in (await human("GET", M)).json() if p["is_default"])
     if not default["superleader_manageable"]:
-        pytest.skip("default preset is hidden from the superleader")
+        r = await human(
+            "PUT",
+            f"{M}/{default['id']}",
+            json={"name": default["name"], "spec": {}, "superleader_manageable": True},
+        )
+        assert r.status_code == 200, r.text
     r = await call("PATCH", f"{A}/{default['id']}", json={"name": "other-name"})
     assert_error(r, 409, "preset_default")
 
