@@ -31,6 +31,13 @@ HIVE_TOOLS = [
 SESSION_TOOLS = ["sessions_list", "session_send"]
 INIT_SCRIPTS_TOOLS = ["init_scripts_get", "init_scripts_edit"]
 CHAT_TOOLS = ["chat_rooms", "chat_send", "chat_react", "chat_status"]
+# Taskboard tools (the agent-visible names are orchestrator_<tool>, like the chat tools): every
+# session gets them, trigger-created ones included (a decision_ask they raise is answered on the
+# web only).
+TASK_TOOLS = [
+    "task_create", "task_update", "task_list", "task_get", "task_comment",
+    "decision_ask", "decision_withdraw", "todo_set", "todo_update", "session_labels_set",
+]  # fmt: skip
 # Superleader admin tools: the plugin's declarative admin rows (any-mcp-tatara-plugins
 # orchestration/orchestrator admin.py) plus the local secret_set tool. History is read and search
 # only: there is no history delete tool, deleting a stored session is for the user (web UI).
@@ -51,19 +58,21 @@ ADMIN_TOOLS = [
 def orchestrator_allow(spec: SessionSpec) -> list[str]:
     """The orchestrator tools this session's agents may call.
 
-    Every session gets the session tools (D11), the init-scripts tools and the chat tools (D13),
-    alone sessions included; the agent API decides what each caller may list, send, edit and say
-    in the chat (leader only). The admin tools and `secret_set` are listed exactly when
-    `session_messaging` is enabled, whoever created the session.
+    Every session gets the session tools (D11), the init-scripts tools, the chat tools (D13) and
+    the task tools, alone sessions included, which also get `me`; the agent API decides what each
+    caller may list, send, edit and say in the chat (leader only). The admin tools and
+    `secret_set` are listed exactly when `session_messaging` is enabled, whoever created the
+    session.
     """
     shared = [
         *SESSION_TOOLS,
         *INIT_SCRIPTS_TOOLS,
         *CHAT_TOOLS,
+        *TASK_TOOLS,
         *(ADMIN_TOOLS if spec.session_messaging else []),
     ]
     if not spec.hive:
-        return shared
+        return ["me", *shared]
     scale = [SCALE_TOOL] if spec.scalable else []
     return [*HIVE_TOOLS, *scale, *shared]
 
