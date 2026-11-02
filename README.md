@@ -179,6 +179,8 @@ A Postgres connection is required. Set exactly one of these; none, or more than 
 | `<fullname>-master-key` | `masterKey.existingSecretKey` (default `master-key`) | `masterKey.value` is set | `masterKey.existingSecret` + `existingSecretKey` |
 | `<fullname>-claude` | `CLAUDE_CODE_OAUTH_TOKEN` | `claude.token` is set | `claude.existingSecret` + `existingSecretKey` |
 | `<fullname>-chat` | `chat.existingSecretKey` (default `chat-token`) | `chat.token` is set and `chat.existingSecret` is not | `chat.existingSecret` + `existingSecretKey` |
+| `<fullname>-admin-<name>` (`<name>` is `webhook`, `schedule`, `connector` or `history`) | `admin.<name>.existingSecretKey` (default `token`) | `admin.<name>.token` is set and `admin.<name>.existingSecret` is not | `admin.<name>.existingSecret` + `existingSecretKey` |
+| `<fullname>-discard-hook` | `discardHook.existingSecretKey` (default `token`) | `discardHook.token` is set and `discardHook.existingSecret` is not | `discardHook.existingSecret` + `existingSecretKey` |
 
 The master key and the Claude token each need a value or an `existingSecret`; with neither the render fails. The agent pods in the release namespace read the Claude Secret, so `existingSecret` must live there.
 

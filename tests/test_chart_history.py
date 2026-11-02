@@ -175,3 +175,14 @@ def test_discard_hook_existing_secret_wins_over_inline_token() -> None:
     for d in _by_kind(docs, "Deployment").values():
         annotations = d["spec"]["template"]["metadata"]["annotations"]
         assert "checksum/discard-hook-secret" not in annotations
+
+
+def test_discard_hook_null_renders_like_unset() -> None:
+    """`discardHook: null` (an operator clearing the block) must not nil-error any template."""
+    docs = _docs({"discardHook": None})
+    assert "ORCH_DISCARD_HOOK_URL" not in _settings(docs)
+    assert f"{FULL}-discard-hook" not in _by_kind(docs, "Secret")
+    for _, c in _every_container(docs):
+        assert "ORCH_DISCARD_HOOK_TOKEN" not in _env(c)
+    for d in _by_kind(docs, "Deployment").values():
+        assert "checksum/discard-hook-secret" not in d["spec"]["template"]["metadata"]["annotations"]

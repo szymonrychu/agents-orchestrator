@@ -32,8 +32,9 @@ spec:
         {{- if and (eq $component "api") $.Values.usage.token (not $.Values.usage.existingSecret) }}
         checksum/usage-secret: {{ $.Values.usage.token | sha256sum }}
         {{- end }}
-        {{- if and (eq $component "reconciler") $.Values.discardHook.token (not $.Values.discardHook.existingSecret) }}
-        checksum/discard-hook-secret: {{ $.Values.discardHook.token | sha256sum }}
+        {{- $dh := $.Values.discardHook | default dict }}
+        {{- if and (eq $component "reconciler") $dh.token (not $dh.existingSecret) }}
+        checksum/discard-hook-secret: {{ $dh.token | sha256sum }}
         {{- end }}
         {{- if eq $component "api" }}
         {{- range $name := splitList "\n" (include "agents-orchestrator.adminUpstreams" $ | trim) }}
