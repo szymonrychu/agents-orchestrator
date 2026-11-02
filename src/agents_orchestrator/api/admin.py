@@ -146,6 +146,7 @@ ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("POST", f"{ADMIN_PREFIX}/presets"): "create",
     ("GET", f"{ADMIN_PREFIX}/presets/{{ref}}"): "preset",
     ("PUT", f"{ADMIN_PREFIX}/presets/{{ref}}"): "preset",
+    ("PATCH", f"{ADMIN_PREFIX}/presets/{{ref}}"): "preset",
     ("DELETE", f"{ADMIN_PREFIX}/presets/{{ref}}"): "preset",
     ("POST", f"{ADMIN_PREFIX}/presets/{{ref}}/copy"): "preset",
     ("PUT", f"{ADMIN_PREFIX}/presets/{{ref}}/secrets/{{name}}"): "preset",
@@ -199,6 +200,15 @@ async def replace_preset(
     async with pool.connection() as conn:
         found = await _manageable_preset(conn, ref)
         return await presets_api.replace(request, conn, settings, found.id, body, superleader=True)
+
+
+@router.patch("/presets/{ref}", response_model=schemas.PresetView)
+async def patch_preset(
+    ref: str, body: schemas.PresetPatch, request: Request, pool: Pool, settings: Cfg
+) -> schemas.PresetView:
+    async with pool.connection() as conn:
+        found = await _manageable_preset(conn, ref)
+        return await presets_api.patch(request, conn, settings, found.id, body)
 
 
 @router.delete("/presets/{ref}", status_code=204, response_model=None)

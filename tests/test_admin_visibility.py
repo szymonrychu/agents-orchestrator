@@ -18,6 +18,7 @@ from agents_orchestrator.api.app import create_app
 PRESET_BODY = {"name": "hidden", "spec": {}}
 BODIES = {
     ("PUT", "/agent/v1/admin/presets/{ref}"): PRESET_BODY,
+    ("PATCH", "/agent/v1/admin/presets/{ref}"): {},
     ("PUT", "/agent/v1/admin/presets/{ref}/secrets/{name}"): {"value": "v"},
 }
 

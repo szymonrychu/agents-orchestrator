@@ -9,16 +9,22 @@ from typing import Any
 
 from fastapi import APIRouter, Request, Response
 from fastapi.concurrency import run_in_threadpool
+from fastapi.exceptions import RequestValidationError
 from pydantic import SecretStr, ValidationError
 
 from agents_orchestrator.api import schemas, secret_store
 from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.sessions import Cfg, Pool, check_spec
 from agents_orchestrator.db import presets as repo
-from agents_orchestrator.preset_policy import changed_paths, human_only_changes, strip_grants
+from agents_orchestrator.preset_policy import (
+    changed_paths,
+    human_only_changes,
+    merge_patch,
+    strip_grants,
+)
 from agents_orchestrator.secret_view import EnvMeta, redact_spec_dict
 from agents_orchestrator.settings import Settings
-from agents_orchestrator.spec import SessionSpec, default_cache_key
+from agents_orchestrator.spec import SessionSpec, SessionSpecIn, default_cache_key
 
 SECRET_MAX_BYTES = 1024 * 1024  # F1.9: a Kubernetes Secret holds at most 1 MiB
 
@@ -26,6 +32,7 @@ router = APIRouter(prefix="/api/v1")
 
 _COPY = " copy"
 _COPY_TRIES = 5
+_PATCH_TRIES = 3
 
 
 def _view(
@@ -276,6 +283,77 @@ async def replace(
             paths.append("labels")
         _note_fields(request, paths)
     return _view(preset, metas)
+
+
+def _secret_in_patch(patch: dict[str, Any]) -> None:
+    env = patch.get("env")
+    for name, entry in (env if isinstance(env, dict) else {}).items():
+        if isinstance(entry, dict) and entry.get("protected") and entry.get("value") is not None:
+            raise ApiError(
+                422,
+                "secret_in_spec",
+                f"protected variable {name} carries a value; set it through the secret route",
+            )
+
+
+def _merged_body(stored: repo.Preset, body: schemas.PresetPatch) -> schemas.PresetIn:
+    """The stored spec with the patch merged in, as the body a PUT would carry."""
+    merged = merge_patch(stored.spec, body.spec or {})
+    try:
+        spec = SessionSpecIn.model_validate(merged)
+    except ValidationError as exc:
+        errors = [{**e, "loc": ("body", "spec", *e["loc"])} for e in exc.errors()]
+        raise RequestValidationError(errors) from None
+    return schemas.PresetIn(name=body.name or stored.name, spec=spec, labels=body.labels)
+
+
+async def patch(
+    request: Request, conn, settings: Settings, preset_id: uuid.UUID, body: schemas.PresetPatch
+) -> schemas.PresetView:
+    """Merge-patch a preset for the superleader: the patch is applied to the stored spec, so
+    what it does not name (a stored protected variable, a grant) is kept; a concurrent edit makes
+    it re-read and retry."""
+    _secret_in_patch(body.spec or {})
+    for _ in range(_PATCH_TRIES):
+        stored = await repo.get(conn, preset_id)
+        if stored is None:
+            raise not_found("preset")
+        merged = _merged_body(stored, body)
+        spec, values = await _validated(
+            merged,
+            settings,
+            stored.spec,
+            preset_id,
+            human_only_base=stored.spec,
+            request=request,
+        )
+        try:
+            preset, metas = await _save(
+                request,
+                conn,
+                settings,
+                spec,
+                values,
+                lambda m=merged, sp=spec, at=stored.updated_at: repo.update(
+                    conn, preset_id, m.name, sp, None, m.labels, at
+                ),
+            )
+        except repo.PresetNotFound:
+            raise not_found("preset") from None
+        except repo.PresetChanged:
+            continue
+        except repo.PresetDefault as exc:
+            raise _default_error(exc) from None
+        except repo.PresetExists:
+            raise _exists(merged.name) from None
+        paths = changed_paths(stored.spec, spec)
+        if merged.name != stored.name:
+            paths.append("name")
+        if merged.labels is not None and merged.labels != stored.labels:
+            paths.append("labels")
+        _note_fields(request, paths)
+        return _view(preset, metas)
+    raise ApiError(409, "conflict", "the preset changed since it was read; retry")
 
 
 async def remove(request: Request, conn, settings: Settings, preset_id: uuid.UUID) -> None:

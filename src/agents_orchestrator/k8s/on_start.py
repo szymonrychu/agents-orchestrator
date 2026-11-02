@@ -42,8 +42,9 @@ TASK_TOOLS = [
 # orchestration/orchestrator admin.py) plus the local secret_set tool. History is read and search
 # only: there is no history delete tool, deleting a stored session is for the user (web UI).
 ADMIN_TOOLS = [
-    "presets_list", "preset_get", "preset_create", "preset_replace", "preset_delete",
-    "preset_copy", "session_get", "session_create", "session_discard", "session_restart",
+    "presets_list", "preset_get", "preset_create", "preset_replace", "preset_patch",
+    "preset_delete", "preset_copy", "session_get", "session_create", "session_discard",
+    "session_restart",
     "agent_restart", "command_get", "webhooks_list", "webhook_get_meta", "webhook_create",
     "webhook_update", "webhook_clone", "webhook_rotate", "webhook_delete",
     "webhook_filters_set", "webhook_events", "webhook_event", "webhook_template_preview",
