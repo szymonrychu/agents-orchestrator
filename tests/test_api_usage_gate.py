@@ -269,6 +269,28 @@ async def test_scale_up_refused(pool, dsn):
     assert await replicas_of(pool, c["id"]) == 1
 
 
+async def test_scale_up_stale_breach_refused(pool, dsn):
+    spec = {"replicas": 1, "max_replicas": 3, "usage_quota": {"seven_day_pct": 80}}
+    c = await insert_session(pool, spec=spec)
+    app = gated(make_settings(dsn), pool, Upstream(windows(seven_day=85.0, stale=True)))
+    async with client_for(app) as http:
+        r = await http.post(f"{C}/{c['id']}/scale", json={"replicas": 2})
+    assert_refused(r, "seven_day", 85.0, 80, stale=True)
+    assert await replicas_of(pool, c["id"]) == 1
+
+
+async def test_scale_up_stale_reset_applies(pool, dsn):
+    spec = {"replicas": 1, "max_replicas": 3, "usage_quota": {"seven_day_pct": 80}}
+    c = await insert_session(pool, spec=spec)
+    body = windows(seven_day=85.0, stale=True)
+    body["windows"]["seven_day"]["resets_at"] = (RESETS - timedelta(days=30)).isoformat()
+    app = gated(make_settings(dsn), pool, Upstream(body))
+    async with client_for(app) as http:
+        r = await http.post(f"{C}/{c['id']}/scale", json={"replicas": 2})
+    assert r.status_code == 202, r.text
+    assert await replicas_of(pool, c["id"]) == 2
+
+
 async def test_scale_down_never_gated(pool, dsn):
     c = await insert_session(pool, spec={"replicas": 3, "max_replicas": 3})
     app = gated(make_settings(dsn), pool, Upstream(windows(seven_day=100.0, five_hour=100.0)))
@@ -292,6 +314,26 @@ async def test_agent_scale_up_refused(pool, dsn):
         r = await http.post("/agent/v1/scale", json={"replicas": 2}, headers=headers(c["id"]))
     assert_refused(r, "seven_day", 100.0, 100)
     assert await replicas_of(pool, c["id"]) == 1
+
+
+async def test_agent_scale_up_stale_breach_refused(pool, dsn):
+    c, _, _ = await scale_hive(pool, replicas=1, max_replicas=3)
+    app = gated(agent_settings(dsn), pool, Upstream(windows(seven_day=100.0, stale=True)))
+    async with agent_client(app) as http:
+        r = await http.post("/agent/v1/scale", json={"replicas": 2}, headers=headers(c["id"]))
+    assert_refused(r, "seven_day", 100.0, 100, stale=True)
+    assert await replicas_of(pool, c["id"]) == 1
+
+
+async def test_agent_scale_up_stale_reset_applies(pool, dsn):
+    c, _, _ = await scale_hive(pool, replicas=1, max_replicas=3)
+    body = windows(seven_day=100.0, stale=True)
+    body["windows"]["seven_day"]["resets_at"] = (RESETS - timedelta(days=30)).isoformat()
+    app = gated(agent_settings(dsn), pool, Upstream(body))
+    async with agent_client(app) as http:
+        r = await http.post("/agent/v1/scale", json={"replicas": 2}, headers=headers(c["id"]))
+    assert r.status_code == 202, r.text
+    assert await replicas_of(pool, c["id"]) == 2
 
 
 async def test_agent_scale_non_leader_over_quota_is_not_leader(pool, dsn):
