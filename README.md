@@ -1186,6 +1186,19 @@ Replaces the caller's session init scripts. Body `{"scripts": ["<shell script>",
 
 The leader grows or shrinks its own session. Body `{replicas}`; sets `spec.replicas` in place (no generation bump, no pod roll) through the same writer as the public `POST /api/v1/sessions/{id}/scale`, with the caller checked as leader. Response 202 `{session_id, replicas, previous_replicas, max_replicas}`. Errors: 403 `not_leader` (the caller is not the current leader), 409 `static_session`, 422 `out_of_range` (outside 1 to `max_replicas`), 409 `leader_would_leave` (the leader's ordinal would be removed and no ready agent that stays can take over; with one, the scale is accepted and leadership moves to it, reason `scale_down`), 409 `session_deleting`, 409 `usage_quota` (a scale-up while the account's Claude usage is at or above the session's quota, see Usage gate), 422 `invalid_request`, plus the 401 and 403 above. Served only on the agent port; the public scale route is not reachable there. Backs the plugin tool `orchestrator_scale`.
 
+### `POST /agent/v1/close`
+
+The leader closes its own session once it is idle. Body `{reason}`, 1 to 500 characters after stripping, no other field. Records the request (`close_requested_at`, `close_reason`); the sweeper discards the session once it is idle for the grace `ORCH_CLOSE_GRACE_SECONDS` (default 30), see Self-close under Autoclose, so the calling turn finishes and its answer stays readable. Response 202 `{session_id, close_requested_at, close_reason, already_requested, grace_seconds}`. A repeat call keeps the first request: `already_requested` is true and the reason and time are the first ones. The request can be cancelled with `DELETE /api/v1/sessions/{session_id}/close` until the session is flipped. Errors, checked in this order, and a refusal records nothing:
+
+- 403 `not_leader`: the caller is not its session's current leader (the only agent of an alone session counts as leader);
+- 422 `own_session`: the session is a superleader session (`session_messaging` true); the user discards it;
+- 409 `session_deleting`: the session is already being discarded;
+- 404 `not_found`: the session row is gone;
+- 422 `invalid_request`: the reason is empty, blank or longer than 500 characters, or the body has another field (checked before the others, by request validation);
+- plus the 401 and 403 above.
+
+Served only on the agent port. Backs the plugin tool `orchestrator_self_close`.
+
 ### Cross-session messaging
 
 A superleader session is one whose spec has `session_messaging` true. Its leader lists and messages the leader of every other open session; the leader of any other session, alone sessions included, lists and messages only the superleader sessions. A send needs a superleader on at least one end (two superleaders may message each other), and every session can receive. A message is an async mailbox entry: it is queued untargeted in the target session, so whoever leads there at claim time gets it as a turn framed with the sender session's slug (see "Session messages" under Delivery and retries); a reply is a send back to that slug. Backs the plugin tools `orchestrator_sessions_list` and `orchestrator_session_send`.
