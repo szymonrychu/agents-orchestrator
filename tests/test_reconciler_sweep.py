@@ -221,10 +221,20 @@ async def wait_until(check, timeout: float) -> None:
 
 
 async def test_notify_wakes_the_sweeper(pool, dsn, spy, monkeypatch):
+    # The sweeper also wakes when its LISTEN is (re)established; route that signal to a separate
+    # event so only a NOTIFY can wake the loop here, and send the request once LISTEN is up.
     monkeypatch.setattr(sweeper_mod, "POLL_SECONDS", 30)
+    listening = asyncio.Event()
+    real_listen = sweeper_mod.listen
+
+    def listen_without_ready_wake(conninfo, channels, *, on_ready=None):
+        return real_listen(conninfo, channels, on_ready=listening.set)
+
+    monkeypatch.setattr(sweeper_mod, "listen", listen_without_ready_wake)
     sw = CacheSweeper(pool, settings_for(dsn, cache_sweep_interval_seconds=3600))
     stop = asyncio.Event()
     task = asyncio.create_task(sw.run(stop))
+    await asyncio.wait_for(listening.wait(), timeout=10)
     await wait_until(lambda: len(spy.calls) == 1, 10)
     await request_run(pool)  # NOTIFYs cache_sweep_changed
     await wait_until(lambda: len(spy.calls) == 2, 5)
