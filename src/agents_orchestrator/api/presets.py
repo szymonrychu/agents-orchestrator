@@ -15,7 +15,7 @@ from agents_orchestrator.api import schemas, secret_store
 from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.sessions import Cfg, Pool, check_spec
 from agents_orchestrator.db import presets as repo
-from agents_orchestrator.preset_policy import changed_paths, human_only_changes
+from agents_orchestrator.preset_policy import changed_paths, human_only_changes, strip_grants
 from agents_orchestrator.secret_view import EnvMeta, redact_spec_dict
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import SessionSpec, default_cache_key
@@ -347,13 +347,23 @@ def _without_derived_key(spec: dict[str, Any], preset_id: uuid.UUID) -> dict[str
     return spec
 
 
-async def copy(conn, preset_id: uuid.UUID, explicit: str | None) -> schemas.PresetView:
+async def copy(
+    conn,
+    preset_id: uuid.UUID,
+    explicit: str | None,
+    superleader: bool = False,
+    request: Request | None = None,
+) -> schemas.PresetView:
     if explicit is not None:
         _checked_name(explicit)
     source = await repo.get(conn, preset_id)
     if source is None:
         raise not_found("preset")
     spec = _without_derived_key(source.spec, preset_id)
+    if superleader:
+        spec, removed = strip_grants(spec)
+        if request is not None:
+            _note_fields(request, removed)
     for _ in range(_COPY_TRIES):
         taken = {p.name.lower() for p in await repo.list_presets(conn)}
         name = explicit if explicit is not None else _copy_name(source.name, taken)

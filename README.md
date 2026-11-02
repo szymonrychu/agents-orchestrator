@@ -1321,6 +1321,7 @@ Each preset has a `superleader_manageable` switch (default false, main port only
   - `wrapper.permission_mode`: unset means `bypassPermissions`; may become `auto`, never any other change.
   - `wrapper.permissions.deny`: entries may be added, never removed. `wrapper.permissions.allow`: entries may be removed, never added.
   - `env.<NAME>` of a stored protected variable: may not be removed or unprotected.
+  - Admin copy never answers 403: the copy has `kube_access`, `session_messaging`, `docker` (with its sizes) and `discard_hook_url` removed, and keeps the source's `wrapper.permission_mode` and `wrapper.permissions`. The main-port copy is unchanged.
   - A replace is a compare-and-swap on `updated_at`: if a human changed the preset after the superleader read it, the call is 409 `conflict` and must be retried from a fresh read.
 - Sending `superleader_manageable` through the admin API is 422 `manageable_main_port_only` when false; the admin API cannot hide a preset.
 - Relay (`/agent/v1/admin/webhooks`, `/schedules`, `/chats`, `/history`): a body naming a hidden or null preset, or a stored object on one, is 404 and never forwarded. Lists (endpoints, events, schedules, runs, rooms, history sessions) are filtered after the upstream page, so a page of `events` or `runs` full of hidden items comes back short or empty; a single event or run of a hidden preset is 404. Objects with a null preset (for example chat rooms without a preset) are hidden. A list answer that is not a JSON list is 502 `upstream_shape`.

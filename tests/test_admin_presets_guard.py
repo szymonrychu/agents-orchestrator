@@ -233,3 +233,44 @@ async def test_audit_fields_on_success(call, seed, pool, boss, canary, caplog):
     assert canary not in str(last) and canary not in caplog.text
     lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("admin ")]
     assert "fields=['labels', 'usage_quota']" in lines[-1]
+
+
+COPY_SOURCE = {
+    "kube_access": True,
+    "session_messaging": True,
+    "docker": True,
+    "docker_storage": "40Gi",
+    "docker_cpu": "2",
+    "docker_memory": "4Gi",
+    "discard_hook_url": "https://h.example",
+    "wrapper": {"permission_mode": "auto", "permissions": {"deny": ["D"]}},
+}
+GRANT_KEYS = (
+    "kube_access",
+    "session_messaging",
+    "docker",
+    "docker_storage",
+    "docker_cpu",
+    "docker_memory",
+    "discard_hook_url",
+)
+
+
+async def test_admin_copy_clears_grants_keeps_restrictions(call, seed, pool, boss):
+    pid = await seed(COPY_SOURCE)
+    r = await call("POST", f"{A}/{pid}/copy", json={"name": "the-copy"})
+    assert r.status_code == 201, r.text
+    spec = r.json()["spec"]
+    assert not [k for k in GRANT_KEYS if k in spec]
+    assert spec["wrapper"] == COPY_SOURCE["wrapper"]
+    last = (await events(pool, boss.id))[-1]
+    assert last["data"]["status"] == 201
+    assert last["data"]["fields"] == sorted(GRANT_KEYS)
+
+
+async def test_main_copy_keeps_grants(human, seed):
+    pid = await seed(COPY_SOURCE)
+    r = await human("POST", f"{M}/{pid}/copy", json={"name": "the-copy"})
+    assert r.status_code == 201, r.text
+    spec = r.json()["spec"]
+    assert all(spec[k] == COPY_SOURCE[k] for k in GRANT_KEYS)

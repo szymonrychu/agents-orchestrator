@@ -211,11 +211,13 @@ async def delete_preset(ref: str, request: Request, pool: Pool, settings: Cfg) -
 
 @router.post("/presets/{ref}/copy", status_code=201, response_model=schemas.PresetView)
 async def copy_preset(
-    ref: str, pool: Pool, body: schemas.CopyPreset | None = None
+    ref: str, request: Request, pool: Pool, body: schemas.CopyPreset | None = None
 ) -> schemas.PresetView:
     async with pool.connection() as conn:
         found = await _manageable_preset(conn, ref)
-        return await presets_api.copy(conn, found.id, body.name if body else None)
+        return await presets_api.copy(
+            conn, found.id, body.name if body else None, superleader=True, request=request
+        )
 
 
 @router.put("/presets/{ref}/secrets/{name}", response_model=schemas.SecretView)
