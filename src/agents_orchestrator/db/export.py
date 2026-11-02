@@ -1,7 +1,8 @@
 """The JSONL history export a pre-discard hook receives (D15).
 
 One `session` record (`id`, `slug`, `spec`, `created_at` and the provenance `preset_id`,
-`preset_name`, `created_by_service`, `created_by_session`, each null when unset), then the
+`preset_name`, `created_by_service`, `created_by_session`, `close_requested_at` and
+`close_reason`, each null when unset), then the
 `agent`, `message`, `turn`, `command`, `check` and `event` records of that session, each kind in
 id order (turns in started_at order). Every kind is read through a server-side cursor, so a long
 history is never held in memory.
@@ -63,7 +64,8 @@ async def export_session_history(
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
                 "SELECT id, slug, spec, created_at, preset_id, preset_name, created_by_service,"
-                " created_by_session, secret_versions FROM sessions WHERE id = %s",
+                " created_by_session, secret_versions, close_requested_at, close_reason"
+                " FROM sessions WHERE id = %s",
                 (session_id,),
             )
             row = await cur.fetchone()

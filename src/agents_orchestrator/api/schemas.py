@@ -160,6 +160,8 @@ class SessionView(BaseModel):
     closes_at: datetime | None
     init_edited_since_run: bool
     backup: SessionBackup
+    close_requested_at: datetime | None = None
+    close_reason: str | None = None
     created_by_service: str | None = None
     created_by_session: uuid.UUID | None = None
     labels: list[str] = []

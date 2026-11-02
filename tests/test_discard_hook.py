@@ -191,6 +191,52 @@ async def test_export_session_record_has_provenance(env):
     assert head["preset_id"] is None and head["preset_name"] == "bench"
 
 
+async def test_export_session_record_carries_close_request(env):
+    c = await env.session("alpha")
+    async with env.pool.connection() as conn:
+        await sessions.request_close(conn, c.id, "done")
+    plain = await env.session("bravo")
+    session = (await env.export(c.id))[0]
+    assert session["kind"] == "session" and session["close_reason"] == "done"
+    stored = (await env.get(c.id)).close_requested_at
+    assert datetime.fromisoformat(session["close_requested_at"]) == stored
+    untouched = (await env.export(plain.id))[0]
+    assert untouched["close_reason"] is None and untouched["close_requested_at"] is None
+
+
+async def test_export_session_record_is_the_union_of_provenance_and_close_request(env):
+    preset_id = uuid.uuid4()
+    await env.sql("INSERT INTO presets (id, name, spec) VALUES (%s, 'bench', '{}')", (preset_id,))
+    async with env.pool.connection() as conn:
+        c = await sessions.create(
+            conn,
+            "alpha",
+            SessionSpec(),
+            preset_id=preset_id,
+            preset_name="bench",
+            created_by_service="agents-schedule",
+        )
+        await sessions.request_close(conn, c.id, "done")
+
+    head = (await env.export(c.id))[0]
+    assert head["kind"] == "session"
+    assert {
+        "id",
+        "slug",
+        "spec",
+        "created_at",
+        "preset_id",
+        "preset_name",
+        "created_by_service",
+        "created_by_session",
+        "close_requested_at",
+        "close_reason",
+    } <= head.keys()
+    assert "secret_versions" not in head
+    assert head["preset_name"] == "bench" and head["created_by_service"] == "agents-schedule"
+    assert head["close_reason"] == "done" and head["close_requested_at"] is not None
+
+
 async def test_export_streams_with_a_server_side_cursor(env):
     c = await env.session("alpha")
     await populate(env, c)

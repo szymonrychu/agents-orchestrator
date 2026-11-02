@@ -11,6 +11,7 @@ from factories import (
     insert_command,
     insert_event,
     insert_message,
+    insert_session,
     insert_turn,
 )
 from pydantic import ValidationError
@@ -414,3 +415,81 @@ async def test_set_replicas_unchanged_is_noop(pool, dsn):
     assert (out.replicas, out.previous_replicas, out.max_replicas) == (2, 2, 4)
     assert got == []
     assert await _spec_row(pool, c["id"]) == before
+
+
+async def _close_columns(pool, session_id) -> tuple:
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT close_requested_at, close_reason FROM sessions WHERE id = %s", (session_id,)
+        )
+        return await cur.fetchone()
+
+
+async def test_request_close_sets_columns_and_notifies(pool, dsn):
+    s = await insert_session(pool)
+    async with _Listener(dsn) as lis, pool.connection() as conn:
+        out = await sessions.request_close(conn, s["id"], "done")
+        got = await lis.payloads()
+    assert out.already is False
+    assert out.session.close_reason == "done" and out.session.close_requested_at is not None
+    assert out.session.desired == "active" and out.session.generation == s["generation"]
+    assert got == [json.dumps({"session_id": str(s["id"])})]
+
+
+async def test_request_close_repeat_keeps_first(pool, dsn):
+    s = await insert_session(pool)
+    async with pool.connection() as conn:
+        first = await sessions.request_close(conn, s["id"], "done")
+    async with _Listener(dsn) as lis, pool.connection() as conn:
+        again = await sessions.request_close(conn, s["id"], "other")
+        assert await lis.payloads() == []
+    assert first.already is False and again.already is True
+    assert again.session.close_reason == "done"
+    assert again.session.close_requested_at == first.session.close_requested_at
+    assert (await _close_columns(pool, s["id"]))[1] == "done"
+
+
+async def test_request_close_refuses_deleting(pool):
+    s = await insert_session(pool, desired="deleting")
+    async with pool.connection() as conn:
+        with pytest.raises(sessions.SessionBeingDeleted):
+            await sessions.request_close(conn, s["id"], "done")
+    assert await _close_columns(pool, s["id"]) == (None, None)
+
+
+async def test_request_close_unknown_session(pool):
+    async with pool.connection() as conn:
+        with pytest.raises(sessions.SessionNotFound):
+            await sessions.request_close(conn, uuid.uuid4(), "done")
+
+
+async def test_cancel_close_clears_and_is_idempotent(pool, dsn):
+    s = await insert_session(pool)
+    async with pool.connection() as conn:
+        await sessions.request_close(conn, s["id"], "done")
+    async with _Listener(dsn) as lis, pool.connection() as conn:
+        cleared = await sessions.cancel_close(conn, s["id"])
+        assert await lis.payloads() == [json.dumps({"session_id": str(s["id"])})]
+        again = await sessions.cancel_close(conn, s["id"])
+        assert await lis.payloads() == []  # nothing was pending: no NOTIFY
+    for got_session in (cleared, again):
+        assert got_session.close_requested_at is None and got_session.close_reason is None
+    assert await _close_columns(pool, s["id"]) == (None, None)
+
+
+async def test_cancel_close_unknown_session(pool):
+    async with pool.connection() as conn:
+        with pytest.raises(sessions.SessionNotFound):
+            await sessions.cancel_close(conn, uuid.uuid4())
+
+
+async def test_cancel_close_refuses_deleting(pool):
+    s = await insert_session(pool)
+    async with pool.connection() as conn:
+        await sessions.request_close(conn, s["id"], "done")
+        await conn.execute("UPDATE sessions SET desired = 'deleting' WHERE id = %s", (s["id"],))
+    async with pool.connection() as conn:
+        with pytest.raises(sessions.SessionBeingDeleted):
+            await sessions.cancel_close(conn, s["id"])
+    requested_at, reason = await _close_columns(pool, s["id"])
+    assert requested_at is not None and reason == "done"
