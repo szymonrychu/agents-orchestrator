@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
@@ -94,6 +95,7 @@ class Reconciler:
         self.wrapper_factory = wrapper_factory
         self._warned_no_agent_url: set[UUID] = set()
         self.hook_transport: httpx.AsyncBaseTransport | None = None
+        self._hook_spent = 0.0  # seconds of discard hooks run in this pass
         self.checks = CheckRunner(pool, kube, settings)
         self.init = InitRunner(pool, kube, settings, write_status=self._write_status)
         self.cache = CacheRunner(pool, kube, settings, write_status=self._write_status)
@@ -147,7 +149,14 @@ class Reconciler:
 
     # ------------------------------------------------------------------ one pass
 
+    def _start_pass(self) -> None:
+        self._hook_spent = 0.0
+
+    def _hook_budget_spent(self) -> bool:
+        return self._hook_spent >= self.settings.discard_hook_pass_budget_seconds
+
     async def reconcile_once(self) -> None:
+        self._start_pass()
         await self._run_restarts()
         await self._release_notes()
         await self._run_rebootstraps()
@@ -176,11 +185,15 @@ class Reconciler:
         never sent again. Any failure records `discard_hook_failed` (`<name>: <reason>` of the
         first failing hook), `discard_hook_failures` and `discard_hook_next_at` (one shared
         backoff) and returns False, so nothing is deleted. The owed hooks are retried once the
-        database clock passes `discard_hook_next_at`; True only when nothing is owed.
+        database clock passes `discard_hook_next_at`; True only when nothing is owed. Once the
+        hooks of this pass have used `discard_hook_pass_budget_seconds`, False at once with
+        nothing run or recorded: the session waits for the next pass.
         """
         delivered, owed = self._owed_hooks(session)
         if not owed:
             return True
+        if self._hook_budget_spent():
+            return False  # this pass spent its hook time (discard_hook_pass_budget_seconds)
         status = session.status
         next_at = status.get("discard_hook_next_at")
         if next_at:
@@ -240,20 +253,26 @@ class Reconciler:
 
     async def _run_hook(self, hook: DiscardHook, session: Session) -> HookResult:
         """One hook fed a fresh export stream; a crash is a failure, never an escape."""
-        async with self.pool.connection() as conn:
-            try:
-                return await run_discard_hook(
-                    hook,
-                    session,
-                    export_session_history(conn, session.id),
-                    self.settings.discard_hook_timeout_seconds,
-                    transport=self.hook_transport,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                log.exception("discard hook %s of session %s crashed", hook.name, session.slug)
-                return HookResult(False, f"{type(exc).__name__}: {exc}")
+        started = time.monotonic()
+        try:
+            async with self.pool.connection() as conn:
+                try:
+                    return await run_discard_hook(
+                        hook,
+                        session,
+                        export_session_history(conn, session.id),
+                        self.settings.discard_hook_timeout_seconds,
+                        connect_timeout=self.settings.discard_hook_connect_timeout_seconds,
+                        read_timeout=self.settings.discard_hook_read_timeout_seconds,
+                        transport=self.hook_transport,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    log.exception("discard hook %s of session %s crashed", hook.name, session.slug)
+                    return HookResult(False, f"{type(exc).__name__}: {exc}")
+        finally:
+            self._hook_spent += time.monotonic() - started
 
     # ------------------------------------------------------------------ an active session
 

@@ -187,6 +187,11 @@ class Settings(BaseSettings):
     # bearer for the settings URL hook only, never sent to a session's own discard_hook_url
     discard_hook_token: str = Field(default="", repr=False)
     discard_hook_timeout_seconds: float = 120
+    # a URL hook server that stalls fails the call after these, well inside the overall timeout
+    discard_hook_connect_timeout_seconds: float = Field(default=5, gt=0)
+    discard_hook_read_timeout_seconds: float = Field(default=30, gt=0)
+    # hook time one reconcile pass may spend; spent, later deleting sessions wait for the next pass
+    discard_hook_pass_budget_seconds: float = Field(default=60, gt=0)
     discard_quiesce_timeout_seconds: float = 120
     discard_drain_seconds: float = 5
     scale_drain_seconds: float = 900

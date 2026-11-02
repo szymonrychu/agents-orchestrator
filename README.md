@@ -80,7 +80,10 @@ Every process reads `ORCH_*` variables (the contract `agents-orchestrator-settin
 | `ORCH_DISCARD_HOOK_COMMAND` | empty | api, reconciler | pre-discard hook command (exclusive with URL) |
 | `ORCH_DISCARD_HOOK_URL` | empty | api, reconciler | pre-discard hook http(s) webhook URL |
 | `ORCH_DISCARD_HOOK_TOKEN` | empty | reconciler | bearer token sent as `Authorization: Bearer` with the `ORCH_DISCARD_HOOK_URL` hook only; needs the URL, refused with the command, never logged |
-| `ORCH_DISCARD_HOOK_TIMEOUT_SECONDS` | `120` | api, reconciler | discard hook timeout |
+| `ORCH_DISCARD_HOOK_TIMEOUT_SECONDS` | `120` | api, reconciler | discard hook timeout (overall, per hook) |
+| `ORCH_DISCARD_HOOK_CONNECT_TIMEOUT_SECONDS` | `5` | reconciler | URL hook: connect timeout (> 0) |
+| `ORCH_DISCARD_HOOK_READ_TIMEOUT_SECONDS` | `30` | reconciler | URL hook: idle timeout (> 0), the longest the server may go without reading or answering a byte; a stalled server fails the hook inside it, not after the overall timeout |
+| `ORCH_DISCARD_HOOK_PASS_BUDGET_SECONDS` | `60` | reconciler | hook time (> 0) one reconcile pass may spend; once spent, the remaining deleting sessions wait for the next pass |
 | `ORCH_SCALE_DRAIN_SECONDS` | `900` | reconciler | scale-down drain deadline (> 0): after it the StatefulSet gets the target replicas even while a draining agent is busy |
 | `ORCH_ANY_MCP_REPO` | `https://github.com/szymonrychu/any-mcp` | api, reconciler | any-mcp git repository |
 | `ORCH_ANY_MCP_REF` | `v0.5.0` | api, reconciler | any-mcp pinned release tag vX.Y.Z (never a branch) |
@@ -410,7 +413,7 @@ Optional hooks receive the full history export before anything is deleted. None 
 1. `settings`: `ORCH_DISCARD_HOOK_COMMAND` (a shell command) or `ORCH_DISCARD_HOOK_URL` (a webhook URL), set at most one;
 2. `session`: `spec.discard_hook_url` of the session (a webhook URL, http or https only).
 
-The settings hook always runs, also for a session that sets its own URL (user decision: it feeds the session history service). A command comes only from settings, never from the spec: the API has no auth and the reconciler holds the Kubernetes credentials. Every hook is bounded by `ORCH_DISCARD_HOOK_TIMEOUT_SECONDS` (120).
+The settings hook always runs, also for a session that sets its own URL (user decision: it feeds the session history service). A command comes only from settings, never from the spec: the API has no auth and the reconciler holds the Kubernetes credentials. Every hook is bounded by `ORCH_DISCARD_HOOK_TIMEOUT_SECONDS` (120); a URL hook also by `ORCH_DISCARD_HOOK_CONNECT_TIMEOUT_SECONDS` (5) and `ORCH_DISCARD_HOOK_READ_TIMEOUT_SECONDS` (30, idle), so a stalled server fails fast and the normal retry backoff applies. Sessions are reconciled one after another, so the hooks of one pass share `ORCH_DISCARD_HOOK_PASS_BUDGET_SECONDS` (60): once spent, a deleting session whose hook is owed is left for the next pass (nothing runs or is recorded for it), so one slow hook cannot hold the other sessions.
 
 `ORCH_DISCARD_HOOK_TOKEN` (reconciler only) is sent as `Authorization: Bearer <token>` with the settings URL hook, and never with a session's own URL, which is user-controlled. It needs `ORCH_DISCARD_HOOK_URL`, is refused with `ORCH_DISCARD_HOOK_COMMAND` or unless it is printable ASCII without whitespace (0x21 to 0x7E), is hidden from the settings repr and is never logged.
 

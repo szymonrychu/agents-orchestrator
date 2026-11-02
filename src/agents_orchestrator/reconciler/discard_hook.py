@@ -44,13 +44,23 @@ async def run_discard_hook(
     lines: AsyncIterator[str],
     timeout: float,
     *,
+    connect_timeout: float = 5,
+    read_timeout: float = 30,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> HookResult:
+    """Run one hook within `timeout` overall. A URL hook also fails once its server stalls:
+    no connection within `connect_timeout`, or no byte moved for `read_timeout`."""
     try:
         async with asyncio.timeout(timeout):
             if hook.kind == "command":
                 return await _run_command(hook.target, session, lines)
-            return await _post_webhook(hook, session, lines, transport)
+            idle = httpx.Timeout(
+                connect=connect_timeout,
+                read=read_timeout,
+                write=read_timeout,
+                pool=connect_timeout,
+            )
+            return await _post_webhook(hook, session, lines, transport, idle)
     except TimeoutError:
         return HookResult(False, f"timed out after {timeout:g}s")
 
@@ -112,6 +122,7 @@ async def _post_webhook(
     session: Session,
     lines: AsyncIterator[str],
     transport: httpx.AsyncBaseTransport | None,
+    timeout: httpx.Timeout,
 ) -> HookResult:
     async def body() -> AsyncIterator[bytes]:
         async for line in lines:
@@ -126,7 +137,7 @@ async def _post_webhook(
         headers["Authorization"] = f"Bearer {hook.token}"
     try:
         async with (
-            httpx.AsyncClient(transport=transport, timeout=None) as client,
+            httpx.AsyncClient(transport=transport, timeout=timeout) as client,
             client.stream("POST", hook.target, content=body(), headers=headers) as response,
         ):
             if response.is_success:
