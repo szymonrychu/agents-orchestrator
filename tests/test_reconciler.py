@@ -146,10 +146,10 @@ async def test_create_applies_five_objects(env):
     assert got.status["phase"] == "pending"
     assert (got.status["ready"], got.status["replicas"]) == (0, 2)
 
-    # level-triggered and idempotent: a second pass applies the same set and deletes nothing
+    # idempotent: a second pass applies nothing and deletes nothing (mx-99 #1039)
     env.kube.reset_records()
     await env.rec.reconcile_once()
-    assert sorted(a.kind for a in env.kube.applied()) == sorted(FIVE)
+    assert env.kube.applied() == []
     assert env.kube.deletes == []
 
 
@@ -484,6 +484,8 @@ async def test_scale_up_cancels_drain(env):
 
 async def test_drain_changes_only_statefulset_replicas(env):
     c, _ = await scaled_down(env, busy=(2,))
+    # a fresh process applies every object once, so the whole drain pass is visible
+    env.rec = Reconciler(env.pool, env.kube, env.settings, wrapper_factory=None)
     env.kube.reset_records()
     await env.rec.reconcile_once()
     session = await env.get(c.id)

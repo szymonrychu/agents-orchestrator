@@ -214,3 +214,35 @@ class LightkubeApi:
 
     async def aclose(self) -> None:
         await self.client.close()
+
+
+def _zero(value: Any) -> bool:
+    return value is None or value in ("", 0, False) or value == [] or value == {}
+
+
+def drift(desired: Any, live: Any, path: str = "") -> str | None:
+    """The path of the first field of `desired` the live object does not hold, or None.
+
+    Maps compare key by key and extra live keys (server defaults, status, metadata the API
+    server owns) are ignored; lists compare item by item at the same length. A desired zero
+    value ("", 0, false, empty) also matches a missing live key, because the API server omits
+    empty fields. A key the render dropped is not seen here (the live object still has it).
+    """
+    if isinstance(desired, dict):
+        if not isinstance(live, dict):
+            return path or "."
+        for k, v in desired.items():
+            sub = f"{path}.{k}"
+            where = drift(v, live[k], sub) if k in live else (None if _zero(v) else sub)
+            if where is not None:
+                return where
+        return None
+    if isinstance(desired, list):
+        if not isinstance(live, list) or len(desired) != len(live):
+            return path or "."
+        for i, (d, x) in enumerate(zip(desired, live, strict=True)):
+            where = drift(d, x, f"{path}[{i}]")
+            if where is not None:
+                return where
+        return None
+    return None if desired == live and type(desired) is type(live) else path or "."
