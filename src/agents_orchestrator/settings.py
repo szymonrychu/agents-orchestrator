@@ -168,8 +168,10 @@ class Settings(BaseSettings):
     max_sessions: int = 20
     autoclose_min_seconds: int = Field(default=300, ge=1)
     #: Seconds a session with a requested self-close stays idle before the sweeper discards it,
-    #: so readers of the final answer (matrix connector, trigger runs) get it first.
-    close_grace_seconds: int = Field(default=30, ge=0, le=3600)
+    #: so readers of the final answer (matrix connector, trigger runs) get it first. The floor of
+    #: 10 s keeps a session from being discarded between a message turning `sent` and its turn
+    #: being recorded.
+    close_grace_seconds: int = Field(default=30, ge=10, le=3600)
 
     wrapper_send_timeout_seconds: float = 15
     #: Rendered into every wrapper as `sessions.interrupt_settle_seconds`; the priority lane's

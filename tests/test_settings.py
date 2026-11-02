@@ -595,11 +595,11 @@ def test_priority_send_timeout_covers_the_wrapper_interrupt_budget():
 
 def test_close_grace_default_and_bounds(monkeypatch):
     assert Settings().close_grace_seconds == 30
-    monkeypatch.setenv("ORCH_CLOSE_GRACE_SECONDS", "0")
-    assert Settings().close_grace_seconds == 0
+    monkeypatch.setenv("ORCH_CLOSE_GRACE_SECONDS", "10")
+    assert Settings().close_grace_seconds == 10
     monkeypatch.setenv("ORCH_CLOSE_GRACE_SECONDS", "3600")
     assert Settings().close_grace_seconds == 3600
-    for bad in ("-1", "3601"):
+    for bad in ("-1", "0", "9", "3601"):
         monkeypatch.setenv("ORCH_CLOSE_GRACE_SECONDS", bad)
         with pytest.raises(SettingsError, match="ORCH_CLOSE_GRACE_SECONDS"):
             Settings()

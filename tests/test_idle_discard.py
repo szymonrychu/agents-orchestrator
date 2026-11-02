@@ -460,8 +460,8 @@ async def test_sweeper_uses_close_grace_setting(dsn, pool, monkeypatch):
     monkeypatch.setattr(autoclose, "AUTOCLOSE_POLL_SECONDS", 0.1)
     s, _ = await _idle_session(pool, spec={})
     await _request(pool, s["id"])
-    await _age_close(pool, s["id"], 5)
-    app = create_app(Settings(database_url=dsn, agent_image="img:1", close_grace_seconds=1))
+    await _age_close(pool, s["id"], 15)
+    app = create_app(Settings(database_url=dsn, agent_image="img:1", close_grace_seconds=10))
     async with app.router.lifespan_context(app):
         for _ in range(50):
             if await _desired(pool, s["id"]) == "deleting":
