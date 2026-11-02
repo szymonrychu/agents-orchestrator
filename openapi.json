@@ -786,6 +786,57 @@
         "title": "CleanupSettingsView",
         "type": "object"
       },
+      "CloseRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "CloseRequest",
+        "type": "object"
+      },
+      "CloseRequested": {
+        "properties": {
+          "already_requested": {
+            "title": "Already Requested",
+            "type": "boolean"
+          },
+          "close_reason": {
+            "title": "Close Reason",
+            "type": "string"
+          },
+          "close_requested_at": {
+            "format": "date-time",
+            "title": "Close Requested At",
+            "type": "string"
+          },
+          "grace_seconds": {
+            "title": "Grace Seconds",
+            "type": "integer"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "close_requested_at",
+          "close_reason",
+          "already_requested",
+          "grace_seconds"
+        ],
+        "title": "CloseRequested",
+        "type": "object"
+      },
       "CommandAccepted": {
         "properties": {
           "command_id": {
@@ -4114,6 +4165,29 @@
         "properties": {
           "backup": {
             "$ref": "#/components/schemas/SessionBackup"
+          },
+          "close_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Close Reason"
+          },
+          "close_requested_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Close Requested At"
           },
           "closes_at": {
             "anyOf": [
@@ -8204,6 +8278,82 @@
         ]
       }
     },
+    "/agent/v1/close": {
+      "post": {
+        "description": "Checks in order: leader (403 `not_leader`), not a superleader session (422 `own_session`),\nnot being discarded (409 `session_deleting`). The sweeper discards the session once it is idle\nfor `ORCH_CLOSE_GRACE_SECONDS`; a repeat call keeps the first request.",
+        "operationId": "close_agent_v1_close_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CloseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloseRequested"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Close the caller's session once idle (leader only)",
+        "tags": [
+          "agent"
+        ]
+      }
+    },
     "/agent/v1/init-scripts": {
       "get": {
         "operationId": "init_scripts_get_agent_v1_init_scripts_get",
@@ -10993,6 +11143,47 @@
           }
         },
         "summary": "Post Check"
+      }
+    },
+    "/api/v1/sessions/{session_id}/close": {
+      "delete": {
+        "description": "Cancel a pending self-close request; 200 even when none is pending, 409 once the\nsession is flipped to deleting.",
+        "operationId": "cancel_session_close_api_v1_sessions__session_id__close_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Session Close"
       }
     },
     "/api/v1/sessions/{session_id}/events": {

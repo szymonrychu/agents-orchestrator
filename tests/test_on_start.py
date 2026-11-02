@@ -40,6 +40,7 @@ TASK_TOOLS = [
 ]  # fmt: skip
 TAIL_TOOLS = [*SESSION_TOOLS, *INIT_SCRIPTS_TOOLS, *CHAT_TOOLS, *TASK_TOOLS]
 ALONE_TOOLS = ["me", *TAIL_TOOLS]
+CLOSE = ["self_close"]  # offered last to every session without session_messaging
 ADMIN_TOOLS = [
     "presets_list", "preset_get", "preset_create", "preset_replace", "preset_delete",
     "preset_copy", "session_get", "session_create", "session_discard", "session_restart",
@@ -96,7 +97,7 @@ def test_alone_session_tools_entry(messaging, static):
     """D11, D13: an alone session gets the session, init-scripts and chat tools; the admin tools
     only with session_messaging."""
     spec = SessionSpec(replicas=1, static=static, session_messaging=messaging)
-    expected = [*ALONE_TOOLS, *ADMIN_TOOLS] if messaging else ALONE_TOOLS
+    expected = [*ALONE_TOOLS, *ADMIN_TOOLS] if messaging else [*ALONE_TOOLS, *CLOSE]
     assert on_start.orchestrator_allow(spec) == expected
     entry = entries(spec)["orchestrator"]
     assert entry["source"] == RESERVED_SOURCE and "plugin" not in entry
@@ -123,7 +124,7 @@ def test_hive_session_tools(messaging, spec_fields, hive_allow):
     then the admin tools only with session_messaging."""
     spec = SessionSpec(session_messaging=messaging, **spec_fields)
     allow = on_start.orchestrator_allow(spec)
-    assert allow == [*hive_allow, *TAIL_TOOLS, *(ADMIN_TOOLS if messaging else [])]
+    assert allow == [*hive_allow, *TAIL_TOOLS, *(ADMIN_TOOLS if messaging else CLOSE)]
     assert entries(spec)["orchestrator"]["allow"] == allow
 
 
@@ -151,24 +152,42 @@ def rendered_allow(created_by_service: str | None, **spec_fields) -> list[str]:
 def test_every_creator_gets_the_chat_tools():
     """Who created the session does not change the allow list (an enabled flag is honoured)."""
     for service in (None, "agents-webhook", "agents-schedule", "agents-matrix-connector"):
-        assert rendered_allow(service, replicas=1) == ALONE_TOOLS, service
-        assert rendered_allow(service, replicas=2) == [*HIVE_TOOLS, "scale", *TAIL_TOOLS], service
+        assert rendered_allow(service, replicas=1) == [*ALONE_TOOLS, *CLOSE], service
+        assert rendered_allow(service, replicas=2) == [
+            *HIVE_TOOLS,
+            "scale",
+            *TAIL_TOOLS,
+            *CLOSE,
+        ], service
+
+
+def test_self_close_offered_to_alone_and_hive():
+    assert on_start.orchestrator_allow(SessionSpec())[-1] == "self_close"
+    assert on_start.orchestrator_allow(SessionSpec(replicas=2))[-1] == "self_close"
+
+
+def test_self_close_not_offered_to_superleaders():
+    for spec in (
+        SessionSpec(session_messaging=True),
+        SessionSpec(replicas=2, session_messaging=True),
+    ):
+        assert "self_close" not in on_start.orchestrator_allow(spec)
 
 
 def test_static_hive_has_no_scale_tool():
     spec = SessionSpec(replicas=2, static=True)
-    assert on_start.orchestrator_allow(spec) == [*HIVE_TOOLS, *TAIL_TOOLS]
+    assert on_start.orchestrator_allow(spec) == [*HIVE_TOOLS, *TAIL_TOOLS, *CLOSE]
 
 
 def test_hive_entry_and_allow():
     spec = SessionSpec(replicas=2, max_replicas=4, auto_compact_pct=70)
-    assert on_start.orchestrator_allow(spec) == [*HIVE_TOOLS, "scale", *TAIL_TOOLS]
+    assert on_start.orchestrator_allow(spec) == [*HIVE_TOOLS, "scale", *TAIL_TOOLS, *CLOSE]
     entry = entries(spec)["orchestrator"]
     assert entry == {
         "name": "orchestrator",
         "source": RESERVED_SOURCE,
         "namespace": "orchestrator",
-        "allow": [*HIVE_TOOLS, "scale", *TAIL_TOOLS],
+        "allow": [*HIVE_TOOLS, "scale", *TAIL_TOOLS, *CLOSE],
         "config": {
             "base_url": "${ORCH_AGENT_URL}",
             "token": "${ORCH_AGENT_TOKEN}",
@@ -465,13 +484,13 @@ def test_golden_allowlist_superleader_leader_and_service_session():
     is on, whoever created the session; a plain leader never gets them."""
     hive = [*HIVE_TOOLS, "scale", *TAIL_TOOLS]
     assert rendered_allow(None, replicas=2, session_messaging=True) == [*hive, *ADMIN_TOOLS]
-    assert rendered_allow(None, replicas=2) == hive
-    assert rendered_allow(None, replicas=2, session_messaging=False) == hive
+    assert rendered_allow(None, replicas=2) == [*hive, *CLOSE]
+    assert rendered_allow(None, replicas=2, session_messaging=False) == [*hive, *CLOSE]
     assert rendered_allow("agents-webhook", replicas=2, session_messaging=True) == [
         *hive,
         *ADMIN_TOOLS,
     ]
-    assert rendered_allow("agents-webhook", replicas=2) == hive
+    assert rendered_allow("agents-webhook", replicas=2) == [*hive, *CLOSE]
 
 
 def test_alone_session_gets_me_and_task_tools():

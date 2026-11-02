@@ -31,6 +31,7 @@ HIVE_TOOLS = [
 SESSION_TOOLS = ["sessions_list", "session_send"]
 INIT_SCRIPTS_TOOLS = ["init_scripts_get", "init_scripts_edit"]
 CHAT_TOOLS = ["chat_rooms", "chat_send", "chat_react", "chat_status"]
+CLOSE_TOOL = "self_close"
 # Taskboard tools (the agent-visible names are orchestrator_<tool>, like the chat tools): every
 # session gets them, trigger-created ones included (a decision_ask they raise is answered on the
 # web only).
@@ -62,14 +63,15 @@ def orchestrator_allow(spec: SessionSpec) -> list[str]:
     the task tools, alone sessions included, which also get `me`; the agent API decides what each
     caller may list, send, edit and say in the chat (leader only). The admin tools and
     `secret_set` are listed exactly when `session_messaging` is enabled, whoever created the
-    session.
+    session; every other session gets `self_close` last instead (a superleader is never offered
+    it).
     """
     shared = [
         *SESSION_TOOLS,
         *INIT_SCRIPTS_TOOLS,
         *CHAT_TOOLS,
         *TASK_TOOLS,
-        *(ADMIN_TOOLS if spec.session_messaging else []),
+        *(ADMIN_TOOLS if spec.session_messaging else [CLOSE_TOOL]),
     ]
     if not spec.hive:
         return ["me", *shared]

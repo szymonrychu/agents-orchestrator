@@ -14,15 +14,15 @@ log = logging.getLogger(__name__)
 AUTOCLOSE_POLL_SECONDS = 10
 
 
-async def sweep(pool: AsyncConnectionPool) -> None:
-    """Run close_expired and discard_idle each poll until cancelled; a failed pass is retried."""
+async def sweep(pool: AsyncConnectionPool, close_grace_seconds: int) -> None:
+    """Run close_expired and discard_idle each poll until cancelled; a failed pass is retried.
+    discard_idle logs each session it flips (idle discard or self-close)."""
     while True:
         try:
             async with pool.connection() as conn:
                 for session_id in await sessions.close_expired(conn):
                     log.info("autoclose: session %s is due, discarding", session_id)
-                for session_id in await sessions.discard_idle(conn):
-                    log.info("idle discard: session %s has been idle long enough", session_id)
+                await sessions.discard_idle(conn, close_grace_seconds)
         except asyncio.CancelledError:
             raise
         except Exception:
