@@ -417,7 +417,10 @@ async def test_sweep_passes_grace(monkeypatch, pool):
         return []
 
     monkeypatch.setattr(sessions, "discard_idle", fake_discard_idle)
-    task = asyncio.create_task(autoclose.sweep(pool, 7))
+    settings = Settings(
+        database_url="postgresql://x/y", agent_image="img:1", close_grace_seconds=17
+    )
+    task = asyncio.create_task(autoclose.sweep(pool, settings))
     for _ in range(100):
         if seen:
             break
@@ -425,7 +428,7 @@ async def test_sweep_passes_grace(monkeypatch, pool):
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert seen and set(seen) == {7}
+    assert seen and set(seen) == {17}
 
 
 async def test_sweeper_uses_close_grace_setting(dsn, pool, monkeypatch):

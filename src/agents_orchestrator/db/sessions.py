@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -15,7 +16,8 @@ from psycopg.types.json import Jsonb
 from agents_orchestrator.db import leadership
 from agents_orchestrator.db.eligibility import ELIGIBLE
 from agents_orchestrator.db.pool import notify
-from agents_orchestrator.db.queue import SessionBeingDeleted
+from agents_orchestrator.db.queue import SessionBeingDeleted, enqueue_message
+from agents_orchestrator.inactivity import NOTICE_CLOSE, NOTICE_REMINDER, close_reason
 from agents_orchestrator.spec import SessionSpec, validate_slug
 
 CHANNEL = "session_changed"
@@ -310,34 +312,43 @@ async def _lock_active(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> 
 
 
 async def request_close(
-    conn: psycopg.AsyncConnection, session_id: uuid.UUID, reason: str
+    conn: psycopg.AsyncConnection, session_id: uuid.UUID, reason: str, *, kind: str = "self"
 ) -> CloseOutcome:
-    """Record a leader's request to close its session once idle. The first request wins: a
-    pending one is returned unchanged (`already`) and its clock is not reset."""
+    """Record a request to close the session once idle, by its leader (`kind` 'self') or the
+    orchestrator ('inactivity'). The first request wins: a pending one is returned unchanged
+    (`already`) and its clock is not reset."""
     async with conn.transaction():
         existing = await _lock_active(conn, session_id)
         if existing.close_requested_at is not None:
             return CloseOutcome(existing, True)
         rows = await _fetch(
             conn,
-            "UPDATE sessions SET close_requested_at = now(), close_reason = %s"
+            "UPDATE sessions SET close_requested_at = now(), close_reason = %s, close_kind = %s"
             " WHERE id = %s AND desired = 'active' AND close_requested_at IS NULL RETURNING *",
-            (reason, session_id),
+            (reason, kind, session_id),
         )
         await _notify(conn, session_id)
         return CloseOutcome(rows[0], False)
 
 
+# Clears a pending close of either kind and restarts the quiet clock, so an inactivity close
+# does not refire on the next poll.
+_CLEAR_CLOSE = (
+    "close_requested_at = NULL, close_reason = NULL, close_kind = NULL,"
+    " close_deadline_at = NULL, last_update_at = now()"
+)
+
+
 async def cancel_close(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Session:
-    """Clear a pending close request; idempotent when none is pending."""
+    """Clear a pending close request (the user's "Keep session") and restart the quiet clock;
+    idempotent when none is pending (no write)."""
     async with conn.transaction():
         existing = await _lock_active(conn, session_id)
         if existing.close_requested_at is None:
             return existing
         rows = await _fetch(
             conn,
-            "UPDATE sessions SET close_requested_at = NULL, close_reason = NULL"
-            " WHERE id = %s AND desired = 'active' RETURNING *",
+            f"UPDATE sessions SET {_CLEAR_CLOSE} WHERE id = %s AND desired = 'active' RETURNING *",
             (session_id,),
         )
         await _notify(conn, session_id)
@@ -357,6 +368,194 @@ async def close_expired(conn: psycopg.AsyncConnection) -> list[uuid.UUID]:
         for session_id in ids:
             await _notify(conn, session_id)
     return ids
+
+
+def quiet_clock_sql(alias: str) -> str:
+    """SQL expression for the last user-visible update of session `alias` (spec 3.2): the
+    latest of its creation, the api-written `last_update_at`, the newest inbound message that is
+    not an orchestrator notice (user, trigger, connector or peer session), the completion of a
+    turn that carried such a message, and the newest message the session sent to another
+    session. Tool activity and turns that carried only a notice do not count."""
+    inbound = (
+        f"qm.session_id = {alias}.id AND qm.notice IS NULL"
+        f" AND qm.sender_session_id IS DISTINCT FROM {alias}.id"
+    )
+    return (
+        f"GREATEST({alias}.created_at, {alias}.last_update_at,"
+        f" (SELECT max(qm.created_at) FROM messages qm WHERE {inbound}),"
+        " (SELECT max(qt.completed_at) FROM messages qm JOIN turns qt ON qt.turn_id = qm.turn_id"
+        f"  WHERE {inbound}),"
+        f" (SELECT max(qm.created_at) FROM messages qm WHERE qm.sender_session_id = {alias}.id))"
+    )
+
+
+# Sessions joined to their quiet clock `q.quiet`.
+_QUIET_FROM = f"sessions s CROSS JOIN LATERAL (SELECT {quiet_clock_sql('s')} AS quiet) q"
+# Active, not a superleader (exempt, spec 3.1) and no close pending.
+_LIMITED = (
+    "s.desired = 'active' AND s.close_requested_at IS NULL"
+    " AND COALESCE((s.spec->>'session_messaging')::boolean, false) = false"
+)
+_REMINDER = "COALESCE((s.spec->'inactivity'->>'reminder_seconds')::int, %(reminder_default)s)"
+_CLOSE = "COALESCE((s.spec->'inactivity'->>'close_seconds')::int, %(close_default)s)"
+_REMIND_PREDICATE = f"""
+    {_LIMITED}
+    AND {_REMINDER} > 0
+    AND q.quiet + make_interval(secs => {_REMINDER}) <= now()
+    AND (s.inactivity_reminded_at IS NULL OR s.inactivity_reminded_at < q.quiet)
+    AND NOT EXISTS (
+        SELECT 1 FROM agents a JOIN agent_status st ON st.agent_id = a.id
+        WHERE a.session_id = s.id AND a.gone_at IS NULL AND st.waiting_since IS NOT NULL)
+"""
+_CLOSE_PREDICATE = f"""
+    {_LIMITED}
+    AND {_CLOSE} > 0
+    AND q.quiet + make_interval(secs => {_CLOSE}) <= now()
+"""
+# An inactivity close is cancelled by an inbound message that is not a notice and came after the
+# close request: created after it, or queued behind its close notice (a message whose transaction
+# began before the close and waited on the row lock carries an earlier `created_at`, but a later
+# id than the notice inserted under that lock).
+_INACTIVITY_CLOSE_CANCELLED = """
+    s.close_kind = 'inactivity' AND EXISTS (
+        SELECT 1 FROM messages cm
+        WHERE cm.session_id = s.id AND cm.notice IS NULL
+          AND cm.sender_session_id IS DISTINCT FROM s.id
+          AND (cm.created_at > s.close_requested_at
+               OR cm.id > (SELECT max(n.id) FROM messages n
+                           WHERE n.session_id = s.id AND n.notice = 'inactivity_close')))
+"""
+_RELEASE_PREDICATE = f"s.desired = 'active' AND {_INACTIVITY_CLOSE_CANCELLED}"
+_OVERDUE_PREDICATE = f"""
+    s.desired = 'active' AND s.close_kind = 'inactivity' AND s.close_deadline_at <= now()
+    AND NOT ({_INACTIVITY_CLOSE_CANCELLED})
+"""
+_FLIP = (
+    "UPDATE sessions SET desired = 'deleting', generation = generation + 1"
+    " WHERE id = %s AND desired = 'active'"
+)
+
+
+async def _sweep_each(
+    conn: psycopg.AsyncConnection,
+    source: str,
+    predicate: str,
+    params: dict[str, Any],
+    columns: str,
+    act: Callable[[uuid.UUID, dict[str, Any]], Awaitable[str]],
+) -> list[uuid.UUID]:
+    """Run `act` on every session of `source` matching `predicate`; returns those it ran on.
+
+    Per candidate, in its own transaction: lock the session row first, then re-evaluate the
+    predicate in a fresh statement (selecting `columns`) and call `act(id, row)` only when it
+    still holds; `act` writes and returns the line logged after the commit. `enqueue_message`
+    takes the same row lock (FOR SHARE) before inserting, so a message committed first is seen
+    by the re-check, and one arriving later waits for the commit."""
+    async with conn.transaction():
+        cur = await conn.execute(f"SELECT s.id FROM {source} WHERE {predicate}", params)
+        candidates = [row[0] for row in await cur.fetchall()]
+    done: list[uuid.UUID] = []
+    for session_id in candidates:
+        line = None
+        async with conn.transaction():
+            await conn.execute("SELECT 1 FROM sessions WHERE id = %s FOR UPDATE", (session_id,))
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    f"SELECT {columns} FROM {source} WHERE s.id = %(id)s AND {predicate}",
+                    {**params, "id": session_id},
+                )
+                row = await cur.fetchone()
+            if row is not None:
+                line = await act(session_id, row)
+                await _notify(conn, session_id)
+        if line is not None:
+            log.info("%s", line)
+            done.append(session_id)
+    return done
+
+
+async def release_inactive_close(conn: psycopg.AsyncConnection) -> list[uuid.UUID]:
+    """Cancel inactivity closes that an inbound message answered (spec Q10), like
+    `cancel_close`: the close fields are cleared and the quiet clock restarts. A self-close is
+    never released this way."""
+
+    async def release(session_id: uuid.UUID, _: dict[str, Any]) -> str:
+        await conn.execute(f"UPDATE sessions SET {_CLEAR_CLOSE} WHERE id = %s", (session_id,))
+        return f"inactivity: session {session_id} got a message, close cancelled"
+
+    return await _sweep_each(conn, "sessions s", _RELEASE_PREDICATE, {}, "s.id", release)
+
+
+async def close_overdue(conn: psycopg.AsyncConnection) -> list[uuid.UUID]:
+    """Flip inactivity closes past their handoff deadline to deleting (request_delete write),
+    busy or not, unless an inbound message cancelled them."""
+
+    async def flip(session_id: uuid.UUID, _: dict[str, Any]) -> str:
+        await conn.execute(_FLIP, (session_id,))
+        return f"inactivity: session {session_id} deadline passed, discarding"
+
+    return await _sweep_each(conn, "sessions s", _OVERDUE_PREDICATE, {}, "s.id", flip)
+
+
+async def close_inactive(
+    conn: psycopg.AsyncConnection,
+    close_default: int,
+    handoff_seconds: int,
+    compose: Callable[[Session, datetime, datetime], str],
+) -> list[uuid.UUID]:
+    """Request the close of sessions quiet for their close limit (spec 3.4): `close_kind`
+    'inactivity', the reason, a deadline `handoff_seconds` away, and the `inactivity_close`
+    notice `compose(session, last_update, deadline)` to the leader, in one transaction."""
+
+    async def close(session_id: uuid.UUID, row: dict[str, Any]) -> str:
+        reason = close_reason(row["quiet_seconds"], row["close_seconds"])
+        [session] = await _fetch(
+            conn,
+            "UPDATE sessions SET close_requested_at = now(), close_kind = 'inactivity',"
+            " close_reason = %s, close_deadline_at = now() + make_interval(secs => %s)"
+            " WHERE id = %s RETURNING *",
+            (reason, handoff_seconds, session_id),
+        )
+        assert session.close_deadline_at is not None
+        text = compose(session, row["quiet"], session.close_deadline_at)
+        await enqueue_message(conn, session_id, text, lane="regular", notice=NOTICE_CLOSE)
+        deadline = session.close_deadline_at.isoformat()
+        return f"inactivity: session {session_id} closing, deadline {deadline}"
+
+    columns = (
+        "q.quiet, floor(extract(epoch FROM now() - q.quiet))::int AS quiet_seconds,"
+        f" {_CLOSE} AS close_seconds"
+    )
+    params = {"close_default": close_default}
+    return await _sweep_each(conn, _QUIET_FROM, _CLOSE_PREDICATE, params, columns, close)
+
+
+async def remind_inactive(
+    conn: psycopg.AsyncConnection,
+    reminder_default: int,
+    compose: Callable[[Session, datetime, int], str],
+) -> list[uuid.UUID]:
+    """Remind sessions quiet for their reminder limit, once per quiet period (spec 3.3):
+    `inactivity_reminded_at` and the `inactivity_reminder` notice
+    `compose(session, last_update, live_agent_count)` to the leader, in one transaction. Never
+    while an agent waits on a person, or while the reminder is off (0)."""
+
+    async def remind(session_id: uuid.UUID, row: dict[str, Any]) -> str:
+        [session] = await _fetch(
+            conn,
+            "UPDATE sessions SET inactivity_reminded_at = now() WHERE id = %s RETURNING *",
+            (session_id,),
+        )
+        text = compose(session, row["quiet"], row["pods"])
+        await enqueue_message(conn, session_id, text, lane="regular", notice=NOTICE_REMINDER)
+        return f"inactivity: session {session_id} reminded"
+
+    columns = (
+        "q.quiet, (SELECT count(*) FROM agents a"
+        " WHERE a.session_id = s.id AND a.gone_at IS NULL)::int AS pods"
+    )
+    params = {"reminder_default": reminder_default}
+    return await _sweep_each(conn, _QUIET_FROM, _REMIND_PREDICATE, params, columns, remind)
 
 
 # A session is idle when it has at least one live agent, every live agent is idle with no turn
@@ -396,34 +595,22 @@ _IDLE_PREDICATE = f"""
 
 async def discard_idle(conn: psycopg.AsyncConnection, close_grace_seconds: int) -> list[uuid.UUID]:
     """Flip idle sessions to deleting (request_delete write): those with a pending close request
-    (self-close or inactivity close) that have been idle for `close_grace_seconds`.
-
-    Per candidate, in its own transaction: lock the session row first, then re-evaluate the idle
-    predicate in a fresh statement and flip under the `desired = 'active'` guard. `enqueue_message`
-    takes the same row lock (FOR SHARE) before inserting, so a message committed first is seen by
-    the re-check and cancels the discard, and one arriving after the flip is refused. A
-    `cancel_close` committed first fails the re-check the same way.
-    """
-    cur = await conn.execute(
-        f"SELECT s.id FROM sessions s WHERE {_IDLE_PREDICATE}", {"grace": close_grace_seconds}
+    (self-close or inactivity close) that have been idle for `close_grace_seconds`, unless an
+    inbound message cancelled their inactivity close. Locked and re-checked per candidate
+    (`_sweep_each`): a message or a `cancel_close` committed first fails the re-check, and a
+    message arriving after the flip is refused."""
+    predicate = (
+        f"{_IDLE_PREDICATE} AND (s.close_kind IS DISTINCT FROM 'inactivity'"
+        f" OR NOT ({_INACTIVITY_CLOSE_CANCELLED}))"
     )
-    flipped: list[uuid.UUID] = []
-    for (session_id,) in await cur.fetchall():
-        async with conn.transaction():
-            await conn.execute("SELECT 1 FROM sessions WHERE id = %s FOR UPDATE", (session_id,))
-            cur = await conn.execute(
-                "UPDATE sessions s SET desired = 'deleting', generation = generation + 1"
-                f" WHERE s.id = %(id)s AND {_IDLE_PREDICATE}"
-                " RETURNING s.id",
-                {"grace": close_grace_seconds, "id": session_id},
-            )
-            row = await cur.fetchone()
-            if row is not None:
-                await _notify(conn, session_id)
-                flipped.append(session_id)
-        if row is not None:
-            log.info("self-close: session %s is idle, discarding", session_id)
-    return flipped
+
+    async def flip(session_id: uuid.UUID, row: dict[str, Any]) -> str:
+        await conn.execute(_FLIP, (session_id,))
+        kind = "inactivity" if row["close_kind"] == "inactivity" else "self-close"
+        return f"{kind}: session {session_id} is idle, discarding"
+
+    params = {"grace": close_grace_seconds}
+    return await _sweep_each(conn, "sessions s", predicate, params, "s.close_kind", flip)
 
 
 async def set_init_scripts(

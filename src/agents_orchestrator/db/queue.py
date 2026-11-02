@@ -144,8 +144,10 @@ async def enqueue_message(
     lane: str = "regular",
     carries_start_prompt: bool = False,
     held: bool = False,
+    notice: str | None = None,
 ) -> int:
-    """Queue a message; a session message carries its sender and hop (D8).
+    """Queue a message; a session message carries its sender and hop (D8), an orchestrator
+    notice its kind (`notice`, e.g. `inactivity_reminder`).
 
     A `held` message is not deliverable until `release_note` clears its `not_before` (the hold
     is a day, so a note whose commands never finish still expires).
@@ -165,9 +167,9 @@ async def enqueue_message(
         row = await _one(
             conn,
             "INSERT INTO messages (session_id, text, target_agent_id, sender_session_id,"
-            " sender_slug, hop, lane, carries_start_prompt, not_before)"
+            " sender_slug, hop, lane, carries_start_prompt, not_before, notice)"
             " VALUES (%s, %s, %s, %s, %s, %s, %s, %s,"
-            " CASE WHEN %s THEN now() + interval '1 day' END) RETURNING id",
+            " CASE WHEN %s THEN now() + interval '1 day' END, %s) RETURNING id",
             (
                 session_id,
                 text,
@@ -178,6 +180,7 @@ async def enqueue_message(
                 lane,
                 carries_start_prompt,
                 held,
+                notice,
             ),
         )
         assert row is not None

@@ -135,3 +135,26 @@ async def test_cancel_not_on_service_or_agent_port(pool, dsn):
     async with httpx.AsyncClient(transport=agent_transport, base_url="http://orch:8001") as agent:
         assert_error(await agent.delete(path), 404, "not_found")
     assert (await close_columns(pool, s["id"]))[1] == "done"
+
+
+async def test_keep_session_clears_inactivity_close(pool, dsn):
+    s = await insert_session(pool)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE sessions SET created_at = now() - interval '5 h',"
+            " last_update_at = now() - interval '5 h' WHERE id = %s",
+            (s["id"],),
+        )
+        assert await sessions_repo.close_inactive(conn, 14400, 300, lambda *_: "closing") == [
+            s["id"]
+        ]
+    async with client_for(create_app(make_settings(dsn), pool)) as http:
+        r = await http.delete(f"/api/v1/sessions/{s['id']}/close")
+    assert r.status_code == 200, r.text
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT close_kind, close_deadline_at, close_requested_at, close_reason,"
+            " now() - last_update_at < interval '2 s' FROM sessions WHERE id = %s",
+            (s["id"],),
+        )
+        assert await cur.fetchone() == (None, None, None, None, True)
