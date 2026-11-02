@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import secrets
 import uuid
@@ -765,7 +766,7 @@ async def test_chat_touch_counts_only_successful_message_posts(monkeypatch):
             assert rig.db.touched == want, (method, path, status)
 
 
-async def test_chat_touch_failure_does_not_fail_the_relay(monkeypatch):
+async def test_chat_touch_failure_does_not_fail_the_relay(monkeypatch, caplog):
     rig = make_rig(monkeypatch)
 
     async def broken(_conn: Any, _session_id: uuid.UUID) -> None:
@@ -775,6 +776,9 @@ async def test_chat_touch_failure_does_not_fail_the_relay(monkeypatch):
     rig.upstream.reply = httpx.Response(202, json={"id": "s1"})
     r = await rig.call("POST", "/agent/v1/chat/messages")
     assert r.status_code == 202 and r.json() == {"id": "s1"}
+    [record] = [r for r in caplog.records if r.name == "agents_orchestrator.api.forward"]
+    assert record.levelno == logging.ERROR and record.exc_info is not None
+    assert "could not stamp last_update_at" in record.getMessage()
 
 
 async def test_chat_tools_parity_db(pool, dsn):

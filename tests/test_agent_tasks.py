@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import logging
 import secrets
 import uuid
 from dataclasses import dataclass, field
@@ -330,7 +331,14 @@ async def test_task_write_touches_session(monkeypatch):
             assert rig.db_touched() == ([rig.session.id] if write else []), (method, path, status)
 
 
-async def test_task_touch_failure_does_not_fail_the_relay(monkeypatch):
+def test_every_relayed_write_method_stamps_the_update():
+    """The relay's write routes are exactly the methods that stamp `last_update_at` (spec 3.2:
+    POST, PUT, PATCH); reads never do."""
+    methods = {m for route in tasks.router.routes for m in route.methods}
+    assert methods - {"GET"} == tasks._WRITES == {"POST", "PUT", "PATCH"}
+
+
+async def test_task_touch_failure_does_not_fail_the_relay(monkeypatch, caplog):
     rig = make_rig(monkeypatch)
 
     async def broken(_conn, _session_id):
@@ -340,6 +348,9 @@ async def test_task_touch_failure_does_not_fail_the_relay(monkeypatch):
     rig.upstream.reply = httpx.Response(201, json={"key": "T-1"})
     r = await rig.call("POST", "/agent/v1/tasks", json={"title": "x"})
     assert r.status_code == 201 and r.json() == {"key": "T-1"}
+    [record] = [r for r in caplog.records if r.name == "agents_orchestrator.api.forward"]
+    assert record.levelno == logging.ERROR and record.exc_info is not None
+    assert "could not stamp last_update_at" in record.getMessage()
 
 
 async def _db_app(pool, dsn, upstream: Upstream):
