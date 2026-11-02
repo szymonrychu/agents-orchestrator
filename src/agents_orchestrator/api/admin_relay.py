@@ -20,6 +20,15 @@ A write that creates, changes, clones or runs a webhook endpoint or schedule is 
 `privileged_target` when the body's preset or the stored object's preset has `kube_access`,
 `session_messaging` or `docker` on (after the 404 checks, before anything is forwarded).
 
+A chat routing rule that opens routing (an allow rule created, or a deny rule removed) lets
+inbound chats start sessions from the room's preset, so it is checked like a room settings change
+(`_rule_room`): only a `room` rule on a room the upstream lists with a visible preset passes, and
+a privileged preset is 403 `privileged_target`. A rule of another kind covers rooms on any preset,
+present and future, and is 403 `human_only_field` (`fields: ["kind"]`); a hidden, null-preset or
+unknown room, or an unknown rule, is 404. A deny rule created or an allow rule removed only
+narrows routing and is forwarded as is. Rule values are personal identifiers and never appear in
+an error.
+
 History is read-only for the superleader: three GET routes and no DELETE (deleting a stored
 session is for the user, through the web UI), so the router answers any other method 405 and
 nothing reaches the upstream. The session list is paged upstream by `before_id`, and agents-history
@@ -117,6 +126,7 @@ class Guard:
     answer: Literal["preset_id", "schedule_id"] | None = None
     cursor: bool = False  # a full list page also answers the upstream's next `before_id`
     privileged: bool = False  # a privileged target preset (body or stored) is 403
+    rule: Literal["body", "stored"] | None = None  # a chat routing rule, see `_rule_room`
 
 
 _E, _S, _R = "endpoint", "schedule", "room"
@@ -151,8 +161,8 @@ GUARDS: dict[tuple[str, str, str], Guard] = {
         body_preset=True, stored=_R, privileged=True
     ),
     ("connector", "GET", "/rules"): Guard(),
-    ("connector", "POST", "/rules"): Guard(),
-    ("connector", "DELETE", "/rules/{rule_id}"): Guard(),
+    ("connector", "POST", "/rules"): Guard(rule="body", privileged=True),
+    ("connector", "DELETE", "/rules/{rule_id}"): Guard(rule="stored", privileged=True),
     ("history", "GET", "/sessions"): Guard(list_filter="preset_id", cursor=True),
     ("history", "GET", "/sessions/{session_id}"): Guard(answer="preset_id"),
     ("history", "GET", "/sessions/{session_id}/records"): Guard(stored="history_session"),
@@ -324,6 +334,56 @@ async def _stored_preset(
     raise not_found("object")
 
 
+def human_only_rule() -> ApiError:
+    return ApiError(
+        403,
+        "human_only_field",
+        "only a human can open chat routing beyond one room: an allow rule, or the removal of a "
+        "deny rule, of a kind other than room",
+        extra={"fields": ["kind"]},
+    )
+
+
+async def _stored_rule(request: Request, settings: Settings) -> dict[str, Any]:
+    """The rule a route acts on, its `list` taken from the upstream list that holds it; an
+    unknown rule is 404."""
+    rules = await _upstream_json(_bare(request), settings, "connector", "/rules")
+    wanted = request.path_params["rule_id"]
+    for list_ in ("allow", "deny"):
+        items = rules.get(list_) if isinstance(rules, dict) else None
+        for item in items if isinstance(items, list) else []:
+            if isinstance(item, dict) and str(item.get("id")) == wanted:
+                return {**item, "list": list_}
+    raise not_found("object")
+
+
+async def _rule_room(
+    request: Request, settings: Settings, guard: Guard, body: bytes | None
+) -> str | None:
+    """The preset of the room a chat routing rule opens routing to; None when the rule only
+    narrows routing (a deny rule created, an allow rule removed). Any list other than exactly
+    `deny` counts as allow and any kind other than exactly `room` as a wider one (fail closed)."""
+    if guard.rule == "body":
+        rule = _body_object(body)
+        if rule.get("list") == "deny":
+            return None
+    else:
+        rule = await _stored_rule(request, settings)
+        if rule["list"] != "deny":
+            return None
+    if rule.get("kind") != "room":
+        request.state.preset_fields = ["kind"]
+        raise human_only_rule()
+    rooms = await _upstream_json(_bare(request), settings, "connector", "/rooms")
+    for room in rooms if isinstance(rooms, list) else []:
+        if isinstance(room, dict) and room.get("room_id") == rule.get("value"):
+            preset = room.get("preset_id")
+            if preset is not None and str(preset) in await _visible(request):
+                return str(preset)
+            break
+    raise not_found("object")
+
+
 def _body_object(body: bytes | None) -> dict[str, Any]:
     """The JSON object a body holds; {} when absent, not JSON (the upstream answers 422) or
     not an object."""
@@ -412,6 +472,8 @@ def _handler(service: str, method: str, template: str) -> Callable[..., Awaitabl
             stored = await _stored_preset(request, settings, service, guard)
             if stored is None or stored not in await _visible(request):
                 raise not_found("object")
+        if guard.rule:
+            stored = await _rule_room(request, settings, guard, body)
         if guard.privileged:
             flagged = await _privileged(request)
             flags = {f for p in (_body_preset(body), stored) if p for f in flagged.get(p, [])}
