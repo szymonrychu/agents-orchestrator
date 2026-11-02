@@ -286,7 +286,6 @@ def on_start_any_mcp(configmap: dict[str, Any]) -> dict[str, Any]:
 
 
 HIVE_ONLY_TOOLS = {
-    "me",
     "activity",
     "leadership_handover",
     "lock_claim",
@@ -298,6 +297,7 @@ HIVE_ONLY_TOOLS = {
 
 
 ALONE_SESSION_TOOLS = [
+    "me",
     "sessions_list",
     "session_send",
     "init_scripts_get",
@@ -306,13 +306,23 @@ ALONE_SESSION_TOOLS = [
     "chat_send",
     "chat_react",
     "chat_status",
+    "task_create",
+    "task_update",
+    "task_list",
+    "task_get",
+    "task_comment",
+    "decision_ask",
+    "decision_withdraw",
+    "todo_set",
+    "todo_update",
+    "session_labels_set",
 ]
 
 
 def assert_alone_session_tools(configmap: dict[str, Any]) -> None:
-    """An alone session created by a user renders the orchestrator entry with exactly the session,
-    init-scripts and chat tools, as a literal list so a code change cannot pass by agreeing with
-    itself."""
+    """An alone session created by a user renders the orchestrator entry with exactly `me` and the
+    session, init-scripts, chat and task tools, as a literal list so a code change cannot pass by
+    agreeing with itself."""
     plugins = on_start_any_mcp(configmap).get("plugins", [])
     entry = next((p for p in plugins if p.get("name") == "orchestrator"), None)
     assert entry is not None, plugins
