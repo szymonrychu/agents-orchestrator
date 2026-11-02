@@ -179,6 +179,25 @@ async def test_put_against_changed_row_is_409(pool, settings, seed, monkeypatch)
     assert (exc.value.status, exc.value.code) == (409, "conflict")
 
 
+@pytest.mark.parametrize("verb", ["replace", "patch"])
+async def test_preset_hidden_after_the_route_read_is_404(pool, settings, human, verb):
+    """A human hides the preset after the route's manageable check: the second read in the
+    write sees it and the superleader gets 404, not an edit."""
+    r = await human("POST", M, json={"name": "hid2", "spec": {}, "superleader_manageable": False})
+    pid = uuid.UUID(r.json()["id"])
+    request = type("R", (), {"state": type("S", (), {})()})()
+    async with pool.connection() as conn:
+        with pytest.raises(ApiError) as exc:
+            if verb == "replace":
+                body = presets_api.schemas.PresetIn(name="hid2", spec={"start_prompt": "p"})
+                await presets_api.replace(request, conn, settings, pid, body, superleader=True)
+            else:
+                body = presets_api.schemas.PresetPatch(spec={"start_prompt": "p"})
+                await presets_api.patch(request, conn, settings, pid, body)
+    assert (exc.value.status, exc.value.code) == (404, "not_found")
+    assert (await human("GET", f"{M}/{pid}")).json()["spec"] == {}
+
+
 async def test_main_port_sets_every_human_only_field(human):
     spec = {
         "kube_access": True,

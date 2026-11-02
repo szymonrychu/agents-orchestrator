@@ -260,7 +260,7 @@ async def replace(
         raise manageable_main_port_only()
     flag = None if superleader else body.superleader_manageable
     stored = await repo.get(conn, preset_id)
-    if stored is None:
+    if stored is None or (superleader and not stored.superleader_manageable):
         raise not_found("preset")
     spec, values = await _validated(
         body,
@@ -337,7 +337,7 @@ async def patch(
     it re-read and retry."""
     for _ in range(_PATCH_TRIES):
         stored = await repo.get(conn, preset_id)
-        if stored is None:
+        if stored is None or not stored.superleader_manageable:
             raise not_found("preset")
         merged = _merged_body(stored, body)
         spec, values = await _validated(
