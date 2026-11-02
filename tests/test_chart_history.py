@@ -185,4 +185,5 @@ def test_discard_hook_null_renders_like_unset() -> None:
     for _, c in _every_container(docs):
         assert "ORCH_DISCARD_HOOK_TOKEN" not in _env(c)
     for d in _by_kind(docs, "Deployment").values():
-        assert "checksum/discard-hook-secret" not in d["spec"]["template"]["metadata"]["annotations"]
+        annotations = d["spec"]["template"]["metadata"]["annotations"]
+        assert "checksum/discard-hook-secret" not in annotations
