@@ -4,9 +4,20 @@ from __future__ import annotations
 
 import httpx
 import pytest
+from any_mcp.testing import PluginHarness
+from any_mcp_tatara_orchestrator import OrchestratorPlugin
 from factories import insert_agent, insert_session
 from test_agent_scale import hive
-from test_api_agent import IP0, IP1, client_for, headers, make_settings, set_ip
+from test_api_agent import (
+    AGENT_PORT,
+    IP0,
+    IP1,
+    client_for,
+    headers,
+    make_settings,
+    set_ip,
+    token,
+)
 from test_api_sessions import assert_error
 
 from agents_orchestrator.api.app import create_app
@@ -122,3 +133,32 @@ async def test_session_gone_between_checks_is_404(pool, dsn, monkeypatch):
     r = await post_close(pool, dsn, c["id"], {"reason": "done"})
     assert_error(r, 404, "not_found")
     assert (await close_columns(pool, c["id"]))[:2] == (None, None)
+
+
+async def call_plugin_close(pool, dsn, session, ip, reason):
+    config = {
+        "base_url": f"http://orch:{AGENT_PORT}",
+        "token": token(session["id"]),
+        "session": str(session["id"]),
+        "agent": "a0",
+        "slug": session["slug"],
+    }
+    transport = httpx.ASGITransport(app=create_app(make_settings(dsn), pool), client=(ip, 4321))
+    async with PluginHarness(OrchestratorPlugin, config=config, transport=transport) as h:
+        return await h.call("self_close", {"reason": reason})
+
+
+async def test_plugin_tool_calls_route(pool, dsn):
+    """The pinned plugin's self_close tool reaches POST /agent/v1/close: the leader is accepted,
+    a member gets the route's not_leader error."""
+    c, _, _ = await hive(pool)
+    ok = await call_plugin_close(pool, dsn, c, IP0, "done")
+    assert not ok.is_error, ok.text
+    assert ok.structured["close_reason"] == "done"
+    assert (await close_columns(pool, c["id"]))[1] == "done"
+
+    other, _, _ = await hive(pool)
+    refused = await call_plugin_close(pool, dsn, other, IP1, "done")
+    assert refused.is_error
+    assert "not_leader" in refused.text
+    assert (await close_columns(pool, other["id"]))[:2] == (None, None)
