@@ -450,7 +450,8 @@ def ids(response, field: str = "id") -> set[str]:
 async def test_lists_filtered(rig, service, template, field):
     r = await rig.call("GET", relay_url(service, template))
     assert r.status_code == 200
-    # object 10 (endpoint, schedule, room) sits on the visible privileged preset: listed, not writable
+    # object 10 (endpoint, schedule, room) sits on the visible privileged preset: listed,
+    # not writable
     seen = (7, 10) if template in ("/endpoints", "/schedules", "/rooms") else (7,)
     assert ids(r, field) == {str(ident(service, n)) for n in seen}
 
