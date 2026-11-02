@@ -437,6 +437,7 @@ async def test_attachment_mime_not_allowed_422(http, pool):
         ("image/png", b'{"a": 1}'),
         ("image/jpeg", _PNG),
         ("application/json", b"{"),
+        pytest.param("application/json", b"[" * 200000, id="json-deeply-nested"),
         ("text/plain", b"\xff\xfe"),
     ],
 )

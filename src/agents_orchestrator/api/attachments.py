@@ -34,7 +34,7 @@ def _check_content(name: str, mime: str, data: bytes) -> None:
     elif mime == "application/json":
         try:
             json.loads(data)
-        except ValueError:
+        except (ValueError, RecursionError):
             ok = False
     elif mime == "text/plain":
         try:
