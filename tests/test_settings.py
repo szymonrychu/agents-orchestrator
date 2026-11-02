@@ -205,6 +205,48 @@ def test_discard_hook_command_or_url(monkeypatch):
         Settings()
 
 
+def test_discard_hook_token_needs_url(monkeypatch):
+    monkeypatch.setenv("ORCH_DISCARD_HOOK_TOKEN", "t0k3n")
+    with pytest.raises(SettingsError) as exc:
+        Settings()
+    assert "ORCH_DISCARD_HOOK_TOKEN" in exc.value.problems
+    assert "t0k3n" not in str(exc.value)
+    monkeypatch.setenv("ORCH_DISCARD_HOOK_URL", "https://history.example/hook")
+    s = Settings()
+    assert s.discard_hook_token == "t0k3n"
+    assert s.discard_hook() == DiscardHook(
+        "url", "https://history.example/hook", "settings", token="t0k3n"
+    )
+    for bad in ("t0k3n\n", "t0 k3n", "t0k3n\x07"):
+        monkeypatch.setenv("ORCH_DISCARD_HOOK_TOKEN", bad)
+        with pytest.raises(SettingsError) as exc:
+            Settings()
+        assert "ORCH_DISCARD_HOOK_TOKEN" in exc.value.problems, repr(bad)
+        assert "t0" not in str(exc.value)
+    monkeypatch.delenv("ORCH_DISCARD_HOOK_TOKEN")
+    assert Settings().discard_hook() == DiscardHook("url", "https://history.example/hook")
+
+
+def test_discard_hook_token_refused_with_command(monkeypatch):
+    monkeypatch.setenv("ORCH_DISCARD_HOOK_COMMAND", "/bin/export")
+    monkeypatch.setenv("ORCH_DISCARD_HOOK_TOKEN", "t0k3n")
+    with pytest.raises(SettingsError) as exc:
+        Settings()
+    assert "ORCH_DISCARD_HOOK_TOKEN" in exc.value.problems
+    assert "ORCH_DISCARD_HOOK_COMMAND" in exc.value.problems["ORCH_DISCARD_HOOK_TOKEN"]
+    assert "t0k3n" not in str(exc.value)
+
+
+def test_discard_hook_token_hidden_in_repr(monkeypatch):
+    monkeypatch.setenv("ORCH_DISCARD_HOOK_URL", "https://history.example/hook")
+    monkeypatch.setenv("ORCH_DISCARD_HOOK_TOKEN", "t0k3n")
+    settings = Settings()
+    hook = settings.discard_hook()
+    assert hook is not None and hook.token == "t0k3n"
+    assert "t0k3n" not in repr(settings) and "t0k3n" not in str(settings)
+    assert "t0k3n" not in repr(hook) and "t0k3n" not in str(hook)
+
+
 def test_any_mcp_ref_must_be_release_tag(monkeypatch):
     monkeypatch.setenv("ORCH_ANY_MCP_REF", "v1.2.3")
     assert Settings().any_mcp_ref == "v1.2.3"

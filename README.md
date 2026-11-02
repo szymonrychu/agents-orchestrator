@@ -79,6 +79,7 @@ Every process reads `ORCH_*` variables (the contract `agents-orchestrator-settin
 | `ORCH_AMBIGUOUS_DEADLINE_SECONDS` | `600` | dispatcher, ingester | deadline after which an ambiguous send fails (> settle) |
 | `ORCH_DISCARD_HOOK_COMMAND` | empty | api, reconciler | pre-discard hook command (exclusive with URL) |
 | `ORCH_DISCARD_HOOK_URL` | empty | api, reconciler | pre-discard hook http(s) webhook URL |
+| `ORCH_DISCARD_HOOK_TOKEN` | empty | reconciler | bearer token sent as `Authorization: Bearer` with the `ORCH_DISCARD_HOOK_URL` hook only; needs the URL, refused with the command, never logged |
 | `ORCH_DISCARD_HOOK_TIMEOUT_SECONDS` | `120` | api, reconciler | discard hook timeout |
 | `ORCH_SCALE_DRAIN_SECONDS` | `900` | reconciler | scale-down drain deadline (> 0): after it the StatefulSet gets the target replicas even while a draining agent is busy |
 | `ORCH_ANY_MCP_REPO` | `https://github.com/szymonrychu/any-mcp` | api, reconciler | any-mcp git repository |
@@ -387,21 +388,23 @@ A deleting session first passes the pre-discard gate, then loses every labelled 
 
 `DELETE /api/v1/sessions/{id}` marks the session `deleting`; the reconciler then removes everything, in this order:
 
-1. **Quiesce** (only when a hook is configured and has not yet delivered): the StatefulSet is scaled to zero and the reconciler waits until no agent pod is left, then gives the ingester `ORCH_DISCARD_DRAIN_SECONDS` (5) to store the last events of their streams. The wait is bounded by `ORCH_DISCARD_QUIESCE_TIMEOUT_SECONDS` (120) from the start of the discard; after that the discard logs a warning and goes on.
-2. **Export** the full history as JSONL.
-3. **Hook**: deliver the export; a failed hook blocks the deletion and is retried with backoff.
+1. **Quiesce** (only while any configured hook has not yet delivered): the StatefulSet is scaled to zero and the reconciler waits until no agent pod is left, then gives the ingester `ORCH_DISCARD_DRAIN_SECONDS` (5) to store the last events of their streams. The wait is bounded by `ORCH_DISCARD_QUIESCE_TIMEOUT_SECONDS` (120) from the start of the discard; after that the discard logs a warning and goes on.
+2. **Export** the full history as JSONL, one stream per hook.
+3. **Hooks**: deliver the export to every hook not yet delivered; a failed hook blocks the deletion and is retried with backoff, the delivered ones are not sent again.
 4. **Delete** everything.
 
 A discard deletes the session's Kubernetes objects (check Jobs, the init Job, StatefulSet and its pods, headless Service, ConfigMap, the Secret by name and the RWX PVC with the workspace) and, last, the session row, which cascades its whole chat history: agents, messages, turns, commands, checks and events.
 
 ### Hook
 
-An optional hook receives the full history export before anything is deleted. None is configured by default. The hook comes from, in order of precedence:
+Optional hooks receive the full history export before anything is deleted. None is configured by default. A discard runs every configured hook, in this order, each with its own export stream:
 
-1. `spec.discard_hook_url` of the session (a webhook URL, http or https only);
-2. `ORCH_DISCARD_HOOK_COMMAND` (a shell command) or `ORCH_DISCARD_HOOK_URL` (a webhook URL), set at most one.
+1. `settings`: `ORCH_DISCARD_HOOK_COMMAND` (a shell command) or `ORCH_DISCARD_HOOK_URL` (a webhook URL), set at most one;
+2. `session`: `spec.discard_hook_url` of the session (a webhook URL, http or https only).
 
-A command comes only from settings, never from the spec: the API has no auth and the reconciler holds the Kubernetes credentials. Both kinds are bounded by `ORCH_DISCARD_HOOK_TIMEOUT_SECONDS` (120).
+The settings hook always runs, also for a session that sets its own URL (user decision: it feeds the session history service). A command comes only from settings, never from the spec: the API has no auth and the reconciler holds the Kubernetes credentials. Every hook is bounded by `ORCH_DISCARD_HOOK_TIMEOUT_SECONDS` (120).
+
+`ORCH_DISCARD_HOOK_TOKEN` (reconciler only) is sent as `Authorization: Bearer <token>` with the settings URL hook, and never with a session's own URL, which is user-controlled. It needs `ORCH_DISCARD_HOOK_URL`, is refused with `ORCH_DISCARD_HOOK_COMMAND` or when it contains whitespace or control characters, is hidden from the settings repr and is never logged.
 
 ### Export format
 
@@ -417,13 +420,13 @@ Run through `sh -c` with the JSONL on stdin, `ORCH_SESSION_ID` and `ORCH_SESSION
 
 ### Webhook contract
 
-An HTTP `POST` of the JSONL, streamed, with `Content-Type: application/x-ndjson`, `X-Orch-Session-Id` and `X-Orch-Session-Slug`. Any 2xx is success; any other status, a connection error or a timeout is a failure.
+An HTTP `POST` of the JSONL, streamed, with `Content-Type: application/x-ndjson`, `X-Orch-Session-Id` and `X-Orch-Session-Slug`, plus `Authorization: Bearer` on the settings URL when `ORCH_DISCARD_HOOK_TOKEN` is set. Any 2xx is success; any other status, a connection error or a timeout is a failure.
 
 ### Delivery and retries
 
-Delivery is at-least-once. Success writes `status.discard_hook_delivered` (database time), after which the export is never sent again, also not after a reconciler restart. A crash between the hook accepting and that write sends the export a second time, so a receiver must tolerate duplicates (the session `id` identifies them).
+Delivery is at-least-once, per hook. Each success adds the hook's name to the object `status.discard_hook_delivered` (`{"settings": "<time>", "session": "<time>"}`, database time), after which that hook is never sent the export again, also not after a reconciler restart. A crash between a hook accepting and that write sends the export a second time, so a receiver must tolerate duplicates (the session `id` identifies them). A `discard_hook_delivered` that is not an object (written by an earlier version, before hooks were tracked by name) counts as nothing delivered, so every hook runs again.
 
-A failing hook holds the discard: nothing is deleted, the session stays `deleting`, and the status records `discard_hook_failed` (the reason), `discard_hook_failures` (the count) and `discard_hook_next_at`. The hook is retried on a later reconcile once the database clock passes `discard_hook_next_at`, with the backoff `ORCH_RETRY_BACKOFF_BASE_SECONDS` doubling up to `ORCH_RETRY_BACKOFF_MAX_SECONDS`. One session's failing hook never stops the other sessions reconciling.
+Each owed hook runs whatever the others did: a failing settings hook never holds the session's own hook back, nor the other way round. Any failure holds the discard: nothing is deleted, the session stays `deleting`, and the status records `discard_hook_failed` (`<name>: <reason>` of the first failing hook, for example `session: status 500`), `discard_hook_failures` (the count, shared by the hooks) and `discard_hook_next_at`. The hooks not yet delivered are retried on a later reconcile once the database clock passes `discard_hook_next_at`, with the backoff `ORCH_RETRY_BACKOFF_BASE_SECONDS` doubling up to `ORCH_RETRY_BACKOFF_MAX_SECONDS`. One session's failing hook never stops the other sessions reconciling.
 
 ### Autoclose
 

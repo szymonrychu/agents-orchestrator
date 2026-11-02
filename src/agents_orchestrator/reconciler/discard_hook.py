@@ -1,8 +1,9 @@
-"""Run the pre-discard hook (D15): a settings command or a webhook, fed the JSONL export.
+"""Run the pre-discard hooks (D15): a settings command or webhook, and a session's own
+webhook, each fed the JSONL export.
 
 The command comes only from settings (operator-controlled): the API has no auth and the
 reconciler holds the Kubernetes credentials, so a spec-level command would be remote code
-execution. The spec carries only a webhook URL.
+execution. The spec carries only a webhook URL, which never gets the settings bearer token.
 """
 
 from __future__ import annotations
@@ -29,11 +30,12 @@ class HookResult:
     reason: str = ""
 
 
-def resolve_hook(session: Session, settings: Settings) -> DiscardHook | None:
-    """The session's own webhook URL wins over the settings hook."""
+def resolve_hooks(session: Session, settings: Settings) -> list[DiscardHook]:
+    """Every hook a discard owes, in run order: the settings hook, then the session's own URL."""
+    hooks = [hook] if (hook := settings.discard_hook()) else []
     if session.spec.discard_hook_url:
-        return DiscardHook("url", session.spec.discard_hook_url)
-    return settings.discard_hook()
+        hooks.append(DiscardHook("url", session.spec.discard_hook_url, "session"))
+    return hooks
 
 
 async def run_discard_hook(
@@ -48,7 +50,7 @@ async def run_discard_hook(
         async with asyncio.timeout(timeout):
             if hook.kind == "command":
                 return await _run_command(hook.target, session, lines)
-            return await _post_webhook(hook.target, session, lines, transport)
+            return await _post_webhook(hook, session, lines, transport)
     except TimeoutError:
         return HookResult(False, f"timed out after {timeout:g}s")
 
@@ -106,7 +108,7 @@ async def _run_command(command: str, session: Session, lines: AsyncIterator[str]
 
 
 async def _post_webhook(
-    url: str,
+    hook: DiscardHook,
     session: Session,
     lines: AsyncIterator[str],
     transport: httpx.AsyncBaseTransport | None,
@@ -120,10 +122,12 @@ async def _post_webhook(
         "X-Orch-Session-Id": str(session.id),
         "X-Orch-Session-Slug": session.slug,
     }
+    if hook.token:
+        headers["Authorization"] = f"Bearer {hook.token}"
     try:
         async with (
             httpx.AsyncClient(transport=transport, timeout=None) as client,
-            client.stream("POST", url, content=body(), headers=headers) as response,
+            client.stream("POST", hook.target, content=body(), headers=headers) as response,
         ):
             if response.is_success:
                 return HookResult(True)
