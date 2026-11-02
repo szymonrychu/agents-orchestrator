@@ -341,6 +341,16 @@ async def test_patch_secret_in_spec(call, seed, kube):
     assert kube.names("Secret") == before
 
 
+async def test_patch_value_on_stored_protected_is_secret_in_spec(call, human, seed, kube):
+    pid = await seed({"env": {"K": {"protected": True}}})
+    before_secrets = kube.names("Secret")
+    before = (await human("GET", f"{M}/{pid}")).json()
+    r = await call("PATCH", f"{A}/{pid}", json={"spec": {"env": {"K": {"value": "x"}}}})
+    assert_error(r, 422, "secret_in_spec")
+    assert kube.names("Secret") == before_secrets
+    assert (await human("GET", f"{M}/{pid}")).json() == before
+
+
 async def test_patch_adds_protected_declaration(call, seed):
     pid = await seed({})
     r = await call("PATCH", f"{A}/{pid}", json={"spec": {"env": {"N": {"protected": True}}}})

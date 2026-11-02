@@ -285,10 +285,18 @@ async def replace(
     return _view(preset, metas)
 
 
-def _secret_in_patch(patch: dict[str, Any]) -> None:
-    env = patch.get("env")
+def _secret_in_patch(patch: dict[str, Any], merged: dict[str, Any]) -> None:
+    """422 when the patch gives a value to a variable that is protected after the merge (the
+    merge fills `protected` from the stored entry, so the patch need not repeat it)."""
+    env, merged_env = patch.get("env"), merged.get("env")
     for name, entry in (env if isinstance(env, dict) else {}).items():
-        if isinstance(entry, dict) and entry.get("protected") and entry.get("value") is not None:
+        kept = merged_env.get(name) if isinstance(merged_env, dict) else None
+        if (
+            isinstance(entry, dict)
+            and entry.get("value") is not None
+            and isinstance(kept, dict)
+            and kept.get("protected")
+        ):
             raise ApiError(
                 422,
                 "secret_in_spec",
@@ -299,6 +307,7 @@ def _secret_in_patch(patch: dict[str, Any]) -> None:
 def _merged_body(stored: repo.Preset, body: schemas.PresetPatch) -> schemas.PresetIn:
     """The stored spec with the patch merged in, as the body a PUT would carry."""
     merged = merge_patch(stored.spec, body.spec or {})
+    _secret_in_patch(body.spec or {}, merged)
     try:
         spec = SessionSpecIn.model_validate(merged)
     except ValidationError as exc:
@@ -313,7 +322,6 @@ async def patch(
     """Merge-patch a preset for the superleader: the patch is applied to the stored spec, so
     what it does not name (a stored protected variable, a grant) is kept; a concurrent edit makes
     it re-read and retry."""
-    _secret_in_patch(body.spec or {})
     for _ in range(_PATCH_TRIES):
         stored = await repo.get(conn, preset_id)
         if stored is None:
