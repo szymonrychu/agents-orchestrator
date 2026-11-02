@@ -113,6 +113,9 @@ options), used for the archives list, download, cleanup preview and delete route
 only lists, gets and deletes with it. It may name the same Secret as `cache.s3.existingSecret`
 when the store has one identity. Without it those routes answer 503. The cleanup sweep starts in
 dry-run: read `GET /api/v1/cache/cleanup/preview`, then set `cache.sweep.dryRun: false`.
+The `cache.sweep.*` values are only the seed: they apply until a policy is saved in Settings > Backups
+(or with `PUT /api/v1/cache/cleanup/settings`), and from then on the database row wins and later
+changes to these values have no effect.
 The reconciler Role allows create, get and delete on `batch` Jobs in the release
 namespace (Kubernetes RBAC cannot restrict verbs by label).
 
