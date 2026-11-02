@@ -188,10 +188,10 @@ class Settings(BaseSettings):
     discard_hook_token: str = Field(default="", repr=False)
     discard_hook_timeout_seconds: float = 120
     # a URL hook server that stalls fails the call after these, well inside the overall timeout
-    discard_hook_connect_timeout_seconds: float = Field(default=5, gt=0)
-    discard_hook_read_timeout_seconds: float = Field(default=30, gt=0)
+    discard_hook_connect_timeout_seconds: float = Field(default=5, gt=0, le=60)
+    discard_hook_read_timeout_seconds: float = Field(default=30, gt=0, le=300)
     # hook time one reconcile pass may spend; spent, later deleting sessions wait for the next pass
-    discard_hook_pass_budget_seconds: float = Field(default=60, gt=0)
+    discard_hook_pass_budget_seconds: float = Field(default=60, gt=0, le=600)
     discard_quiesce_timeout_seconds: float = 120
     discard_drain_seconds: float = 5
     scale_drain_seconds: float = 900
@@ -523,6 +523,14 @@ class Settings(BaseSettings):
         settle = info.data.get("ambiguous_settle_seconds")
         if settle is not None and v <= settle:
             raise _Bad("must exceed ORCH_AMBIGUOUS_SETTLE_SECONDS")
+        return v
+
+    @field_validator("discard_hook_read_timeout_seconds")
+    @classmethod
+    def _check_hook_read(cls, v: float, info: ValidationInfo) -> float:
+        overall = info.data.get("discard_hook_timeout_seconds")
+        if overall is not None and v > overall:
+            raise _Bad("must be at most ORCH_DISCARD_HOOK_TIMEOUT_SECONDS")
         return v
 
     @field_validator("retry_backoff_base_seconds", "scale_drain_seconds")

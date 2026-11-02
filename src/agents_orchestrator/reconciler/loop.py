@@ -96,6 +96,7 @@ class Reconciler:
         self._warned_no_agent_url: set[UUID] = set()
         self.hook_transport: httpx.AsyncBaseTransport | None = None
         self._hook_spent = 0.0  # seconds of discard hooks run in this pass
+        self._hook_attempted: dict[UUID, float] = {}  # session -> monotonic start of its last hook
         self.checks = CheckRunner(pool, kube, settings)
         self.init = InitRunner(pool, kube, settings, write_status=self._write_status)
         self.cache = CacheRunner(pool, kube, settings, write_status=self._write_status)
@@ -155,6 +156,23 @@ class Reconciler:
     def _hook_budget_spent(self) -> bool:
         return self._hook_spent >= self.settings.discard_hook_pass_budget_seconds
 
+    def _hook_deadline(self) -> float:
+        """Wall-clock seconds one hook call may take: the overall timeout, capped by what is
+        left of the pass budget, but never under connect + read (one fair try). A server that
+        trickles a byte inside the read timeout is cut here, command hooks included. With this
+        floor a pass spends under budget + floor (95 s by default) on hooks."""
+        s = self.settings
+        remaining = s.discard_hook_pass_budget_seconds - self._hook_spent
+        floor = s.discard_hook_connect_timeout_seconds + s.discard_hook_read_timeout_seconds
+        return min(s.discard_hook_timeout_seconds, max(remaining, floor))
+
+    def _hook_order(self, rows: list[Session]) -> list[Session]:
+        """Sessions whose hook ran longest ago (or never) first, the rest in database order, so
+        stalled sessions at the head of the list cannot spend every pass's budget alone."""
+        live = {r.id for r in rows}
+        self._hook_attempted = {k: v for k, v in self._hook_attempted.items() if k in live}
+        return sorted(rows, key=lambda r: self._hook_attempted.get(r.id, 0.0))
+
     async def reconcile_once(self) -> None:
         self._start_pass()
         await self._run_restarts()
@@ -163,7 +181,7 @@ class Reconciler:
         await self.checks.run_once()
         async with self.pool.connection() as conn:
             rows = await sessions.list_sessions(conn)
-        for session in rows:
+        for session in self._hook_order(rows):
             try:
                 if session.desired == "deleting":
                     await self._discard(session)
@@ -186,8 +204,9 @@ class Reconciler:
         first failing hook), `discard_hook_failures` and `discard_hook_next_at` (one shared
         backoff) and returns False, so nothing is deleted. The owed hooks are retried once the
         database clock passes `discard_hook_next_at`; True only when nothing is owed. Once the
-        hooks of this pass have used `discard_hook_pass_budget_seconds`, False at once with
-        nothing run or recorded: the session waits for the next pass.
+        hooks of this pass have used `discard_hook_pass_budget_seconds`, a hook not yet run is
+        left owed (nothing run or recorded for it) and the result is False: the session waits
+        for the next pass. Each call is cut at `_hook_deadline`.
         """
         delivered, owed = self._owed_hooks(session)
         if not owed:
@@ -202,11 +221,15 @@ class Reconciler:
                 if (await cur.fetchone())[0]:
                     return False
         failed = ""
+        skipped = False
         for hook in owed:
+            if self._hook_budget_spent() and hook is not owed[0]:
+                skipped = True  # a hook already ran this pass: the rest stays owed, unrecorded
+                continue
             result = await self._run_hook(hook, session)
             if result.ok:
                 delivered[hook.name] = (await self._db_now()).isoformat()
-                last = hook is owed[-1] and not failed
+                last = hook is owed[-1] and not failed and not skipped
                 await self._write_status(
                     session,
                     {"discard_hook_delivered": dict(delivered)},
@@ -222,7 +245,7 @@ class Reconciler:
                 )
                 failed = failed or f"{hook.name}: {result.reason}"
         if not failed:
-            return True
+            return not skipped  # a skipped hook is still owed: nothing may be deleted unexported
         failures = int(status.get("discard_hook_failures", 0)) + 1
         delay = self.settings.retry_delay_seconds(failures)
         async with self.pool.connection() as conn:
@@ -254,6 +277,7 @@ class Reconciler:
     async def _run_hook(self, hook: DiscardHook, session: Session) -> HookResult:
         """One hook fed a fresh export stream; a crash is a failure, never an escape."""
         started = time.monotonic()
+        self._hook_attempted[session.id] = started
         try:
             async with self.pool.connection() as conn:
                 try:
@@ -261,7 +285,7 @@ class Reconciler:
                         hook,
                         session,
                         export_session_history(conn, session.id),
-                        self.settings.discard_hook_timeout_seconds,
+                        self._hook_deadline(),
                         connect_timeout=self.settings.discard_hook_connect_timeout_seconds,
                         read_timeout=self.settings.discard_hook_read_timeout_seconds,
                         transport=self.hook_transport,
