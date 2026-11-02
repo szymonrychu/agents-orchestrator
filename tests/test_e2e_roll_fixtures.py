@@ -119,7 +119,7 @@ def test_script_port_forward_reconnects() -> None:
 
 
 def test_replacement_order_reads_the_pod_names_from_json_log_lines(monkeypatch) -> None:
-    """The reconciler logs JSON lines: the pod name ends at the message, not at the line end."""
+    """The reconciler logs JSON lines: the pod name is not at the line end: revisions follow it."""
     module = e2e_module()
     lines = [
         {"ts": "2026-10-28T11:20:00.000Z", "level": "INFO", "msg": "migrations applied: none"},
@@ -127,13 +127,19 @@ def test_replacement_order_reads_the_pod_names_from_json_log_lines(monkeypatch) 
             "ts": "2026-10-28T11:21:00.000Z",
             "level": "INFO",
             "logger": "agents_orchestrator.reconciler.rollout",
-            "msg": "session e2e-scale-roll: replacing idle outdated pod agent-e2e-scale-roll-1",
+            "msg": (
+                "session e2e-scale-roll: replacing idle outdated pod agent-e2e-scale-roll-1 "
+                "(revision r1, update revision r2)"
+            ),
         },
         {
             "ts": "2026-10-28T11:22:00.000Z",
             "level": "INFO",
             "logger": "agents_orchestrator.reconciler.rollout",
-            "msg": "session e2e-scale-roll: replacing idle outdated pod agent-e2e-scale-roll-0",
+            "msg": (
+                "session e2e-scale-roll: replacing idle outdated pod agent-e2e-scale-roll-0 "
+                "(revision r1, update revision r2)"
+            ),
         },
     ]
     text = "\n".join([*(json.dumps(line) for line in lines), "not a json line"])

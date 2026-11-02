@@ -364,7 +364,7 @@ Kubernetes access (D2) is the one value-gated exception. With `kubeAccess.enable
 
 With `kubeAccess.enabled`, anything able to create pods, StatefulSets, Jobs or Secrets in the release namespace, the reconciler included, is cluster-admin-equivalent: it can run a pod as `<fullname>-kube-access`, or mint a non-expiring token Secret for that ServiceAccount, and so act as `cluster-admin`. Grant workload and Secret creation in that namespace only to identities you would trust with `cluster-admin`.
 
-Applies are server-side applies with field manager `agents-orchestrator` and `force`, so the reconciler owns the fields it renders.
+Applies are server-side applies with field manager `agents-orchestrator` and `force`, so the reconciler owns the fields it renders. An object is applied only when it changed: its render differs from the one the process last applied, or the live object no longer holds a rendered field (that re-apply is logged at INFO with the first differing path). A pass with nothing to change sends no PATCH. The session Secret is never read, so an unchanged one is re-applied every 10 minutes, which restores one deleted out of band. Every pod or StatefulSet the reconciler deletes or scales away is logged at INFO with the session slug, the object and the reason: an idle pod on an outdated revision (with the pod and update revision hashes), a restart command (with its id and issuing session), a scale-down (from, to and the pods removed), an object no longer rendered, or a discard.
 
 ### One shared namespace, kept safe (D26)
 

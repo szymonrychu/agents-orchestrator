@@ -11,6 +11,13 @@ shared with the orchestrator's own objects (D26). The guards that keep the recon
   merge patch before it is applied (`_apply`, D1)
 - Secrets are never read or listed: the session Secret is applied with the rest and deleted by
   its deterministic name
+- a rendered object is applied only when it changed: when its fingerprint differs from the last
+  one this process applied, or the live object `drift`s from it (a Secret, never read, is
+  instead re-asserted every `SECRET_REASSERT_SECONDS`). A no-op pass patches nothing, so it
+  never touches the StatefulSet (mx-99 #1039)
+- every pod or StatefulSet this process deletes or scales away is logged at INFO with the
+  session slug, the object and the reason (outdated revision, restart command, scale-down,
+  no longer rendered, discard)
 
 A deleting session (D15) waits for `pre_discard`, then loses every labelled object including
 its PVC, and once none is left its row is purged, which cascades its whole history.
@@ -20,6 +27,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import json
 import logging
 import time
 from collections.abc import Callable
@@ -36,8 +45,15 @@ from agents_orchestrator.db import queue, sessions
 from agents_orchestrator.db.export import export_session_history
 from agents_orchestrator.db.pool import listen, notify
 from agents_orchestrator.db.sessions import Session, SessionNotFound
-from agents_orchestrator.k8s.kube import FIELD_MANAGER, KubeApi, Obj, is_owned, pod_ready
-from agents_orchestrator.k8s.labels import object_names, session_labels
+from agents_orchestrator.k8s.kube import (
+    FIELD_MANAGER,
+    KubeApi,
+    Obj,
+    drift,
+    is_owned,
+    pod_ready,
+)
+from agents_orchestrator.k8s.labels import SESSION_LABEL, object_names, session_labels
 from agents_orchestrator.k8s.render import pod_url, render_session
 from agents_orchestrator.reconciler.cache import CacheGate, CacheRunner
 from agents_orchestrator.reconciler.checks import CheckRunner
@@ -63,6 +79,10 @@ DISCARD_ORDER = ("Job", *PRUNE_ORDER)
 # `rollingUpdate.partition` that a server-side apply would keep next to `type: OnDelete`, which
 # the API server rejects; the patch changes no template, so the controller rolls no pod (D1).
 TO_ON_DELETE: Obj = {"spec": {"updateStrategy": {"type": "OnDelete", "rollingUpdate": None}}}
+
+# A Secret is never read, so an unchanged one is applied again only this often, which restores
+# one deleted out of band without a PATCH on every pass.
+SECRET_REASSERT_SECONDS = 600.0
 
 _HOOK_FAILURE_KEYS = ("discard_hook_failed", "discard_hook_failures", "discard_hook_next_at")
 
@@ -94,6 +114,9 @@ class Reconciler:
             settings.require_cache()
         self.wrapper_factory = wrapper_factory
         self._warned_no_agent_url: set[UUID] = set()
+        # (kind, name) -> (fingerprint, monotonic time) of the last object this process
+        # applied; see `_apply`
+        self._applied: dict[tuple[str, str], tuple[str, float]] = {}
         self.hook_transport: httpx.AsyncBaseTransport | None = None
         self._hook_spent = 0.0  # seconds of discard hooks run in this pass
         self._hook_attempted: dict[UUID, float] = {}  # session -> monotonic start of its last hook
@@ -314,7 +337,7 @@ class Reconciler:
         )
         objs = render_session(rendered, self.settings, tokens_for(self.settings, session.id))
 
-        foreign = await self._foreign(slug, objs)
+        foreign, live = await self._foreign(slug, objs)
         if foreign:
             await self._write_status(
                 session,
@@ -330,11 +353,13 @@ class Reconciler:
             session, lambda: self._agents_exist(slug)
         )
         for obj in objs:
+            reason = "scale-down"
             if sessions_gate.hold and obj["kind"] == "StatefulSet":
                 obj = {**obj, "spec": {**obj["spec"], "replicas": 0}}
-            await self._apply(obj)
+                reason = "held for the transcripts restore"
+            await self._apply(obj, live.get((obj["kind"], obj["metadata"]["name"])), reason)
         desired = {(o["kind"], o["metadata"]["name"]) for o in objs}
-        await self._prune(slug, desired)
+        await self._prune(slug, desired, reason="no longer rendered")
         cache_gate = await self.cache.restore_step(session)
         # init waits for the restore, so a script never runs on a workspace about to be replaced
         gate = await self.init.step(session) if not cache_gate.hold else InitGate()
@@ -373,16 +398,52 @@ class Reconciler:
         drop = (*(() if draining else ("drain",)), *(() if rollout else ("rollout",)))
         await self._write_status(session, fields, session.generation, drop=drop)
 
-    async def _apply(self, obj: Obj) -> None:
-        """Server-side apply; a live StatefulSet not on OnDelete is first moved there."""
-        if obj["kind"] == "StatefulSet":
-            ns, name = self.settings.namespace, obj["metadata"]["name"]
-            live = await self.kube.get_object("StatefulSet", ns, name)
-            strategy = ((live or {}).get("spec") or {}).get("updateStrategy") or {}
-            if live is not None and strategy.get("type") != "OnDelete":
+    async def _apply(self, obj: Obj, live: Obj | None, reason: str) -> None:
+        """Server-side apply `obj` unless it is unchanged; `reason` names a scale-down.
+
+        Skipped when this process last applied the very same object (its fingerprint) and
+        `live` still holds it (no `drift`). The fingerprint catches a field the render dropped
+        (still owned live, so `drift` alone would miss it); `drift` catches an out-of-band edit
+        and a deleted object, and is logged. A fresh process applies each object once. A Secret
+        is never read: an unchanged one is skipped for `SECRET_REASSERT_SECONDS`.
+
+        A live StatefulSet not on OnDelete is first moved there.
+        """
+        kind, name = obj["kind"], obj["metadata"]["name"]
+        ns, slug = self.settings.namespace, obj["metadata"]["labels"][SESSION_LABEL]
+        fingerprint = hashlib.sha256(json.dumps(obj, sort_keys=True).encode()).hexdigest()
+        last, now = self._applied.get((kind, name)), time.monotonic()
+        if last is not None and last[0] == fingerprint:
+            if kind == "Secret":
+                if now - last[1] < SECRET_REASSERT_SECONDS:
+                    return
+            else:
+                where = "the object is gone" if live is None else drift(obj, live)
+                if where is None:
+                    return
+                log.info(
+                    "session %s: %s %s drifted at %s, applying it again", slug, kind, name, where
+                )
+        if kind == "StatefulSet" and live is not None:
+            spec = live.get("spec") or {}
+            if (spec.get("updateStrategy") or {}).get("type") != "OnDelete":
                 log.info("statefulset %s: moving to updateStrategy OnDelete", name)
                 await self.kube.merge_patch("StatefulSet", ns, name, TO_ON_DELETE)
+            before, after = spec.get("replicas", 0), obj["spec"]["replicas"]
+            if after < before:
+                log.info(
+                    "session %s: scaling StatefulSet %s from %d to %d replicas (%s), removing"
+                    " pods %s",
+                    slug,
+                    name,
+                    before,
+                    after,
+                    reason,
+                    ", ".join(f"{name}-{i}" for i in range(after, before)),
+                )
+        self._applied.pop((kind, name), None)
         await self.kube.apply(obj, field_manager=FIELD_MANAGER, force=True)
+        self._applied[(kind, name)] = (fingerprint, now)
 
     async def _draining(self, session_id: UUID, replicas: int) -> list[tuple[int, bool]]:
         """(ordinal, busy) of each agent at or above `replicas` that is not gone (D3).
@@ -439,9 +500,12 @@ class Reconciler:
             return True
         return bool(agent_pods(slug, await self.kube.list_pods(ns, session_labels(slug))))
 
-    async def _foreign(self, slug: str, objs: list[Obj]) -> list[str]:
-        """`foreign_object <kind>/<name>` for each rendered name held by an unlabelled object."""
-        found = []
+    async def _foreign(
+        self, slug: str, objs: list[Obj]
+    ) -> tuple[list[str], dict[tuple[str, str], Obj]]:
+        """`foreign_object <kind>/<name>` for each rendered name held by an unlabelled object,
+        and the live objects read on the way by (kind, name), for `_apply`."""
+        found, live = [], {}
         for obj in objs:
             kind, name = obj["kind"], obj["metadata"]["name"]
             if kind not in GUARDED_KINDS:
@@ -449,16 +513,25 @@ class Reconciler:
             existing = await self.kube.get_object(kind, self.settings.namespace, name)
             if existing is not None and not is_owned(existing, slug):
                 found.append(f"foreign_object {kind}/{name}")
-        return found
+            elif existing is not None:
+                live[(kind, name)] = existing
+        return found, live
 
     async def _prune(
-        self, slug: str, desired: set[tuple[str, str]], order: tuple[str, ...] = PRUNE_ORDER
+        self,
+        slug: str,
+        desired: set[tuple[str, str]],
+        order: tuple[str, ...] = PRUNE_ORDER,
+        *,
+        reason: str,
     ) -> None:
         ns, selector = self.settings.namespace, session_labels(slug)
         for kind in order:
             for obj in await self.kube.list_objects(kind, ns, selector):
                 name = obj["metadata"]["name"]
                 if (kind, name) not in desired and is_owned(obj, slug):
+                    log.info("session %s: deleting %s %s (%s)", slug, kind, name, reason)
+                    self._applied.pop((kind, name), None)
                     await self.kube.delete(kind, ns, name)
 
     async def _observe(self, session: Session) -> int:
@@ -527,8 +600,10 @@ class Reconciler:
             )
             return
         ns, slug = self.settings.namespace, session.slug
-        await self._prune(slug, set(), DISCARD_ORDER)
-        await self.kube.delete("Secret", ns, object_names(slug)["secret"])  # absent is fine
+        await self._prune(slug, set(), DISCARD_ORDER, reason="discard")
+        secret = object_names(slug)["secret"]
+        self._applied.pop(("Secret", secret), None)
+        await self.kube.delete("Secret", ns, secret)  # absent is fine
 
         remaining = await self._remaining(slug)
         if remaining:
@@ -582,7 +657,7 @@ class Reconciler:
             ):
                 if obj["kind"] == "StatefulSet":
                     obj["spec"]["replicas"] = 0
-                    await self._apply(obj)
+                    await self._apply(obj, sts, "discard")
 
         running = sorted(
             p["metadata"]["name"]
@@ -666,6 +741,13 @@ class Reconciler:
         pods = await self.kube.list_pods(ns, session_labels(slug))
         if not any(p["metadata"]["name"] == agent.pod_name and is_owned(p, slug) for p in pods):
             return "failed", {"error": "pod_not_found"}
+        log.info(
+            "session %s: deleting pod %s (restart command %d%s)",
+            slug,
+            agent.pod_name,
+            cmd.id,
+            f", issued by session {cmd.issued_by_session}" if cmd.issued_by_session else "",
+        )
         await self.kube.delete_pod(ns, agent.pod_name)
         return "done", {"pod": agent.pod_name}
 
