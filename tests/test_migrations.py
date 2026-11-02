@@ -1107,6 +1107,17 @@ def test_permission_mode_state_migration_adds_nullable_columns_idempotently(empt
     )
 
 
+def test_cache_sweep_tables_apply_after_a_database_already_at_0027(empty_dsn, tmp_path):
+    for path in MIGRATIONS_DIR.glob("*.sql"):
+        if not path.name.startswith("0025_"):
+            shutil.copy(path, tmp_path)
+    run_migrations(empty_dsn, tmp_path)
+    assert _columns(empty_dsn, "cache_sweep_settings") == set()
+    assert run_migrations(empty_dsn) == ["0025"]
+    assert {"enabled", "dry_run"} <= _columns(empty_dsn, "cache_sweep_settings")
+    assert "requested_at" in _columns(empty_dsn, "cache_sweep_requests")
+
+
 def test_migration_adds_columns_and_gin_index(empty_dsn, tmp_path):
     for path in MIGRATIONS_DIR.glob("*.sql"):
         if path.name < "0027":
