@@ -179,7 +179,7 @@ async def test_put_against_changed_row_is_409(pool, settings, seed, monkeypatch)
     assert (exc.value.status, exc.value.code) == (409, "conflict")
 
 
-@pytest.mark.parametrize("verb", ["replace", "patch"])
+@pytest.mark.parametrize("verb", ["replace", "patch", "copy"])
 async def test_preset_hidden_after_the_route_read_is_404(pool, settings, human, verb):
     """A human hides the preset after the route's manageable check: the second read in the
     write sees it and the superleader gets 404, not an edit."""
@@ -191,11 +191,14 @@ async def test_preset_hidden_after_the_route_read_is_404(pool, settings, human, 
             if verb == "replace":
                 body = presets_api.schemas.PresetIn(name="hid2", spec={"start_prompt": "p"})
                 await presets_api.replace(request, conn, settings, pid, body, superleader=True)
-            else:
+            elif verb == "patch":
                 body = presets_api.schemas.PresetPatch(spec={"start_prompt": "p"})
                 await presets_api.patch(request, conn, settings, pid, body)
+            else:
+                await presets_api.copy(conn, pid, "hid2-copy", superleader=True, request=request)
     assert (exc.value.status, exc.value.code) == (404, "not_found")
     assert (await human("GET", f"{M}/{pid}")).json()["spec"] == {}
+    assert [p for p in (await human("GET", M)).json() if p["name"] == "hid2-copy"] == []
 
 
 async def test_main_port_sets_every_human_only_field(human):

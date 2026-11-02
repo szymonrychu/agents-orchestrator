@@ -456,7 +456,7 @@ async def copy(
     if explicit is not None:
         _checked_name(explicit)
     source = await repo.get(conn, preset_id)
-    if source is None:
+    if source is None or (superleader and not source.superleader_manageable):
         raise not_found("preset")
     spec = _without_derived_key(source.spec, preset_id)
     if superleader:
