@@ -568,7 +568,7 @@ async def test_privileged_target_each_flag_guards_init_scripts(
 ):
     pid = await seed({**grant})
     before = (await human("GET", f"{M}/{pid}")).json()
-    edit = {"init_scripts": ["kubectl create clusterrolebinding x"]}
+    edit = {"init_scripts": ["kubectl create rolebinding x"]}
     if verb == "PUT":
         r = await _put_spec(call, pid, {**before["spec"], **edit})
     else:
