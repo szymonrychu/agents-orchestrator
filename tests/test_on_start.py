@@ -34,7 +34,12 @@ HIVE_TOOLS = [
 SESSION_TOOLS = ["sessions_list", "session_send"]
 INIT_SCRIPTS_TOOLS = ["init_scripts_get", "init_scripts_edit"]
 CHAT_TOOLS = ["chat_rooms", "chat_send", "chat_react", "chat_status"]
-TAIL_TOOLS = [*SESSION_TOOLS, *INIT_SCRIPTS_TOOLS, *CHAT_TOOLS]
+TASK_TOOLS = [
+    "task_create", "task_update", "task_list", "task_get", "task_comment",
+    "decision_ask", "decision_withdraw", "todo_set", "todo_update", "session_labels_set",
+]  # fmt: skip
+TAIL_TOOLS = [*SESSION_TOOLS, *INIT_SCRIPTS_TOOLS, *CHAT_TOOLS, *TASK_TOOLS]
+ALONE_TOOLS = ["me", *TAIL_TOOLS]
 ADMIN_TOOLS = [
     "presets_list", "preset_get", "preset_create", "preset_replace", "preset_delete",
     "preset_copy", "session_get", "session_create", "session_discard", "session_restart",
@@ -82,7 +87,7 @@ def test_alone_session_tools_entry(messaging, static):
     """D11, D13: an alone session gets the session, init-scripts and chat tools; the admin tools
     only with session_messaging."""
     spec = SessionSpec(replicas=1, static=static, session_messaging=messaging)
-    expected = [*TAIL_TOOLS, *ADMIN_TOOLS] if messaging else TAIL_TOOLS
+    expected = [*ALONE_TOOLS, *ADMIN_TOOLS] if messaging else ALONE_TOOLS
     assert on_start.orchestrator_allow(spec) == expected
     entry = entries(spec)["orchestrator"]
     assert entry["source"] == RESERVED_SOURCE and "plugin" not in entry
@@ -137,7 +142,7 @@ def rendered_allow(created_by_service: str | None, **spec_fields) -> list[str]:
 def test_every_creator_gets_the_chat_tools():
     """Who created the session does not change the allow list (an enabled flag is honoured)."""
     for service in (None, "agents-webhook", "agents-schedule", "agents-matrix-connector"):
-        assert rendered_allow(service, replicas=1) == TAIL_TOOLS, service
+        assert rendered_allow(service, replicas=1) == ALONE_TOOLS, service
         assert rendered_allow(service, replicas=2) == [*HIVE_TOOLS, "scale", *TAIL_TOOLS], service
 
 
@@ -458,3 +463,29 @@ def test_golden_allowlist_superleader_leader_and_service_session():
         *ADMIN_TOOLS,
     ]
     assert rendered_allow("agents-webhook", replicas=2) == hive
+
+
+def test_alone_session_gets_me_and_task_tools():
+    allow = on_start.orchestrator_allow(SessionSpec(replicas=1))
+    assert allow[0] == "me"
+    assert set(TASK_TOOLS) <= set(allow)
+    assert "activity" not in allow and "lock_claim" not in allow
+
+
+def test_hive_session_gets_task_tools_once():
+    allow = on_start.orchestrator_allow(SessionSpec(replicas=2))
+    assert len(allow) == len(set(allow))
+    assert allow.count("me") == 1
+    assert all(allow.count(t) == 1 for t in TASK_TOOLS)
+
+
+def test_trigger_session_gets_task_tools_and_chat():
+    """No trigger refusal (leader decision): a trigger-created session has the task tools."""
+    allow = rendered_allow("agents-webhook", replicas=1)
+    assert set(TASK_TOOLS) <= set(allow)
+    assert set(CHAT_TOOLS) <= set(allow)
+
+
+def test_session_labels_set_in_allow_list():
+    assert "session_labels_set" in on_start.orchestrator_allow(SessionSpec(replicas=1))
+    assert "session_labels_set" in on_start.orchestrator_allow(SessionSpec(replicas=2))

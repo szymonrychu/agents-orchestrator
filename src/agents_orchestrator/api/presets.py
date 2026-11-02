@@ -36,6 +36,7 @@ def _view(
         name=preset.name,
         is_default=preset.is_default,
         superleader_manageable=preset.superleader_manageable,
+        labels=preset.labels,
         spec=redact_spec_dict(preset.spec, metas),
         created_at=preset.created_at,
         updated_at=preset.updated_at,
@@ -178,7 +179,7 @@ async def create(
             settings,
             spec,
             values,
-            lambda: repo.create(conn, body.name, spec, manageable),
+            lambda: repo.create(conn, body.name, spec, manageable, body.labels),
         )
     except repo.PresetExists:
         raise _exists(body.name) from None
@@ -215,7 +216,7 @@ async def replace(
             settings,
             spec,
             values,
-            lambda: repo.update(conn, preset_id, body.name, spec, flag),
+            lambda: repo.update(conn, preset_id, body.name, spec, flag, body.labels),
         )
         return _view(preset, metas)
     except repo.PresetNotFound:
@@ -306,7 +307,9 @@ async def copy(conn, preset_id: uuid.UUID, explicit: str | None) -> schemas.Pres
         taken = {p.name.lower() for p in await repo.list_presets(conn)}
         name = explicit if explicit is not None else _copy_name(source.name, taken)
         try:
-            return _view(await repo.create(conn, name, spec, source.superleader_manageable))
+            return _view(
+                await repo.create(conn, name, spec, source.superleader_manageable, source.labels)
+            )
         except repo.PresetExists:
             if explicit is not None:
                 raise _exists(name) from None

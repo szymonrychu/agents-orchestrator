@@ -11,6 +11,7 @@
 {{- $_ := include "agents-orchestrator.masterKeySecretName" . }}
 {{- $claude := include "agents-orchestrator.claudeSecretName" . }}
 {{- $_ := include "agents-orchestrator.chatEnabled" . }}
+{{- $_ := include "agents-orchestrator.taskboardEnabled" . }}
 {{- $_ := include "agents-orchestrator.usageEnabled" . }}
 {{- $_ := include "agents-orchestrator.adminUpstreams" . }}
 {{- $agentUsage := include "agents-orchestrator.agentUsageEnabled" . }}

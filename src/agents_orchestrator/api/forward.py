@@ -85,14 +85,17 @@ async def forward(
     slug: str,
     *,
     empty_ok: bool = False,
+    query: str | None = None,
 ) -> tuple[int, bytes]:
     """Send one call and return the upstream status and raw body.
 
     `path` is appended to `target.base`; the request's query string is passed on. With
-    `empty_ok` an empty body is accepted (a 204), otherwise the answer must be JSON.
+    `empty_ok` an empty body is accepted (a 204), otherwise the answer must be JSON. `query`
+    replaces the request's query string when given.
     """
     url = target.base.rstrip("/") + path
-    query = request.scope.get("query_string", b"").decode("latin-1")
+    if query is None:
+        query = request.scope.get("query_string", b"").decode("latin-1")
     if query:
         url += "?" + query
     headers = {

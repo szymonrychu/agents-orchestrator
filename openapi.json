@@ -2552,6 +2552,28 @@
         "title": "MetaUsage",
         "type": "object"
       },
+      "OwnLabelsView": {
+        "properties": {
+          "labels": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Labels",
+            "type": "array"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "labels"
+        ],
+        "title": "OwnLabelsView",
+        "type": "object"
+      },
       "PermissionModeIn": {
         "additionalProperties": false,
         "properties": {
@@ -2787,6 +2809,20 @@
       "PresetIn": {
         "additionalProperties": false,
         "properties": {
+          "labels": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Labels"
+          },
           "name": {
             "title": "Name",
             "type": "string"
@@ -2838,6 +2874,13 @@
             "title": "Is Default",
             "type": "boolean"
           },
+          "labels": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Labels",
+            "type": "array"
+          },
           "name": {
             "title": "Name",
             "type": "string"
@@ -2862,6 +2905,7 @@
           "name",
           "is_default",
           "superleader_manageable",
+          "labels",
           "spec",
           "created_at",
           "updated_at"
@@ -3124,6 +3168,23 @@
           "last_transcripts_backup"
         ],
         "title": "SessionBackup",
+        "type": "object"
+      },
+      "SessionLabelsIn": {
+        "additionalProperties": false,
+        "properties": {
+          "labels": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Labels",
+            "type": "array"
+          }
+        },
+        "required": [
+          "labels"
+        ],
+        "title": "SessionLabelsIn",
         "type": "object"
       },
       "SessionMessageIn": {
@@ -4049,6 +4110,14 @@
           "init_edited_since_run": {
             "title": "Init Edited Since Run",
             "type": "boolean"
+          },
+          "labels": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Labels",
+            "type": "array"
           },
           "leader_agent_id": {
             "anyOf": [
@@ -8506,6 +8575,82 @@
         ]
       }
     },
+    "/agent/v1/session/labels": {
+      "put": {
+        "description": "Replace the calling session's labels.",
+        "operationId": "set_own_labels_agent_v1_session_labels_put",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionLabelsIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnLabelsView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Own Labels",
+        "tags": [
+          "agent"
+        ]
+      }
+    },
     "/agent/v1/sessions": {
       "get": {
         "operationId": "sessions_list_agent_v1_sessions_get",
@@ -8651,6 +8796,654 @@
           }
         },
         "summary": "Queue a message to the leader of another session (leader only)",
+        "tags": [
+          "agent"
+        ]
+      }
+    },
+    "/agent/v1/tasks": {
+      "get": {
+        "operationId": "collection_agent_v1_tasks_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "The taskboard upstream's status and JSON body, unchanged"
+          },
+          "401": {
+            "description": "unauthorized: missing or invalid agent credentials"
+          },
+          "403": {
+            "description": "forbidden (not a live agent pod)"
+          },
+          "404": {
+            "description": "not_found: the path is not one the relay forwards"
+          },
+          "413": {
+            "description": "payload_too_large: the body exceeds 256 KiB"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "taskboard_unconfigured or taskboard_unavailable"
+          }
+        },
+        "summary": "Taskboard tasks collection (list, create) as the caller's session",
+        "tags": [
+          "agent"
+        ]
+      },
+      "patch": {
+        "operationId": "collection_agent_v1_tasks_patch",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "The taskboard upstream's status and JSON body, unchanged"
+          },
+          "401": {
+            "description": "unauthorized: missing or invalid agent credentials"
+          },
+          "403": {
+            "description": "forbidden (not a live agent pod)"
+          },
+          "404": {
+            "description": "not_found: the path is not one the relay forwards"
+          },
+          "413": {
+            "description": "payload_too_large: the body exceeds 256 KiB"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "taskboard_unconfigured or taskboard_unavailable"
+          }
+        },
+        "summary": "Taskboard tasks collection (list, create) as the caller's session",
+        "tags": [
+          "agent"
+        ]
+      },
+      "post": {
+        "operationId": "collection_agent_v1_tasks_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "The taskboard upstream's status and JSON body, unchanged"
+          },
+          "401": {
+            "description": "unauthorized: missing or invalid agent credentials"
+          },
+          "403": {
+            "description": "forbidden (not a live agent pod)"
+          },
+          "404": {
+            "description": "not_found: the path is not one the relay forwards"
+          },
+          "413": {
+            "description": "payload_too_large: the body exceeds 256 KiB"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "taskboard_unconfigured or taskboard_unavailable"
+          }
+        },
+        "summary": "Taskboard tasks collection (list, create) as the caller's session",
+        "tags": [
+          "agent"
+        ]
+      },
+      "put": {
+        "operationId": "collection_agent_v1_tasks_put",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "The taskboard upstream's status and JSON body, unchanged"
+          },
+          "401": {
+            "description": "unauthorized: missing or invalid agent credentials"
+          },
+          "403": {
+            "description": "forbidden (not a live agent pod)"
+          },
+          "404": {
+            "description": "not_found: the path is not one the relay forwards"
+          },
+          "413": {
+            "description": "payload_too_large: the body exceeds 256 KiB"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "taskboard_unconfigured or taskboard_unavailable"
+          }
+        },
+        "summary": "Taskboard tasks collection (list, create) as the caller's session",
+        "tags": [
+          "agent"
+        ]
+      }
+    },
+    "/agent/v1/tasks/{path}": {
+      "get": {
+        "operationId": "item_agent_v1_tasks__path__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "The taskboard upstream's status and JSON body, unchanged"
+          },
+          "401": {
+            "description": "unauthorized: missing or invalid agent credentials"
+          },
+          "403": {
+            "description": "forbidden (not a live agent pod)"
+          },
+          "404": {
+            "description": "not_found: the path is not one the relay forwards"
+          },
+          "413": {
+            "description": "payload_too_large: the body exceeds 256 KiB"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "taskboard_unconfigured or taskboard_unavailable"
+          }
+        },
+        "summary": "Taskboard task, comments, todo and decisions as the caller's session",
+        "tags": [
+          "agent"
+        ]
+      },
+      "patch": {
+        "operationId": "item_agent_v1_tasks__path__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "The taskboard upstream's status and JSON body, unchanged"
+          },
+          "401": {
+            "description": "unauthorized: missing or invalid agent credentials"
+          },
+          "403": {
+            "description": "forbidden (not a live agent pod)"
+          },
+          "404": {
+            "description": "not_found: the path is not one the relay forwards"
+          },
+          "413": {
+            "description": "payload_too_large: the body exceeds 256 KiB"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "taskboard_unconfigured or taskboard_unavailable"
+          }
+        },
+        "summary": "Taskboard task, comments, todo and decisions as the caller's session",
+        "tags": [
+          "agent"
+        ]
+      },
+      "post": {
+        "operationId": "item_agent_v1_tasks__path__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "The taskboard upstream's status and JSON body, unchanged"
+          },
+          "401": {
+            "description": "unauthorized: missing or invalid agent credentials"
+          },
+          "403": {
+            "description": "forbidden (not a live agent pod)"
+          },
+          "404": {
+            "description": "not_found: the path is not one the relay forwards"
+          },
+          "413": {
+            "description": "payload_too_large: the body exceeds 256 KiB"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "taskboard_unconfigured or taskboard_unavailable"
+          }
+        },
+        "summary": "Taskboard task, comments, todo and decisions as the caller's session",
+        "tags": [
+          "agent"
+        ]
+      },
+      "put": {
+        "operationId": "item_agent_v1_tasks__path__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "The taskboard upstream's status and JSON body, unchanged"
+          },
+          "401": {
+            "description": "unauthorized: missing or invalid agent credentials"
+          },
+          "403": {
+            "description": "forbidden (not a live agent pod)"
+          },
+          "404": {
+            "description": "not_found: the path is not one the relay forwards"
+          },
+          "413": {
+            "description": "payload_too_large: the body exceeds 256 KiB"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "taskboard_unconfigured or taskboard_unavailable"
+          }
+        },
+        "summary": "Taskboard task, comments, todo and decisions as the caller's session",
         "tags": [
           "agent"
         ]
@@ -9530,7 +10323,29 @@
     },
     "/api/v1/sessions": {
       "get": {
+        "description": "All sessions; `label` (repeatable) keeps live sessions that carry any of the labels.",
         "operationId": "list_sessions_api_v1_sessions_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "label",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Label"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -9545,6 +10360,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "List Sessions"
@@ -10349,6 +11174,57 @@
           }
         },
         "summary": "Put Init Scripts"
+      }
+    },
+    "/api/v1/sessions/{session_id}/labels": {
+      "patch": {
+        "description": "Replace the session's labels (an editable snapshot of its preset's).",
+        "operationId": "patch_labels_api_v1_sessions__session_id__labels_patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionLabelsIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Labels"
       }
     },
     "/api/v1/sessions/{session_id}/leader": {
