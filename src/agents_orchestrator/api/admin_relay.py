@@ -349,7 +349,7 @@ def _next_cursor(request: Request, guard: Guard, status: int, content: bytes) ->
     if not isinstance(page, list):
         return {}
     limit = request.query_params.get("limit", "")
-    size = int(limit) if limit.isdigit() else HISTORY_DEFAULT_LIMIT
+    size = int(limit) if limit.isascii() and limit.isdigit() else HISTORY_DEFAULT_LIMIT
     ids = [i["id"] for i in page if isinstance(i, dict) and type(i.get("id")) is int]
     if not ids or len(page) < size:
         return {}
@@ -399,6 +399,17 @@ def _slug(template: str) -> str:
     return re.sub(r"\W+", "_", template).rstrip("_")
 
 
+def _cursor_responses(service: str, method: str, template: str) -> dict[int | str, Any]:
+    """The OpenAPI entry that documents `X-Next-Before-Id` on a list route with a cursor."""
+    if not GUARDS[(service, method, template)].cursor:
+        return {}
+    header = {
+        "description": "Smallest id of the upstream page when it was full: pass it as `before_id`",
+        "schema": {"type": "string"},
+    }
+    return {200: {"description": "Successful Response", "headers": {NEXT_CURSOR_HEADER: header}}}
+
+
 def _register() -> None:
     for service, (relay_prefix, _, _, routes) in SERVICES.items():
         for method, template, success in routes:
@@ -408,6 +419,7 @@ def _register() -> None:
                 methods=[method],
                 status_code=success,
                 response_class=Response,
+                responses=_cursor_responses(service, method, template),
                 operation_id="admin_" + service + "_" + method.lower() + _slug(template),
                 summary=f"{method} {service} {template}",
                 tags=["admin"],

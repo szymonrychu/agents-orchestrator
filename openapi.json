@@ -5303,7 +5303,15 @@
         ],
         "responses": {
           "200": {
-            "description": "Successful Response"
+            "description": "Successful Response",
+            "headers": {
+              "X-Next-Before-Id": {
+                "description": "Smallest id of the upstream page when it was full: pass it as `before_id`",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "422": {
             "content": {

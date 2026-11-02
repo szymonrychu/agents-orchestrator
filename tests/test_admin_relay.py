@@ -578,6 +578,28 @@ async def test_history_list_full_page_carries_the_upstream_cursor(rig):
     assert NEXT not in r.headers  # two rows for a limit of three: the end
 
 
+async def test_history_list_default_limit_full_page_carries_the_cursor(rig):
+    rig.summaries[:] = [history_session("SessionSummary", n, None) for n in range(100, 50, -1)]
+    r = await rig.call("GET", relay_url("history", "/sessions"))  # no `limit`: the default of 50
+    assert r.status_code == 200 and r.json() == []
+    assert r.headers[NEXT] == "51"  # 50 rows is a full default page
+    rig.summaries[:] = rig.summaries[1:]
+    r = await rig.call("GET", relay_url("history", "/sessions"))
+    assert NEXT not in r.headers  # 49 rows: the end
+
+
+async def test_history_list_non_ascii_digit_limit_is_not_a_page_size(rig):
+    r = await rig.call("GET", relay_url("history", "/sessions"), params={"limit": "\u0663"})
+    assert NEXT not in r.headers  # three rows against the default of 50, not against 3
+
+
+def test_history_list_documents_the_cursor_header(rig):
+    op = rig.app.openapi()["paths"][ADMIN_PREFIX + "/history/sessions"]["get"]
+    assert "X-Next-Before-Id" in op["responses"]["200"]["headers"]
+    one = rig.app.openapi()["paths"][ADMIN_PREFIX + "/history/sessions/{session_id}"]["get"]
+    assert "headers" not in one["responses"]["200"]
+
+
 async def test_history_get_hidden_is_404(rig):
     for n in (8, 9):
         r = await rig.call("GET", relay_url("history", "/sessions/{session_id}", n))
