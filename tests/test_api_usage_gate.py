@@ -100,7 +100,7 @@ async def make_preset(http, name, spec) -> dict:
     return r.json()
 
 
-def assert_refused(r, metric: str, percent: float, limit: int) -> None:
+def assert_refused(r, metric: str, percent: float, limit: int, stale: bool = False) -> None:
     assert_error(r, 409, "usage_quota")
     err = r.json()["error"]
     assert err["usage"] == {
@@ -108,6 +108,7 @@ def assert_refused(r, metric: str, percent: float, limit: int) -> None:
         "percent": percent,
         "limit": limit,
         "resets_at": RESETS.isoformat(),
+        "stale": stale,
     }
     assert isinstance(err["retry_after"], int) and err["retry_after"] >= 1
     assert r.headers["Retry-After"] == str(err["retry_after"])
@@ -175,11 +176,42 @@ async def test_unavailable_allows(pool, dsn):
     assert slow.calls == 1
 
 
-async def test_stale_allows(pool, dsn):
+async def test_stale_breaching_reading_refuses(pool, dsn):
     app = gated(make_settings(dsn), pool, Upstream(windows(seven_day=99.0, stale=True)))
     async with client_for(app) as http:
         r = await http.post(
             C, json={"slug": "stale", "spec": {"usage_quota": {"seven_day_pct": 10}}}
+        )
+    assert_refused(r, "seven_day", 99.0, 10, stale=True)
+    assert "stale" in r.json()["error"]["message"]
+    assert await session_count(pool) == 0
+
+
+async def test_stale_non_breaching_reading_allows(pool, dsn):
+    app = gated(make_settings(dsn), pool, Upstream(windows(seven_day=9.0, stale=True)))
+    async with client_for(app) as http:
+        r = await http.post(
+            C, json={"slug": "stale-low", "spec": {"usage_quota": {"seven_day_pct": 10}}}
+        )
+    assert r.status_code == 201, r.text
+
+
+async def test_stale_reading_already_reset_allows(pool, dsn):
+    body = windows(seven_day=99.0, stale=True)
+    body["windows"]["seven_day"]["resets_at"] = (RESETS - timedelta(days=30)).isoformat()
+    app = gated(make_settings(dsn), pool, Upstream(body))
+    async with client_for(app) as http:
+        r = await http.post(
+            C, json={"slug": "stale-reset", "spec": {"usage_quota": {"seven_day_pct": 10}}}
+        )
+    assert r.status_code == 201, r.text
+
+
+async def test_missing_window_allows(pool, dsn):
+    app = gated(make_settings(dsn), pool, Upstream({"windows": {}}))
+    async with client_for(app) as http:
+        r = await http.post(
+            C, json={"slug": "no-data", "spec": {"usage_quota": {"seven_day_pct": 10}}}
         )
     assert r.status_code == 201, r.text
 

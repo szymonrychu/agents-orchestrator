@@ -71,7 +71,7 @@ URL together with `usage.token` or `usage.existingSecret`, or none of them; one 
 fails the render. The URL and the token are env of the api main container only, because Settings
 refuses a URL without its token and no other component or init container uses the gate; the
 settings ConfigMap carries only `ORCH_USAGE_QUOTA_DEFAULT`. A metric gates when its percent is at
-or above the limit; missing, stale or reset data never gates.
+or above the limit, also on a stale reading (a lower bound); missing or reset data never gates.
 
 ## Workspace cache
 
