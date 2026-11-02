@@ -90,6 +90,7 @@ class Command:
     session_id: uuid.UUID
     agent_url: str | None
     wrapper_session_id: str | None
+    issued_by_session: uuid.UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -829,7 +830,7 @@ async def claim_command(conn: psycopg.AsyncConnection, kinds: Sequence[str]) -> 
             " WHERE id = (SELECT id FROM commands WHERE status = 'queued' AND kind = ANY(%s)"
             "  ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED)"
             " AND status = 'queued'"
-            " RETURNING id, agent_id, kind, status, created_at, started_at)"
+            " RETURNING id, agent_id, kind, status, created_at, started_at, issued_by_session)"
             " SELECT c.*, a.session_id, a.url AS agent_url, a.wrapper_session_id"
             " FROM c JOIN agents a ON a.id = c.agent_id",
             (list(kinds),),

@@ -1,9 +1,10 @@
 """The hard usage gate: where the account's usage stands (`UsageSource`) and whether a start
 or scale-up must be refused (`breach`, raised as `refusal` by `check` and `enforce`).
 
-The usage service (agents-usage) answers `GET /usage/v1/current`. Missing, stale or reset data
-never gates: an unreachable service, a timeout, a bad answer, an absent or stale window all
-mean "allow", with one warning per cache period.
+The usage service (agents-usage) answers `GET /usage/v1/current`. Missing or reset data never
+gates: an unreachable service, a timeout, a bad answer, an absent window or a window that has
+already reset all mean "allow", with one warning per cache period. A stale reading still gates
+when it breaches the quota: usage in a window only grows until reset, so it is a lower bound.
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ class Breach:
     percent: float
     limit: int
     resets_at: datetime
+    stale: bool = False
 
 
 def breach(
@@ -53,8 +55,10 @@ def breach(
 ) -> Breach | None:
     """The breach to report, or None when a start may proceed.
 
-    A metric gates when its window exists, is not stale, has not reset yet and
-    `percent >= limit` (`>=`, so the default 100 gates at the real limit). The limit is the
+    A metric gates when its window exists, has not reset yet and `percent >= limit` (`>=`, so
+    the default 100 gates at the real limit). A stale reading gates too (agents go quiet at
+    quota, so the newest reading is old exactly then, and usage only grows until reset); the
+    breach says so in `stale`. The limit is the
     quota's value for that metric, else `default_pct`. With several breaches the one with the
     latest `resets_at` is reported: that is when a start can succeed.
     """
@@ -63,23 +67,25 @@ def breach(
     found: list[Breach] = []
     for metric in GATED_METRICS:
         window = windows.get(metric)
-        if window is None or window.stale or window.resets_at <= now:
+        if window is None or window.resets_at <= now:
             continue
         limit = getattr(quota, f"{metric}_pct", None) if quota is not None else None
         limit = default_pct if limit is None else limit
         if window.percent >= limit:
-            found.append(Breach(metric, window.percent, limit, window.resets_at))
+            found.append(Breach(metric, window.percent, limit, window.resets_at, window.stale))
     return max(found, key=lambda b: b.resets_at, default=None)
 
 
 def refusal(b: Breach, now: datetime) -> ApiError:
-    """409 `usage_quota` with the breach as `usage` and the seconds until it resets, at least 1,
-    as `retry_after` (body and `Retry-After` header)."""
+    """409 `usage_quota` with the breach as `usage` (`stale` true for an old reading) and the
+    seconds until it resets, at least 1, as `retry_after` (body and `Retry-After` header)."""
     resets_at = b.resets_at.isoformat()
+    reading = " (stale reading, a lower bound)" if b.stale else ""
     return ApiError(
         409,
         "usage_quota",
-        f"{b.metric} usage {b.percent:g}% is at or above the quota {b.limit}% until {resets_at}",
+        f"{b.metric} usage {b.percent:g}%{reading} is at or above the quota {b.limit}% "
+        f"until {resets_at}",
         retry_after=max(1, math.ceil((b.resets_at - now).total_seconds())),
         extra={
             "usage": {
@@ -87,6 +93,7 @@ def refusal(b: Breach, now: datetime) -> ApiError:
                 "percent": b.percent,
                 "limit": b.limit,
                 "resets_at": resets_at,
+                "stale": b.stale,
             }
         },
     )
