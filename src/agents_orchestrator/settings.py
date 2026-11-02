@@ -167,6 +167,11 @@ class Settings(BaseSettings):
     max_pvc_size: str = "100Gi"
     max_sessions: int = 20
     autoclose_min_seconds: int = Field(default=300, ge=1)
+    #: Seconds a session with a requested self-close stays idle before the sweeper discards it,
+    #: so readers of the final answer (matrix connector, trigger runs) get it first. The floor of
+    #: 10 s keeps a session from being discarded between a message turning `sent` and its turn
+    #: being recorded.
+    close_grace_seconds: int = Field(default=30, ge=10, le=3600)
 
     wrapper_send_timeout_seconds: float = 15
     #: Rendered into every wrapper as `sessions.interrupt_settle_seconds`; the priority lane's
@@ -187,6 +192,11 @@ class Settings(BaseSettings):
     # bearer for the settings URL hook only, never sent to a session's own discard_hook_url
     discard_hook_token: str = Field(default="", repr=False)
     discard_hook_timeout_seconds: float = 120
+    # a URL hook server that stalls fails the call after these, well inside the overall timeout
+    discard_hook_connect_timeout_seconds: float = Field(default=5, gt=0, le=60)
+    discard_hook_read_timeout_seconds: float = Field(default=30, gt=0, le=300)
+    # hook time one reconcile pass may spend; spent, later deleting sessions wait for the next pass
+    discard_hook_pass_budget_seconds: float = Field(default=60, gt=0, le=600)
     discard_quiesce_timeout_seconds: float = 120
     discard_drain_seconds: float = 5
     scale_drain_seconds: float = 900
@@ -194,7 +204,7 @@ class Settings(BaseSettings):
     any_mcp_repo: str = "https://github.com/szymonrychu/any-mcp"
     any_mcp_ref: str = "v0.5.0"
     any_mcp_plugins_repo: str = "https://github.com/szymonrychu/any-mcp-tatara-plugins"
-    any_mcp_plugins_ref: str = "v0.9.0"
+    any_mcp_plugins_ref: str = "v0.11.1"
     on_start_timeout_seconds: float = 600
 
     cache_s3_endpoint: str = ""
@@ -518,6 +528,14 @@ class Settings(BaseSettings):
         settle = info.data.get("ambiguous_settle_seconds")
         if settle is not None and v <= settle:
             raise _Bad("must exceed ORCH_AMBIGUOUS_SETTLE_SECONDS")
+        return v
+
+    @field_validator("discard_hook_read_timeout_seconds")
+    @classmethod
+    def _check_hook_read(cls, v: float, info: ValidationInfo) -> float:
+        overall = info.data.get("discard_hook_timeout_seconds")
+        if overall is not None and v > overall:
+            raise _Bad("must be at most ORCH_DISCARD_HOOK_TIMEOUT_SECONDS")
         return v
 
     @field_validator("retry_backoff_base_seconds", "scale_drain_seconds")

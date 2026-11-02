@@ -15,7 +15,7 @@ from typing import Annotated, Any
 from xml.sax.saxutils import escape
 
 from fastapi import APIRouter, Depends, Header, Query, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from agents_orchestrator.api import schemas
 from agents_orchestrator.api import sessions as sessions_api
@@ -60,6 +60,20 @@ class Me(BaseModel):
     max_replicas: int
     static: bool
     members: list[Member]
+
+
+class CloseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)]
+
+
+class CloseRequested(BaseModel):
+    session_id: uuid.UUID
+    close_requested_at: datetime
+    close_reason: str
+    already_requested: bool
+    grace_seconds: int
 
 
 def _unauthorized() -> ApiError:
@@ -172,6 +186,44 @@ async def scale(
         replicas=out.replicas,
         previous_replicas=out.previous_replicas,
         max_replicas=out.max_replicas,
+    )
+
+
+@router.post(
+    "/close",
+    status_code=202,
+    response_model=CloseRequested,
+    summary="Close the caller's session once idle (leader only)",
+)
+async def close(agent: Caller, body: CloseRequest, pool: Pool, settings: Cfg) -> CloseRequested:
+    """Checks in order: leader (403 `not_leader`), not a superleader session (422 `own_session`),
+    not being discarded (409 `session_deleting`). The sweeper discards the session once it is idle
+    for `ORCH_CLOSE_GRACE_SECONDS`; a repeat call keeps the first request."""
+    async with pool.connection() as conn:
+        session = await _session(conn, agent)
+        if not await _leads(conn, agent, session):
+            raise ApiError(403, "not_leader", "only the leader can close its session")
+        if session.spec.session_messaging:
+            raise ApiError(
+                422,
+                "own_session",
+                "a superleader session cannot close itself; the user discards it",
+            )
+        try:
+            out = await sessions_repo.request_close(conn, agent.session_id, body.reason)
+        except q.SessionBeingDeleted:
+            raise ApiError(
+                409, "session_deleting", "the session is already being discarded"
+            ) from None
+        except sessions_repo.SessionNotFound:
+            raise ApiError(404, "not_found", "session not found") from None
+    assert out.session.close_requested_at is not None and out.session.close_reason is not None
+    return CloseRequested(
+        session_id=out.session.id,
+        close_requested_at=out.session.close_requested_at,
+        close_reason=out.session.close_reason,
+        already_requested=out.already,
+        grace_seconds=settings.close_grace_seconds,
     )
 
 
