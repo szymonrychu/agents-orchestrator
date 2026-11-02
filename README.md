@@ -404,7 +404,7 @@ Optional hooks receive the full history export before anything is deleted. None 
 
 The settings hook always runs, also for a session that sets its own URL (user decision: it feeds the session history service). A command comes only from settings, never from the spec: the API has no auth and the reconciler holds the Kubernetes credentials. Every hook is bounded by `ORCH_DISCARD_HOOK_TIMEOUT_SECONDS` (120).
 
-`ORCH_DISCARD_HOOK_TOKEN` (reconciler only) is sent as `Authorization: Bearer <token>` with the settings URL hook, and never with a session's own URL, which is user-controlled. It needs `ORCH_DISCARD_HOOK_URL`, is refused with `ORCH_DISCARD_HOOK_COMMAND` or when it contains whitespace or control characters, is hidden from the settings repr and is never logged.
+`ORCH_DISCARD_HOOK_TOKEN` (reconciler only) is sent as `Authorization: Bearer <token>` with the settings URL hook, and never with a session's own URL, which is user-controlled. It needs `ORCH_DISCARD_HOOK_URL`, is refused with `ORCH_DISCARD_HOOK_COMMAND` or unless it is printable ASCII without whitespace (0x21 to 0x7E), is hidden from the settings repr and is never logged.
 
 ### Export format
 

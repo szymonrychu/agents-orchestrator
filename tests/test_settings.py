@@ -205,7 +205,7 @@ def test_discard_hook_command_or_url(monkeypatch):
         Settings()
 
 
-def test_discard_hook_token_needs_url(monkeypatch):
+def test_discard_hook_token_needs_url(monkeypatch, caplog):
     monkeypatch.setenv("ORCH_DISCARD_HOOK_TOKEN", "t0k3n")
     with pytest.raises(SettingsError) as exc:
         Settings()
@@ -217,12 +217,15 @@ def test_discard_hook_token_needs_url(monkeypatch):
     assert s.discard_hook() == DiscardHook(
         "url", "https://history.example/hook", "settings", token="t0k3n"
     )
-    for bad in ("t0k3n\n", "t0 k3n", "t0k3n\x07"):
+    for bad in ("t0k3n\n", "t0 k3n", "t0k3n\x07", "t0k\u00e9n", "t0k3n\u00a0", "t0k3n\x7f"):
         monkeypatch.setenv("ORCH_DISCARD_HOOK_TOKEN", bad)
-        with pytest.raises(SettingsError) as exc:
+        with caplog.at_level("DEBUG"), pytest.raises(SettingsError) as exc:
             Settings()
         assert "ORCH_DISCARD_HOOK_TOKEN" in exc.value.problems, repr(bad)
-        assert "t0" not in str(exc.value)
+        shown = str(exc.value) + repr(exc.value) + repr(exc.value.problems) + caplog.text
+        shown = shown.replace("ORCH_DISCARD_HOOK_TOKEN", "")
+        for part in ("t0", "k3", "3n", "k\u00e9", "\u00e9n", "\u00a0", "\x7f", "\x07"):
+            assert part not in shown, (repr(bad), part)
     monkeypatch.delenv("ORCH_DISCARD_HOOK_TOKEN")
     assert Settings().discard_hook() == DiscardHook("url", "https://history.example/hook")
 

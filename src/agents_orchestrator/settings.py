@@ -549,9 +549,9 @@ class Settings(BaseSettings):
             raise _Bad("not used with ORCH_DISCARD_HOOK_COMMAND (a bearer for the URL hook only)")
         if v and info.data.get("discard_hook_url") == "":
             raise _Bad("needs ORCH_DISCARD_HOOK_URL")
-        if any(c.isspace() or not c.isprintable() for c in v):
+        if not re.fullmatch(r"[\x21-\x7e]*", v):
             # an illegal header value would echo the token into the failure reason and the log
-            raise _Bad("must not contain whitespace or control characters")
+            raise _Bad("must be printable ASCII without whitespace")
         return v
 
     @field_validator("chat_url")
