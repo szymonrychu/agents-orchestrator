@@ -20,7 +20,6 @@ from agents_orchestrator.preset_policy import (
     changed_paths,
     human_only_changes,
     merge_patch,
-    privileged_target_changes,
     strip_grants,
 )
 from agents_orchestrator.secret_view import EnvMeta, redact_spec_dict
@@ -68,16 +67,6 @@ def human_only_refused(paths: list[str]) -> ApiError:
     )
 
 
-def privileged_edit_refused(paths: list[str]) -> ApiError:
-    return ApiError(
-        403,
-        "privileged_target",
-        "only a human can change these fields of a preset with kube_access, session_messaging "
-        f"or docker on: {', '.join(paths)}",
-        extra={"fields": paths},
-    )
-
-
 def _note_fields(request: Request, paths: list[str]) -> None:
     """Hand the changed (or refused) paths to the admin audit; paths only, never values."""
     request.state.preset_fields = sorted(paths)
@@ -99,15 +88,13 @@ async def _validated(
     _checked_name(body.name)
     spec, values = body.spec.split()
     if human_only_base is not None:
-        dumped = spec.model_dump(mode="json", exclude_unset=True)
-        if refused := human_only_changes(human_only_base, dumped):
+        refused = human_only_changes(
+            human_only_base, spec.model_dump(mode="json", exclude_unset=True)
+        )
+        if refused:
             if request is not None:
                 _note_fields(request, refused)
             raise human_only_refused(refused)
-        if refused := privileged_target_changes(human_only_base, dumped):
-            if request is not None:
-                _note_fields(request, refused)
-            raise privileged_edit_refused(refused)
     stored_spec = None
     if stored is not None:
         try:

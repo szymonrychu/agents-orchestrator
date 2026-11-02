@@ -79,23 +79,6 @@ def human_only_changes(stored: dict[str, Any], new: dict[str, Any]) -> list[str]
     return sorted(out)
 
 
-def privileged_target_changes(stored: dict[str, Any], new: dict[str, Any]) -> list[str]:
-    """The changed spec paths an agent may not touch on a stored preset that is privileged.
-
-    Empty when the stored preset has no privileged flag on. Otherwise only `usage_quota` and
-    the human-only fields (which `human_only_changes` already limits to toward safe) may
-    change; name and labels are not spec paths. The stored preset counts, so turning a flag
-    off together with another edit is refused."""
-    if not privileged(stored):
-        return []
-    protected = {
-        f"env.{n}" for n, e in _dict(stored.get("env")).items() if _dict(e).get("protected")
-    }
-    allowed = {"usage_quota", *GRANTS, *DOCKER_SIZES, *protected}
-    allowed |= {"wrapper.permission_mode", "wrapper.permissions"}
-    return [p for p in changed_paths(stored, new) if p not in allowed]
-
-
 def strip_grants(spec: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     drop = set(GRANTS)
     if "docker" in spec:

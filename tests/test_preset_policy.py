@@ -145,18 +145,3 @@ def test_changed_paths():
         {"env": {"A": {"value": "1"}}, "replicas": 1},
         {"env": {"A": {"value": "2"}}, "replicas": 1, "wrapper": {"system_append": "x"}},
     ) == ["env.A", "wrapper.system_append"]
-
-
-def test_privileged_target_changes():
-    from agents_orchestrator.preset_policy import privileged_target_changes as ptc
-
-    stored = {"kube_access": True, "env": {"K": {"protected": True}}, "start_prompt": "a"}
-    assert ptc({"start_prompt": "a"}, {"start_prompt": "b"}) == []  # not privileged
-    assert ptc(stored, {**stored, "usage_quota": {"five_hour_pct": 5}}) == []
-    assert ptc(stored, {"env": {"K": {"protected": True}}, "start_prompt": "a"}) == []
-    assert ptc(stored, {**stored, "start_prompt": "b", "init_scripts": ["x"]}) == [
-        "init_scripts",
-        "start_prompt",
-    ]
-    assert ptc(stored, {"env": {"K": {"protected": True}}}) == ["start_prompt"]
-    assert ptc(stored, {**stored, "env": {**stored["env"], "N": {"value": "1"}}}) == ["env.N"]
