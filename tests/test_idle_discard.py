@@ -4,9 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import UTC, datetime
 
 import pytest
-from factories import insert_agent, insert_message, insert_session, set_agent_status
+from factories import (
+    insert_agent,
+    insert_message,
+    insert_session,
+    insert_turn,
+    set_agent_status,
+)
 from pydantic import ValidationError
 
 from agents_orchestrator.api import autoclose
@@ -72,6 +79,26 @@ async def _request(pool, session_id, reason="done") -> None:
 async def _age_all(pool, session_id, seconds: int) -> None:
     await _age(pool, session_id, seconds)
     await _age_close(pool, session_id, seconds)
+
+
+async def _lock_waiters(pool, at_least: int, timeout: float = 10.0) -> None:
+    """Wait until `at_least` other backends of this database wait on a lock.
+
+    Makes the arrival order at a row lock observed instead of assumed from sleeps.
+    """
+    deadline = asyncio.get_running_loop().time() + timeout
+    async with pool.connection() as conn:
+        while True:
+            cur = await conn.execute(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
+                " AND pid <> pg_backend_pid() AND wait_event_type = 'Lock'"
+            )
+            waiting = (await cur.fetchone())[0]
+            await conn.rollback()  # pg_stat_activity is a per-transaction snapshot
+            if waiting >= at_least:
+                return
+            assert asyncio.get_running_loop().time() < deadline, "lock waiters never showed up"
+            await asyncio.sleep(0.02)
 
 
 def test_spec_field_minimum_60_and_default_unset():
@@ -286,6 +313,22 @@ async def test_requested_close_waits_for_running_turn(pool):
     assert await _desired(pool, s["id"]) == "active"
 
 
+async def test_requested_close_counts_grace_from_turn_end(pool):
+    """An old request meets a freshly ended calling turn: the grace restarts from the turn end."""
+    s, a = await _idle_session(pool, spec={})
+    await _request(pool, s["id"])
+    await _age_all(pool, s["id"], 120)
+    turn = await insert_turn(pool, a["id"], status="completed", completed_at=datetime.now(UTC))
+    assert await _run(pool) == []
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE turns SET started_at = now() - interval '2 min',"
+            " completed_at = now() - interval '2 min' WHERE turn_id = %s",
+            (turn["turn_id"],),
+        )
+    assert await _run(pool) == [s["id"]]
+
+
 async def test_requested_close_waits_for_queued_message(pool):
     s, _ = await _idle_session(pool, spec={})
     await _request(pool, s["id"])
@@ -336,6 +379,11 @@ async def test_smaller_threshold_wins(pool):
     assert await _run(pool, grace=30) == []  # no request: the spec threshold alone applies
     assert await _desired(pool, s2["id"]) == "active"
 
+    s3, _ = await _idle_session(pool, spec={"discard_after_idle_seconds": 60})
+    await _request(pool, s3["id"])
+    await _age_all(pool, s3["id"], 100)
+    assert await _run(pool, grace=600) == [s3["id"]]  # the spec threshold is the smaller one
+
 
 async def test_cancel_before_flip_keeps_session(pool):
     s, _ = await _idle_session(pool, spec={})
@@ -357,7 +405,7 @@ async def test_cancel_racing_flip_has_one_outcome(pool):
         async with holder.transaction():
             await holder.execute("SELECT 1 FROM sessions WHERE id = %s FOR UPDATE", (s["id"],))
             task = asyncio.create_task(_run(pool))
-            await asyncio.sleep(0.3)
+            await _lock_waiters(pool, 1)
             assert not task.done()  # the discard waits on the session lock
             await sessions.cancel_close(holder, s["id"])
         assert await task == []
@@ -379,9 +427,9 @@ async def test_cancel_racing_flip_has_one_outcome(pool):
     async with pool.connection() as holder, holder.transaction():
         await holder.execute("SELECT 1 FROM sessions WHERE id = %s FOR UPDATE", (m["id"],))
         flip = asyncio.create_task(_run(pool))
-        await asyncio.sleep(0.3)
+        await _lock_waiters(pool, 1)  # the flip is queued on the row lock ...
         cancelled = asyncio.create_task(cancel())
-        await asyncio.sleep(0.3)
+        await _lock_waiters(pool, 2)  # ... before the cancel joins the queue behind it
         assert not flip.done() and not cancelled.done()
     assert await flip == [m["id"]]
     assert await cancelled == "refused"
