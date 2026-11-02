@@ -17,6 +17,7 @@ from test_api_agent import client_for, headers, make_settings
 from test_api_sessions import assert_error
 from test_api_sessions import client_for as main_client
 
+from agents_orchestrator.api import admin
 from agents_orchestrator.api import presets as presets_api
 from agents_orchestrator.api.admin import ADMIN_PREFIX
 from agents_orchestrator.api.app import create_app
@@ -637,3 +638,234 @@ async def test_privileged_copy_is_unprivileged_and_editable(call, human, seed):
     got = (await human("GET", f"{M}/{cid}")).json()["spec"]
     assert not got.get("kube_access") and not got.get("session_messaging")
     assert (await human("GET", f"{M}/{pid}")).json()["spec"]["init_scripts"] == ["echo stored"]
+
+
+# ---------------------------------- explicit security list (agent-preset-editing O2)
+
+GUARDED_PRESET_WRITES: dict[tuple[str, str], str] = {
+    ("POST", A): "guard",
+    ("PUT", f"{A}/{{ref}}"): "guard",
+    ("PATCH", f"{A}/{{ref}}"): "guard",
+    ("POST", f"{A}/{{ref}}/copy"): "strip",
+    ("PUT", f"{A}/{{ref}}/secrets/{{name}}"): "secret",
+}
+GRANT_FIELDS = ("kube_access", "session_messaging")
+QUOTA = {"usage_quota": {"five_hour_pct": 80}}
+
+
+def _admin_preset_writes() -> set[tuple[str, str]]:
+    return {
+        (method, route.path)
+        for route in admin.router.routes
+        if route.path.startswith(A)
+        for method in route.methods & {"POST", "PUT", "PATCH"}
+    }
+
+
+def test_every_admin_preset_write_route_is_classified():
+    assert set(GUARDED_PRESET_WRITES) == _admin_preset_writes()
+    assert set(GUARDED_PRESET_WRITES.values()) == {"guard", "strip", "secret"}
+
+
+async def test_patch_non_superleader_403(app, human, seed, pool):
+    pid = await seed({})
+    before = (await human("GET", f"{M}/{pid}")).json()
+    plain = await alone(pool, "guard-plain")
+    async with client_for(app, plain.leader_ip) as http:
+        r = await http.patch(f"{A}/{pid}", json={"spec": QUOTA}, headers=headers(plain.id))
+    assert_error(r, 403, "not_superleader")
+    assert (await human("GET", f"{M}/{pid}")).json()["updated_at"] == before["updated_at"]
+    assert [e for e in await events(pool, plain.id) if e["type"] == "admin_call"] == []
+
+
+async def test_patch_without_agent_token_refused(app, human, seed, boss):
+    pid = await seed({})
+    before = (await human("GET", f"{M}/{pid}")).json()
+    async with client_for(app, boss.leader_ip) as http:
+        bad = await http.patch(
+            f"{A}/{pid}", json={"spec": QUOTA}, headers=headers(boss.id, "wrong-token")
+        )
+    assert_error(bad, 401, "unauthorized")
+    async with client_for(app, "10.9.9.9") as http:
+        foreign = await http.patch(f"{A}/{pid}", json={"spec": QUOTA}, headers=headers(boss.id))
+    assert_error(foreign, 403, "forbidden")
+    assert (await human("GET", f"{M}/{pid}")).json() == before
+
+
+async def test_patch_hidden_preset_by_id_and_name_404(call, human):
+    r = await human("POST", M, json={"name": "hid-o2", "spec": {}, "superleader_manageable": False})
+    assert r.status_code == 201, r.text
+    hidden = r.json()
+    unknown = await call("PATCH", f"{A}/no-such-preset", json={"spec": QUOTA})
+    assert_error(unknown, 404, "not_found")
+    for ref in (hidden["id"], hidden["name"]):
+        got = await call("PATCH", f"{A}/{ref}", json={"spec": QUOTA})
+        assert_error(got, 404, "not_found")
+        assert got.json() == unknown.json()
+    assert (await human("GET", f"{M}/{hidden['id']}")).json() == hidden
+
+
+async def _preset_named(human, name):
+    return [p for p in (await human("GET", M)).json() if p["name"] == name]
+
+
+@pytest.mark.parametrize("field", GRANT_FIELDS)
+@pytest.mark.parametrize("route", list(GUARDED_PRESET_WRITES), ids="-".join)
+async def test_grant_refused_on_every_admin_preset_write(call, human, seed, kube, route, field):
+    method, path = route
+    kind = GUARDED_PRESET_WRITES[route]
+    secrets_before = kube.names("Secret")
+    if kind == "strip":
+        pid = await seed({"kube_access": True, "session_messaging": True})
+        r = await call(method, path.format(ref=pid), json={"name": "stripped"})
+        assert r.status_code == 201, r.text
+        assert not [k for k in GRANT_FIELDS if k in r.json()["spec"]]
+        stored = (await human("GET", f"{M}/{r.json()['id']}")).json()["spec"]
+        assert not [k for k in GRANT_FIELDS if k in stored]
+        return
+    if method == "POST":
+        r = await call(method, path, json={"name": "granted", "spec": {field: True}})
+        assert_error(r, 403, "human_only_field")
+        assert r.json()["error"]["fields"] == [field]
+        assert await _preset_named(human, "granted") == []
+        assert kube.names("Secret") == secrets_before
+        return
+    pid = await seed({})
+    before = (await human("GET", f"{M}/{pid}")).json()
+    if kind == "secret":
+        r = await call(method, path.format(ref=pid, name=field), json={"value": "v"})
+        assert_error(r, 422, "invalid_request")
+    else:
+        body = {"spec": {field: True}}
+        if method == "PUT":
+            body["name"] = "seeded"
+        r = await call(method, path.format(ref=pid), json=body)
+        assert_error(r, 403, "human_only_field")
+        assert r.json()["error"]["fields"] == [field]
+    assert (await human("GET", f"{M}/{pid}")).json() == before
+    assert kube.names("Secret") == secrets_before
+
+
+async def test_patch_cannot_regrant_after_human_turns_off(call, human, seed, pool, settings):
+    pid = await seed({"kube_access": True})
+    read = await call("GET", f"{A}/{pid}")
+    assert read.status_code == 200 and read.json()["spec"]["kube_access"] is True
+    async with pool.connection() as conn:
+        stale = await presets_repo.get(conn, uuid.UUID(pid))
+    r = await human("PUT", f"{M}/{pid}", json={"name": "seeded", "spec": {}})
+    assert r.status_code == 200, r.text
+    regrant = {"spec": {"kube_access": True, **QUOTA}}
+    r = await call("PATCH", f"{A}/{pid}", json=regrant)
+    assert_error(r, 403, "human_only_field")
+    assert r.json()["error"]["fields"] == ["kube_access"]
+
+    # the patch read the row before the human turned the grant off: the guard passes on the
+    # stale row, the compare-and-swap fails, and the retry re-reads and refuses
+    real_get, reads = presets_repo.get, []
+
+    async def first_read_stale(conn, preset_id):
+        reads.append(preset_id)
+        return stale if len(reads) == 1 else await real_get(conn, preset_id)
+
+    request = type("R", (), {"state": type("S", (), {})()})()
+    body = presets_api.schemas.PresetPatch(**regrant)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(presets_repo, "get", first_read_stale)
+        async with pool.connection() as conn:
+            with pytest.raises(ApiError) as exc:
+                await presets_api.patch(request, conn, settings, uuid.UUID(pid), body)
+    assert (exc.value.status, exc.value.code) == (403, "human_only_field")
+    assert len(reads) == 2
+    got = (await human("GET", f"{M}/{pid}")).json()["spec"]
+    assert not got.get("kube_access") and "usage_quota" not in got
+
+
+async def test_patch_unrelated_field_on_granted_preset_passes(call, human, seed):
+    pid = await seed({"kube_access": True, "session_messaging": True})
+    quota = {"five_hour_pct": 80, "seven_day_pct": 80}
+    r = await call("PATCH", f"{A}/{pid}", json={"spec": {"usage_quota": quota}})
+    assert r.status_code == 200, r.text
+    got = (await human("GET", f"{M}/{pid}")).json()["spec"]
+    assert got["kube_access"] is True and got["session_messaging"] is True
+    assert got["usage_quota"] == quota
+
+
+@pytest.mark.parametrize("patch", [{"wrapper": None}, {"wrapper": {"permissions": None}}])
+async def test_patch_null_wrapper_drops_deny_403(call, human, seed, patch):
+    pid = await seed({"wrapper": {"permissions": {"deny": ["Bash(rm:*)"]}}})
+    before = (await human("GET", f"{M}/{pid}")).json()
+    r = await call("PATCH", f"{A}/{pid}", json={"spec": patch})
+    assert_error(r, 403, "human_only_field")
+    assert r.json()["error"]["fields"] == ["wrapper.permissions.deny"]
+    assert (await human("GET", f"{M}/{pid}")).json() == before
+
+
+@pytest.mark.parametrize(
+    "wrapper", [{"permission_mode": "bypassPermissions"}, {"permission_mode": None}]
+)
+async def test_patch_permission_mode_auto_to_bypass_403(call, human, seed, wrapper):
+    pid = await seed({"wrapper": {"permission_mode": "auto"}})
+    before = (await human("GET", f"{M}/{pid}")).json()
+    r = await call("PATCH", f"{A}/{pid}", json={"spec": {"wrapper": wrapper}})
+    assert_error(r, 403, "human_only_field")
+    assert r.json()["error"]["fields"] == ["wrapper.permission_mode"]
+    assert (await human("GET", f"{M}/{pid}")).json() == before
+
+
+async def _all_events(pool):
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute("SELECT data FROM events ORDER BY id")
+        return [row["data"] for row in await cur.fetchall()]
+
+
+async def test_canary_never_echoed(call, human, seed, pool, kube, canary, caplog):
+    caplog.set_level(logging.DEBUG)
+    key = "SSH_PRIVATE_KEY_B64"
+    protected = {"env": {key: {"protected": True}}}
+    pid = await seed(protected)
+    answers = [await call("PUT", f"{A}/{pid}/secrets/{key}", json={"value": canary})]
+    assert answers[0].status_code == 200 and answers[0].json()["version"] == 1, answers[0].text
+    answers.append(await call("GET", f"{A}/{pid}"))
+    answers.append(await call("GET", A))
+    answers.append(await call("PATCH", f"{A}/{pid}", json={"spec": QUOTA}))
+    answers.append(await call("PATCH", f"{A}/{pid}", json={"name": "renamed"}))
+    answers.append(await call("POST", f"{A}/{pid}/copy", json={"name": "canary-copy"}))
+    answers.append(await call("PUT", f"{A}/{pid}", json={"name": "renamed", "spec": protected}))
+    assert [a.status_code for a in answers] == [200, 200, 200, 200, 200, 201, 200]
+
+    refused = [
+        (403, "human_only_field", {"spec": {"kube_access": True}}),
+        (422, "secret_in_spec", {"spec": {"env": {key: {"value": canary + "x"}}}}),
+        # the body fails validation before the route: an unknown field next to the value
+        (422, "invalid_request", {"spec": {"env": {key: {"value": canary + "y"}}}, "replicas": 99}),
+    ]
+    for status, code, body in refused:
+        secrets_before = kube.names("Secret")
+        r = await call("PATCH", f"{A}/{pid}", json=body)
+        assert_error(r, status, code)
+        assert kube.names("Secret") == secrets_before
+        answers.append(r)
+    # a PUT may carry a value; an invalid spec next to it writes no Secret version
+    secrets_before = kube.names("Secret")
+    spec = {"env": {key: {"protected": True, "value": canary + "y"}}, "replicas": 99}
+    r = await call("PUT", f"{A}/{pid}", json={"name": "renamed", "spec": spec})
+    assert_error(r, 422, "invalid_request")
+    assert kube.names("Secret") == secrets_before
+    answers.append(r)
+
+    for a in answers:
+        assert canary not in a.text, a.request.url
+        assert canary not in str(a.headers), a.request.url
+    assert canary not in caplog.text
+    assert not [r for r in caplog.records if canary in r.getMessage()]
+    assert canary not in str(await _all_events(pool))
+    entry = (await human("GET", f"{M}/{pid}")).json()["spec"]["env"][key]
+    assert entry["set"] is True and entry["version"] == 1
+
+
+async def test_secret_route_answer_is_metadata_only(call, seed, canary):
+    pid = await seed({"env": {"K": {"protected": True}}})
+    r = await call("PUT", f"{A}/{pid}/secrets/K", json={"value": canary})
+    assert r.status_code == 200, r.text
+    assert set(r.json()) == {"name", "set", "version", "updated_at"}
+    assert canary not in r.text
