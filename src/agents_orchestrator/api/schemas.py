@@ -9,6 +9,12 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from agents_orchestrator.labels import normalize_labels
+from agents_orchestrator.settings import (
+    SWEEP_GRACE_SECONDS_MAX,
+    SWEEP_INTERVAL_SECONDS_MAX,
+    SWEEP_KEEP_NEWEST_MAX,
+    SWEEP_RETENTION_DAYS_MAX,
+)
 from agents_orchestrator.spec import SessionSpec, SessionSpecIn
 
 
@@ -549,6 +555,38 @@ class CleanupPreview(BaseModel):
     grace_seconds: int
     sweep_enabled: bool
     sweep_dry_run: bool
+    last_sweep: dict[str, Any] | None
+
+
+class SweepPolicyIn(BaseModel):
+    """The whole sweep policy; every field is required (a PUT replaces the saved policy)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    dry_run: bool
+    retention_days: int = Field(ge=1, le=SWEEP_RETENTION_DAYS_MAX)
+    keep_newest: int = Field(ge=1, le=SWEEP_KEEP_NEWEST_MAX)
+    interval_seconds: int = Field(ge=60, le=SWEEP_INTERVAL_SECONDS_MAX)
+    grace_seconds: int = Field(ge=0, le=SWEEP_GRACE_SECONDS_MAX)
+
+
+class SweepPolicyView(BaseModel):
+    enabled: bool
+    dry_run: bool
+    retention_days: int
+    keep_newest: int
+    interval_seconds: int
+    grace_seconds: int
+
+
+class CleanupSettingsView(BaseModel):
+    policy: SweepPolicyView
+    defaults: SweepPolicyView
+    source: Literal["database", "environment"]
+    updated_at: datetime | None
+    run_requested_at: datetime | None
+    run_pending: bool
     last_sweep: dict[str, Any] | None
 
 

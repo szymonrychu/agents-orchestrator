@@ -17,6 +17,11 @@ from agents_orchestrator.spec import CACHE_MAX_BYTES_LIMIT, parse_quantity
 
 PREFIX = "ORCH_"
 MIN_MASTER_KEY_BYTES = 32
+# Upper bounds of the archive sweep policy; also literals in the CHECKs of migration 0025.
+SWEEP_RETENTION_DAYS_MAX = 3650
+SWEEP_KEEP_NEWEST_MAX = 1000
+SWEEP_INTERVAL_SECONDS_MAX = 30 * 86400
+SWEEP_GRACE_SECONDS_MAX = 7 * 86400
 _TAG_RE = re.compile(r"^v\d+\.\d+\.\d+$")
 _DOCKER_IMAGE_RE = re.compile(r"^[a-z0-9][a-z0-9._:/-]*:\d+\.\d+\.\d+-dind$")
 _SERVICE_TOKEN_RE = re.compile(r"^([a-z0-9][a-z0-9-]{0,62}):([0-9a-f]{64})$")
@@ -207,10 +212,12 @@ class Settings(BaseSettings):
     # deadline plus the presign margin: an archive younger than that may still be mid-save.
     # Seconds between two restarts an agent asks for on its own session (429 restart_cooldown).
     self_restart_cooldown_seconds: int = Field(default=600, ge=1)
-    cache_retention_days: int = Field(default=30, ge=1)
-    cache_keep_newest: int = Field(default=3, ge=1)
-    cache_sweep_interval_seconds: int = Field(default=6 * 3600, ge=60)
-    cache_sweep_grace_seconds: int | None = Field(default=None, ge=0)
+    cache_retention_days: int = Field(default=30, ge=1, le=SWEEP_RETENTION_DAYS_MAX)
+    cache_keep_newest: int = Field(default=3, ge=1, le=SWEEP_KEEP_NEWEST_MAX)
+    cache_sweep_interval_seconds: int = Field(
+        default=6 * 3600, ge=60, le=SWEEP_INTERVAL_SECONDS_MAX
+    )
+    cache_sweep_grace_seconds: int | None = Field(default=None, ge=0, le=SWEEP_GRACE_SECONDS_MAX)
     cache_sweep_enabled: bool = True
     cache_sweep_dry_run: bool = True
     # The api pod's own list/get/delete key pair (the reconciler keeps cache_s3_access_key_id).

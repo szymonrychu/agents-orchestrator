@@ -32,6 +32,7 @@ import psycopg
 
 from agents_orchestrator import rendering
 from agents_orchestrator.cache.keys import ArchiveNameError, group_of, object_name_for
+from agents_orchestrator.cache.policy import SweepPolicy
 from agents_orchestrator.cache.presign import (
     SUFFIX,
     ArchiveObject,
@@ -273,16 +274,16 @@ async def run_sweep(
     protected: Callable[[], Awaitable[set[str]]],
     now: Callable[[], Awaitable[datetime]],
     *,
-    dry_run: bool,
+    policy: SweepPolicy,
     credentials: S3Credentials | None = None,
 ) -> SweepResult:
-    """List, plan, re-check protection right before deleting, delete (unless `dry_run`).
+    """List, plan with `policy`, re-check protection right before deleting, delete (unless dry-run).
 
     `protected` is called twice: for the plan, and again after it so a key a session started to
     reference in between is dropped from the deletes. Never raises for S3 or DB trouble on the
     way: the failure is recorded in `error` and the next sweep retries.
     """
-    result = SweepResult(dry_run=dry_run, started_at=await now())
+    result = SweepResult(dry_run=policy.dry_run, started_at=await now())
     try:
         objects = await asyncio.to_thread(
             list_archives, settings, settings.cache_s3_prefix, credentials=credentials
@@ -292,13 +293,13 @@ async def run_sweep(
             objects,
             await protected(),
             await now(),
-            retention_days=settings.cache_retention_days,
-            keep_newest=settings.cache_keep_newest,
-            grace_seconds=settings.cache_sweep_grace_seconds or 0,
+            retention_days=policy.retention_days,
+            keep_newest=policy.keep_newest,
+            grace_seconds=policy.grace_seconds,
             prefix=settings.cache_s3_prefix,
         )
         result.planned, result.planned_bytes = len(plan.deletes), plan.bytes
-        if not dry_run and plan.deletes:
+        if not policy.dry_run and plan.deletes:
             late = await protected()
             safe = SweepPlan(tuple(d for d in plan.decisions if d.delete and d.key not in late))
             result.skipped_protected = len(plan.deletes) - len(safe.decisions)
@@ -309,7 +310,7 @@ async def run_sweep(
     result.finished_at = await now()
     log.info(
         "cache sweep %s: listed %d, planned %d (%d bytes), deleted %d, failed %d, error %s",
-        "dry-run" if dry_run else "done",
+        "dry-run" if policy.dry_run else "done",
         result.listed,
         result.planned,
         result.planned_bytes,

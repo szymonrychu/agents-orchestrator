@@ -495,8 +495,8 @@ Save never follows symlinks, skips sockets, FIFOs and device files, and skips ev
 Besides the restore and save Jobs, three things manage the archives in the bucket.
 
 - Versioned saves: a `save_key` such as `proj/{{ now }}` writes a new object per save, and a `restore_key` ending in `/` (`proj/`) restores the newest one. Names carry the fixed-width lowercase stamp, so they sort chronologically; the listing prefix keeps its `/`, so `foo/` never matches `foo-bar/`, and only direct children of the prefix count.
-- The cleanup sweep: the reconciler (a singleton, so one sweep at a time) lists the whole prefix every `ORCH_CACHE_SWEEP_INTERVAL_SECONDS` (6 hours; the last sweep time is read from the `cache_sweeps` row, so a restart does not repeat it) and deletes an archive only when it is beyond the newest `ORCH_CACHE_KEEP_NEWEST` of its group, older than `ORCH_CACHE_RETENTION_DAYS` and than `ORCH_CACHE_SWEEP_GRACE_SECONDS`, and not protected. A group is everything up to the last `/` of the name (`proj/<stamp>` groups under `proj/`; a flat name groups alone and is never deleted for being old); the newest by modification time and the greatest key of a group are never deleted. Transcripts (`sessions/<slug>`) are deleted by age alone. Protected keys are read from the database right before the delete (a second time after planning): the `restore_resolved` and `save_resolved` keys, the names the specs render to, and the transcripts object of every stored session, which covers sessions being discarded and cache runs in flight. Deletes go in batches of 1000 with per-key errors logged, and the run summary is stored in `cache_sweeps` (written by the reconciler only) and returned as `last_sweep` by the cleanup preview. `ORCH_CACHE_SWEEP_DRY_RUN` defaults to `true`: it plans and logs only.
-- The archives routes (`/api/v1/cache/...`) list, download, preview the cleanup and delete archives with the api pod's own key pair (`ORCH_CACHE_S3_API_*`); see the API section.
+- The cleanup sweep: the reconciler (a singleton, so one sweep at a time) lists the whole prefix every sweep interval (`ORCH_CACHE_SWEEP_INTERVAL_SECONDS`, 6 hours; the last sweep time is read from the `cache_sweeps` row, so a restart does not repeat it) and deletes an archive only when it is beyond the newest `ORCH_CACHE_KEEP_NEWEST` of its group, older than `ORCH_CACHE_RETENTION_DAYS` and than `ORCH_CACHE_SWEEP_GRACE_SECONDS`, and not protected. A group is everything up to the last `/` of the name (`proj/<stamp>` groups under `proj/`; a flat name groups alone and is never deleted for being old); the newest by modification time and the greatest key of a group are never deleted. Transcripts (`sessions/<slug>`) are deleted by age alone. Protected keys are read from the database right before the delete (a second time after planning): the `restore_resolved` and `save_resolved` keys, the names the specs render to, and the transcripts object of every stored session, which covers sessions being discarded and cache runs in flight. Deletes go in batches of 1000 with per-key errors logged, and the run summary is stored in `cache_sweeps` (written by the reconciler only) and returned as `last_sweep` by the cleanup preview. `ORCH_CACHE_SWEEP_DRY_RUN` defaults to `true`: it plans and logs only. The six knobs (enabled, dry run, retention days, keep newest, interval, grace) are a stored policy: the `ORCH_CACHE_*` values are only the seed, used until a policy is saved with `PUT /api/v1/cache/cleanup/settings` (Settings > Backups in the web UI); from then on the database row wins, and later changes to the environment do not touch it (`GET` shows both the saved policy and the environment defaults). The sweeper re-reads the policy every pass and wakes at once when it is saved or when a run is requested. `POST /api/v1/cache/cleanup/run` asks for one sweep now, through the same planner and safety guards, even when the schedule is disabled (`dry_run` still applies); the reconciler runs it on its next wake and the request stays pending until a sweep has started at or after it. The preview and the manual delete grace check use the same stored policy.
+- The archive routes (list, download, cleanup preview and delete under `/api/v1/cache/...`) use the api pod's own key pair (`ORCH_CACHE_S3_API_*`); the cleanup settings and run routes (`/api/v1/cache/cleanup/settings`, `/api/v1/cache/cleanup/run`) need only the database. See the API section.
 
 ### Transcripts
 
@@ -535,12 +535,12 @@ The cache is off until `ORCH_CACHE_S3_BUCKET` is set; then the access key, the s
 | `ORCH_CACHE_MAX_BYTES` | `5368709120` | archive cap, 1 to 5 GiB |
 | `ORCH_CACHE_TIMEOUT_SECONDS` | `1800` | Job deadline, 60 to 86400; also sets the presigned URL lifetime |
 | `ORCH_SELF_RESTART_COOLDOWN_SECONDS` | `600` | api | minimum seconds between two restarts an agent asks for on its own session; a second claim inside the window is refused with 429 `restart_cooldown` and `retry_after` (at least 1) |
-| `ORCH_CACHE_RETENTION_DAYS` | `30` | the sweep deletes archives older than this many days (at least 1) |
-| `ORCH_CACHE_KEEP_NEWEST` | `3` | the sweep always keeps this many newest archives per name group (at least 1) |
-| `ORCH_CACHE_SWEEP_INTERVAL_SECONDS` | `21600` | seconds between sweeps (at least 60; the reconciler leader runs them) |
-| `ORCH_CACHE_SWEEP_GRACE_SECONDS` | `ORCH_CACHE_TIMEOUT_SECONDS` + 600 | an archive younger than this is never deleted (it may be mid-save) |
-| `ORCH_CACHE_SWEEP_ENABLED` | `true` | run the sweep |
-| `ORCH_CACHE_SWEEP_DRY_RUN` | `true` | plan and log the sweep without deleting; set `false` after a verified preview |
+| `ORCH_CACHE_RETENTION_DAYS` | `30` | the sweep deletes archives older than this many days (1 to 3650); seed until saved in the UI |
+| `ORCH_CACHE_KEEP_NEWEST` | `3` | the sweep always keeps this many newest archives per name group (1 to 1000); seed until saved in the UI |
+| `ORCH_CACHE_SWEEP_INTERVAL_SECONDS` | `21600` | seconds between sweeps (60 to 2592000; the reconciler leader runs them); seed until saved in the UI |
+| `ORCH_CACHE_SWEEP_GRACE_SECONDS` | `ORCH_CACHE_TIMEOUT_SECONDS` + 600 | an archive younger than this is never deleted (0 to 604800; it may be mid-save); seed until saved in the UI |
+| `ORCH_CACHE_SWEEP_ENABLED` | `true` | run the sweep; seed until saved in the UI |
+| `ORCH_CACHE_SWEEP_DRY_RUN` | `true` | plan and log the sweep without deleting; set `false` after a verified preview; seed until saved in the UI |
 | `ORCH_CACHE_S3_API_ACCESS_KEY_ID` | empty | access key id of the api pod (list, get and delete only; set together with the secret) |
 | `ORCH_CACHE_S3_API_SECRET_ACCESS_KEY` | empty | secret key of the api pod; the archives endpoints answer 503 without the pair |
 
@@ -577,6 +577,9 @@ The rule "services talk only through the queue or HTTP APIs, with no shared stat
 | `leadership_requests` | api inserts; the dispatcher decides rows (`applied` or `rejected`) only through `WHERE status = 'queued'` guarded updates |
 | `session_leaders` | dispatcher |
 | `file_locks` | api |
+| `cache_sweep_settings` | api (`PUT /api/v1/cache/cleanup/settings`); the reconciler sweeper only reads it |
+| `cache_sweep_requests` | api (`POST /api/v1/cache/cleanup/run`); the reconciler sweeper only reads it |
+| `cache_sweeps` | reconciler (the sweeper); the api only reads it for the cleanup preview |
 
 ### NOTIFY channels and polling fallbacks
 
@@ -590,8 +593,9 @@ NOTIFY payloads are wake-up hints that carry ids only. Every loop also polls, be
 | `status` | `{session_id}` | ingester, dispatcher, reconciler | status stream |
 | `leadership_requested` | `{session_id}` | api (leadership routes, and a scale-down to a count at or below the leader's ordinal); ingester on a `compacting` or `compacted` event | dispatcher |
 | `leader_changed` | `{session_id, agent_id, epoch, reason}` | dispatcher (leadership pass) | hive-state push, session stream |
+| `cache_sweep_changed` | `{}` | api (`PUT` cleanup settings, `POST` cleanup run) | reconciler sweeper |
 
-Polling fallbacks: dispatcher `ORCH_DISPATCH_POLL_SECONDS` (2 s), reconciler `ORCH_RECONCILE_POLL_SECONDS` (10 s), ingester stream refresh `ORCH_INGEST_REFRESH_SECONDS` (5 s); the api SSE streams re-read on a 5 s poll when no NOTIFY arrives.
+Polling fallbacks: dispatcher `ORCH_DISPATCH_POLL_SECONDS` (2 s), reconciler `ORCH_RECONCILE_POLL_SECONDS` (10 s), reconciler sweeper (60 s; the `cache_sweep_changed` wake-up), ingester stream refresh `ORCH_INGEST_REFRESH_SECONDS` (5 s); the api SSE streams re-read on a 5 s poll when no NOTIFY arrives.
 
 ### Hive
 
@@ -712,6 +716,9 @@ Plain SQL migrations (`src/agents_orchestrator/db/migrations`), psycopg 3, no OR
 | `leadership_requests` | queue: `handover` (from the leader) or `user` requests with target agent, epoch, status (`queued`, `applied`, `rejected`); the api inserts, and the reconciler a `rollout` handover from an idle leader; the dispatcher decides |
 | `session_leaders` | one row per hive: leader agent, `epoch`, `since`, `reason` (`initial`, `user`, `handover: <reason>`, `leader_lost`, `lease_expired`, `scale_down`, `compaction`), `unready_since`, feed cursor and pushed hive-state hash; the dispatcher is the only writer (see Leadership) |
 | `checks` | queue: a shell command run as a Kubernetes Job; exit code and log tail |
+| `cache_sweep_settings` | one row (`id = 1`): the stored cleanup policy (enabled, dry run, retention days, keep newest, interval, grace), written only by the api (migration `0025`) |
+| `cache_sweep_requests` | one row (`id = 1`): `requested_at` of the last run-now request, written only by the api; a request is pending until a sweep has started at or after it (migration `0025`) |
+| `cache_sweeps` | one row: the last sweep summary (`result`, including `started_at`), written only by the reconciler sweeper |
 
 ## API
 
@@ -775,11 +782,23 @@ Query `key` (the full object key). Answers 302 with `Cache-Control: no-store` an
 
 ### `GET /api/v1/cache/cleanup/preview`
 
-What the cleanup sweep would delete now: the same planner as the reconciler's sweep, read-only. Response 200 `{"would_delete": [{"key", "size", "reason"}], "count", "total_bytes", "retention_days", "keep_newest", "grace_seconds", "sweep_enabled", "sweep_dry_run", "last_sweep": <last sweep result or null>}` with `Cache-Control: no-store`. An archive is listed only when it is beyond the newest `ORCH_CACHE_KEEP_NEWEST` of its group, older than `ORCH_CACHE_RETENTION_DAYS` and than the grace period, and referenced by no session; the newest object of a group is never listed. Errors: 503 `unavailable`.
+What the cleanup sweep would delete now: the same planner as the reconciler's sweep, read-only. Response 200 `{"would_delete": [{"key", "size", "reason"}], "count", "total_bytes", "retention_days", "keep_newest", "grace_seconds", "sweep_enabled", "sweep_dry_run", "last_sweep": <last sweep result or null>}` with `Cache-Control: no-store`. It uses the stored policy (see `GET /api/v1/cache/cleanup/settings`; the `ORCH_CACHE_*` environment values apply until a policy is saved), and `retention_days`, `keep_newest`, `grace_seconds`, `sweep_enabled` and `sweep_dry_run` in the response are the values of that policy. An archive is listed only when it is beyond the newest `keep_newest` of its group, older than `retention_days` and than the grace period, and referenced by no session; the newest object of a group is never listed. Errors: 503 `unavailable`.
+
+### `GET /api/v1/cache/cleanup/settings`
+
+The sweep policy in force. Response 200 with `Cache-Control: no-store`: `{"policy": {"enabled", "dry_run", "retention_days", "keep_newest", "interval_seconds", "grace_seconds"}, "defaults": {the same six fields from the ORCH_CACHE_* environment}, "source": "database" | "environment", "updated_at": <time or null>, "run_requested_at": <time or null>, "run_pending": bool, "last_sweep": <last sweep result or null>}`. `source` is `environment` (and `policy` equals `defaults`) until a policy is saved; after that the saved row wins and `defaults` still shows the environment. `run_pending` is true from a run request until a sweep has started at or after it. Needs only the database, not the api S3 key pair.
+
+### `PUT /api/v1/cache/cleanup/settings`
+
+Replaces the whole policy. Body (all six fields required, extra fields rejected): `{"enabled": bool, "dry_run": bool, "retention_days": 1..3650, "keep_newest": 1..1000, "interval_seconds": 60..2592000, "grace_seconds": 0..604800}`. Response 200 with the same body as `GET`, `Cache-Control: no-store`. The sweeper picks it up at once. Every call writes an `audit:` log line with the caller, the old policy (or `env`) and the new one. Needs only the database. Errors: 422 `invalid_request` (a missing, unknown or out-of-bounds field; nothing is stored).
+
+### `POST /api/v1/cache/cleanup/run`
+
+Asks the reconciler for one sweep now (no body). It uses the stored policy, the same planner and every safety guard (the protected set, the grace period, `dry_run`), and runs even when the policy is disabled. Repeated requests before the sweep starts collapse into one. Response 202 with the same body as `GET` (`run_pending` true, `run_requested_at` set), `Cache-Control: no-store`; poll `GET /api/v1/cache/cleanup/settings` for `run_pending` and `last_sweep`. Writes an `audit:` log line with the caller. Needs only the database; the sweep itself needs the reconciler's S3 key pair, and without it the request stays pending.
 
 ### `DELETE /api/v1/cache/archives`
 
-Body `{"keys": ["<full object key>", ...]}` (1 to 1000 keys, extra fields rejected). Deletes the keys the server re-checks right before deleting: a key outside the grammar, a missing one, one a session references and one younger than the grace period are refused, each with a reason, and never sent to S3. Response 200 `{"deleted": [key], "refused": [{"key", "reason"}], "errors": [{"key", "code", "message"}]}`; `errors` are the per-key failures S3 reported for a delete it accepted. Every call writes an `audit:` log line with the caller (the service name or the peer address), the deleted keys and the counts. Errors: 422 `invalid_request` (bad body), 503 `unavailable`. These four routes are on the main port only: the service port does not serve them.
+Body `{"keys": ["<full object key>", ...]}` (1 to 1000 keys, extra fields rejected). Deletes the keys the server re-checks right before deleting: a key outside the grammar, a missing one, one a session references and one younger than the grace period are refused, each with a reason, and never sent to S3. Response 200 `{"deleted": [key], "refused": [{"key", "reason"}], "errors": [{"key", "code", "message"}]}`; `errors` are the per-key failures S3 reported for a delete it accepted. Every call writes an `audit:` log line with the caller (the service name or the peer address), the deleted keys and the counts. Errors: 422 `invalid_request` (bad body), 503 `unavailable`. These four routes and the three cleanup settings and run routes are on the main port only: the service port does not serve them.
 
 ### `GET /api/v1/sessions`
 
