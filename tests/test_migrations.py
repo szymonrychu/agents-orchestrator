@@ -1126,6 +1126,16 @@ def test_cache_sweep_tables_apply_after_a_database_already_at_0027(empty_dsn, tm
     assert "requested_at" in _columns(empty_dsn, "cache_sweep_requests")
 
 
+def test_session_close_columns_apply_after_a_database_already_at_0027(empty_dsn, tmp_path):
+    for path in MIGRATIONS_DIR.glob("*.sql"):
+        if not path.name.startswith("0026_"):
+            shutil.copy(path, tmp_path)
+    run_migrations(empty_dsn, tmp_path)
+    assert _columns(empty_dsn, "sessions") & {"close_requested_at", "close_reason"} == set()
+    assert run_migrations(empty_dsn) == ["0026"]
+    assert {"close_requested_at", "close_reason"} <= _columns(empty_dsn, "sessions")
+
+
 def test_0026_session_close_columns(empty_dsn):
     run_migrations(empty_dsn)
     assert {"close_requested_at", "close_reason"} <= _columns(empty_dsn, "sessions")
