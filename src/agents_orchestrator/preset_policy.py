@@ -10,6 +10,8 @@ and false equal:
   never any other change.
 - wrapper.permissions.deny: entries may be added, never removed.
 - wrapper.permissions.allow: entries may be removed, never added.
+- env.<NAME> of a stored protected variable: may not be removed or unprotected
+  (decision 7 b); adding a protected variable and setting its value stay allowed.
 
 All functions work on JSON dicts as stored (model_dump(mode="json",
 exclude_unset=True)) and never mutate their inputs. The main port never calls
@@ -17,6 +19,7 @@ them: only the agent-facing admin routes do.
 """
 
 import copy
+from collections.abc import Iterable
 from typing import Any
 
 GRANTS: tuple[str, ...] = ("kube_access", "session_messaging", "docker", "discard_hook_url")
@@ -70,16 +73,26 @@ def human_only_changes(stored: dict[str, Any], new: dict[str, Any]) -> list[str]
         out.append("wrapper.permissions.allow")
     if not _entries(s_perm.get("deny")) <= _entries(n_perm.get("deny")):
         out.append("wrapper.permissions.deny")
+
+    new_env = _dict(new.get("env"))
+    for name, entry in _dict(stored.get("env")).items():
+        if _dict(entry).get("protected") and not _dict(new_env.get(name)).get("protected"):
+            out.append(f"env.{name}")
     return sorted(out)
 
 
-def privileged_target_changes(stored: dict[str, Any], new: dict[str, Any]) -> list[str]:
+def privileged_target_changes(
+    stored: dict[str, Any], new: dict[str, Any], secret_values: Iterable[str] = ()
+) -> list[str]:
     """The changed spec paths an agent may not touch on a stored preset that is privileged.
 
     Empty when the stored preset has no privileged flag on. Otherwise only `usage_quota` and
     the human-only fields (which `human_only_changes` already limits to toward safe) may
     change; name and labels are not spec paths. The stored preset counts, so turning a flag
-    off together with another edit is refused."""
+    off together with another edit is refused. `secret_values` names the protected variables
+    the call gives a value: each is refused as `env.<NAME>`, because a new value would swap a
+    credential the granted pod runs with. A stored protected entry resent unchanged (or
+    differing only in form) passes; removing or unprotecting it is human-only (7 b)."""
     if not privileged(stored):
         return []
     protected = {
@@ -87,7 +100,8 @@ def privileged_target_changes(stored: dict[str, Any], new: dict[str, Any]) -> li
     }
     allowed = {"usage_quota", *GRANTS, *DOCKER_SIZES, *protected}
     allowed |= {"wrapper.permission_mode", "wrapper.permissions"}
-    return [p for p in changed_paths(stored, new) if p not in allowed]
+    refused = {p for p in changed_paths(stored, new) if p not in allowed}
+    return sorted(refused | {f"env.{n}" for n in secret_values})
 
 
 def strip_grants(spec: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:

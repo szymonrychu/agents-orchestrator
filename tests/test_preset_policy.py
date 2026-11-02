@@ -64,11 +64,19 @@ def test_permission_lists():
     assert human_only_changes({}, p(["A"], None)) == ["wrapper.permissions.allow"]
 
 
-def test_protected_env_is_not_human_only():
+def test_protected_env_removal_is_human_only():
+    """Decision 7 b: removing or unprotecting a stored protected variable is human-only;
+    adding one (and setting its value through the secret route) is not."""
     stored = {"env": {"K": {"protected": True}}}
-    assert human_only_changes(stored, {"env": {}}) == []
-    assert human_only_changes(stored, {}) == []
-    assert human_only_changes(stored, {"env": {"K": {"value": "v"}}}) == []
+    assert human_only_changes(stored, {"env": {}}) == ["env.K"]
+    assert human_only_changes(stored, {}) == ["env.K"]
+    assert human_only_changes(stored, {"env": {"K": {"value": "v"}}}) == ["env.K"]
+    assert human_only_changes(stored, {"env": {"K": {"value": "v", "protected": False}}}) == [
+        "env.K"
+    ]
+    assert human_only_changes(stored, {"env": {"K": {"protected": True}}}) == []
+    assert human_only_changes({}, {"env": {"J": {"protected": True}}}) == []
+    assert human_only_changes({"env": {"P": {"value": "x"}}}, {}) == []
     assert (
         human_only_changes(stored, {"env": {"K": {"protected": True}, "N": {"protected": True}}})
         == []
@@ -160,3 +168,16 @@ def test_privileged_target_changes():
     ]
     assert ptc(stored, {"env": {"K": {"protected": True}}}) == ["start_prompt"]
     assert ptc(stored, {**stored, "env": {**stored["env"], "N": {"value": "1"}}}) == ["env.N"]
+
+
+def test_privileged_target_refuses_secret_values():
+    """A value for a protected variable of a privileged preset (credential substitution in a
+    pod with a grant) is refused even though the stored spec does not change."""
+    from agents_orchestrator.preset_policy import privileged_target_changes as ptc
+
+    stored = {"kube_access": True, "env": {"K": {"protected": True}}}
+    assert ptc(stored, stored, ["K"]) == ["env.K"]
+    assert ptc(stored, {**stored, "start_prompt": "p"}, ["K"]) == ["env.K", "start_prompt"]
+    assert (
+        ptc({"env": {"K": {"protected": True}}}, {"env": {"K": {"protected": True}}}, ["K"]) == []
+    )

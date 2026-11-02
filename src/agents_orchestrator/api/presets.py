@@ -104,7 +104,7 @@ async def _validated(
             if request is not None:
                 _note_fields(request, refused)
             raise human_only_refused(refused)
-        if refused := privileged_target_changes(human_only_base, dumped):
+        if refused := privileged_target_changes(human_only_base, dumped, values):
             if request is not None:
                 _note_fields(request, refused)
             raise privileged_edit_refused(refused)
@@ -498,13 +498,24 @@ async def by_ref(conn, ref: str) -> repo.Preset:
 
 
 async def put_secret(
-    request: Request, conn, settings: Settings, preset: str, name: str, body: schemas.SecretIn
+    request: Request,
+    conn,
+    settings: Settings,
+    preset: str,
+    name: str,
+    body: schemas.SecretIn,
+    superleader: bool = False,
 ) -> schemas.SecretView:
-    """Set the value of a protected variable (a new version). The value is never echoed."""
+    """Set the value of a protected variable (a new version). The value is never echoed.
+
+    The superleader may not set one on a privileged preset (403 `privileged_target`)."""
     value = body.value.get_secret_value()
     if len(value.encode()) > SECRET_MAX_BYTES:
         raise ApiError(413, "secret_too_large", f"a secret holds at most {SECRET_MAX_BYTES} bytes")
     found = await by_ref(conn, preset)
+    if superleader and (refused := privileged_target_changes(found.spec, found.spec, [name])):
+        _note_fields(request, refused)
+        raise privileged_edit_refused(refused)
     entry = found.spec.get("env", {}).get(name)
     if not (isinstance(entry, dict) and entry.get("protected")):
         raise ApiError(

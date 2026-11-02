@@ -237,7 +237,9 @@ async def set_preset_secret(
     touched(request, name)
     async with pool.connection() as conn:
         found = await _manageable_preset(conn, ref)
-        return await presets_api.put_secret(request, conn, settings, str(found.id), name, body)
+        return await presets_api.put_secret(
+            request, conn, settings, str(found.id), name, body, superleader=True
+        )
 
 
 # ---------------------------------------------------------------- sessions (O7)
