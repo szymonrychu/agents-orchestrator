@@ -2283,6 +2283,21 @@
             ],
             "title": "Next Attempt At"
           },
+          "notice": {
+            "anyOf": [
+              {
+                "enum": [
+                  "inactivity_reminder",
+                  "inactivity_close"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notice"
+          },
           "session_id": {
             "format": "uuid",
             "title": "Session Id",
@@ -4217,6 +4232,33 @@
           "backup": {
             "$ref": "#/components/schemas/SessionBackup"
           },
+          "close_deadline_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Close Deadline At"
+          },
+          "close_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "self",
+                  "inactivity"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Close Kind"
+          },
           "close_reason": {
             "anyOf": [
               {
@@ -4301,6 +4343,30 @@
             "title": "Id",
             "type": "string"
           },
+          "inactivity_closes_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inactivity Closes At"
+          },
+          "inactivity_reminded_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inactivity Reminded At"
+          },
           "init_edited_since_run": {
             "title": "Init Edited Since Run",
             "type": "boolean"
@@ -4312,6 +4378,18 @@
             },
             "title": "Labels",
             "type": "array"
+          },
+          "last_update_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Update At"
           },
           "leader_agent_id": {
             "anyOf": [
@@ -4389,6 +4467,18 @@
               }
             ],
             "title": "Preset Name"
+          },
+          "reminder_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reminder At"
           },
           "slug": {
             "title": "Slug",

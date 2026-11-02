@@ -20,6 +20,7 @@ from test_api_sessions import assert_error, make_settings
 from agents_orchestrator.api.app import create_app
 from agents_orchestrator.api.listener import Listener
 from agents_orchestrator.db import events as ev
+from agents_orchestrator.db import sessions
 from agents_orchestrator.db.pool import notify
 
 
@@ -315,6 +316,33 @@ async def test_status_stream_carries_attention(srv, pool):
             seen[f["event"]] = f["data"]
         assert seen["agent_status"]["agent"]["attention"]["reason"] == "permission"
         assert seen["session_status"]["session"]["summary"]["attention_agents"] == 1
+
+
+async def test_stream_carries_close_kind(srv, pool):
+    cl = await insert_session(pool)
+    ag = await insert_agent(pool, cl["id"], ready=True)
+    await set_agent_status(pool, ag["id"], state="idle")
+    async with open_sse(srv, "/api/v1/stream") as sse:
+        snap = await sse.next()
+        [entry] = snap["data"]["sessions"]
+        assert entry["session"]["close_kind"] is None
+        assert entry["session"]["close_deadline_at"] is None
+        async with pool.connection() as conn:
+            await conn.execute(
+                "UPDATE sessions SET created_at = now() - interval '5 h',"
+                " last_update_at = now() - interval '5 h' WHERE id = %s",
+                (cl["id"],),
+            )
+            closed = await sessions.close_inactive(conn, 14400, 300, lambda *_: "closing")
+        assert closed == [cl["id"]]
+        frames = {}
+        while "session_status" not in frames:
+            f = await sse.next()
+            frames[f["event"]] = f["data"]
+        session = frames["session_status"]["session"]
+        assert session["close_kind"] == "inactivity"
+        assert session["close_deadline_at"] is not None
+        assert session["close_reason"].startswith("No update for 5 h")
 
 
 async def test_stream_recovers_from_lost_notify(srv, pool, dsn):

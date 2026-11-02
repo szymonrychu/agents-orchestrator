@@ -13,7 +13,7 @@ from fastapi.concurrency import run_in_threadpool
 from psycopg_pool import AsyncConnectionPool
 from pydantic import ValidationError
 
-from agents_orchestrator import rendering
+from agents_orchestrator import inactivity, rendering
 from agents_orchestrator.api import schemas, secret_store, usage_gate
 from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.service_auth import calling_service
@@ -82,6 +82,22 @@ def _closes_at(session: repo.Session) -> datetime | None:
     return None if after is None else session.created_at + timedelta(seconds=after)
 
 
+def _inactivity(
+    session: repo.Session, last_update: datetime | None, settings: Settings
+) -> tuple[datetime | None, datetime | None]:
+    """`reminder_at` and `inactivity_closes_at`: the quiet clock plus each effective limit, null
+    when that limit is off (superleaders have both off); no reminder while a close is pending."""
+    limits = inactivity.effective(session.spec, settings)
+
+    def due(seconds: int) -> datetime | None:
+        if last_update is None or seconds == 0:
+            return None
+        return last_update + timedelta(seconds=seconds)
+
+    reminder = None if session.close_requested_at is not None else due(limits.reminder_seconds)
+    return reminder, due(limits.close_seconds)
+
+
 def _last_backup(run: object) -> schemas.BackupRun | None:
     if not isinstance(run, dict) or run.get("state") != "saved":
         return None
@@ -112,6 +128,8 @@ def _backup(session: repo.Session, settings: Settings) -> schemas.SessionBackup:
 
 def _view(session: repo.Session, agg: dict | None, settings: Settings) -> schemas.SessionView:
     agg = agg or {}
+    last_update = agg.get("last_update")
+    reminder_at, inactivity_closes_at = _inactivity(session, last_update, settings)
     return schemas.SessionView(
         id=session.id,
         slug=session.slug,
@@ -136,6 +154,12 @@ def _view(session: repo.Session, agg: dict | None, settings: Settings) -> schema
         backup=_backup(session, settings),
         close_requested_at=session.close_requested_at,
         close_reason=session.close_reason,
+        close_kind=session.close_kind,
+        close_deadline_at=session.close_deadline_at,
+        inactivity_reminded_at=session.inactivity_reminded_at,
+        last_update_at=last_update,
+        reminder_at=reminder_at,
+        inactivity_closes_at=inactivity_closes_at,
         created_by_service=session.created_by_service,
         created_by_session=session.created_by_session,
         labels=session.labels,

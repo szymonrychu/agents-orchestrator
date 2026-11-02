@@ -123,6 +123,9 @@ class SessionBackup(BaseModel):
     last_transcripts_backup: BackupRun | None
 
 
+CloseKind = Literal["self", "inactivity"]
+
+
 class SessionView(BaseModel):
     id: uuid.UUID
     slug: str
@@ -147,6 +150,17 @@ class SessionView(BaseModel):
     backup: SessionBackup
     close_requested_at: datetime | None = None
     close_reason: str | None = None
+    # who asked for the pending close: the agent (`self`) or the inactivity limit
+    close_kind: CloseKind | None = None
+    # an inactivity close is forced at this time even mid-turn
+    close_deadline_at: datetime | None = None
+    inactivity_reminded_at: datetime | None = None
+    # the quiet clock: the last user-visible update of the session
+    last_update_at: datetime | None = None
+    # when the reminder is due; null when it is off, for a superleader or with a close pending
+    reminder_at: datetime | None = None
+    # when the inactivity limit requests the close; null when it is off or for a superleader
+    inactivity_closes_at: datetime | None = None
     created_by_service: str | None = None
     created_by_session: uuid.UUID | None = None
     labels: list[str] = []
@@ -323,6 +337,8 @@ class Meta(BaseModel):
 
 Lane = Literal["idle", "regular", "priority"]
 MessageStatus = Literal["queued", "dispatching", "verifying", "sent", "failed", "cancelled"]
+# an orchestrator-written message; null for every other message
+Notice = Literal["inactivity_reminder", "inactivity_close"]
 
 
 class PostMessage(BaseModel):
@@ -362,6 +378,7 @@ class MessageView(BaseModel):
     created_at: datetime
     dispatched_at: datetime | None
     turn: TurnView | None
+    notice: Notice | None = None
 
 
 class CommandAccepted(BaseModel):

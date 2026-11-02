@@ -375,3 +375,17 @@ async def test_start_prompt_user_is_the_creating_service_or_empty(http, pool):
         )
     await http.post(f"/api/v1/sessions/{cl2['id']}/messages", json={"text": "y"})
     assert await _texts(http, cl2["id"]) == ["[agents-webhook]\n\ny"]
+
+
+async def test_message_view_notice(http, pool):
+    cl = await insert_session(pool)
+    notice = await insert_message(pool, cl["id"], text="remind", notice="inactivity_reminder")
+    plain = await insert_message(pool, cl["id"], text="hi")
+    got = (await http.get(f"/api/v1/messages/{notice['id']}")).json()
+    assert got["notice"] == "inactivity_reminder"
+    assert (await http.get(f"/api/v1/messages/{plain['id']}")).json()["notice"] is None
+    listed = (await http.get(f"/api/v1/sessions/{cl['id']}/messages")).json()
+    assert {m["id"]: m["notice"] for m in listed} == {
+        notice["id"]: "inactivity_reminder",
+        plain["id"]: None,
+    }

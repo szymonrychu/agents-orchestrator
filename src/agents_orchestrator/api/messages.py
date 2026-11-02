@@ -50,6 +50,7 @@ def _message_view(r: dict) -> schemas.MessageView:
         created_at=r["created_at"],
         dispatched_at=r["dispatched_at"],
         turn=turn,
+        notice=r["notice"],
     )
 
 
