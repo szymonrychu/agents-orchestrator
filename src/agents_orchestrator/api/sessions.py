@@ -133,6 +133,8 @@ def _view(session: repo.Session, agg: dict | None, settings: Settings) -> schema
         closes_at=_closes_at(session),
         init_edited_since_run=_init_edited(session),
         backup=_backup(session, settings),
+        close_requested_at=session.close_requested_at,
+        close_reason=session.close_reason,
         created_by_service=session.created_by_service,
         created_by_session=session.created_by_session,
     )
@@ -477,6 +479,26 @@ async def discard_session(
         )
     async with pool.connection() as conn:
         return await discard(conn, session_id, settings)
+
+
+@router.delete("/sessions/{session_id}/close", response_model=schemas.SessionView)
+async def cancel_session_close(
+    session_id: uuid.UUID,
+    pool: Pool,
+    settings: Cfg,
+) -> schemas.SessionView:
+    """Cancel a pending self-close request; 200 even when none is pending, 409 once the
+    session is flipped to deleting."""
+    async with pool.connection() as conn:
+        try:
+            session = await repo.cancel_close(conn, session_id)
+        except repo.SessionNotFound:
+            raise not_found("session") from None
+        except repo.SessionBeingDeleted:
+            raise ApiError(
+                409, "session_deleting", "the session is already being discarded"
+            ) from None
+        return await one_view(conn, session, settings)
 
 
 def init_scripts_view(

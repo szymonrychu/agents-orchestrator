@@ -60,7 +60,8 @@ async def export_session_history(
     async with conn.transaction():
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
-                "SELECT id, slug, spec, created_at, secret_versions FROM sessions WHERE id = %s",
+                "SELECT id, slug, spec, created_at, secret_versions,"
+                " close_requested_at, close_reason FROM sessions WHERE id = %s",
                 (session_id,),
             )
             row = await cur.fetchone()

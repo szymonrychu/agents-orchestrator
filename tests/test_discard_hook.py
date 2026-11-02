@@ -156,6 +156,19 @@ async def test_export_jsonl_kinds_and_order(env):
                 assert datetime.fromisoformat(value).utcoffset() == timedelta(0)
 
 
+async def test_export_session_record_carries_close_request(env):
+    c = await env.session("alpha")
+    async with env.pool.connection() as conn:
+        await sessions.request_close(conn, c.id, "done")
+    plain = await env.session("bravo")
+    session = (await env.export(c.id))[0]
+    assert session["kind"] == "session" and session["close_reason"] == "done"
+    stored = (await env.get(c.id)).close_requested_at
+    assert datetime.fromisoformat(session["close_requested_at"]) == stored
+    untouched = (await env.export(plain.id))[0]
+    assert untouched["close_reason"] is None and untouched["close_requested_at"] is None
+
+
 async def test_export_streams_with_a_server_side_cursor(env):
     c = await env.session("alpha")
     await populate(env, c)

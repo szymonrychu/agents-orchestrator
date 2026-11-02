@@ -4036,6 +4036,29 @@
           "backup": {
             "$ref": "#/components/schemas/SessionBackup"
           },
+          "close_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Close Reason"
+          },
+          "close_requested_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Close Requested At"
+          },
           "closes_at": {
             "anyOf": [
               {
@@ -9883,6 +9906,47 @@
           }
         },
         "summary": "Post Check"
+      }
+    },
+    "/api/v1/sessions/{session_id}/close": {
+      "delete": {
+        "description": "Cancel a pending self-close request; 200 even when none is pending, 409 once the\nsession is flipped to deleting.",
+        "operationId": "cancel_session_close_api_v1_sessions__session_id__close_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Session Close"
       }
     },
     "/api/v1/sessions/{session_id}/events": {
