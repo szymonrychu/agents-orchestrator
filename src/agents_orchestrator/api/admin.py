@@ -273,9 +273,14 @@ async def create_session(
     """Same body and rules as the main port, usage gate included; the caller's session is
     recorded as the creator and `created_by_service` stays empty."""
     _, caller = caller_of(request)
-    return await sessions_api.create(
-        pool, settings, body, created_by_session=caller.id, usage=usage
-    )
+    try:
+        return await sessions_api.create(
+            pool, settings, body, created_by_session=caller.id, usage=usage
+        )
+    except ApiError as exc:
+        if exc.code == "privileged_target":
+            request.state.preset_fields = exc.extra["fields"]
+        raise
 
 
 @router.delete("/sessions/{slug}", status_code=202, response_model=schemas.SessionView)
