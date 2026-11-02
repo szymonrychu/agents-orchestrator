@@ -43,6 +43,7 @@ class Preset:
     spec: dict[str, Any]
     is_default: bool
     superleader_manageable: bool
+    labels: list[str]
     created_at: datetime
     updated_at: datetime
 
@@ -66,6 +67,7 @@ def _from_row(row: dict[str, Any]) -> Preset:
         spec=row["spec"],
         is_default=row["is_default"],
         superleader_manageable=row["superleader_manageable"],
+        labels=row["labels"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -99,15 +101,16 @@ async def create(
     name: str,
     spec: dict[str, Any],
     superleader_manageable: bool = False,
+    labels: list[str] | None = None,
 ) -> Preset:
     validate_preset_name(name)
     try:
         async with conn.transaction():
             rows = await _fetch(
                 conn,
-                "INSERT INTO presets (id, name, spec, superleader_manageable)"
-                " VALUES (%s, %s, %s, %s) RETURNING *",
-                (uuid.uuid4(), name, Jsonb(spec), superleader_manageable),
+                "INSERT INTO presets (id, name, spec, superleader_manageable, labels)"
+                " VALUES (%s, %s, %s, %s, %s) RETURNING *",
+                (uuid.uuid4(), name, Jsonb(spec), superleader_manageable, labels or []),
             )
     except psycopg.errors.UniqueViolation:
         raise PresetExists(name) from None
@@ -120,8 +123,9 @@ async def update(
     name: str,
     spec: dict[str, Any],
     superleader_manageable: bool | None = None,
+    labels: list[str] | None = None,
 ) -> Preset:
-    """Replace name and spec; a None flag keeps the stored superleader_manageable."""
+    """Replace name and spec; a None flag or None labels keep the stored values."""
     validate_preset_name(name)
     try:
         async with conn.transaction():
@@ -136,8 +140,8 @@ async def update(
                 conn,
                 "UPDATE presets SET name = %s, spec = %s,"
                 " superleader_manageable = COALESCE(%s, superleader_manageable),"
-                " updated_at = now() WHERE id = %s RETURNING *",
-                (name, Jsonb(spec), superleader_manageable, preset_id),
+                " labels = COALESCE(%s, labels), updated_at = now() WHERE id = %s RETURNING *",
+                (name, Jsonb(spec), superleader_manageable, labels, preset_id),
             )
     except psycopg.errors.UniqueViolation:
         raise PresetExists(name) from None
