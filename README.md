@@ -298,7 +298,7 @@ The POST and DELETE terminal routes and the file write (`PUT /api/v1/sessions/{s
 
 ### Service tokens
 
-In-cluster trigger services (agents-webhook, agents-schedule) call the orchestrator on a dedicated service port, `ORCH_SERVICE_PORT` (default 8002), served by the same api process. Their pod CIDRs therefore stay out of `ORCH_ALLOWED_CIDRS`: the source allowlist is skipped on this port and a bearer token authenticates the caller instead. This is the `orch-service-tokens` contract consumers rely on.
+In-cluster trigger services (agents-webhook, agents-schedule) call the orchestrator on a dedicated service port, `ORCH_SERVICE_PORT` (default 8002), served by the same api process. Their pod CIDRs therefore stay out of `ORCH_ALLOWED_CIDRS`: the source allowlist is skipped on this port and a bearer token authenticates the caller instead. The message route accepts `attachments` on this port too. This is the `orch-service-tokens` contract consumers rely on.
 
 - Send `Authorization: Bearer <token>` on every request. Only the sha256 of each token is configured in the orchestrator (`ORCH_SERVICE_TOKENS`, `<name>:<sha256 hex>` entries, or `ORCH_SERVICE_TOKENS_FILE`); the token itself lives only in the calling service. Hashes are compared in constant time and the token never reaches a log line or error body.
 - Missing, malformed or unknown token (and an empty token list): `401 unauthorized` with `WWW-Authenticate: Bearer`.
@@ -312,6 +312,7 @@ In-cluster trigger services (agents-webhook, agents-schedule) call the orchestra
   - `GET /api/v1/sessions/{session_id}`
   - `GET /api/v1/sessions/{session_id}/messages`
   - `POST /api/v1/sessions/{session_id}/messages`
+  - `GET /api/v1/sessions/{session_id}/files/download`
   - `GET /api/v1/messages/{message_id}`
   - `GET /api/v1/stream` (read-only SSE of every session; the frames carry message payloads, so a consumer keeps only the fields it needs)
 
@@ -973,7 +974,7 @@ The orchestrator calls the wrapper's `PUT /v1/sessions/{id}/files/content` with 
 
 Downloads one file of the session workdir as raw bytes, through the same agent choice as the listing; text and binary files of any size, with no preview cap. Query: `path` (relative to the workdir), `agent_id` (optional; an agent of this session, else 404 `not_found`). The orchestrator opens the wrapper's `GET /v1/sessions/{id}/files/download` with the derived bearer in the `Authorization` header only, and maps the wrapper's status before any byte is sent, so every refusal is a JSON error envelope. Response 200 streams the wrapper's bytes unchanged (`application/octet-stream` in the OpenAPI document) with the wrapper's `Content-Type` (the mime guessed from the file name, else `application/octet-stream`), `Content-Length` (the file size) and `Content-Disposition` (`attachment` with an ASCII `filename` and an RFC 6266 `filename*`), plus `X-Content-Type-Options: nosniff` and `Cache-Control: no-store` set by the orchestrator. Nothing is buffered and there is no total timeout; connect and each read keep the wrapper client's 30 s timeout. The content is relayed as stored and is not passed through the secret redactor. A symlink to a file downloads the target's bytes only when the wrapper's path guards allow it.
 
-Errors: 400 `invalid_path` (absolute, NUL, `..` or a symlink leaving the workdir), 400 `not_a_file` (a directory, the workdir itself, a FIFO, socket or device), 404 `not_found` (session, agent or path), 409 `agent_not_ready` (no usable agent), 502 `wrapper_unreachable`, 502 `wrapper_error` (a wrapper 5xx; its body is not relayed), 503 `unavailable` (no master key). The wrapper status and code are passed through unchanged for 4xx, a rejected bearer included, and the bearer never appears in an answer. When the wrapper stream fails after the response started, the orchestrator aborts the connection instead of ending the body, so the browser marks the download failed rather than saving a short file. The upstream response is closed when the relay ends, fails or the browser goes away. The route is not served on the service port.
+Errors: 400 `invalid_path` (absolute, NUL, `..` or a symlink leaving the workdir), 400 `not_a_file` (a directory, the workdir itself, a FIFO, socket or device), 404 `not_found` (session, agent or path), 409 `agent_not_ready` (no usable agent), 502 `wrapper_unreachable`, 502 `wrapper_error` (a wrapper 5xx; its body is not relayed), 503 `unavailable` (no master key). The wrapper status and code are passed through unchanged for 4xx, a rejected bearer included, and the bearer never appears in an answer. When the wrapper stream fails after the response started, the orchestrator aborts the connection instead of ending the body, so the browser marks the download failed rather than saving a short file. The upstream response is closed when the relay ends, fails or the browser goes away. The route is also served on the service port with a service token (connector services fetch agent output files there).
 
 ### `POST /api/v1/agents/{agent_id}/terminals`
 
