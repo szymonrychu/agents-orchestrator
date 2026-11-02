@@ -71,6 +71,12 @@ class Session:
     close_requested_at: datetime | None = None
     close_reason: str | None = None
     labels: list[str] = field(default_factory=list)
+    # inactivity limits: the api-written quiet-clock stamp, when the reminder went out, who asked
+    # for the close ('self' or 'inactivity') and when an inactivity close is forced
+    last_update_at: datetime | None = None
+    inactivity_reminded_at: datetime | None = None
+    close_kind: str | None = None
+    close_deadline_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -97,6 +103,10 @@ def _from_row(row: dict[str, Any]) -> Session:
         close_requested_at=row["close_requested_at"],
         close_reason=row["close_reason"],
         labels=row["labels"],
+        last_update_at=row["last_update_at"],
+        inactivity_reminded_at=row["inactivity_reminded_at"],
+        close_kind=row["close_kind"],
+        close_deadline_at=row["close_deadline_at"],
     )
 
 
