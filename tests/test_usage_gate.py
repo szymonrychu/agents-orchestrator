@@ -65,10 +65,29 @@ def test_quota_per_metric():
     assert got == Breach("five_hour", 60.0, 50, NOW + timedelta(hours=3))
 
 
-def test_stale_never_gates():
-    assert (
-        breach({"seven_day": W(99.0, stale=True)}, UsageQuota(seven_day_pct=10), 100, NOW) is None
-    )
+def test_stale_breaching_reading_still_gates():
+    got = breach({"seven_day": W(99.0, stale=True)}, UsageQuota(seven_day_pct=10), 100, NOW)
+    assert got == Breach("seven_day", 99.0, 10, NOW + timedelta(hours=24), stale=True)
+
+
+def test_fresh_breach_is_not_marked_stale():
+    assert breach({"seven_day": W(99.0)}, None, 90, NOW).stale is False
+
+
+def test_stale_non_breaching_reading_passes():
+    assert breach({"seven_day": W(9.0, stale=True)}, UsageQuota(seven_day_pct=10), 100, NOW) is None
+
+
+def test_stale_reading_already_reset_passes():
+    stale_reset = W(99.0, stale=True, hours=0)
+    assert breach({"seven_day": stale_reset}, UsageQuota(seven_day_pct=10), 100, NOW) is None
+
+
+def test_missing_data_passes():
+    assert breach(None, None, 100, NOW) is None
+    assert breach({}, None, 100, NOW) is None
+    assert breach({"seven_day": W(99.0)}, None, 90, NOW).metric == "seven_day"
+    assert breach({"other": W(99.0)}, None, 90, NOW) is None
 
 
 def test_reset_window_never_gates():
@@ -303,8 +322,19 @@ def test_refusal_body():
             "percent": 85.0,
             "limit": 80,
             "resets_at": resets.isoformat(),
+            "stale": False,
         }
     }
+
+
+def test_refusal_names_a_stale_reading():
+    resets = NOW + timedelta(hours=2)
+    err = refusal(Breach("five_hour", 91.0, 90, resets, stale=True), NOW)
+    assert err.extra["usage"]["stale"] is True
+    assert err.message == (
+        f"five_hour usage 91% (stale reading, a lower bound) is at or above the quota 90% "
+        f"until {resets.isoformat()}"
+    )
 
 
 def test_refusal_retry_after_at_least_one():

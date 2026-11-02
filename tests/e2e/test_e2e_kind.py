@@ -2435,9 +2435,10 @@ def streamed_ids(api: httpx.Client, cid: str, agents: int) -> dict[str, set[str]
 def replacement_order() -> list[str]:
     """Pod names in the order the reconciler logged replacing them.
 
-    The reconciler logs one JSON object per line; the pod name ends its `msg`.
+    The reconciler logs one JSON object per line; the pod name follows the phrase in its `msg`,
+    with the revisions after it.
     """
-    pattern = re.compile(r"replacing idle outdated pod (\S+)$")
+    pattern = re.compile(r"replacing idle outdated pod (\S+)")
     order = []
     for line in reconciler_log().splitlines():
         try:

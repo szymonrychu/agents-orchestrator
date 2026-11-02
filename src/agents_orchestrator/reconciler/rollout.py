@@ -189,7 +189,7 @@ class Replacer:
             if o in agents and not agents[o]["busy"] and (single or not agents[o]["leads"])
         ]
         if idle:
-            await self._delete(session, agents[idle[0]], pods[idle[0]], single)
+            await self._delete(session, agents[idle[0]], pods[idle[0]], single, rollout.revision)
             return
         if not rollout.leader_pending or rollout.pending != [leader] or leader in rollout.waiting:
             return
@@ -198,7 +198,7 @@ class Replacer:
             await self._queue_handover(session, agents[leader]["id"])
 
     async def _delete(
-        self, session: Session, agent: dict[str, Any], pod: Obj, single: bool
+        self, session: Session, agent: dict[str, Any], pod: Obj, single: bool, revision: str
     ) -> None:
         """Mark the agent unready, read its idle test again, then delete its pod."""
         async with self.pool.connection() as conn:
@@ -218,7 +218,13 @@ class Replacer:
         if held is None or held["busy"] or (held["leads"] and not single):
             return  # claimed meanwhile: the next converge marks it ready from its pod again
         name = pod["metadata"]["name"]
-        log.info("session %s: replacing idle outdated pod %s", session.slug, name)
+        log.info(
+            "session %s: replacing idle outdated pod %s (revision %s, update revision %s)",
+            session.slug,
+            name,
+            (pod["metadata"].get("labels") or {}).get(REVISION_LABEL),
+            revision,
+        )
         await self.kube.delete_pod(self.settings.namespace, name)
 
     async def _queue_handover(self, session: Session, agent_id: Any) -> None:
