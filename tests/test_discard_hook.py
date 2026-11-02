@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -154,6 +155,40 @@ async def test_export_jsonl_kinds_and_order(env):
         for key, value in record.items():
             if key.endswith("_at") and value is not None:
                 assert datetime.fromisoformat(value).utcoffset() == timedelta(0)
+
+
+async def test_export_session_record_has_provenance(env):
+    preset_id = uuid.uuid4()
+    await env.sql("INSERT INTO presets (id, name, spec) VALUES (%s, 'bench', '{}')", (preset_id,))
+    async with env.pool.connection() as conn:
+        c = await sessions.create(
+            conn,
+            "alpha",
+            SessionSpec(),
+            preset_id=preset_id,
+            preset_name="bench",
+            created_by_service="agents-schedule",
+        )
+        child = await sessions.create(conn, "bravo", SessionSpec(), created_by_session=c.id)
+        bare = await sessions.create(conn, "charlie", SessionSpec())
+
+    head = (await env.export(c.id))[0]
+    assert head["kind"] == "session"
+    assert head["preset_id"] == str(preset_id) and head["preset_name"] == "bench"
+    assert head["created_by_service"] == "agents-schedule" and head["created_by_session"] is None
+
+    head = (await env.export(child.id))[0]
+    assert head["created_by_session"] == str(c.id) and head["created_by_service"] is None
+    assert head["preset_id"] is None and head["preset_name"] is None
+
+    head = (await env.export(bare.id))[0]
+    for key in ("preset_id", "preset_name", "created_by_service", "created_by_session"):
+        assert head[key] is None, key
+
+    # the preset may later change or go: the record keeps the snapshotted name
+    await env.sql("DELETE FROM presets WHERE id = %s", (preset_id,))
+    head = (await env.export(c.id))[0]
+    assert head["preset_id"] is None and head["preset_name"] == "bench"
 
 
 async def test_export_streams_with_a_server_side_cursor(env):

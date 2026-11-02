@@ -408,7 +408,7 @@ The settings hook always runs, also for a session that sets its own URL (user de
 
 ### Export format
 
-JSONL, one JSON object per line, each with a `kind`. The first line is the `session` record (`id`, `slug`, `spec`, `created_at`). Then come the `agent`, `message`, `turn`, `command`, `check` and `event` records of the session, each kind in id order (turns in `started_at` order); a record carries the table's columns. A `command` record's own kind column is named `command_kind`. Timestamps are ISO 8601 UTC. The export is streamed from the database with server-side cursors, so a long history is never held in memory. The session is already `deleting` and the API refuses new messages, so, with the agents quiesced first, the history includes every event the agents produced.
+JSONL, one JSON object per line, each with a `kind`. The first line is the `session` record (`id`, `slug`, `spec`, `created_at`, and the provenance `preset_id`, `preset_name`, `created_by_service`, `created_by_session`, each `null` when unset; `preset_id` is also `null` once the preset is deleted, `preset_name` keeps the name it had at creation). Then come the `agent`, `message`, `turn`, `command`, `check` and `event` records of the session, each kind in id order (turns in `started_at` order); a record carries the table's columns. A `command` record's own kind column is named `command_kind`. Timestamps are ISO 8601 UTC. The export is streamed from the database with server-side cursors, so a long history is never held in memory. The session is already `deleting` and the API refuses new messages, so, with the agents quiesced first, the history includes every event the agents produced.
 
 ### Breaking change, 2026-10-25
 
