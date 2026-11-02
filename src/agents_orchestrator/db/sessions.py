@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -18,6 +19,8 @@ from agents_orchestrator.db.queue import SessionBeingDeleted
 from agents_orchestrator.spec import SessionSpec, validate_slug
 
 CHANNEL = "session_changed"
+
+log = logging.getLogger(__name__)
 
 
 class SessionExists(Exception):
@@ -323,10 +326,16 @@ async def close_expired(conn: psycopg.AsyncConnection) -> list[uuid.UUID]:
 # A session is idle when it has at least one live agent, every live agent is idle with no turn
 # and no attention, no message is queued, dispatching or verifying, and its init is not running.
 # `idle_since` is the latest signal: creation, agent free_since and attention, turn start and
-# end, message creation and dispatch, init start and finish.
-_IDLE_PREDICATE = """
+# end, message creation and dispatch, init start and finish, and a close request. The threshold
+# is the smaller of the spec's `discard_after_idle_seconds` and, while a close is requested, the
+# `%(grace)s` parameter (LEAST ignores NULL); a session with neither is never discarded.
+_IDLE_THRESHOLD = (
+    "LEAST(CASE WHEN s.close_requested_at IS NOT NULL THEN %(grace)s::int END,"
+    " (s.spec->>'discard_after_idle_seconds')::int)"
+)
+_IDLE_PREDICATE = f"""
     s.desired = 'active'
-    AND (s.spec->>'discard_after_idle_seconds') IS NOT NULL
+    AND {_IDLE_THRESHOLD} IS NOT NULL
     AND EXISTS (SELECT 1 FROM agents a WHERE a.session_id = s.id AND a.gone_at IS NULL)
     AND NOT EXISTS (
         SELECT 1 FROM agents a LEFT JOIN agent_status st ON st.agent_id = a.id
@@ -346,32 +355,44 @@ _IDLE_PREDICATE = """
         (SELECT max(GREATEST(m.created_at, m.dispatched_at))
            FROM messages m WHERE m.session_id = s.id),
         NULLIF(s.status->'init'->>'started_at', '')::timestamptz,
-        NULLIF(s.status->'init'->>'finished_at', '')::timestamptz
-    ) + make_interval(secs => (s.spec->>'discard_after_idle_seconds')::int) <= now()
+        NULLIF(s.status->'init'->>'finished_at', '')::timestamptz,
+        s.close_requested_at
+    ) + make_interval(secs => {_IDLE_THRESHOLD}) <= now()
 """
 
 
-async def discard_idle(conn: psycopg.AsyncConnection) -> list[uuid.UUID]:
-    """Flip sessions idle for their `discard_after_idle_seconds` to deleting (request_delete write).
+async def discard_idle(conn: psycopg.AsyncConnection, close_grace_seconds: int) -> list[uuid.UUID]:
+    """Flip idle sessions to deleting (request_delete write): idle for their
+    `discard_after_idle_seconds`, or for `close_grace_seconds` after a requested self-close.
 
     Per candidate, in its own transaction: lock the session row first, then re-evaluate the idle
     predicate in a fresh statement and flip under the `desired = 'active'` guard. `enqueue_message`
     takes the same row lock (FOR SHARE) before inserting, so a message committed first is seen by
-    the re-check and cancels the discard, and one arriving after the flip is refused.
+    the re-check and cancels the discard, and one arriving after the flip is refused. A
+    `cancel_close` committed first fails the re-check the same way.
     """
-    cur = await conn.execute(f"SELECT s.id FROM sessions s WHERE {_IDLE_PREDICATE}")
+    cur = await conn.execute(
+        f"SELECT s.id FROM sessions s WHERE {_IDLE_PREDICATE}", {"grace": close_grace_seconds}
+    )
     flipped: list[uuid.UUID] = []
     for (session_id,) in await cur.fetchall():
         async with conn.transaction():
             await conn.execute("SELECT 1 FROM sessions WHERE id = %s FOR UPDATE", (session_id,))
             cur = await conn.execute(
                 "UPDATE sessions s SET desired = 'deleting', generation = generation + 1"
-                f" WHERE s.id = %s AND {_IDLE_PREDICATE} RETURNING s.id",
-                (session_id,),
+                f" WHERE s.id = %(id)s AND {_IDLE_PREDICATE}"
+                " RETURNING s.id, s.close_requested_at IS NOT NULL",
+                {"grace": close_grace_seconds, "id": session_id},
             )
-            if await cur.fetchone() is not None:
+            row = await cur.fetchone()
+            if row is not None:
                 await _notify(conn, session_id)
                 flipped.append(session_id)
+        if row is not None:
+            if row[1]:
+                log.info("self-close: session %s is idle, discarding", session_id)
+            else:
+                log.info("idle discard: session %s has been idle long enough", session_id)
     return flipped
 
 

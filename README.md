@@ -67,6 +67,7 @@ Every process reads `ORCH_*` variables (the contract `agents-orchestrator-settin
 | `ORCH_MAX_PVC_SIZE` | `100Gi` | api | cap on PVC size |
 | `ORCH_MAX_SESSIONS` | `20` | api | cap on session rows |
 | `ORCH_AUTOCLOSE_MIN_SECONDS` | `300` | api | smallest accepted `autoclose_after_seconds` of a session spec |
+| `ORCH_CLOSE_GRACE_SECONDS` | `30` | api | seconds (0 to 3600) a session with a requested self-close stays idle before the sweeper discards it |
 | `ORCH_WRAPPER_SEND_TIMEOUT_SECONDS` | `15` | dispatcher, ingester | wrapper send timeout; at most half of dispatching_stale_seconds |
 | `ORCH_WRAPPER_INTERRUPT_SETTLE_SECONDS` | `20` | reconciler, dispatcher | rendered into every wrapper as `sessions.interrupt_settle_seconds`; the priority send timeout is `ORCH_WRAPPER_SEND_TIMEOUT_SECONDS + 3 * this + 14` s (89 s by default) |
 | `ORCH_DISPATCHING_STALE_SECONDS` | `60` | dispatcher, ingester | dispatching row stale cutoff |
@@ -434,6 +435,10 @@ A session whose spec sets `autoclose_after_seconds` closes itself: once `created
 `spec.discard_after_idle_seconds` (integer, 60 to 2592000, default unset meaning off) discards a session once it has been idle that long, for webhook and cron hives whose lifetime is unknown (`autoclose_after_seconds` counts from `created_at` and can kill a busy session). The same sweeper flips it to `deleting` and the reconciler discards it through the normal path, so the cache save rules apply. A session is idle when it has a live agent, every live agent is `idle` with no running turn and no attention (`waiting_since`), no message is `queued`, `dispatching` or `verifying`, and its init is not `running`. The clock is the latest of: `created_at`, an agent's `free_since` or attention time, a turn start or end, a message creation or dispatch, the init start or finish; so a session that just finished a turn restarts it. A follow-up event for a `reuse_running_agent` session queues a message, which blocks the discard and restarts the clock. The flip locks the session row, re-checks idleness in a fresh statement and is guarded by `desired = 'active'`; `enqueue_message` share-locks the same row, so a message committed first cancels the discard and one arriving after the flip is refused with 409 `session_deleting`.
 
 The `sessions` table keeps one writer, the api: the sweeper is an api background task that writes `desired` and `generation` (the same write as `DELETE`), never the reconciler.
+
+#### Self-close
+
+A session whose leader asked to close it (`POST /agent/v1/close`, the `self_close` tool; it sets `close_requested_at` and `close_reason`) is discarded by the same sweeper once it is idle for `ORCH_CLOSE_GRACE_SECONDS` (default 30, 0 to 3600). Idle has the Idle discard meaning above, with the request time added to the clock, so the grace counts from the later of the request and the last activity: the calling turn has ended, every agent is idle, no message is pending, no attention and no init running. The grace lets the readers of the final answer (the matrix connector polls every 3 s, trigger runs) fetch it before the rows are purged. With `discard_after_idle_seconds` also set, the smaller threshold applies. The sweeper polls every 10 s, so the session goes to `deleting` 30 to 40 s after its last turn ends by default, and the reconciler discards it through the normal path (cache and transcript saves, discard hook export), exactly like Idle discard. Until the flip, `DELETE /api/v1/sessions/{session_id}/close` cancels the request; the flip and a cancel lock the same row, so a cancel committed first keeps the session and one after the flip is refused with 409 `session_deleting`. The sweeper logs `self-close: session <id> is idle, discarding`.
 
 ## Workspace cache
 

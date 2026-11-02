@@ -67,7 +67,9 @@ def create_app(
         if owns_pool:
             app.state.pool = await open_pool(settings.database_url)
         await listener.start()
-        sweeper = asyncio.create_task(autoclose.sweep(app.state.pool), name="autoclose")
+        sweeper = asyncio.create_task(
+            autoclose.sweep(app.state.pool, settings.close_grace_seconds), name="autoclose"
+        )
         app.state.autoclose_task = sweeper
         try:
             yield
