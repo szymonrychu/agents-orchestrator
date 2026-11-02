@@ -45,6 +45,7 @@ from typing import Any
 
 from agents_orchestrator.k8s.kube import FIELD_MANAGER, Forbidden, KubeError, NotFound
 from agents_orchestrator.reconciler.rollout import REVISION_LABEL
+from agents_orchestrator.spec import parse_quantity
 
 READ_VERBS = frozenset({"get", "list", "watch"})
 ORCHESTRATOR_LABELS = {
@@ -270,6 +271,7 @@ class FakeKube:
             previous["metadata"]["uid"] if previous is not None else str(uuid.uuid4())
         )
         stored.pop("stringData", None)  # a Secret's data is write-only for this fake
+        _canonicalise_quantities(stored)
         if obj["kind"] == "StatefulSet":
             _keep_defaulted_rolling_update(stored, previous)
             _admit_statefulset(stored)
@@ -490,6 +492,47 @@ def _keep_defaulted_rolling_update(sts: dict[str, Any], previous: dict[str, Any]
     strategy = sts["spec"].setdefault("updateStrategy", {})
     if kept is not None and "rollingUpdate" not in strategy:
         strategy["rollingUpdate"] = copy.deepcopy(kept)
+
+
+_BINARY = ("", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei")
+_DECIMAL = ("n", "u", "m", "", "k", "M", "G", "T", "P", "E")
+
+
+def canonical_quantity(value: str) -> str:
+    """A quantity as the API server stores it: "0.5" is "500m", "1024Mi" is "1Gi", "1e3" is "1k".
+
+    A binary suffix (Ki..Ei) stays binary at the largest power that divides the value; anything
+    else becomes decimal SI, using the milli suffix for a fraction.
+    """
+    qty = parse_quantity(value)
+    if qty == 0:
+        return "0"
+    if value.endswith(_BINARY[1:]) and qty == qty.to_integral_value():
+        n = int(qty)
+        for exp in range(len(_BINARY) - 1, 0, -1):
+            if n % 1024**exp == 0:
+                return f"{n // 1024**exp}{_BINARY[exp]}"
+    if qty != qty.to_integral_value():
+        return f"{int(qty * 1000)}m"
+    n = int(qty)
+    exp = 0
+    while n % 1000 == 0 and exp < 6:
+        n //= 1000
+        exp += 1
+    return f"{n}{_DECIMAL[3 + exp]}"
+
+
+def _canonicalise_quantities(node: Any, parent: str = "") -> None:
+    """Rewrite resource quantities in place, like the API server on write."""
+    if isinstance(node, dict):
+        for key, val in node.items():
+            if isinstance(val, str) and (parent in ("limits", "requests") or key == "sizeLimit"):
+                node[key] = canonical_quantity(val)
+            else:
+                _canonicalise_quantities(val, key)
+    elif isinstance(node, list):
+        for item in node:
+            _canonicalise_quantities(item, parent)
 
 
 def _admit_statefulset(sts: dict[str, Any]) -> None:

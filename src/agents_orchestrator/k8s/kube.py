@@ -12,6 +12,7 @@ in-memory one that also enforces the Role.
 from __future__ import annotations
 
 import contextlib
+import re
 from collections.abc import Iterator, Mapping
 from typing import Any, Protocol
 
@@ -31,6 +32,7 @@ from lightkube.resources.core_v1 import (
 from lightkube.types import PatchType
 
 from agents_orchestrator.k8s.labels import MANAGED_BY, MANAGED_BY_LABEL, SESSION_LABEL
+from agents_orchestrator.spec import parse_quantity
 
 FIELD_MANAGER = "agents-orchestrator"
 
@@ -220,6 +222,18 @@ def _zero(value: Any) -> bool:
     return value is None or value in ("", 0, False) or value == [] or value == {}
 
 
+# A resource quantity: cpu, memory, storage under `limits` / `requests`, an emptyDir sizeLimit.
+_QUANTITY_PATH = re.compile(r"\.(?:(?:limits|requests)\.[^.\[]+|sizeLimit)$")
+
+
+def _same_quantity(desired: str, live: str) -> bool:
+    """True when both parse as Kubernetes quantities of equal value ("0.5" and "500m")."""
+    try:
+        return parse_quantity(desired) == parse_quantity(live)
+    except ValueError:
+        return False
+
+
 def drift(desired: Any, live: Any, path: str = "") -> str | None:
     """The path of the first field of `desired` the live object does not hold, or None.
 
@@ -227,6 +241,8 @@ def drift(desired: Any, live: Any, path: str = "") -> str | None:
     server owns) are ignored; lists compare item by item at the same length. A desired zero
     value ("", 0, false, empty) also matches a missing live key, because the API server omits
     empty fields. A key the render dropped is not seen here (the live object still has it).
+    Resource quantities compare by value: the API server canonicalises them on write ("0.5"
+    is stored as "500m", "1024Mi" as "1Gi").
     """
     if isinstance(desired, dict):
         if not isinstance(live, dict):
@@ -245,4 +261,13 @@ def drift(desired: Any, live: Any, path: str = "") -> str | None:
             if where is not None:
                 return where
         return None
-    return None if desired == live and type(desired) is type(live) else path or "."
+    if desired == live and type(desired) is type(live):
+        return None
+    if (
+        isinstance(desired, str)
+        and isinstance(live, str)
+        and _QUANTITY_PATH.search(path)
+        and _same_quantity(desired, live)
+    ):
+        return None
+    return path or "."

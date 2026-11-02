@@ -133,6 +133,40 @@ def test_drift_names_a_changed_value_or_list():
     assert drift(desired, {"spec": {"replicas": "2", "env": one}}) == ".spec.replicas"
 
 
+def test_drift_compares_resource_quantities_by_value():
+    """The API server canonicalises quantities on write, so "0.5" is stored as "500m"."""
+    desired = {
+        "spec": {
+            "containers": [{"resources": {"limits": {"cpu": "0.5", "memory": "1024Mi"}}}],
+            "volumes": [{"emptyDir": {"sizeLimit": "0.5Ti"}}],
+            "resources": {"requests": {"storage": "1e3"}},
+            "env": [{"name": "A", "value": "1e3"}],
+        }
+    }
+    live = {
+        "spec": {
+            "containers": [{"resources": {"limits": {"cpu": "500m", "memory": "1Gi"}}}],
+            "volumes": [{"emptyDir": {"sizeLimit": "512Gi"}}],
+            "resources": {"requests": {"storage": "1k"}},
+            "env": [{"name": "A", "value": "1e3"}],
+        }
+    }
+    assert drift(desired, live) is None
+
+
+def test_drift_still_sees_a_changed_quantity_and_ignores_other_strings():
+    desired = {"spec": {"containers": [{"resources": {"limits": {"cpu": "0.5"}}}]}}
+    where = ".spec.containers[0].resources.limits.cpu"
+    assert drift(desired, {"spec": {"containers": [{"resources": {"limits": {"cpu": "1"}}}]}}) == (
+        where
+    )
+    bad = {"spec": {"containers": [{"resources": {"limits": {"cpu": "plenty"}}}]}}
+    assert drift(desired, bad) == where
+    # an env value that merely looks like a quantity is compared as text
+    env = {"env": [{"name": "A", "value": "1e3"}]}
+    assert drift(env, {"env": [{"name": "A", "value": "1000"}]}) == ".env[0].value"
+
+
 # ---------------------------------------------------------------- no-op passes
 
 
@@ -148,6 +182,41 @@ async def test_noop_pass_patches_nothing(env):
     assert env.kube.applied() == []
     assert env.kube.patches == [] and env.kube.deletes == []
     assert env.kube.get("StatefulSet", "agent-alpha")["status"]["updateRevision"] == revision
+
+
+async def test_canonicalised_quantities_are_no_drift(env, caplog):
+    """The API server rewrites "0.5" to "500m" and "1024Mi" to "1Gi"; that is not drift."""
+    await env.session(
+        "alpha",
+        pvc_size="1024Mi",
+        resources={"requests": {"cpu": "0.25"}, "limits": {"cpu": "0.5", "memory": "1024Mi"}},
+    )
+    await env.rec.reconcile_once()
+    sts = env.kube.get("StatefulSet", "agent-alpha")
+    container = sts["spec"]["template"]["spec"]["containers"][0]
+    assert container["resources"]["limits"] == {"cpu": "500m", "memory": "1Gi"}
+    assert container["resources"]["requests"]["cpu"] == "250m"
+    pvc = env.kube.get("PersistentVolumeClaim", "agent-alpha-workspace")
+    assert pvc["spec"]["resources"]["requests"]["storage"] == "1Gi"
+    env.kube.reset_records()
+
+    with caplog.at_level("INFO"):
+        await env.rec.reconcile_once()
+        await env.rec.reconcile_once()
+    assert env.kube.applied() == []
+    assert not [m for m in reasons(caplog) if "drifted" in m]
+
+
+async def test_changed_quantity_is_still_applied(env):
+    c = await env.session("alpha", resources={"limits": {"cpu": "0.5"}})
+    await env.rec.reconcile_once()
+    env.kube.reset_records()
+
+    await env.update(c.id, resources={"limits": {"cpu": "1"}})
+    await env.rec.reconcile_once()
+    assert env.sts_patches() == ["agent-alpha"]
+    sts = env.kube.get("StatefulSet", "agent-alpha")
+    assert sts["spec"]["template"]["spec"]["containers"][0]["resources"]["limits"]["cpu"] == "1"
 
 
 async def test_spec_change_patches_once(env):
@@ -311,3 +380,15 @@ async def test_discard_logs_each_deletion(env, caplog):
         m for m in lines if "StatefulSet agent-alpha " in m or "StatefulSet/agent-alpha " in m
     )
     assert "session alpha" in sts and "discard" in sts
+
+
+async def test_discard_forgets_the_secret_it_deleted(env):
+    c = await env.session("alpha", replicas=1)
+    await env.rec.reconcile_once()
+    assert ("Secret", "agent-alpha-ccw") in env.rec._applied
+    async with env.pool.connection() as conn:
+        await sessions.request_delete(conn, c.id)
+
+    await env.rec.reconcile_once()
+    assert "agent-alpha-ccw" in env.kube.deleted("Secret")
+    assert ("Secret", "agent-alpha-ccw") not in env.rec._applied

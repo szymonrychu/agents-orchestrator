@@ -601,7 +601,9 @@ class Reconciler:
             return
         ns, slug = self.settings.namespace, session.slug
         await self._prune(slug, set(), DISCARD_ORDER, reason="discard")
-        await self.kube.delete("Secret", ns, object_names(slug)["secret"])  # absent is fine
+        secret = object_names(slug)["secret"]
+        self._applied.pop(("Secret", secret), None)
+        await self.kube.delete("Secret", ns, secret)  # absent is fine
 
         remaining = await self._remaining(slug)
         if remaining:
