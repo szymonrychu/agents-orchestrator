@@ -45,23 +45,20 @@ async def test_put_then_effective_is_the_database(pool, dsn):
         assert (await cur.fetchone())[0] == 1
 
 
-async def test_put_notifies(pool, dsn):
-    got: list = []
+async def _put(conn):
+    await store.put(conn, SweepPolicy(True, True, 30, 3, 21600, 2400))
 
-    async def reader():
-        async for item in listen(dsn, [store.CHANNEL]):
-            got.append(item)
-            return
 
-    task = asyncio.create_task(reader())
-    for _ in range(50):
-        await asyncio.sleep(0.1)
-        async with pool.connection() as conn:
-            await store.put(conn, SweepPolicy(True, True, 30, 3, 21600, 2400))
-        if got:
-            break
-    await asyncio.wait_for(task, 5)
-    assert got[0] == ("cache_sweep_changed", {})
+@pytest.mark.parametrize("write", [_put, store.request_run], ids=["put", "request_run"])
+async def test_writes_notify(pool, dsn, write):
+    ready = asyncio.Event()
+    stream = listen(dsn, [store.CHANNEL], on_ready=ready.set)
+    first = asyncio.ensure_future(anext(stream))
+    await asyncio.wait_for(ready.wait(), 5)  # LISTEN is up: one write must be enough
+    async with pool.connection() as conn:
+        await write(conn)
+    assert await asyncio.wait_for(first, 5) == ("cache_sweep_changed", {})
+    await stream.aclose()
 
 
 @pytest.mark.parametrize(

@@ -20,8 +20,7 @@ class SweepPolicy:
     def from_settings(cls, settings: Settings) -> SweepPolicy:
         """The ORCH_CACHE_* values: what applies until a policy is saved in the database."""
         grace = settings.cache_sweep_grace_seconds
-        if grace is None:  # Settings resolves the default; only an unvalidated object lacks it
-            grace = settings.cache_timeout_seconds + 600
+        assert grace is not None  # Settings._resolve fills the default
         return cls(
             enabled=settings.cache_sweep_enabled,
             dry_run=settings.cache_sweep_dry_run,
