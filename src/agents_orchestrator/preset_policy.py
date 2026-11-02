@@ -52,7 +52,7 @@ def privileged(spec: dict[str, Any]) -> list[str]:
 
 def human_only_changes(stored: dict[str, Any], new: dict[str, Any]) -> list[str]:
     out: list[str] = []
-    for f in ("kube_access", "session_messaging", "docker"):
+    for f in PRIVILEGED:
         if bool(new.get(f)) and not bool(stored.get(f)):
             out.append(f)
 
