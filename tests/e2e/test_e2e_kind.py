@@ -306,6 +306,7 @@ ALONE_SESSION_TOOLS = [
     "chat_send",
     "chat_react",
     "chat_status",
+    "self_close",
 ]
 
 

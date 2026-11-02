@@ -31,6 +31,7 @@ HIVE_TOOLS = [
 SESSION_TOOLS = ["sessions_list", "session_send"]
 INIT_SCRIPTS_TOOLS = ["init_scripts_get", "init_scripts_edit"]
 CHAT_TOOLS = ["chat_rooms", "chat_send", "chat_react", "chat_status"]
+CLOSE_TOOL = "self_close"
 # Superleader admin tools: the plugin's declarative admin rows (any-mcp-tatara-plugins
 # orchestration/orchestrator admin.py) plus the local secret_set tool.
 ADMIN_TOOLS = [
@@ -52,13 +53,14 @@ def orchestrator_allow(spec: SessionSpec) -> list[str]:
     Every session gets the session tools (D11), the init-scripts tools and the chat tools (D13),
     alone sessions included; the agent API decides what each caller may list, send, edit and say
     in the chat (leader only). The admin tools and `secret_set` are listed exactly when
-    `session_messaging` is enabled, whoever created the session.
+    `session_messaging` is enabled, whoever created the session; every other session gets
+    `self_close` last instead (a superleader is never offered it).
     """
     shared = [
         *SESSION_TOOLS,
         *INIT_SCRIPTS_TOOLS,
         *CHAT_TOOLS,
-        *(ADMIN_TOOLS if spec.session_messaging else []),
+        *(ADMIN_TOOLS if spec.session_messaging else [CLOSE_TOOL]),
     ]
     if not spec.hive:
         return shared
