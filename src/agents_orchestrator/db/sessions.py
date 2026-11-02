@@ -363,12 +363,9 @@ async def close_expired(conn: psycopg.AsyncConnection) -> list[uuid.UUID]:
 # and no attention, no message is queued, dispatching or verifying, and its init is not running.
 # `idle_since` is the latest signal: creation, agent free_since and attention, turn start and
 # end, message creation and dispatch, init start and finish, and a close request. The threshold
-# is the smaller of the spec's `discard_after_idle_seconds` and, while a close is requested, the
-# `%(grace)s` parameter (LEAST ignores NULL); a session with neither is never discarded.
-_IDLE_THRESHOLD = (
-    "LEAST(CASE WHEN s.close_requested_at IS NOT NULL THEN %(grace)s::int END,"
-    " (s.spec->>'discard_after_idle_seconds')::int)"
-)
+# is the `%(grace)s` parameter while a close is requested (self-close or inactivity close); a
+# session with no close request has no threshold and is never discarded.
+_IDLE_THRESHOLD = "CASE WHEN s.close_requested_at IS NOT NULL THEN %(grace)s::int END"
 _IDLE_PREDICATE = f"""
     s.desired = 'active'
     AND {_IDLE_THRESHOLD} IS NOT NULL
@@ -398,8 +395,8 @@ _IDLE_PREDICATE = f"""
 
 
 async def discard_idle(conn: psycopg.AsyncConnection, close_grace_seconds: int) -> list[uuid.UUID]:
-    """Flip idle sessions to deleting (request_delete write): idle for their
-    `discard_after_idle_seconds`, or for `close_grace_seconds` after a requested self-close.
+    """Flip idle sessions to deleting (request_delete write): those with a pending close request
+    (self-close or inactivity close) that have been idle for `close_grace_seconds`.
 
     Per candidate, in its own transaction: lock the session row first, then re-evaluate the idle
     predicate in a fresh statement and flip under the `desired = 'active'` guard. `enqueue_message`
@@ -417,7 +414,7 @@ async def discard_idle(conn: psycopg.AsyncConnection, close_grace_seconds: int) 
             cur = await conn.execute(
                 "UPDATE sessions s SET desired = 'deleting', generation = generation + 1"
                 f" WHERE s.id = %(id)s AND {_IDLE_PREDICATE}"
-                " RETURNING s.id, s.close_requested_at IS NOT NULL",
+                " RETURNING s.id",
                 {"grace": close_grace_seconds, "id": session_id},
             )
             row = await cur.fetchone()
@@ -425,10 +422,7 @@ async def discard_idle(conn: psycopg.AsyncConnection, close_grace_seconds: int) 
                 await _notify(conn, session_id)
                 flipped.append(session_id)
         if row is not None:
-            if row[1]:
-                log.info("self-close: session %s is idle, discarding", session_id)
-            else:
-                log.info("idle discard: session %s has been idle long enough", session_id)
+            log.info("self-close: session %s is idle, discarding", session_id)
     return flipped
 
 

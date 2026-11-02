@@ -32,6 +32,11 @@ from agents_orchestrator.cache.keys import validate_name
 if TYPE_CHECKING:
     from agents_orchestrator.settings import Settings
 
+# Bounds of an inactivity limit (0 = off); shared by the ORCH_INACTIVITY_* settings and
+# `spec.inactivity`.
+INACTIVITY_MIN_SECONDS = 60
+INACTIVITY_MAX_SECONDS = 2592000
+
 SLUG_MAX = 40
 RESERVED_PLUGIN = "orchestrator"
 _LABEL_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
@@ -625,6 +630,23 @@ class UsageQuota(_Strict):
     seven_day_pct: int | None = Field(default=None, ge=1, le=100)
 
 
+class InactivityLimits(_Strict):
+    """Per-preset inactivity limits, in seconds, overriding `ORCH_INACTIVITY_REMINDER_SECONDS` and
+    `ORCH_INACTIVITY_CLOSE_SECONDS`: unset uses the setting, 0 turns the limit off."""
+
+    reminder_seconds: int | None = None
+    close_seconds: int | None = None
+
+    @field_validator("reminder_seconds", "close_seconds")
+    @classmethod
+    def _check_limit(cls, v: int | None) -> int | None:
+        if v is not None and v != 0 and not INACTIVITY_MIN_SECONDS <= v <= INACTIVITY_MAX_SECONDS:
+            raise ValueError(
+                f"must be 0 (off) or {INACTIVITY_MIN_SECONDS} to {INACTIVITY_MAX_SECONDS}"
+            )
+        return v
+
+
 class SessionSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -651,9 +673,6 @@ class SessionSpec(BaseModel):
     wrapper: WrapperSettings | None = None
     leader_lease_seconds: int | None = Field(default=None, ge=60, le=604800)
     autoclose_after_seconds: int | None = Field(default=None, ge=1, le=2592000)
-    # Idle-based discard: the session is discarded once it has been idle this long (see
-    # db.sessions.discard_idle). Unset means off.
-    discard_after_idle_seconds: int | None = Field(default=None, ge=60, le=2592000)
     # Read only by trigger services (agents-webhook, agents-schedule): send a new event to
     # the session still running for it. The orchestrator never acts on it, so a session a
     # user creates ignores it. Sparse: unset is not stored or dumped in a preset.
@@ -667,6 +686,9 @@ class SessionSpec(BaseModel):
     # Usage ceilings that refuse a session start or scale-up (see api/usage_gate.py). Sparse:
     # unset is not stored or dumped in a preset.
     usage_quota: UsageQuota | None = None
+    # Inactivity reminder and close limits overriding the ORCH_INACTIVITY_* settings. Sparse:
+    # unset is not stored or dumped in a preset.
+    inactivity: InactivityLimits | None = None
     # Privileged Docker-in-Docker sidecar (docker build/run, kind); refused until ORCH_DOCKER_IMAGE
     # is set. The three sizes tune the sidecar and need docker: true. Sparse like kube_access.
     docker: bool | None = Field(default=None, strict=True)
@@ -1076,6 +1098,21 @@ def validate_spec(spec: SessionSpec, settings: Settings, stored: SessionSpec | N
                 derived[name] = i
                 continue
             errors.append(f"any_mcp_sources[{i}]: {reason}")
+    if spec.inactivity is not None:
+        own = spec.inactivity
+        reminder = (
+            settings.inactivity_reminder_seconds
+            if own.reminder_seconds is None
+            else own.reminder_seconds
+        )
+        close = (
+            settings.inactivity_close_seconds if own.close_seconds is None else own.close_seconds
+        )
+        if reminder > 0 and close > 0 and reminder >= close:
+            errors.append(
+                f"inactivity.reminder_seconds {reminder} must be below "
+                f"inactivity.close_seconds {close}"
+            )
     errors.extend(_template_problems(spec))
     if errors:
         raise SpecInvalid(errors)

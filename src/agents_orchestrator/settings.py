@@ -13,7 +13,12 @@ import yaml
 from pydantic import Field, ValidationError, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-from agents_orchestrator.spec import CACHE_MAX_BYTES_LIMIT, parse_quantity
+from agents_orchestrator.spec import (
+    CACHE_MAX_BYTES_LIMIT,
+    INACTIVITY_MAX_SECONDS,
+    INACTIVITY_MIN_SECONDS,
+    parse_quantity,
+)
 
 PREFIX = "ORCH_"
 MIN_MASTER_KEY_BYTES = 32
@@ -22,9 +27,6 @@ SWEEP_RETENTION_DAYS_MAX = 3650
 SWEEP_KEEP_NEWEST_MAX = 1000
 SWEEP_INTERVAL_SECONDS_MAX = 30 * 86400
 SWEEP_GRACE_SECONDS_MAX = 7 * 86400
-# Bounds of an inactivity limit (0 = off); also the bounds of `spec.inactivity`.
-INACTIVITY_MIN_SECONDS = 60
-INACTIVITY_MAX_SECONDS = 2592000
 _TAG_RE = re.compile(r"^v\d+\.\d+\.\d+$")
 _DOCKER_IMAGE_RE = re.compile(r"^[a-z0-9][a-z0-9._:/-]*:\d+\.\d+\.\d+-dind$")
 _SERVICE_TOKEN_RE = re.compile(r"^([a-z0-9][a-z0-9-]{0,62}):([0-9a-f]{64})$")

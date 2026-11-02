@@ -1548,6 +1548,36 @@
         "title": "HandoverIn",
         "type": "object"
       },
+      "InactivityLimits": {
+        "additionalProperties": false,
+        "description": "Per-preset inactivity limits, in seconds, overriding `ORCH_INACTIVITY_REMINDER_SECONDS` and\n`ORCH_INACTIVITY_CLOSE_SECONDS`: unset uses the setting, 0 turns the limit off.",
+        "properties": {
+          "close_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Close Seconds"
+          },
+          "reminder_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reminder Seconds"
+          }
+        },
+        "title": "InactivityLimits",
+        "type": "object"
+      },
       "InitScriptsIn": {
         "properties": {
           "scripts": {
@@ -3505,19 +3535,6 @@
               }
             ]
           },
-          "discard_after_idle_seconds": {
-            "anyOf": [
-              {
-                "maximum": 2592000.0,
-                "minimum": 60.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Discard After Idle Seconds"
-          },
           "discard_hook_url": {
             "anyOf": [
               {
@@ -3605,6 +3622,16 @@
               }
             ],
             "title": "Image"
+          },
+          "inactivity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InactivityLimits"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "init_scripts": {
             "default": [],
@@ -3837,19 +3864,6 @@
               }
             ]
           },
-          "discard_after_idle_seconds": {
-            "anyOf": [
-              {
-                "maximum": 2592000.0,
-                "minimum": 60.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Discard After Idle Seconds"
-          },
           "discard_hook_url": {
             "anyOf": [
               {
@@ -3937,6 +3951,16 @@
               }
             ],
             "title": "Image"
+          },
+          "inactivity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InactivityLimits"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "init_scripts": {
             "default": [],
