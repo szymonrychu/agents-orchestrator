@@ -145,6 +145,13 @@ async def test_manageable_ids(pool):
         assert await presets.manageable_ids(conn) == {p1.id, p2.id}
 
 
+async def test_manageable_specs_only_manageable(pool):
+    async with pool.connection() as conn:
+        p1 = await presets.create(conn, "a", {"kube_access": True}, superleader_manageable=True)
+        await presets.create(conn, "c", {"docker": True})
+        assert await presets.manageable_specs(conn) == {p1.id: {"kube_access": True}}
+
+
 async def test_update_expected_updated_at_mismatch_raises(pool):
     async with pool.connection() as conn:
         one = await presets.create(conn, "Cas", {"a": 1})

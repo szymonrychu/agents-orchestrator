@@ -21,6 +21,7 @@ from psycopg.types.json import Jsonb
 from test_agent_session_messaging import alone
 from test_api_agent import KEY, client_for, headers, make_settings
 from test_api_sessions import assert_error
+from test_api_sessions import client_for as main_client
 
 from agents_orchestrator.api import admin_relay, forward
 from agents_orchestrator.api.admin import ADMIN_PREFIX
@@ -82,6 +83,7 @@ async def rig(pool, dsn):
     )  # fmt: skip
     r.vis = str(await add_preset(pool, True))
     r.hid = str(await add_preset(pool, False))
+    r.priv = str(await add_preset(pool, True, {"kube_access": True}))
     seed(r)
 
     async def call(method, path, **kw):
@@ -93,12 +95,12 @@ async def rig(pool, dsn):
     return r
 
 
-async def add_preset(pool, manageable: bool) -> uuid.UUID:
+async def add_preset(pool, manageable: bool, spec: dict | None = None) -> uuid.UUID:
     pid = uuid.uuid4()
     async with pool.connection() as conn:
         await conn.execute(
             "INSERT INTO presets (id, name, spec, superleader_manageable) VALUES (%s,%s,%s,%s)",
-            (pid, f"p-{pid.hex[:8]}", Jsonb({}), manageable),
+            (pid, f"p-{pid.hex[:8]}", Jsonb(spec or {}), manageable),
         )
     return pid
 
@@ -127,11 +129,11 @@ def make(service: str, schema: str, n: int, **over):
 def seed(rig) -> None:
     """Give the fakes one object on a manageable preset (7), one on a hidden preset (8) and,
     for rooms and runs, one without a preset (9); mutations answer a minimal valid success."""
-    by = {7: rig.vis, 8: rig.hid, 9: None}
-    ends = [make("webhook", "EndpointView", n, preset_id=by[n]) for n in (7, 8)]
+    by = {7: rig.vis, 8: rig.hid, 9: None, 10: rig.priv}
+    ends = [make("webhook", "EndpointView", n, preset_id=by[n]) for n in (7, 8, 10)]
     events = [make("webhook", "EventView", n, preset_id=by[n]) for n in (7, 8, 9)]
     details = [make("webhook", "EventDetail", n, preset_id=by[n]) for n in (7, 8, 9)]
-    scheds = [make("schedule", "ScheduleView", n, preset_id=by[n]) for n in (7, 8)]
+    scheds = [make("schedule", "ScheduleView", n, preset_id=by[n]) for n in (7, 8, 10)]
     runs = [make("schedule", "RunView", n, schedule_id=ident("schedule", n)) for n in (7, 8, 9)]
     runs[2]["schedule_id"] = ident("schedule", 99)  # a schedule the upstream does not list
     rooms = [make("connector", "RoomView", n, preset_id=by[n]) for n in (7, 8, 9)]
@@ -448,7 +450,9 @@ def ids(response, field: str = "id") -> set[str]:
 async def test_lists_filtered(rig, service, template, field):
     r = await rig.call("GET", relay_url(service, template))
     assert r.status_code == 200
-    assert ids(r, field) == {str(ident(service, 7))}
+    # object 10 (endpoint, schedule) sits on the visible privileged preset: listed, not writable
+    seen = (7, 10) if template in ("/endpoints", "/schedules") else (7,)
+    assert ids(r, field) == {str(ident(service, n)) for n in seen}
 
 
 async def test_list_with_non_list_payload_fails_closed(rig):
@@ -649,3 +653,96 @@ async def test_history_query_string_passed(rig):
     (call,) = rig.fakes["history"].calls
     assert call.path == "/history/v1/sessions" and call.query == "q=needle&regex=true"
     assert call.headers["authorization"] == f"Bearer {rig.tokens['history']}"
+
+
+# ------------------------------------------------------------------------- privileged targets
+
+PRIVILEGED_WRITES = [
+    ("webhook", "POST", "/endpoints"),
+    ("webhook", "PATCH", "/endpoints/{id}"),
+    ("webhook", "POST", "/endpoints/{id}/clone"),
+    ("schedule", "POST", "/schedules"),
+    ("schedule", "PUT", "/schedules/{schedule_id}"),
+    ("schedule", "POST", "/schedules/{schedule_id}/run"),
+]
+PRIV_BODY = [r for r in PRIVILEGED_WRITES if r in BODY]
+PRIV_STORED = [r for r in PRIVILEGED_WRITES if r in STORED]
+
+
+def test_privileged_guard_rows_are_exactly_the_epic_list():
+    assert {k for k, g in admin_relay.GUARDS.items() if g.privileged} == set(PRIVILEGED_WRITES)
+
+
+async def _last_admin_call(rig) -> dict:
+    async with rig.pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT data FROM events WHERE session_id = %s AND type = 'admin_call'"
+            " ORDER BY id DESC LIMIT 1",
+            (rig.boss.id,),
+        )
+        return (await cur.fetchone())[0]
+
+
+@pytest.mark.parametrize(("service", "method", "template"), PRIV_BODY)
+async def test_relay_body_privileged_target_403(rig, service, method, template):
+    body = _body_for(rig, service, method, template, rig.priv)
+    r = await rig.call(method, relay_url(service, template), json=body)
+    assert_error(r, 403, "privileged_target")
+    assert r.json()["error"]["fields"] == ["kube_access"]
+    assert not _sent(rig, service, method, template)
+    event = await _last_admin_call(rig)
+    assert event["status"] == 403
+    assert event["fields"] == ["kube_access"]
+
+
+@pytest.mark.parametrize(("service", "method", "template"), PRIV_STORED)
+@pytest.mark.parametrize("with_preset", [False, True])
+async def test_relay_stored_privileged_target_403(rig, service, method, template, with_preset):
+    body = _body_for(rig, service, method, template, rig.vis)
+    if body is not None and not with_preset:
+        body.pop("preset_id")
+    r = await rig.call(method, relay_url(service, template, 10), json=body)
+    assert_error(r, 403, "privileged_target")
+    assert r.json()["error"]["fields"] == ["kube_access"]
+    assert not _sent(rig, service, method, template, 10)
+
+
+@pytest.mark.parametrize(("service", "method", "template"), PRIV_STORED)
+async def test_relay_safe_preset_still_forwarded(rig, service, method, template):
+    body = _body_for(rig, service, method, template, rig.vis)
+    r = await rig.call(method, relay_url(service, template), json=body)
+    assert r.status_code == _success(service, method, template), r.text
+    assert _sent(rig, service, method, template)
+
+
+async def test_relay_hidden_privileged_is_404(rig):
+    hidden = str(await add_preset(rig.pool, False, {"kube_access": True}))
+    body = _body_for(rig, "webhook", "POST", "/endpoints", hidden)
+    r = await rig.call("POST", relay_url("webhook", "/endpoints"), json=body)
+    assert_error(r, 404, "not_found")
+    assert not _sent(rig, "webhook", "POST", "/endpoints")
+
+
+@pytest.mark.parametrize(
+    ("service", "method", "template"),
+    [
+        ("webhook", "DELETE", "/endpoints/{id}"),
+        ("webhook", "POST", "/endpoints/{id}/rotate"),
+        ("schedule", "DELETE", "/schedules/{schedule_id}"),
+    ],
+)
+async def test_relay_non_write_routes_ignore_privileged(rig, service, method, template):
+    r = await rig.call(method, relay_url(service, template, 10))
+    assert r.status_code == _success(service, method, template), r.text
+    assert _sent(rig, service, method, template, 10)
+
+
+async def test_relay_is_agent_port_only(rig):
+    test_relay_routes_are_served_on_the_admin_router(rig)
+    body = _body_for(rig, "webhook", "POST", "/endpoints", rig.vis)
+    async with main_client(rig.app) as http:
+        r = await http.post(
+            ADMIN_PREFIX + "/webhooks/endpoints", json=body, headers={"authorization": "Bearer x"}
+        )
+    assert not 200 <= r.status_code < 300
+    assert not _sent(rig, "webhook", "POST", "/endpoints")
