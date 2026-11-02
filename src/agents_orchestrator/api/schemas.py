@@ -298,6 +298,12 @@ class MetaUsage(BaseModel):
     quota_default_pct: int
 
 
+class MetaInactivity(BaseModel):
+    reminder_seconds: int
+    close_seconds: int
+    handoff_seconds: int
+
+
 class Meta(BaseModel):
     defaults: MetaDefaults
     agent_image: str
@@ -312,6 +318,7 @@ class Meta(BaseModel):
     hook_events: list[MetaHookEvent]
     permission_modes: list[MetaPermissionMode]
     usage: MetaUsage
+    inactivity: MetaInactivity
 
 
 Lane = Literal["idle", "regular", "priority"]

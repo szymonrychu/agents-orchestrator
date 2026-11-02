@@ -248,6 +248,11 @@ async def meta(settings: Cfg) -> schemas.Meta:
         usage=schemas.MetaUsage(
             configured=settings.usage_available, quota_default_pct=settings.usage_quota_default
         ),
+        inactivity=schemas.MetaInactivity(
+            reminder_seconds=settings.inactivity_reminder_seconds,
+            close_seconds=settings.inactivity_close_seconds,
+            handoff_seconds=settings.inactivity_handoff_seconds,
+        ),
     )
 
 

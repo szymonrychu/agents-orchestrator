@@ -15,3 +15,19 @@ async def test_meta_permission_modes(pool, dsn):
         {"value": "bypassPermissions", "label": "Allow all"},
         {"value": "auto", "label": "Auto"},
     ]
+
+
+async def test_meta_reports_inactivity(pool, dsn):
+    settings = make_settings(
+        dsn,
+        inactivity_reminder_seconds=3600,
+        inactivity_close_seconds=14400,
+        inactivity_handoff_seconds=300,
+    )
+    async with client_for(create_app(settings, pool)) as c:
+        meta = (await c.get("/api/v1/meta")).json()
+    assert meta["inactivity"] == {
+        "reminder_seconds": 3600,
+        "close_seconds": 14400,
+        "handoff_seconds": 300,
+    }

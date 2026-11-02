@@ -2376,6 +2376,9 @@
             "title": "Hook Events",
             "type": "array"
           },
+          "inactivity": {
+            "$ref": "#/components/schemas/MetaInactivity"
+          },
           "kube_access": {
             "$ref": "#/components/schemas/MetaKubeAccess"
           },
@@ -2410,7 +2413,8 @@
           "docker",
           "hook_events",
           "permission_modes",
-          "usage"
+          "usage",
+          "inactivity"
         ],
         "title": "Meta",
         "type": "object"
@@ -2593,6 +2597,29 @@
           "interval_required"
         ],
         "title": "MetaHookEvent",
+        "type": "object"
+      },
+      "MetaInactivity": {
+        "properties": {
+          "close_seconds": {
+            "title": "Close Seconds",
+            "type": "integer"
+          },
+          "handoff_seconds": {
+            "title": "Handoff Seconds",
+            "type": "integer"
+          },
+          "reminder_seconds": {
+            "title": "Reminder Seconds",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "reminder_seconds",
+          "close_seconds",
+          "handoff_seconds"
+        ],
+        "title": "MetaInactivity",
         "type": "object"
       },
       "MetaKubeAccess": {
