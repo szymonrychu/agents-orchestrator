@@ -53,6 +53,9 @@ Every process reads `ORCH_*` variables (the contract `agents-orchestrator-settin
 | `ORCH_WRAPPER_PORT` | `8080` | dispatcher, ingester | wrapper HTTP port |
 | `ORCH_CLUSTER_DOMAIN` | `cluster.local` | dispatcher, ingester, reconciler | Kubernetes cluster DNS domain |
 | `ORCH_AGENT_TERMINATION_GRACE_SECONDS` | `90` | api, reconciler | agent pod termination grace |
+| `ORCH_AGENT_FS_GROUP_CHANGE_POLICY` | `OnRootMismatch` | api, reconciler | agent pod `securityContext.fsGroupChangePolicy` (`OnRootMismatch` or `Always`); `OnRootMismatch` skips the recursive chown of the workspace PVC on every start |
+| `ORCH_AGENT_LIVENESS_TIMEOUT_SECONDS` | `5` | api, reconciler | agent liveness probe `timeoutSeconds` (>= 1) |
+| `ORCH_AGENT_LIVENESS_FAILURE_THRESHOLD` | `6` | api, reconciler | agent liveness probe `failureThreshold` (>= 1); with the 10 s period a wrapper is restarted after about a minute without a `/healthz` answer |
 | `ORCH_HTTP_HOST` | `0.0.0.0` | api | bind host |
 | `ORCH_HTTP_PORT` | `8000` | api | bind port |
 | `ORCH_DISPATCH_POLL_SECONDS` | `2` | dispatcher | dispatcher polling fallback |

@@ -41,6 +41,9 @@ def test_defaults():
     assert s.wrapper_port == 8080
     assert s.cluster_domain == "cluster.local"
     assert s.agent_termination_grace_seconds == 90
+    assert s.agent_fs_group_change_policy == "OnRootMismatch"
+    assert s.agent_liveness_timeout_seconds == 5
+    assert s.agent_liveness_failure_threshold == 6
     assert s.http_host == "0.0.0.0"
     assert s.http_port == 8000
     assert s.dispatch_poll_seconds == 2
