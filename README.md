@@ -66,6 +66,9 @@ Every process reads `ORCH_*` variables (the contract `agents-orchestrator-settin
 | `ORCH_MAX_REPLICAS` | `16` | api | cap on replicas per session |
 | `ORCH_MAX_PVC_SIZE` | `100Gi` | api | cap on PVC size |
 | `ORCH_MAX_SESSIONS` | `20` | api | cap on session rows |
+| `ORCH_ATTACHMENTS_MAX_BYTES` | `6291456` | api | largest decoded message attachment (at least 1); above it a POST is refused 413 `too_large` |
+| `ORCH_ATTACHMENTS_MAX_TOTAL_BYTES` | `8388608` | api | largest decoded total of the attachments of one message (at least 1); above it a POST is refused 413 `too_large` |
+| `ORCH_ATTACHMENTS_MAX_COUNT` | `8` | api | most attachments on one message (0 refuses all); above it a POST is refused 413 `too_large` |
 | `ORCH_AUTOCLOSE_MIN_SECONDS` | `300` | api | smallest accepted `autoclose_after_seconds` of a session spec |
 | `ORCH_CLOSE_GRACE_SECONDS` | `30` | api | seconds (10 to 3600) a session with a requested self-close stays idle before the sweeper discards it |
 | `ORCH_WRAPPER_SEND_TIMEOUT_SECONDS` | `15` | dispatcher, ingester | wrapper send timeout; at most half of dispatching_stale_seconds |
@@ -863,11 +866,11 @@ List of agent views: `id`, `ordinal`, `pod_name`, `ready`, `state`, `free_since`
 
 ### `POST /api/v1/sessions/{session_id}/messages`
 
-Body `{"text": "<non-empty>", "target_agent_id": "<uuid, optional>"}`. Queues a message for round-robin dispatch (or for one agent). Response 202 `{"message_id": <int>, "status": "queued"}`. Errors: 404 `not_found`, 409 `session_deleting`, 422 `invalid_request` (empty text, target not in this session), 422 `target_gone`. The first message a session ever receives is the rendered spec `start_prompt` (if set), a blank line, then `text`, as one message; later messages are unchanged. This holds for every caller, so a chat preamble in `text` follows the start prompt.
+Body `{"text": "<non-empty>", "target_agent_id": "<uuid, optional>", "attachments": [{"name", "mime", "data_b64"}, ...optional]}`. An attachment `name` matches `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$` and is unique within the request; `mime` is one of `image/png`, `image/jpeg`, `application/json`, `text/plain`; `data_b64` is standard padded base64 (no whitespace) of at least 1 byte whose content must match the mime (PNG and JPEG magic bytes, parsable JSON, UTF-8 text). The bytes are stored with the message; views list only metadata. Queues a message for round-robin dispatch (or for one agent). Response 202 `{"message_id": <int>, "status": "queued"}`. Errors: 404 `not_found`, 409 `session_deleting`, 413 `too_large` (more than `ORCH_ATTACHMENTS_MAX_COUNT` attachments, one over `ORCH_ATTACHMENTS_MAX_BYTES`, or a decoded total over `ORCH_ATTACHMENTS_MAX_TOTAL_BYTES`; an over-long `data_b64` is refused before decoding), 422 `invalid_request` (empty text, target not in this session), 422 `invalid_attachment` (bad name, mime not allowed, bad base64, duplicate name, zero bytes, content not matching the mime), 422 `target_gone`. The first message a session ever receives is the rendered spec `start_prompt` (if set), a blank line, then `text`, as one message; later messages are unchanged. This holds for every caller, so a chat preamble in `text` follows the start prompt.
 
 ### `GET /api/v1/sessions/{session_id}/messages`
 
-Query `status` (comma-separated, from `queued`, `dispatching`, `verifying`, `sent`, `failed`, `cancelled`) and `limit` (1-500, default 100). Response 200: list of message views (`id`, `session_id`, `text`, `status`, `target_agent_id`, `agent_id`, `turn_id`, `attempts`, `max_attempts`, `next_attempt_at`, `error`, `created_at`, `dispatched_at`, `turn`: `status`, `started_at`, `completed_at`, `final_text`, `usage`). Errors: 404 `not_found`, 422 `invalid_request`.
+Query `status` (comma-separated, from `queued`, `dispatching`, `verifying`, `sent`, `failed`, `cancelled`) and `limit` (1-500, default 100). Response 200: list of message views (`id`, `session_id`, `text`, `status`, `target_agent_id`, `agent_id`, `turn_id`, `attempts`, `max_attempts`, `next_attempt_at`, `error`, `created_at`, `dispatched_at`, `attachments`: a list of `name`, `mime`, `size`, `path` (`.attachments/orch-<id>/<name>`, never the bytes), `turn`: `status`, `started_at`, `completed_at`, `final_text`, `usage`). Errors: 404 `not_found`, 422 `invalid_request`.
 
 ### `GET /api/v1/messages/{message_id}`
 

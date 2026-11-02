@@ -375,3 +375,149 @@ async def test_start_prompt_user_is_the_creating_service_or_empty(http, pool):
         )
     await http.post(f"/api/v1/sessions/{cl2['id']}/messages", json={"text": "y"})
     assert await _texts(http, cl2["id"]) == ["[agents-webhook]\n\ny"]
+
+
+# ---- attachments ----
+
+_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+
+
+def _att(name="s.png", mime="image/png", data=_PNG, **kw):
+    import base64
+
+    return {"name": name, "mime": mime, "data_b64": base64.b64encode(data).decode(), **kw}
+
+
+async def test_post_message_with_png_attachment(http, pool):
+    cl = await insert_session(pool)
+    r = await http.post(
+        f"/api/v1/sessions/{cl['id']}/messages", json={"text": "see", "attachments": [_att()]}
+    )
+    assert r.status_code == 202, r.text
+    mid = r.json()["message_id"]
+    want = [
+        {
+            "name": "s.png",
+            "mime": "image/png",
+            "size": len(_PNG),
+            "path": f".attachments/orch-{mid}/s.png",
+        }
+    ]
+    one = await http.get(f"/api/v1/messages/{mid}")
+    assert one.json()["attachments"] == want
+    assert "data_b64" not in one.text
+    lst = await http.get(f"/api/v1/sessions/{cl['id']}/messages")
+    assert lst.json()[0]["attachments"] == want
+    assert "data_b64" not in lst.text
+
+
+async def test_message_without_attachments_lists_empty(http, pool):
+    cl = await insert_session(pool)
+    r = await http.post(f"/api/v1/sessions/{cl['id']}/messages", json={"text": "x"})
+    got = (await http.get(f"/api/v1/messages/{r.json()['message_id']}")).json()
+    assert got["attachments"] == []
+
+
+async def _post_att(http, pool, *items):
+    cl = await insert_session(pool)
+    return await http.post(
+        f"/api/v1/sessions/{cl['id']}/messages", json={"text": "x", "attachments": list(items)}
+    )
+
+
+async def test_attachment_mime_not_allowed_422(http, pool):
+    r = await _post_att(http, pool, _att("a.gif", "image/gif", b"GIF89a"))
+    assert_error(r, 422, "invalid_attachment")
+    assert await _count(pool, "messages") == 0
+
+
+@pytest.mark.parametrize(
+    ("mime", "data"),
+    [
+        ("image/png", b'{"a": 1}'),
+        ("image/jpeg", _PNG),
+        ("application/json", b"{"),
+        ("text/plain", b"\xff\xfe"),
+    ],
+)
+async def test_attachment_content_mismatch_422(http, pool, mime, data):
+    r = await _post_att(http, pool, _att("f.bin", mime, data))
+    assert_error(r, 422, "invalid_attachment")
+    assert await _count(pool, "messages") == 0
+
+
+async def test_valid_jpeg_json_and_text_accepted(http, pool):
+    r = await _post_att(
+        http,
+        pool,
+        _att("a.jpg", "image/jpeg", b"\xff\xd8\xff\xe0abc"),
+        _att("b.json", "application/json", b'{"a": 1}'),
+        _att("c.txt", "text/plain", "café".encode()),
+    )
+    assert r.status_code == 202, r.text
+
+
+async def test_attachment_bad_base64_422(http, pool):
+    r = await _post_att(http, pool, {"name": "a.png", "mime": "image/png", "data_b64": "@@@@"})
+    assert_error(r, 422, "invalid_attachment")
+    r = await _post_att(http, pool, {"name": "a.png", "mime": "image/png", "data_b64": "aGk=\n"})
+    assert_error(r, 422, "invalid_attachment")
+
+
+async def test_attachment_zero_bytes_422(http, pool):
+    assert_error(
+        await _post_att(http, pool, _att("a.txt", "text/plain", b"")), 422, "invalid_attachment"
+    )
+
+
+async def test_attachment_duplicate_name_422(http, pool):
+    r = await _post_att(http, pool, _att("a.png"), _att("a.png"))
+    assert_error(r, 422, "invalid_attachment")
+
+
+@pytest.mark.parametrize("name", ["../x", "a/b", ".gitignore", "x\x00y", "a" * 129, ""])
+async def test_attachment_bad_name_422(http, pool, name):
+    assert_error(await _post_att(http, pool, _att(name)), 422, "invalid_attachment")
+
+
+async def test_attachment_caps_413(pool, dsn):
+    app = create_app(
+        make_settings(
+            dsn,
+            attachments_max_bytes=100,
+            attachments_max_total_bytes=150,
+            attachments_max_count=2,
+        ),
+        pool,
+    )
+    async with client_for(app) as http:
+        txt = "text/plain"
+        assert_error(
+            await _post_att(http, pool, *[_att(f"{i}.txt", txt, b"a") for i in range(3)]),
+            413,
+            "too_large",
+        )
+        assert_error(await _post_att(http, pool, _att("a.txt", txt, b"a" * 101)), 413, "too_large")
+        assert_error(
+            await _post_att(
+                http, pool, _att("a.txt", txt, b"a" * 100), _att("b.txt", txt, b"b" * 60)
+            ),
+            413,
+            "too_large",
+        )
+        # over-long data_b64 is refused before decoding (invalid base64 would be 422 otherwise)
+        long = {"name": "a.txt", "mime": txt, "data_b64": "!" * 1000}
+        assert_error(await _post_att(http, pool, long), 413, "too_large")
+    assert await _count(pool, "messages") == 0
+
+
+async def test_start_prompt_message_keeps_attachments(http, pool):
+    cl = await insert_session(pool, spec={"start_prompt": "ctx"})
+    r = await http.post(
+        f"/api/v1/sessions/{cl['id']}/messages", json={"text": "go", "attachments": [_att()]}
+    )
+    assert r.status_code == 202, r.text
+    got = (await http.get(f"/api/v1/messages/{r.json()['message_id']}")).json()
+    assert got["text"] == "ctx\n\ngo"
+    assert [a["name"] for a in got["attachments"]] == ["s.png"]
+    assert await _count(pool, "message_attachments") == 1
