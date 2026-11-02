@@ -810,3 +810,41 @@ async def test_commands_and_checks_lifecycle(pool):
     assert rows[1][:5] == (c2, "failed", None, 2, "boom")
     assert rows[2][1] == "cancelled"
     assert rows[2][6] is not None
+
+
+# ---------------------------------------------------------------- attachments
+
+
+async def test_enqueue_message_stores_attachments_in_order(pool):
+    sid = (await insert_session(pool))["id"]
+    atts = [
+        q.StoredAttachment("b.png", "image/png", b"\x89PNG-b"),
+        q.StoredAttachment("a.txt", "text/plain", b"hello"),
+    ]
+    async with pool.connection() as conn:
+        mid = await q.enqueue_message(conn, sid, "hi", attachments=atts)
+        assert await q.message_attachments(conn, mid) == atts
+        cur = await conn.execute(
+            "SELECT position, size FROM message_attachments WHERE message_id=%s ORDER BY position",
+            (mid,),
+        )
+        assert await cur.fetchall() == [(0, 6), (1, 5)]
+
+
+async def test_message_attachments_empty_for_plain_message(pool):
+    sid = (await insert_session(pool))["id"]
+    mid = await _enqueue(pool, sid)
+    async with pool.connection() as conn:
+        assert await q.message_attachments(conn, mid) == []
+
+
+async def test_attachments_deleted_with_message(pool):
+    sid = (await insert_session(pool))["id"]
+    async with pool.connection() as conn:
+        mid = await q.enqueue_message(
+            conn, sid, "hi", attachments=[q.StoredAttachment("a.txt", "text/plain", b"x")]
+        )
+    await _exec(pool, "DELETE FROM messages WHERE id=%s", (mid,))
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT count(*) FROM message_attachments")
+        assert (await cur.fetchone())[0] == 0

@@ -132,6 +132,25 @@ async def _transition(
 # ---------------------------------------------------------------- messages: api side
 
 
+@dataclass(frozen=True)
+class StoredAttachment:
+    name: str
+    mime: str
+    data: bytes
+
+
+async def message_attachments(
+    conn: psycopg.AsyncConnection, message_id: int
+) -> list[StoredAttachment]:
+    """The attachments of a message in the order they were sent."""
+    rows = await _all(
+        conn,
+        "SELECT name, mime, data FROM message_attachments WHERE message_id = %s ORDER BY position",
+        (message_id,),
+    )
+    return [StoredAttachment(r["name"], r["mime"], bytes(r["data"])) for r in rows]
+
+
 async def enqueue_message(
     conn: psycopg.AsyncConnection,
     session_id: uuid.UUID,
@@ -144,11 +163,14 @@ async def enqueue_message(
     lane: str = "regular",
     carries_start_prompt: bool = False,
     held: bool = False,
+    attachments: Sequence[StoredAttachment] = (),
 ) -> int:
     """Queue a message; a session message carries its sender and hop (D8).
 
     A `held` message is not deliverable until `release_note` clears its `not_before` (the hold
     is a day, so a note whose commands never finish still expires).
+
+    `attachments` are stored in order in the same transaction as the message.
 
     `target_agent_id` is stored as given; this function does not clear it when a sender is set
     (a None target leaves the claim to route the message to the session's leader). Raises
@@ -181,6 +203,12 @@ async def enqueue_message(
             ),
         )
         assert row is not None
+        for position, att in enumerate(attachments):
+            await conn.execute(
+                "INSERT INTO message_attachments (message_id, position, name, mime, size, data)"
+                " VALUES (%s, %s, %s, %s, %s, %s)",
+                (row["id"], position, att.name, att.mime, len(att.data), att.data),
+            )
         await notify(conn, "message_queued", {"session_id": str(session_id)})
         await _status(conn, session_id)
         return row["id"]
