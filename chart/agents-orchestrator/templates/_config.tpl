@@ -193,12 +193,12 @@ ConfigMap, the migrate init containers or the other components. Empty when the g
 {{- end }}
 
 {{/*
-Admin relay upstreams (admin.webhook, admin.schedule, admin.connector). Each needs url together
+Admin relay upstreams (admin.webhook, admin.schedule, admin.connector, admin.history). Each needs url together
 with a token source (token or existingSecret); one without the other fails the render. Emits
 "<name>" lines for the configured ones.
 */}}
 {{- define "agents-orchestrator.adminUpstreams" -}}
-{{- range $name := list "webhook" "schedule" "connector" -}}
+{{- range $name := list "webhook" "schedule" "connector" "history" -}}
 {{- $cfg := index ($.Values.admin | default dict) $name | default dict -}}
 {{- $token := or $cfg.token $cfg.existingSecret -}}
 {{- if and $cfg.url $token }}
@@ -216,7 +216,7 @@ with a token source (token or existingSecret); one without the other fails the r
 {{- end }}
 
 {{/*
-ORCH_WEBHOOK/SCHEDULE/CONNECTOR _URL and _TOKEN env entries, each pair together. Only the api main
+ORCH_WEBHOOK/SCHEDULE/CONNECTOR/HISTORY _URL and _TOKEN env entries, each pair together. Only the api main
 container includes this; never the ConfigMap, the init containers or the other components.
 */}}
 {{- define "agents-orchestrator.adminEnv" -}}
@@ -231,6 +231,41 @@ container includes this; never the ConfigMap, the init containers or the other c
       name: {{ include "agents-orchestrator.adminSecretName" (dict "root" $ "name" $name) }}
       key: {{ $cfg.existingSecretKey | default "token" }}
 {{- end }}
+{{- end -}}
+{{- end }}
+
+{{/*
+"true" when the settings discard hook is configured, empty when it is off. discardHook.url and a
+token source (discardHook.token or discardHook.existingSecret) go together; one without the other
+fails the render.
+*/}}
+{{- define "agents-orchestrator.discardHookEnabled" -}}
+{{- $h := .Values.discardHook | default dict -}}
+{{- $token := or $h.token $h.existingSecret -}}
+{{- if and $h.url $token -}}
+true
+{{- else if or $h.url $token -}}
+{{- fail "agents-orchestrator: set discardHook.url together with discardHook.token or discardHook.existingSecret, or none of them" -}}
+{{- end -}}
+{{- end }}
+
+{{/* Name of the Secret holding ORCH_DISCARD_HOOK_TOKEN: existingSecret wins over the chart Secret. */}}
+{{- define "agents-orchestrator.discardHookSecretName" -}}
+{{- default (printf "%s-discard-hook" (include "agents-orchestrator.fullname" .)) (.Values.discardHook | default dict).existingSecret -}}
+{{- end }}
+
+{{/*
+ORCH_DISCARD_HOOK_TOKEN env entry. Only the reconciler main container, which delivers the hook,
+includes this; never the ConfigMap, the init containers or the other components (the URL is in the
+ConfigMap). Empty when the hook is off.
+*/}}
+{{- define "agents-orchestrator.discardHookEnv" -}}
+{{- if include "agents-orchestrator.discardHookEnabled" . -}}
+- name: ORCH_DISCARD_HOOK_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "agents-orchestrator.discardHookSecretName" . }}
+      key: {{ .Values.discardHook.existingSecretKey | default "token" }}
 {{- end -}}
 {{- end }}
 
