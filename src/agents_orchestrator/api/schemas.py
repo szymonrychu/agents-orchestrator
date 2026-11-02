@@ -119,6 +119,8 @@ class SessionView(BaseModel):
     closes_at: datetime | None
     init_edited_since_run: bool
     backup: SessionBackup
+    created_by_service: str | None = None
+    created_by_session: uuid.UUID | None = None
 
 
 class InitScriptsIn(BaseModel):
@@ -262,6 +264,11 @@ class MetaPermissionMode(BaseModel):
     label: str
 
 
+class MetaUsage(BaseModel):
+    configured: bool
+    quota_default_pct: int
+
+
 class Meta(BaseModel):
     defaults: MetaDefaults
     agent_image: str
@@ -275,6 +282,7 @@ class Meta(BaseModel):
     docker: MetaDocker
     hook_events: list[MetaHookEvent]
     permission_modes: list[MetaPermissionMode]
+    usage: MetaUsage
 
 
 Lane = Literal["idle", "regular", "priority"]

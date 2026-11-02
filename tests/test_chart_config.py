@@ -179,6 +179,7 @@ def test_settings_configmap():
         "ORCH_AGENT_IMAGE": "registry.example/wrapper:1",
         "ORCH_AGENT_PORT": "8001",
         "ORCH_SELF_RESTART_COOLDOWN_SECONDS": "600",
+        "ORCH_USAGE_QUOTA_DEFAULT": "100",
         "ORCH_SERVICE_PORT": "8002",
         "ORCH_AGENT_API_URL": f"http://{FULL}-agents.ns1.svc:8001",
         "ORCH_CLAUDE_SECRET_NAME": f"{FULL}-claude",

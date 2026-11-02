@@ -29,6 +29,9 @@ spec:
         {{- if and (eq $component "api") $.Values.chat.token (not $.Values.chat.existingSecret) }}
         checksum/chat-secret: {{ $.Values.chat.token | sha256sum }}
         {{- end }}
+        {{- if and (eq $component "api") $.Values.usage.token (not $.Values.usage.existingSecret) }}
+        checksum/usage-secret: {{ $.Values.usage.token | sha256sum }}
+        {{- end }}
         {{- if eq $component "api" }}
         {{- range $name := splitList "\n" (include "agents-orchestrator.adminUpstreams" $ | trim) }}
         {{- $acfg := index ($.Values.admin | default dict) $name | default dict }}
@@ -118,6 +121,9 @@ spec:
             - name: ORCH_HTTP_PORT
               value: "8000"
             {{- with include "agents-orchestrator.chatEnv" $ }}
+            {{- . | nindent 12 }}
+            {{- end }}
+            {{- with include "agents-orchestrator.usageEnv" $ }}
             {{- . | nindent 12 }}
             {{- end }}
             {{- with include "agents-orchestrator.adminEnv" $ }}

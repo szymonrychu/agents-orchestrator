@@ -31,12 +31,15 @@ async def insert_session(
     desired: str = "active",
     status: dict | None = None,
     id: uuid.UUID | None = None,
+    created_by_service: str | None = None,
+    created_by_session: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     n = next(_counter)
     return await _one(
         pool,
-        "INSERT INTO sessions (id, slug, spec, generation, observed_generation, desired, status)"
-        " VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+        "INSERT INTO sessions (id, slug, spec, generation, observed_generation, desired, status,"
+        " created_by_service, created_by_session)"
+        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
         (
             id or uuid.uuid4(),
             slug or f"session-{n}",
@@ -45,6 +48,8 @@ async def insert_session(
             observed_generation,
             desired,
             Jsonb(status if status is not None else {}),
+            created_by_service,
+            created_by_session,
         ),
     )
 

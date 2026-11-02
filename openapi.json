@@ -2272,6 +2272,9 @@
             },
             "title": "Permission Modes",
             "type": "array"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/MetaUsage"
           }
         },
         "required": [
@@ -2286,7 +2289,8 @@
           "kube_access",
           "docker",
           "hook_events",
-          "permission_modes"
+          "permission_modes",
+          "usage"
         ],
         "title": "Meta",
         "type": "object"
@@ -2528,6 +2532,24 @@
           "limits"
         ],
         "title": "MetaResources",
+        "type": "object"
+      },
+      "MetaUsage": {
+        "properties": {
+          "configured": {
+            "title": "Configured",
+            "type": "boolean"
+          },
+          "quota_default_pct": {
+            "title": "Quota Default Pct",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "configured",
+          "quota_default_pct"
+        ],
+        "title": "MetaUsage",
         "type": "object"
       },
       "PermissionModeIn": {
@@ -3511,6 +3533,16 @@
             "title": "Static",
             "type": "boolean"
           },
+          "usage_quota": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageQuota"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "workdir": {
             "default": "workdir",
             "maxLength": 63,
@@ -3833,6 +3865,16 @@
             "title": "Static",
             "type": "boolean"
           },
+          "usage_quota": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageQuota"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "workdir": {
             "default": "workdir",
             "maxLength": 63,
@@ -3959,6 +4001,29 @@
             "format": "date-time",
             "title": "Created At",
             "type": "string"
+          },
+          "created_by_service": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By Service"
+          },
+          "created_by_session": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By Session"
           },
           "desired": {
             "enum": [
@@ -4262,6 +4327,40 @@
           "final_text"
         ],
         "title": "TurnView",
+        "type": "object"
+      },
+      "UsageQuota": {
+        "additionalProperties": false,
+        "description": "Per-preset ceilings, in percent of the account's usage windows, below the default\n(`ORCH_USAGE_QUOTA_DEFAULT`) at which starting or growing a session is refused. A metric\nleft unset uses the default.",
+        "properties": {
+          "five_hour_pct": {
+            "anyOf": [
+              {
+                "maximum": 100.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Five Hour Pct"
+          },
+          "seven_day_pct": {
+            "anyOf": [
+              {
+                "maximum": 100.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seven Day Pct"
+          }
+        },
+        "title": "UsageQuota",
         "type": "object"
       },
       "ValidationError": {
@@ -6298,7 +6397,7 @@
     },
     "/agent/v1/admin/sessions": {
       "post": {
-        "description": "Same body and rules as the main port; the caller's session is recorded as the creator\nand `created_by_service` stays empty.",
+        "description": "Same body and rules as the main port, usage gate included; the caller's session is\nrecorded as the creator and `created_by_service` stays empty.",
         "operationId": "create_session_agent_v1_admin_sessions_post",
         "parameters": [
           {
@@ -8333,6 +8432,7 @@
     },
     "/agent/v1/scale": {
       "post": {
+        "description": "A scale-up over the usage quota is refused 409 `usage_quota`, but only for the leader:\na non-leader is always answered 403 `not_leader`.",
         "operationId": "scale_agent_v1_scale_post",
         "parameters": [
           {
@@ -10516,7 +10616,7 @@
     },
     "/api/v1/sessions/{session_id}/scale": {
       "post": {
-        "description": "Set spec.replicas in place (no caller agent: the public route has no leader check).",
+        "description": "Set spec.replicas in place (no caller agent: the public route has no leader check).\nA scale-up over the usage quota is refused 409 `usage_quota`.",
         "operationId": "scale_session_api_v1_sessions__session_id__scale_post",
         "parameters": [
           {

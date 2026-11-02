@@ -157,6 +157,42 @@ ConfigMap, the migrate init containers or the other components. Empty when the c
 {{- end }}
 
 {{/*
+"true" when the usage gate is configured, empty when it is off. usage.url and a token source
+(usage.token or usage.existingSecret) go together; one without the other fails the render.
+*/}}
+{{- define "agents-orchestrator.usageEnabled" -}}
+{{- $u := .Values.usage | default dict -}}
+{{- $token := or $u.token $u.existingSecret -}}
+{{- if and $u.url $token -}}
+true
+{{- else if or $u.url $token -}}
+{{- fail "agents-orchestrator: set usage.url together with usage.token or usage.existingSecret, or none of them" -}}
+{{- end -}}
+{{- end }}
+
+{{/* Name of the Secret holding ORCH_USAGE_TOKEN: existingSecret wins over the chart Secret. */}}
+{{- define "agents-orchestrator.usageSecretName" -}}
+{{- default (printf "%s-usage" (include "agents-orchestrator.fullname" .)) (.Values.usage | default dict).existingSecret -}}
+{{- end }}
+
+{{/*
+ORCH_USAGE_URL and ORCH_USAGE_TOKEN env entries, always together (Settings refuses one without the
+other). Only the api main container, which serves the usage gate, includes this; never the shared
+ConfigMap, the migrate init containers or the other components. Empty when the gate is off.
+*/}}
+{{- define "agents-orchestrator.usageEnv" -}}
+{{- if include "agents-orchestrator.usageEnabled" . -}}
+- name: ORCH_USAGE_URL
+  value: {{ .Values.usage.url | quote }}
+- name: ORCH_USAGE_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "agents-orchestrator.usageSecretName" . }}
+      key: {{ .Values.usage.existingSecretKey | default "usage-token" }}
+{{- end -}}
+{{- end }}
+
+{{/*
 Admin relay upstreams (admin.webhook, admin.schedule, admin.connector). Each needs url together
 with a token source (token or existingSecret); one without the other fails the render. Emits
 "<name>" lines for the configured ones.
@@ -203,4 +239,18 @@ ORCH_AGENT_API_URL: the cluster-internal agents Service URL, unless env.ORCH_AGE
 */}}
 {{- define "agents-orchestrator.agentApiUrl" -}}
 {{- default (printf "http://%s-agents.%s.svc:%v" (include "agents-orchestrator.fullname" .) .Release.Namespace .Values.agentApi.port) (index .Values.env "ORCH_AGENT_API_URL") -}}
+{{- end }}
+
+{{/*
+"true" when agent usage forwarding is configured, empty when it is off. agentUsage.url and
+agentUsage.secretName go together; one without the other fails the render. The Secret is
+only named here: the chart never holds the ingest token.
+*/}}
+{{- define "agents-orchestrator.agentUsageEnabled" -}}
+{{- $u := .Values.agentUsage | default dict -}}
+{{- if and $u.url $u.secretName -}}
+true
+{{- else if or $u.url $u.secretName -}}
+{{- fail "agents-orchestrator: set agentUsage.url together with agentUsage.secretName, or none of them" -}}
+{{- end -}}
 {{- end }}

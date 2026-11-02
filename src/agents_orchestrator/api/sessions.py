@@ -14,9 +14,10 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import ValidationError
 
 from agents_orchestrator import rendering
-from agents_orchestrator.api import schemas, secret_store
+from agents_orchestrator.api import schemas, secret_store, usage_gate
 from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.service_auth import calling_service
+from agents_orchestrator.api.usage_gate import UsageSource
 from agents_orchestrator.cache.keys import ArchiveNameError
 from agents_orchestrator.cache.save_rule import save_skip
 from agents_orchestrator.db import agents as agents_repo
@@ -50,8 +51,13 @@ def get_pool(request: Request) -> AsyncConnectionPool:
     return request.app.state.pool
 
 
+def get_usage(request: Request) -> UsageSource | None:
+    return request.app.state.usage
+
+
 Pool = Annotated[AsyncConnectionPool, Depends(get_pool)]
 Cfg = Annotated[Settings, Depends(get_settings)]
+Usage = Annotated[UsageSource | None, Depends(get_usage)]
 
 router = APIRouter(prefix="/api/v1")
 
@@ -127,6 +133,8 @@ def _view(session: repo.Session, agg: dict | None, settings: Settings) -> schema
         closes_at=_closes_at(session),
         init_edited_since_run=_init_edited(session),
         backup=_backup(session, settings),
+        created_by_service=session.created_by_service,
+        created_by_session=session.created_by_session,
     )
 
 
@@ -233,6 +241,9 @@ async def meta(settings: Cfg) -> schemas.Meta:
         ),
         hook_events=[schemas.MetaHookEvent(**asdict(e)) for e in HOOK_EVENT_SPECS],
         permission_modes=[schemas.MetaPermissionMode(**m) for m in PERMISSION_MODES],
+        usage=schemas.MetaUsage(
+            configured=settings.usage_available, quota_default_pct=settings.usage_quota_default
+        ),
     )
 
 
@@ -250,10 +261,15 @@ async def create(
     body: schemas.CreateSession,
     creator: str | None = None,
     created_by_session: uuid.UUID | None = None,
+    *,
+    usage: UsageSource | None,
 ) -> schemas.SessionView:
     """Create a session from a spec or a preset; shared by the main port and the admin routes.
     `creator` is the trigger service on the service port; `created_by_session` the superleader
-    that created it through the admin routes."""
+    that created it through the admin routes. `usage` is the usage gate's source (None: gate
+    off), keyword-only with no default so no caller can skip the gate: the usage is read before
+    the create lock (no network I/O under it) and judged against the resolved spec's quota
+    inside the transaction, so a refusal (409 `usage_quota`) rolls the insert back."""
     if (body.spec is None) == (body.preset_id is None):
         raise ApiError(422, "invalid_request", "exactly one of spec or preset_id")
     if created_by_session is not None and body.spec is not None:
@@ -275,6 +291,7 @@ async def create(
             validate_slug(body.slug)
         except ValueError as exc:
             raise ApiError(422, "invalid_request", str(exc)) from None
+    windows = await usage.current() if usage is not None else None
     async with pool.connection() as conn:
         async with conn.transaction():
             await conn.execute("SELECT pg_advisory_xact_lock(%s)", (_CREATE_LOCK,))
@@ -296,6 +313,9 @@ async def create(
                 session = await _create_from_preset(
                     conn, body.preset_id, body.slug, settings, creator, created_by_session
                 )
+            usage_gate.check(
+                windows, session.spec.usage_quota, settings.usage_quota_default, datetime.now(UTC)
+            )
         return await one_view(conn, session, settings)
 
 
@@ -305,8 +325,9 @@ async def create_session(
     request: Request,
     pool: Pool,
     settings: Cfg,
+    usage: Usage,
 ) -> schemas.SessionView:
-    return await create(pool, settings, body, calling_service(request))
+    return await create(pool, settings, body, calling_service(request), usage=usage)
 
 
 _SLUG_ATTEMPTS = 5
@@ -567,11 +588,45 @@ SCALE_STATUS = {
 }
 
 
+async def gate_scale_up(
+    pool,
+    usage: UsageSource | None,
+    settings: Settings,
+    session_id: uuid.UUID,
+    replicas: int,
+    *,
+    caller_agent_id: uuid.UUID | None = None,
+) -> None:
+    """Refuse a scale-up over the usage quota (409 `usage_quota`), from the session's own
+    snapshotted quota. Scale-down, an unchanged count and a gate that is off are never gated;
+    nor is a count `set_replicas` refuses on its own (missing, deleting, static, out of range),
+    so its error stays the answer; that includes `not_leader` for a `caller_agent_id` that is
+    not the session's leader, so a non-leader never sees `usage_quota`. Check-then-act: a
+    concurrent scale between this read and `set_replicas` is not re-judged (fail-open, like
+    missing data)."""
+    if usage is None:
+        return
+    async with pool.connection() as conn:
+        session = await repo.get(conn, session_id)
+        if session is None or session.desired != "active" or session.spec.static:
+            return
+        spec = session.spec
+        if not spec.replicas < replicas <= (spec.max_replicas or spec.replicas):
+            return
+        if caller_agent_id is not None:
+            leader = await agents_repo.leader_of(conn, session_id)
+            if leader is None or leader[0] != caller_agent_id:
+                return
+    await usage_gate.enforce(usage, spec.usage_quota, settings.usage_quota_default)
+
+
 @router.post("/sessions/{session_id}/scale", status_code=202, response_model=schemas.ScaleResult)
 async def scale_session(
-    session_id: uuid.UUID, body: schemas.ScaleRequest, pool: Pool
+    session_id: uuid.UUID, body: schemas.ScaleRequest, pool: Pool, settings: Cfg, usage: Usage
 ) -> schemas.ScaleResult:
-    """Set spec.replicas in place (no caller agent: the public route has no leader check)."""
+    """Set spec.replicas in place (no caller agent: the public route has no leader check).
+    A scale-up over the usage quota is refused 409 `usage_quota`."""
+    await gate_scale_up(pool, usage, settings, session_id, body.replicas)
     async with pool.connection() as conn:
         try:
             out = await repo.set_replicas(conn, session_id, body.replicas)

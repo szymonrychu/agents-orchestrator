@@ -616,6 +616,15 @@ class WorkspaceCache(_Strict):
         return v
 
 
+class UsageQuota(_Strict):
+    """Per-preset ceilings, in percent of the account's usage windows, below the default
+    (`ORCH_USAGE_QUOTA_DEFAULT`) at which starting or growing a session is refused. A metric
+    left unset uses the default."""
+
+    five_hour_pct: int | None = Field(default=None, ge=1, le=100)
+    seven_day_pct: int | None = Field(default=None, ge=1, le=100)
+
+
 class SessionSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -655,6 +664,9 @@ class SessionSpec(BaseModel):
     # Full read-write Kubernetes access in every namespace for the agent pods; refused until
     # ORCH_KUBE_ACCESS_SERVICE_ACCOUNT is set. Sparse: unset is not stored or dumped in a preset.
     kube_access: bool | None = Field(default=None, strict=True)
+    # Usage ceilings that refuse a session start or scale-up (see api/usage_gate.py). Sparse:
+    # unset is not stored or dumped in a preset.
+    usage_quota: UsageQuota | None = None
     # Privileged Docker-in-Docker sidecar (docker build/run, kind); refused until ORCH_DOCKER_IMAGE
     # is set. The three sizes tune the sidecar and need docker: true. Sparse like kube_access.
     docker: bool | None = Field(default=None, strict=True)

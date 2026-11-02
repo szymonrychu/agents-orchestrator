@@ -352,6 +352,126 @@ def test_chat_settings(monkeypatch):
     assert token not in str(exc.value)
 
 
+def test_usage_settings(monkeypatch):
+    s = Settings()
+    assert (s.usage_url, s.usage_token) == ("", "")
+    assert s.usage_available is False
+    assert s.usage_quota_default == 100
+    assert s.usage_cache_seconds == 30
+    assert s.usage_timeout_seconds == 3
+    token = "usage-" + secrets.token_hex(16)
+    monkeypatch.setenv("ORCH_USAGE_URL", "http://agents-usage-api:8000")
+    monkeypatch.setenv("ORCH_USAGE_TOKEN", token)
+    s = Settings()
+    assert (s.usage_url, s.usage_token) == ("http://agents-usage-api:8000", token)
+    assert s.usage_available is True
+    assert token not in repr(s)
+    assert token not in str(s)
+    for bad in ("ftp://usage", "usage:8000", "http://", "http://usage/?q=1", "http://usage/#f"):
+        monkeypatch.setenv("ORCH_USAGE_URL", bad)
+        with pytest.raises(SettingsError) as exc:
+            Settings()
+        assert "ORCH_USAGE_URL" in exc.value.problems, bad
+        assert token not in str(exc.value)
+
+
+def test_usage_url_and_token_come_as_a_pair(monkeypatch):
+    token = "usage-" + secrets.token_hex(16)
+    monkeypatch.setenv("ORCH_USAGE_URL", "http://usage:8000")
+    with pytest.raises(SettingsError) as exc:
+        Settings()
+    assert "set ORCH_USAGE_URL and ORCH_USAGE_TOKEN together, or neither" in str(exc.value)
+    monkeypatch.delenv("ORCH_USAGE_URL")
+    monkeypatch.setenv("ORCH_USAGE_TOKEN", token)
+    with pytest.raises(SettingsError) as exc:
+        Settings()
+    assert "set ORCH_USAGE_URL and ORCH_USAGE_TOKEN together, or neither" in str(exc.value)
+    assert token not in str(exc.value)
+
+
+def test_agent_usage_settings(monkeypatch):
+    s = Settings()
+    assert (s.agent_usage_url, s.agent_usage_secret) == ("", "")
+    assert s.agent_usage_enabled is False
+    monkeypatch.setenv("ORCH_AGENT_USAGE_URL", "http://agents-usage:8002")
+    monkeypatch.setenv("ORCH_AGENT_USAGE_SECRET", "agents-usage-ingest")
+    s = Settings()
+    assert (s.agent_usage_url, s.agent_usage_secret) == (
+        "http://agents-usage:8002",
+        "agents-usage-ingest",
+    )
+    assert s.agent_usage_enabled is True
+
+
+def test_agent_usage_url_and_secret_come_as_a_pair(monkeypatch):
+    pair = "set ORCH_AGENT_USAGE_URL and ORCH_AGENT_USAGE_SECRET together, or neither"
+    monkeypatch.setenv("ORCH_AGENT_USAGE_URL", "http://agents-usage:8002")
+    with pytest.raises(SettingsError) as exc:
+        Settings()
+    assert pair in str(exc.value)
+    monkeypatch.delenv("ORCH_AGENT_USAGE_URL")
+    monkeypatch.setenv("ORCH_AGENT_USAGE_SECRET", "agents-usage-ingest")
+    with pytest.raises(SettingsError) as exc:
+        Settings()
+    assert pair in str(exc.value)
+
+
+def test_agent_usage_bad_url_refused(monkeypatch):
+    monkeypatch.setenv("ORCH_AGENT_USAGE_SECRET", "agents-usage-ingest")
+    # the wrapper's usage.url check also refuses a trailing slash and a missing host
+    for bad in (
+        "ftp://usage",
+        "usage:8002",
+        "http://",
+        "http://:8002",
+        "http://usage/?q=1",
+        "http://usage/#f",
+        "http://usage:8002/",
+        "http://usage:8002/base/",
+    ):
+        monkeypatch.setenv("ORCH_AGENT_USAGE_URL", bad)
+        with pytest.raises(SettingsError) as exc:
+            Settings()
+        assert "ORCH_AGENT_USAGE_URL" in exc.value.problems, bad
+
+
+def test_agent_usage_bad_secret_name_refused(monkeypatch):
+    monkeypatch.setenv("ORCH_AGENT_USAGE_URL", "http://agents-usage:8002")
+    for bad in ("Agents_Usage", "-lead", "trail-", "a b", "a..b", "x" * 254):
+        monkeypatch.setenv("ORCH_AGENT_USAGE_SECRET", bad)
+        with pytest.raises(SettingsError) as exc:
+            Settings()
+        assert "ORCH_AGENT_USAGE_SECRET" in exc.value.problems, bad
+    monkeypatch.setenv("ORCH_AGENT_USAGE_SECRET", "agents.usage-ingest")
+    assert Settings().agent_usage_secret == "agents.usage-ingest"
+
+
+@pytest.mark.parametrize(
+    ("name", "bad"),
+    [
+        ("ORCH_USAGE_QUOTA_DEFAULT", "0"),
+        ("ORCH_USAGE_QUOTA_DEFAULT", "101"),
+        ("ORCH_USAGE_CACHE_SECONDS", "0"),
+        ("ORCH_USAGE_CACHE_SECONDS", "601"),
+        ("ORCH_USAGE_TIMEOUT_SECONDS", "0"),
+        ("ORCH_USAGE_TIMEOUT_SECONDS", "31"),
+    ],
+)
+def test_usage_numeric_bounds(monkeypatch, name, bad):
+    monkeypatch.setenv(name, bad)
+    with pytest.raises(SettingsError) as exc:
+        Settings()
+    assert name in exc.value.problems
+
+
+def test_usage_numeric_overrides(monkeypatch):
+    monkeypatch.setenv("ORCH_USAGE_QUOTA_DEFAULT", "90")
+    monkeypatch.setenv("ORCH_USAGE_CACHE_SECONDS", "60")
+    monkeypatch.setenv("ORCH_USAGE_TIMEOUT_SECONDS", "1.5")
+    s = Settings()
+    assert (s.usage_quota_default, s.usage_cache_seconds, s.usage_timeout_seconds) == (90, 60, 1.5)
+
+
 def test_priority_send_timeout_covers_the_wrapper_interrupt_budget():
     from agents_orchestrator.settings import PRIORITY_HOLD_SLACK_SECONDS
 

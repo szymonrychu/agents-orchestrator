@@ -1,4 +1,5 @@
-"""Error shape shared with the wrapper: {"error": {"code", "message"}}."""
+"""Error shape shared with the wrapper: {"error": {"code", "message"}}, plus `retry_after` and
+any extra fields a code documents (`usage_quota` adds `usage`)."""
 
 from __future__ import annotations
 
@@ -21,16 +22,26 @@ _CODES = {
 
 
 class ApiError(Exception):
-    def __init__(self, status: int, code: str, message: str, retry_after: int | None = None):
+    def __init__(
+        self,
+        status: int,
+        code: str,
+        message: str,
+        retry_after: int | None = None,
+        extra: dict | None = None,
+    ):
         self.status = status
         self.code = code
         self.message = message
         self.retry_after = retry_after  # seconds; sent as the Retry-After header and in the body
+        self.extra = extra  # more fields of the error object (JSON values)
         super().__init__(message)
 
 
-def error_body(code: str, message: str, retry_after: int | None = None) -> dict:
-    body = {"code": code, "message": message}
+def error_body(
+    code: str, message: str, retry_after: int | None = None, extra: dict | None = None
+) -> dict:
+    body = {"code": code, "message": message, **(extra or {})}
     if retry_after is not None:
         body["retry_after"] = retry_after
     return {"error": body}
@@ -42,10 +53,12 @@ def error_response(
     message: str,
     headers: dict[str, str] | None = None,
     retry_after: int | None = None,
+    extra: dict | None = None,
 ) -> JSONResponse:
     if retry_after is not None:
         headers = {**(headers or {}), "Retry-After": str(retry_after)}
-    return JSONResponse(error_body(code, message, retry_after), status_code=status, headers=headers)
+    body = error_body(code, message, retry_after, extra)
+    return JSONResponse(body, status_code=status, headers=headers)
 
 
 def not_found(what: str) -> ApiError:
@@ -55,7 +68,9 @@ def not_found(what: str) -> ApiError:
 def install(app: FastAPI) -> None:
     @app.exception_handler(ApiError)
     async def _api(_: Request, exc: ApiError):
-        return error_response(exc.status, exc.code, exc.message, retry_after=exc.retry_after)
+        return error_response(
+            exc.status, exc.code, exc.message, retry_after=exc.retry_after, extra=exc.extra
+        )
 
     @app.exception_handler(StarletteHTTPException)
     async def _http(_: Request, exc: StarletteHTTPException):

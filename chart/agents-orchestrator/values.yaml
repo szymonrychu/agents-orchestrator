@@ -199,6 +199,17 @@ env: {}
 # becomes ORCH_AGENT_IMAGE).
 agentImage: ""
 
+# Usage forwarding from the agent pods to agents-usage. url becomes ORCH_AGENT_USAGE_URL (the
+# agents-usage ingest listener, e.g. http://agents-usage:8002, no trailing slash) and secretName becomes
+# ORCH_AGENT_USAGE_SECRET: the Secret (key "token") holding the shared ingest token, which the
+# agent pods read as env CCW_USAGE_TOKEN. The chart only names the Secret and never holds the
+# token. Set both, or neither (forwarding is then off); one without the other fails the render.
+# Needs agentImage claude-code-wrapper >= 0.8.0: an older wrapper refuses the usage config
+# section. Sessions on another image (spec.image) do not forward.
+agentUsage:
+  url: ""
+  secretName: ""
+
 # Postgres connection. A connection is required: set exactly one of
 #   1. cnpg.enabled=true              (the chart creates a CloudNativePG Cluster)
 #   2. postgres.existingSecret        (an existing Secret holding a connection URI)
@@ -264,6 +275,21 @@ chat:
   token: ""
   existingSecret: ""
   existingSecretKey: chat-token
+
+# Usage gate upstream (agents-usage service port). url becomes ORCH_USAGE_URL; ORCH_USAGE_TOKEN,
+# the service bearer sent upstream, comes from existingSecret/existingSecretKey, or from the chart
+# Secret <fullname>-usage built from token (existingSecret wins). Both are env of the api main
+# container only, always together, never in the settings ConfigMap. Set url with a token source,
+# or neither (the gate is then off and never blocks); one without the other fails the render.
+usage:
+  url: ""
+  token: ""
+  existingSecret: ""
+  existingSecretKey: usage-token
+
+# Default usage quota percent (1..100) of a session without its own usage_quota
+# (ORCH_USAGE_QUOTA_DEFAULT). A metric gates when its percent reaches the limit.
+usageQuotaDefault: 100
 
 # Seconds between two restarts an agent asks for on its own session (ORCH_SELF_RESTART_COOLDOWN_SECONDS).
 selfRestartCooldownSeconds: 600
