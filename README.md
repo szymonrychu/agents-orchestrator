@@ -764,7 +764,7 @@ Query `key` (the full object key). Answers 302 with `Cache-Control: no-store` an
 
 ### `GET /api/v1/cache/cleanup/preview`
 
-What the cleanup sweep would delete now: the same planner as the reconciler's sweep, read-only. Response 200 `{"would_delete": [{"key", "size", "reason"}], "count", "total_bytes", "retention_days", "keep_newest", "grace_seconds", "sweep_enabled", "sweep_dry_run", "last_sweep": <last sweep result or null>}` with `Cache-Control: no-store`. An archive is listed only when it is beyond the newest `ORCH_CACHE_KEEP_NEWEST` of its group, older than `ORCH_CACHE_RETENTION_DAYS` and than the grace period, and referenced by no session; the newest object of a group is never listed. Errors: 503 `unavailable`.
+What the cleanup sweep would delete now: the same planner as the reconciler's sweep, read-only. Response 200 `{"would_delete": [{"key", "size", "reason"}], "count", "total_bytes", "retention_days", "keep_newest", "grace_seconds", "sweep_enabled", "sweep_dry_run", "last_sweep": <last sweep result or null>}` with `Cache-Control: no-store`. It uses the stored policy (see `GET /api/v1/cache/cleanup/settings`; the `ORCH_CACHE_*` environment values apply until a policy is saved), and `retention_days`, `keep_newest`, `grace_seconds`, `sweep_enabled` and `sweep_dry_run` in the response are the values of that policy. An archive is listed only when it is beyond the newest `keep_newest` of its group, older than `retention_days` and than the grace period, and referenced by no session; the newest object of a group is never listed. Errors: 503 `unavailable`.
 
 ### `GET /api/v1/cache/cleanup/settings`
 
