@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import uuid
 
 import httpx
+import psycopg
 from factories import insert_session
 from test_api_sessions import assert_error, client_for, make_settings
 from test_api_streams import open_sse, srv  # noqa: F401  (srv is a fixture)
@@ -48,13 +50,19 @@ async def test_view_carries_close_fields(pool, dsn):
 
 async def test_stream_snapshot_carries_close_fields(srv, pool):  # noqa: F811
     asked = await insert_session(pool)
+    plain = await insert_session(pool)
     await request_close(pool, asked["id"], "all done")
+    stored_at = (await close_columns(pool, asked["id"]))[0]
     async with open_sse(srv, "/api/v1/stream") as sse:
         snap = await sse.next()
     assert snap["event"] == "snapshot"
     by_id = {x["session"]["id"]: x["session"] for x in snap["data"]["sessions"]}
     assert by_id[str(asked["id"])]["close_reason"] == "all done"
-    assert by_id[str(asked["id"])]["close_requested_at"] is not None
+    assert by_id[str(asked["id"])]["close_requested_at"] == (
+        stored_at.isoformat().replace("+00:00", "Z")
+    )
+    assert by_id[str(plain["id"])]["close_reason"] is None
+    assert by_id[str(plain["id"])]["close_requested_at"] is None
 
 
 async def test_cancel_clears_200(pool, dsn):
@@ -67,6 +75,20 @@ async def test_cancel_clears_200(pool, dsn):
     assert body["id"] == str(s["id"])
     assert body["close_requested_at"] is None and body["close_reason"] is None
     assert (await close_columns(pool, s["id"]))[:2] == (None, None)
+
+
+async def test_cancel_notifies_the_stream(pool, dsn):
+    s = await insert_session(pool)
+    await request_close(pool, s["id"])
+    notified: list[dict] = []
+    async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as lconn:
+        await lconn.execute("LISTEN session_changed")
+        async with client_for(create_app(make_settings(dsn), pool)) as http:
+            r = await http.delete(f"/api/v1/sessions/{s['id']}/close")
+        async for n in lconn.notifies(timeout=2, stop_after=1):
+            notified.append(json.loads(n.payload))
+    assert r.status_code == 200, r.text
+    assert notified == [{"session_id": str(s["id"])}]
 
 
 async def test_cancel_without_request_is_200(pool, dsn):
