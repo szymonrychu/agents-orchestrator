@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
+from agents_orchestrator.labels import normalize_labels
 from agents_orchestrator.spec import SessionSpec, SessionSpecIn
 
 
@@ -25,6 +26,24 @@ class PresetIn(BaseModel):
     name: str
     spec: SessionSpecIn = SessionSpecIn()
     superleader_manageable: bool | None = None
+    # None keeps the stored labels on PUT and means none on POST
+    labels: list[str] | None = None
+
+    @field_validator("labels")
+    @classmethod
+    def _labels(cls, value: list[str] | None) -> list[str] | None:
+        return None if value is None else normalize_labels(value)
+
+
+class SessionLabelsIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    labels: list[str]
+
+    @field_validator("labels")
+    @classmethod
+    def _labels(cls, value: list[str]) -> list[str]:
+        return normalize_labels(value)
 
 
 class SecretIn(BaseModel):
@@ -55,6 +74,7 @@ class PresetView(BaseModel):
     name: str
     is_default: bool
     superleader_manageable: bool
+    labels: list[str]
     spec: dict[str, Any]
     created_at: datetime
     updated_at: datetime
@@ -123,6 +143,7 @@ class SessionView(BaseModel):
     close_reason: str | None = None
     created_by_service: str | None = None
     created_by_session: uuid.UUID | None = None
+    labels: list[str] = []
 
 
 class InitScriptsIn(BaseModel):

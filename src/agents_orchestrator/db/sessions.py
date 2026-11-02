@@ -70,6 +70,7 @@ class Session:
     # clears it, the autoclose sweeper acts on it once the session is idle
     close_requested_at: datetime | None = None
     close_reason: str | None = None
+    labels: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,7 @@ def _from_row(row: dict[str, Any]) -> Session:
         created_by_session=row["created_by_session"],
         close_requested_at=row["close_requested_at"],
         close_reason=row["close_reason"],
+        labels=row["labels"],
     )
 
 
@@ -121,6 +123,7 @@ async def create(
     created_by_service: str | None = None,
     secret_versions: dict[str, str] | None = None,
     created_by_session: uuid.UUID | None = None,
+    labels: list[str] | None = None,
 ) -> Session:
     validate_slug(slug)
     try:
@@ -128,8 +131,8 @@ async def create(
             rows = await _fetch(
                 conn,
                 "INSERT INTO sessions (id, slug, spec, preset_id, preset_name, created_by_service,"
-                " secret_versions, created_by_session)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
+                " secret_versions, created_by_session, labels)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
                 (
                     uuid.uuid4(),
                     slug,
@@ -139,6 +142,7 @@ async def create(
                     created_by_service,
                     Jsonb(secret_versions) if secret_versions else None,
                     created_by_session,
+                    labels or [],
                 ),
             )
             await _notify(conn, rows[0].id)
@@ -189,8 +193,30 @@ async def claim_self_restart(
     return SelfRestartClaim(False, max(1, int(row["wait"])))
 
 
-async def list_sessions(conn: psycopg.AsyncConnection) -> list[Session]:
-    return await _fetch(conn, "SELECT * FROM sessions ORDER BY created_at, slug", ())
+async def list_sessions(
+    conn: psycopg.AsyncConnection, labels: list[str] | None = None
+) -> list[Session]:
+    """Every session; with `labels`, only live (not being deleted) sessions sharing any."""
+    if not labels:
+        return await _fetch(conn, "SELECT * FROM sessions ORDER BY created_at, slug", ())
+    return await _fetch(
+        conn,
+        "SELECT * FROM sessions WHERE labels && %s::text[] AND desired = 'active'"
+        " ORDER BY created_at, slug",
+        (labels,),
+    )
+
+
+async def set_labels(
+    conn: psycopg.AsyncConnection, session_id: uuid.UUID, labels: list[str]
+) -> Session:
+    """Replace the session's labels. They are not part of the spec: no generation bump."""
+    rows = await _fetch(
+        conn, "UPDATE sessions SET labels = %s WHERE id = %s RETURNING *", (labels, session_id)
+    )
+    if not rows:
+        raise SessionNotFound(str(session_id))
+    return rows[0]
 
 
 @dataclass(frozen=True)

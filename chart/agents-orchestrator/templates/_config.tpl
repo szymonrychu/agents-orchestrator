@@ -157,6 +157,41 @@ ConfigMap, the migrate init containers or the other components. Empty when the c
 {{- end }}
 
 {{/*
+"true" when the taskboard relay is configured, empty when it is off. taskboard.url and a token source
+(taskboard.token or taskboard.existingSecret) go together; one without the other fails the render.
+*/}}
+{{- define "agents-orchestrator.taskboardEnabled" -}}
+{{- $token := or .Values.taskboard.token .Values.taskboard.existingSecret -}}
+{{- if and .Values.taskboard.url $token -}}
+true
+{{- else if or .Values.taskboard.url $token -}}
+{{- fail "agents-orchestrator: set taskboard.url together with taskboard.token or taskboard.existingSecret, or none of them" -}}
+{{- end -}}
+{{- end }}
+
+{{/* Name of the Secret holding ORCH_TASKBOARD_TOKEN: existingSecret wins over the chart Secret. */}}
+{{- define "agents-orchestrator.taskboardSecretName" -}}
+{{- default (printf "%s-taskboard" (include "agents-orchestrator.fullname" .)) .Values.taskboard.existingSecret -}}
+{{- end }}
+
+{{/*
+ORCH_TASKBOARD_URL and ORCH_TASKBOARD_TOKEN env entries, always together (Settings refuses one without the
+other). Only the api main container, which serves the taskboard relay, includes this; never the shared
+ConfigMap, the migrate init containers or the other components. Empty when the taskboard relay is off.
+*/}}
+{{- define "agents-orchestrator.taskboardEnv" -}}
+{{- if include "agents-orchestrator.taskboardEnabled" . -}}
+- name: ORCH_TASKBOARD_URL
+  value: {{ .Values.taskboard.url | quote }}
+- name: ORCH_TASKBOARD_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "agents-orchestrator.taskboardSecretName" . }}
+      key: {{ .Values.taskboard.existingSecretKey | default "taskboard-token" }}
+{{- end -}}
+{{- end }}
+
+{{/*
 "true" when the usage gate is configured, empty when it is off. usage.url and a token source
 (usage.token or usage.existingSecret) go together; one without the other fails the render.
 */}}
