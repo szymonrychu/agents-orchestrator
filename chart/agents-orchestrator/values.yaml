@@ -362,7 +362,8 @@ cache:
   # Cleanup sweep of stale archives, run by the reconciler. dryRun only plans and logs: set it
   # false after reading the preview (GET /api/v1/cache/cleanup/preview). An archive is deleted
   # only when it is beyond the newest keepNewest of its group, older than retentionDays and than
-  # graceSeconds, and referenced by no session.
+  # graceSeconds, and referenced by no session. These values are only the seed: they apply until
+  # the policy is saved in Settings > Backups, and then the database row wins.
   sweep:
     enabled: true
     dryRun: true
