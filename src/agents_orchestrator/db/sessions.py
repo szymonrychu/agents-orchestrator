@@ -63,6 +63,16 @@ class Session:
     secret_versions: dict[str, str] = field(default_factory=dict)
     # the superleader session that created it through the admin routes
     created_by_session: uuid.UUID | None = None
+    # a pending self-close request from the session's leader (hive-self-close); the api sets and
+    # clears it, the autoclose sweeper acts on it once the session is idle
+    close_requested_at: datetime | None = None
+    close_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class CloseOutcome:
+    session: Session
+    already: bool  # a request was already pending: it is returned unchanged
 
 
 def _from_row(row: dict[str, Any]) -> Session:
@@ -80,6 +90,8 @@ def _from_row(row: dict[str, Any]) -> Session:
         created_by_service=row["created_by_service"],
         secret_versions=row["secret_versions"] or {},
         created_by_session=row["created_by_session"],
+        close_requested_at=row["close_requested_at"],
+        close_reason=row["close_reason"],
     )
 
 
@@ -245,6 +257,52 @@ async def request_delete(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -
     if existing is None:
         raise SessionNotFound(str(session_id))
     return existing
+
+
+async def _lock_active(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Session:
+    """Lock the session row FOR UPDATE inside the caller's transaction; the row must exist and
+    be active."""
+    rows = await _fetch(conn, "SELECT * FROM sessions WHERE id = %s FOR UPDATE", (session_id,))
+    if not rows:
+        raise SessionNotFound(str(session_id))
+    if rows[0].desired != "active":
+        raise SessionBeingDeleted(str(session_id))
+    return rows[0]
+
+
+async def request_close(
+    conn: psycopg.AsyncConnection, session_id: uuid.UUID, reason: str
+) -> CloseOutcome:
+    """Record a leader's request to close its session once idle. The first request wins: a
+    pending one is returned unchanged (`already`) and its clock is not reset."""
+    async with conn.transaction():
+        existing = await _lock_active(conn, session_id)
+        if existing.close_requested_at is not None:
+            return CloseOutcome(existing, True)
+        rows = await _fetch(
+            conn,
+            "UPDATE sessions SET close_requested_at = now(), close_reason = %s"
+            " WHERE id = %s AND desired = 'active' AND close_requested_at IS NULL RETURNING *",
+            (reason, session_id),
+        )
+        await _notify(conn, session_id)
+        return CloseOutcome(rows[0], False)
+
+
+async def cancel_close(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Session:
+    """Clear a pending close request; idempotent when none is pending."""
+    async with conn.transaction():
+        existing = await _lock_active(conn, session_id)
+        if existing.close_requested_at is None:
+            return existing
+        rows = await _fetch(
+            conn,
+            "UPDATE sessions SET close_requested_at = NULL, close_reason = NULL"
+            " WHERE id = %s AND desired = 'active' RETURNING *",
+            (session_id,),
+        )
+        await _notify(conn, session_id)
+        return rows[0]
 
 
 async def close_expired(conn: psycopg.AsyncConnection) -> list[uuid.UUID]:
