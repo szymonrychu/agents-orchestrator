@@ -27,6 +27,7 @@ from agents_orchestrator.api import (
     secret_store,
     sessions,
     streams,
+    tasks,
     templates,
     workspace,
 )
@@ -78,6 +79,7 @@ def create_app(
             await listener.stop()
             await workspace.close_client(app)
             await chat.close_client(app)
+            await tasks.close_client(app)
             await forward.close_client(app, admin_relay.STATE_ATTR)
             await secret_store.close_kube(app)
             if usage is not None:
@@ -98,6 +100,7 @@ def create_app(
     app.state.listener = listener
     app.state.wrapper_http = None
     app.state.chat_http = None
+    app.state.taskboard_http = None
     app.state.admin_http = None
     app.state.kube = kube  # given (tests) or built on first use by api.secret_store
     app.state.kube_owned = False
@@ -108,6 +111,7 @@ def create_app(
     app.include_router(agent.router)
     app.include_router(admin.router)
     app.include_router(chat.router)
+    app.include_router(tasks.router)
     app.include_router(presets.router)
     app.include_router(templates.router)
     app.include_router(archives.router)

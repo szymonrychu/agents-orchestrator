@@ -482,3 +482,73 @@ def test_self_restart_cooldown_default_and_override():
     docs = render(values(postgres={"url": URL}, selfRestartCooldownSeconds=90))
     cm = by_kind(docs, "ConfigMap")[f"{FULL}-settings"]
     assert cm["data"]["ORCH_SELF_RESTART_COOLDOWN_SECONDS"] == "90"
+
+
+TB_URL = "http://agents-taskboard-agents:8001"
+TB_VALUES = {
+    "inline": {"url": TB_URL, "token": "t"},
+    "existing": {"url": TB_URL, "existingSecret": "tb-s", "existingSecretKey": "k"},
+}
+
+
+@pytest.mark.parametrize("tb", TB_VALUES.values(), ids=TB_VALUES.keys())
+def test_taskboard_pair_on_api_main_only(tb):
+    """Settings refuses a taskboard URL without its token: the pair goes to api main alone."""
+    docs = render(values(postgres={"url": URL}, taskboard=tb))
+    cm = by_kind(docs, "ConfigMap")[f"{FULL}-settings"]
+    assert "ORCH_TASKBOARD_URL" not in cm["data"] and "ORCH_TASKBOARD_TOKEN" not in cm["data"]
+    for dep, items in _containers(docs).items():
+        for c in items:
+            names = _env_names(c)
+            assert ("ORCH_TASKBOARD_URL" in names) == ("ORCH_TASKBOARD_TOKEN" in names)
+            assert ("ORCH_TASKBOARD_URL" in names) == _is_api_main(dep, c), (dep, c["name"])
+    api = next(c for c in _containers(docs)[f"{FULL}-api"] if c["name"] == "api")
+    env = {e["name"]: e for e in api["env"]}
+    assert env["ORCH_TASKBOARD_URL"] == {"name": "ORCH_TASKBOARD_URL", "value": TB_URL}
+    assert env["ORCH_TASKBOARD_TOKEN"]["valueFrom"]["secretKeyRef"] == {
+        "name": tb.get("existingSecret", f"{FULL}-taskboard"),
+        "key": tb.get("existingSecretKey", "taskboard-token"),
+    }
+
+
+def test_taskboard_token_secret_and_checksum():
+    tok = "".join(["marker", "taskboard", "value"])
+    docs = render(values(postgres={"url": URL}, taskboard={"url": TB_URL, "token": tok}))
+    assert by_kind(docs, "Secret")[f"{FULL}-taskboard"]["stringData"] == {"taskboard-token": tok}
+    for cm in by_kind(docs, "ConfigMap").values():
+        assert tok not in yaml.safe_dump(cm)
+    api = by_kind(docs, "Deployment")[f"{FULL}-api"]
+    assert "checksum/taskboard-secret" in api["spec"]["template"]["metadata"]["annotations"]
+
+
+def test_taskboard_existing_secret_wins():
+    docs = render(
+        values(
+            postgres={"url": URL},
+            taskboard={"url": TB_URL, "token": "t", "existingSecret": "tb-s"},
+        )
+    )
+    assert f"{FULL}-taskboard" not in by_kind(docs, "Secret")
+
+
+@pytest.mark.parametrize(
+    "tb",
+    [
+        {"url": TB_URL},
+        {"token": "t"},
+        {"existingSecret": "tb-s"},
+        {"url": TB_URL, "existingSecretKey": "k"},
+    ],
+)
+def test_taskboard_url_and_token_together(tb):
+    err = render_error(values(postgres={"url": URL}, taskboard=tb))
+    assert "taskboard.url" in err and "taskboard.token" in err
+
+
+def test_taskboard_absent_by_default():
+    docs = render(values(postgres={"url": URL}))
+    assert f"{FULL}-taskboard" not in by_kind(docs, "Secret")
+    for items in _containers(docs).values():
+        for c in items:
+            assert "ORCH_TASKBOARD_URL" not in _env_names(c)
+            assert "ORCH_TASKBOARD_TOKEN" not in _env_names(c)

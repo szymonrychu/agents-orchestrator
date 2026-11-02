@@ -352,6 +352,34 @@ def test_chat_settings(monkeypatch):
     assert token not in str(exc.value)
 
 
+def test_taskboard_settings(monkeypatch):
+    s = Settings()
+    assert (s.taskboard_url, s.taskboard_token, s.taskboard_available) == ("", "", False)
+    token = "tb-" + secrets.token_hex(16)
+    monkeypatch.setenv("ORCH_TASKBOARD_URL", "http://agents-taskboard-agents:8001")
+    monkeypatch.setenv("ORCH_TASKBOARD_TOKEN", token)
+    s = Settings()
+    assert (s.taskboard_url, s.taskboard_token) == ("http://agents-taskboard-agents:8001", token)
+    assert s.taskboard_available
+    assert token not in repr(s)
+    for bad in ("ftp://tb", "tb:8001", "http://", "http://tb/?q=1", "http://tb/#f"):
+        monkeypatch.setenv("ORCH_TASKBOARD_URL", bad)
+        with pytest.raises(SettingsError) as exc:
+            Settings()
+        assert "ORCH_TASKBOARD_URL" in exc.value.problems, bad
+    monkeypatch.delenv("ORCH_TASKBOARD_TOKEN")
+    monkeypatch.setenv("ORCH_TASKBOARD_URL", "http://tb:8001")
+    with pytest.raises(SettingsError) as exc:
+        Settings()
+    assert "ORCH_TASKBOARD_URL" in str(exc.value) and "ORCH_TASKBOARD_TOKEN" in str(exc.value)
+    monkeypatch.delenv("ORCH_TASKBOARD_URL")
+    monkeypatch.setenv("ORCH_TASKBOARD_TOKEN", token)
+    with pytest.raises(SettingsError) as exc:
+        Settings()
+    assert "ORCH_TASKBOARD_URL" in str(exc.value) and "ORCH_TASKBOARD_TOKEN" in str(exc.value)
+    assert token not in str(exc.value)
+
+
 def test_usage_settings(monkeypatch):
     s = Settings()
     assert (s.usage_url, s.usage_token) == ("", "")

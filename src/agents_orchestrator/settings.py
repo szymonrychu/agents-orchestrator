@@ -231,6 +231,10 @@ class Settings(BaseSettings):
     chat_url: str = ""
     chat_token: str = Field(default="", repr=False)
 
+    # taskboard relay (agents-taskboard): url and token come as a pair, or neither
+    taskboard_url: str = ""
+    taskboard_token: str = Field(default="", repr=False)
+
     # usage gate (agents-usage): url and service token come as a pair, or neither
     usage_url: str = ""
     usage_token: str = Field(default="", repr=False)
@@ -533,15 +537,15 @@ class Settings(BaseSettings):
                 raise _Bad("must be an http or https URL")
         return v
 
-    @field_validator("chat_url")
+    @field_validator("chat_url", "taskboard_url")
     @classmethod
-    def _check_chat_url(cls, v: str) -> str:
+    def _check_relay_url(cls, v: str) -> str:
         if v:
             parsed = urlparse(v)
             if parsed.scheme not in ("http", "https") or not parsed.netloc:
                 raise _Bad("must be an http or https URL")
             if parsed.query or parsed.fragment:
-                raise _Bad("must not carry a query or fragment (the relay appends /chat/v1/...)")
+                raise _Bad("must not carry a query or fragment (the relay appends the API path)")
         return v
 
     @field_validator("webhook_url", "schedule_url", "connector_url", "usage_url")
@@ -614,6 +618,14 @@ class Settings(BaseSettings):
             raise _Bad("set ORCH_CHAT_URL and ORCH_CHAT_TOKEN together, or neither")
         return v
 
+    @field_validator("taskboard_token")
+    @classmethod
+    def _check_taskboard_pair(cls, v: str, info: ValidationInfo) -> str:
+        url = info.data.get("taskboard_url")
+        if url is not None and bool(url) != bool(v):
+            raise _Bad("set ORCH_TASKBOARD_URL and ORCH_TASKBOARD_TOKEN together, or neither")
+        return v
+
     @model_validator(mode="after")
     def _resolve(self) -> Settings:
         if self.master_key_file:
@@ -677,6 +689,10 @@ class Settings(BaseSettings):
     @property
     def chat_available(self) -> bool:
         return bool(self.chat_url)
+
+    @property
+    def taskboard_available(self) -> bool:
+        return bool(self.taskboard_url)
 
     @property
     def usage_available(self) -> bool:

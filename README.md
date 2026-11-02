@@ -100,6 +100,8 @@ Every process reads `ORCH_*` variables (the contract `agents-orchestrator-settin
 | `ORCH_SESSION_MESSAGE_PAIR_MAX_PER_HOUR` | `30` | api | cross-session messages one pair of sessions may exchange, both directions, in the last hour (at least 1); above it a send is refused 429 `pair_budget` |
 | `ORCH_CHAT_URL` | empty | api | http or https base URL of the chat upstream (the matrix connector's agent listener); the chat relay calls `{ORCH_CHAT_URL}/chat/v1/...`. No query or fragment. Set together with `ORCH_CHAT_TOKEN` or neither; empty answers every `/agent/v1/chat/*` call 503 `chat_unconfigured` |
 | `ORCH_CHAT_TOKEN` | empty | api | bearer token the chat relay presents to the chat upstream (`Authorization: Bearer`); secret, never in a repr, a log line or an error body. Set together with `ORCH_CHAT_URL` or neither, else a settings error naming both |
+| `ORCH_TASKBOARD_URL` | empty | api | http or https base URL of agents-taskboard; the taskboard relay calls `{ORCH_TASKBOARD_URL}/taskboard/api/v1/tasks/...`. No query or fragment. Set together with `ORCH_TASKBOARD_TOKEN` or neither; empty answers every `/agent/v1/tasks` call 503 `taskboard_unconfigured` |
+| `ORCH_TASKBOARD_TOKEN` | empty | api | bearer token the taskboard relay presents upstream (`Authorization: Bearer`); secret, never in a repr, a log line or an error body. Set together with `ORCH_TASKBOARD_URL` or neither, else a settings error naming both |
 | `ORCH_WEBHOOK_URL` | empty | api | http or https base URL of the agents-webhook admin listener; the superleader admin relay (`/agent/v1/admin/webhooks/*`) calls `/webhooks/api/v1/...`. No query or fragment. Set together with `ORCH_WEBHOOK_TOKEN` or neither; empty answers those calls 503 `upstream_unconfigured` |
 | `ORCH_WEBHOOK_TOKEN` | empty | api | service bearer the admin relay presents to that upstream (`Authorization: Bearer`); secret, never in a repr, a log line or an error body. Set together with `ORCH_WEBHOOK_URL` or neither |
 | `ORCH_SCHEDULE_URL` | empty | api | http or https base URL of the agents-schedule admin listener; the superleader admin relay (`/agent/v1/admin/schedules/*`) calls `/schedules/api/v1/...`. No query or fragment. Set together with `ORCH_SCHEDULE_TOKEN` or neither; empty answers those calls 503 `upstream_unconfigured` |
@@ -182,6 +184,8 @@ The master key and the Claude token each need a value or an `existingSecret`; wi
 The admin relay upstreams are optional, one block each under `admin.webhook`, `admin.schedule` and `admin.connector`. `admin.<name>.url` becomes `ORCH_WEBHOOK_URL`, `ORCH_SCHEDULE_URL` or `ORCH_CONNECTOR_URL`, and the token `ORCH_<NAME>_TOKEN` comes from `admin.<name>.existingSecret` (key `existingSecretKey`, default `token`) or else from the chart Secret `<fullname>-admin-<name>` built from `admin.<name>.token`. Same rules as chat: api main container only, always as a pair, never in the ConfigMap, the pod rolls when a chart-made token changes, url without a token source (or the reverse) fails the render. `selfRestartCooldownSeconds` (default 600) becomes `ORCH_SELF_RESTART_COOLDOWN_SECONDS`. The api Role already allows `create`, `patch` and `delete` on Secrets (never a read), which covers both protected preset variables and the `webhook-<id>-password` Secrets.
 
 The chat relay is optional. `chat.url` becomes `ORCH_CHAT_URL` and `ORCH_CHAT_TOKEN` comes from `chat.existingSecret` (key `chat.existingSecretKey`, default `chat-token`) or else from the chart Secret `<fullname>-chat` built from `chat.token`; `existingSecret` wins. `ORCH_CHAT_URL` (a plain value) and `ORCH_CHAT_TOKEN` (a `secretKeyRef`) are env of the api main container only, always together, never in the settings ConfigMap (not its migrate init container, not the dispatcher, ingester or reconciler), and the api pod rolls when the chart-made token changes (`checksum/chat-secret`). Set `chat.url` together with `chat.token` or `chat.existingSecret`, or none of them: one without the other fails the render naming all three. With none, neither variable renders and every `/agent/v1/chat/*` call answers 503 `chat_unconfigured`.
+
+The taskboard relay is optional and follows the same shape. `taskboard.url` becomes `ORCH_TASKBOARD_URL` and `ORCH_TASKBOARD_TOKEN` comes from `taskboard.existingSecret` (key `taskboard.existingSecretKey`, default `taskboard-token`) or else from the chart Secret `<fullname>-taskboard` built from `taskboard.token`; `existingSecret` wins. Both are env of the api main container only, always together, never in the settings ConfigMap, and the api pod rolls when the chart-made token changes (`checksum/taskboard-secret`). Set `taskboard.url` together with `taskboard.token` or `taskboard.existingSecret`, or none of them: one without the other fails the render. With none, every `/agent/v1/tasks` call answers 503 `taskboard_unconfigured`.
 
 ### Settings ConfigMap
 
@@ -1239,6 +1243,17 @@ Forwards to `POST {ORCH_CHAT_URL}/chat/v1/reactions`. Body `{to, key}`: `to` a m
 #### `GET /agent/v1/chat/messages/{send_id}`
 
 Forwards to `GET {ORCH_CHAT_URL}/chat/v1/messages/{send_id}` (the id percent-encoded as one path segment, dots included): the delivery status of a send of the caller's session, 200 `{id, kind, status, reason, room_id, created_at, sent_at}`; the upstream answers 404 `not_found` for an id that is not one of the caller session's sends.
+
+### Taskboard
+
+A session reaches agents-taskboard through relay routes on the agent port only: `GET|POST /agent/v1/tasks` and `GET|POST|PUT|PATCH` on `/agent/v1/tasks/{key}`, `.../comments`, `.../todo`, `.../todo/{id}`, `.../decisions` and `POST .../decisions/{id}/withdraw`, forwarded to `{ORCH_TASKBOARD_URL}/taskboard/api/v1/tasks/...`. The orchestrator proves who is calling; the agent token never leaves it. Nothing is stored. Every route checks, in this order, and a refusal makes no upstream call:
+
+1. the agent identity above: 401 `unauthorized`, 403 `forbidden`;
+2. 404 `not_found`: the path is not in the list above (notably `.../decisions/{id}/answer`, the stream and anything else): answering a decision exists only on the web listener;
+3. 503 `taskboard_unconfigured`: `ORCH_TASKBOARD_URL` and `ORCH_TASKBOARD_TOKEN` are empty;
+4. 413 `payload_too_large`: a body over 256 KiB.
+
+There is no leader check and no trigger-session refusal: trigger-created sessions may keep tasks and ask decisions, but cannot answer them. The relay forwards the method, path, query string and body with only `Authorization: Bearer <ORCH_TASKBOARD_TOKEN>`, `X-Orch-Session: <caller session id>`, `X-Orch-Slug: <caller session slug>` and, for a body, `Content-Type: application/json`; every inbound header, `X-Orch-*` included, is dropped. On `GET /agent/v1/tasks`, a `labels=mine` parameter is replaced by one `label` parameter per label of the calling session (`Session.labels`); a session without labels gets `{"items": [], "next_cursor": null}` without an upstream call. The upstream status and JSON body pass through unchanged; a connection error, a timeout or a non-JSON answer is 503 `taskboard_unavailable`.
 
 ### File locks
 
