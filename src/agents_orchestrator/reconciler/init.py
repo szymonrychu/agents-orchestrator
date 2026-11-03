@@ -33,7 +33,7 @@ from psycopg_pool import AsyncConnectionPool
 from agents_orchestrator import rendering
 from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.k8s.kube import KubeApi, KubeError, Obj, is_owned
-from agents_orchestrator.k8s.labels import object_names, prefix, session_labels
+from agents_orchestrator.k8s.labels import prefix, session_labels, workspace_pvc
 from agents_orchestrator.k8s.render import (
     WORKSPACE_VOLUME,
     agent_identity,
@@ -134,7 +134,7 @@ def render_init_job(session: Session, settings: Settings, scripts: list[str] | N
         "volumes": [
             {
                 "name": WORKSPACE_VOLUME,
-                "persistentVolumeClaim": {"claimName": object_names(slug)["pvc"]},
+                "persistentVolumeClaim": {"claimName": workspace_pvc(session.slug, session.status)},
             }
         ],
     }

@@ -182,6 +182,24 @@ async def test_discard_another_session(call, pool):
     assert_error(await call("DELETE", f"{S}/nope"), 404, "not_found")
 
 
+async def test_force_discard_of_a_session_already_deleting(call, pool):
+    """T-26: a superleader unsticks a discard held by a failing hook with `?force=true`."""
+    preset = (await call("POST", P, json={"name": "stuck", "spec": {}})).json()
+    await call("POST", S, json={"slug": "stuck-one", "preset_id": preset["id"]})
+    assert (await call("DELETE", f"{S}/stuck-one")).status_code == 202
+    assert (await row(pool, "stuck-one"))["discard_forced_at"] is None
+    r = await call("DELETE", f"{S}/stuck-one", params={"force": "true"})
+    assert r.status_code == 202, r.text
+    stored = await row(pool, "stuck-one")
+    assert stored["desired"] == "deleting" and stored["discard_forced_at"] is not None
+    assert_error(
+        await call("DELETE", f"{S}/stuck-one", params={"force": "1"}), 422, "invalid_request"
+    )
+    assert_error(
+        await call("DELETE", f"{S}/adm-boss", params={"force": "true"}), 422, "own_session"
+    )
+
+
 async def test_discarding_the_callers_own_session_is_refused(call, pool):
     assert_error(await call("DELETE", f"{S}/adm-boss"), 422, "own_session")
     assert (await row(pool, "adm-boss"))["desired"] == "active"

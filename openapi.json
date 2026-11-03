@@ -7292,6 +7292,7 @@
     },
     "/agent/v1/admin/sessions/{slug}": {
       "delete": {
+        "description": "`?force=true` abandons the target's owed pre-discard hooks, also when it is already\ndeleting (a discard stuck on a hook receiver that is down).",
         "operationId": "discard_session_agent_v1_admin_sessions__slug__delete",
         "parameters": [
           {
@@ -7301,6 +7302,18 @@
             "schema": {
               "title": "Slug",
               "type": "string"
+            }
+          },
+          {
+            "description": "Abandon the session's owed pre-discard hooks (reason `forced`) so the discard finishes without them, also for a session already deleting; the workspace PVC is kept as the backup. Refused on the service port.",
+            "in": "query",
+            "name": "force",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Abandon the session's owed pre-discard hooks (reason `forced`) so the discard finishes without them, also for a session already deleting; the workspace PVC is kept as the backup. Refused on the service port.",
+              "title": "Force",
+              "type": "boolean"
             }
           },
           {
@@ -11311,7 +11324,7 @@
     },
     "/api/v1/sessions/{session_id}": {
       "delete": {
-        "description": "Discard the session. On the service port a service may discard only a session it created\nitself; any other session answers 404 `not_found`, like an unknown one.",
+        "description": "Discard the session. On the service port a service may discard only a session it created\nitself; any other session answers 404 `not_found`, like an unknown one. `?force=true` (main\nport only) abandons the owed pre-discard hooks, also of a session already deleting.",
         "operationId": "discard_session_api_v1_sessions__session_id__delete",
         "parameters": [
           {
@@ -11322,6 +11335,18 @@
               "format": "uuid",
               "title": "Session Id",
               "type": "string"
+            }
+          },
+          {
+            "description": "Abandon the session's owed pre-discard hooks (reason `forced`) so the discard finishes without them, also for a session already deleting; the workspace PVC is kept as the backup. Refused on the service port.",
+            "in": "query",
+            "name": "force",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Abandon the session's owed pre-discard hooks (reason `forced`) so the discard finishes without them, also for a session already deleting; the workspace PVC is kept as the backup. Refused on the service port.",
+              "title": "Force",
+              "type": "boolean"
             }
           }
         ],

@@ -114,6 +114,39 @@ async def test_patch_session_retired_405(http):
     ]
 
 
+async def forced_at(pool, session_id: str):
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT desired, discard_forced_at FROM sessions WHERE id = %s", (session_id,)
+        )
+        return await cur.fetchone()
+
+
+async def test_delete_force_marks_a_forced_discard_also_when_already_deleting(http, pool):
+    """T-26: `?force=true` abandons the owed pre-discard hooks; it also works on a session
+    already stuck in deleting, where a plain repeat delete changes nothing."""
+    cid = (await http.post("/api/v1/sessions", json={"slug": "f", "spec": {}})).json()["id"]
+    r = await http.delete(f"/api/v1/sessions/{cid}?force=false")
+    assert r.status_code == 202, r.text
+    assert await forced_at(pool, cid) == ("deleting", None)
+    r = await http.delete(f"/api/v1/sessions/{cid}?force=true")
+    assert r.status_code == 202, r.text
+    assert r.json()["desired"] == "deleting"
+    desired, forced = await forced_at(pool, cid)
+    assert desired == "deleting" and forced is not None
+    # a repeat force keeps the first stamp
+    assert (await http.delete(f"/api/v1/sessions/{cid}?force=true")).status_code == 202
+    assert (await forced_at(pool, cid))[1] == forced
+    for bad in ("force=yes", "force=true&force=true", "force=true&purge=true"):
+        assert_error(await http.delete(f"/api/v1/sessions/{cid}?{bad}"), 422, "invalid_request")
+
+    other = (await http.post("/api/v1/sessions", json={"slug": "g", "spec": {}})).json()["id"]
+    r = await http.delete(f"/api/v1/sessions/{other}?force=true")
+    assert r.status_code == 202, r.text
+    desired, forced = await forced_at(pool, other)
+    assert desired == "deleting" and forced is not None
+
+
 async def test_delete_is_discard_without_purge(http, pool):
     cid = (await http.post("/api/v1/sessions", json={"slug": "d", "spec": {}})).json()["id"]
     r = await http.delete(f"/api/v1/sessions/{cid}")
