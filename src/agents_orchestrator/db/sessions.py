@@ -768,9 +768,11 @@ async def replace_spec(
         row = await _lock_row(conn, session_id)
         if row["spec"] != expected:
             raise SpecChanged(str(session_id))
-        await recheck(LockedSession(row["spec"], row["preset_id"], row["secret_versions"] or {}))
+        # decided before the recheck, which gets the stored dict itself
         dumped = _dump(spec)
-        if dumped.obj == row["spec"]:
+        unchanged = dumped.obj == row["spec"]
+        await recheck(LockedSession(row["spec"], row["preset_id"], row["secret_versions"] or {}))
+        if unchanged:
             return _from_row(row), False
         rows = await _fetch(
             conn,

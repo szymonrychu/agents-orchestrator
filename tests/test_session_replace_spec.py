@@ -102,9 +102,15 @@ async def test_deleting_session_refused(pool):
     async with pool.connection() as conn:
         await sessions.request_delete(conn, s.id)
     before = await _row(pool, s.id)
+    called = []
+
+    async def recheck(locked):
+        called.append(locked)
+
     async with pool.connection() as conn:
         with pytest.raises(SessionBeingDeleted):
-            await sessions.replace_spec(conn, s.id, before[0], BASE, _noop)
+            await sessions.replace_spec(conn, s.id, before[0], BASE, recheck)
+    assert called == []
     assert await _row(pool, s.id) == before
 
 
@@ -150,6 +156,30 @@ async def test_recheck_gets_the_fresh_locked_row(pool):
     assert seen == [
         sessions.LockedSession(spec=stored, preset_id=preset_id, secret_versions=versions)
     ]
+
+
+@pytest.mark.parametrize("change", [False, True])
+async def test_recheck_mutating_the_locked_spec_does_not_move_the_decision(pool, change):
+    """The written or not written decision is taken before the recheck, so a recheck that
+    edits the dict it was handed cannot turn a real change into no write, or the reverse."""
+    s = await _created(pool)
+    stored, gen, _ = await _row(pool, s.id)
+    new = BASE.model_copy(update={"image": "img:2"}) if change else BASE
+    target = new.model_dump(mode="json", exclude_none=True)
+
+    async def recheck(locked):
+        if change:
+            locked.spec.clear()
+            locked.spec.update(target)  # now equal to the new spec
+        else:
+            locked.spec["image"] = "img:other"  # now differs from the new spec
+
+    async with pool.connection() as conn:
+        _, written = await sessions.replace_spec(conn, s.id, dict(stored), new, recheck)
+    assert written is change
+    spec, gen2, _ = await _row(pool, s.id)
+    assert spec == target
+    assert gen2 == gen + int(change)
 
 
 async def _wait_for_lock_wait(pool, timeout=5.0):
