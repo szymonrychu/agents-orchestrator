@@ -231,3 +231,13 @@ async def test_regular_leader_cannot_read_another_session(app, pool):
     assert_error(await call(app, me, "GET", other.slug), 403, "not_superleader")
     assert_error(await call(app, me, "GET", "sp-get-nobody"), 403, "not_superleader")
     assert await audits(pool, me.id) == []
+
+
+async def test_regular_hive_non_leader_cannot_read_its_own_session(app, pool, settings):
+    """The gate's not_leader rule is the only guard on GET: a member that is not the leader reads
+    nothing, even its own session, and no admin_call row is written."""
+    me = await hive(pool, "sp-get-member")
+    await _seed(pool, settings, me, {})
+    assert_error(await call(app, me, "GET", me.slug, ip=me.member_ip), 403, "not_leader")
+    assert (await call(app, me, "GET", me.slug)).status_code == 200  # the leader still reads it
+    assert [a["status"] for a in await audits(pool, me.id)] == [200]

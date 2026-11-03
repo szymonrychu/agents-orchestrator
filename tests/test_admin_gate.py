@@ -77,6 +77,22 @@ async def test_every_admin_route_carries_its_gate(pool, dsn):
     assert editor == EDITOR_ROUTES
 
 
+async def test_editor_gate_is_per_route_and_slug_stays_a_path_parameter(pool, dsn):
+    """The editor gate reads `slug`: it sits on the routes that have {slug}, never on the router,
+    so a route added without one cannot turn it into a required query parameter."""
+    assert admin.session_router.dependencies == []
+    for route in admin.session_router.routes:
+        assert "{slug}" in route.path, route.path
+    app = create_app(make_settings(dsn), pool)
+    for path, ops in app.openapi()["paths"].items():
+        if not path.startswith(ADMIN_PREFIX):
+            continue
+        for method, op in ops.items():
+            where = {p["name"]: p["in"] for p in op.get("parameters", [])}
+            assert where.get("slug", "path") == "path", (method, path)
+            assert ("slug" in where) == ("{slug}" in path), (method, path)
+
+
 async def test_gate_table_over_all_admin_routes(pool, dsn):
     app = create_app(make_settings(dsn), pool)
     plain = await alone(pool, "g-plain")

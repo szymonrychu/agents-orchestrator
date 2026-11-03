@@ -2,8 +2,8 @@
 
 One gate covers `router`: `require_superleader` (a live agent of a session with
 `session_messaging` set, whoever created the session). `session_router` (GET and PATCH
-`/sessions/{slug}`) has `require_session_editor` instead, which also admits any other
-session's leader on its own slug. Every admitted call is audited without values or bodies
+`/sessions/{slug}`) carries `require_session_editor` on each route instead, which also admits
+any other session's leader on its own slug. Every admitted call is audited without values or bodies
 (D15): one log line and one `events` row the UI feed shows.
 """
 
@@ -81,6 +81,7 @@ async def require_session_editor(
 
 
 Superleader = Depends(require_superleader)
+SessionEditor = Depends(require_session_editor)
 
 
 def caller_of(request: Request):
@@ -157,12 +158,9 @@ class AdminRoute(APIRoute):
 router = APIRouter(
     prefix=ADMIN_PREFIX, tags=["admin"], route_class=AdminRoute, dependencies=[Superleader]
 )
-session_router = APIRouter(
-    prefix=ADMIN_PREFIX,
-    tags=["admin"],
-    route_class=AdminRoute,
-    dependencies=[Depends(require_session_editor)],
-)
+# The routes with {slug} carry the editor gate themselves: it reads the path parameter `slug`, so
+# a router-level dependency would make it a required query parameter on any route without one.
+session_router = APIRouter(prefix=ADMIN_PREFIX, tags=["admin"], route_class=AdminRoute)
 
 
 def touched(request: Request, *names: str) -> None:
@@ -294,7 +292,9 @@ async def _target(conn, slug: str, caller: sessions_repo.Session) -> sessions_re
     return session
 
 
-@session_router.get("/sessions/{slug}", response_model=schemas.SessionView)
+@session_router.get(
+    "/sessions/{slug}", response_model=schemas.SessionView, dependencies=[SessionEditor]
+)
 async def get_session(
     slug: str, request: Request, pool: Pool, settings: Cfg
 ) -> schemas.SessionView:
@@ -304,7 +304,9 @@ async def get_session(
         return await sessions_api.one_view(conn, await _target(conn, slug, caller), settings)
 
 
-@session_router.patch("/sessions/{slug}", response_model=schemas.SessionView)
+@session_router.patch(
+    "/sessions/{slug}", response_model=schemas.SessionView, dependencies=[SessionEditor]
+)
 async def patch_session(
     slug: str, body: schemas.SessionSpecPatch, request: Request, pool: Pool, settings: Cfg
 ) -> schemas.SessionView:
