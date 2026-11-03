@@ -79,6 +79,8 @@ class Session:
     inactivity_reminded_at: datetime | None = None
     close_kind: str | None = None
     close_deadline_at: datetime | None = None
+    # set by a forced discard (DELETE ...?force=true): owed pre-discard hooks are abandoned
+    discard_forced_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -109,6 +111,7 @@ def _from_row(row: dict[str, Any]) -> Session:
         inactivity_reminded_at=row["inactivity_reminded_at"],
         close_kind=row["close_kind"],
         close_deadline_at=row["close_deadline_at"],
+        discard_forced_at=row["discard_forced_at"],
     )
 
 
@@ -283,14 +286,29 @@ async def count_active(conn: psycopg.AsyncConnection) -> int:
     return (await cur.fetchone())[0]
 
 
-async def request_delete(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Session:
+async def request_delete(
+    conn: psycopg.AsyncConnection, session_id: uuid.UUID, *, force: bool = False
+) -> Session:
+    """Flip the session to deleting (a no-op when it already is). `force` also stamps
+    `discard_forced_at` (kept once set), on an active session and on one already deleting, so
+    the reconciler abandons the owed pre-discard hooks instead of retrying them."""
     async with conn.transaction():
-        rows = await _fetch(
-            conn,
-            "UPDATE sessions SET desired = 'deleting', generation = generation + 1"
-            " WHERE id = %s AND desired = 'active' RETURNING *",
-            (session_id,),
-        )
+        if force:
+            rows = await _fetch(
+                conn,
+                "UPDATE sessions SET desired = 'deleting',"
+                " generation = generation + (desired = 'active')::int,"
+                " discard_forced_at = coalesce(discard_forced_at, now())"
+                " WHERE id = %s RETURNING *",
+                (session_id,),
+            )
+        else:
+            rows = await _fetch(
+                conn,
+                "UPDATE sessions SET desired = 'deleting', generation = generation + 1"
+                " WHERE id = %s AND desired = 'active' RETURNING *",
+                (session_id,),
+            )
         if rows:
             await _notify(conn, session_id)
             return rows[0]

@@ -474,6 +474,15 @@ async def test_service_discards_its_own_session(app, pool):
     assert await desired(pool, session_id) == "deleting"
 
 
+async def test_service_port_refuses_a_forced_discard(app, pool):
+    """T-26: `?force=true` is for the UI and a superleader, not for trigger services."""
+    cl = await insert_session(pool, created_by_service="agents-webhook")
+    async with client(app, 8002) as c:
+        r = await c.delete(f"/api/v1/sessions/{cl['id']}?force=true")
+        assert_error(r, 422, "invalid_request")
+    assert await desired(pool, cl["id"]) == "active"
+
+
 async def test_service_cannot_discard_another_services_session(app, pool):
     cl = await insert_session(pool, created_by_service="agents-schedule")
     async with client(app, 8002) as c:

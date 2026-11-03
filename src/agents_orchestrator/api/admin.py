@@ -282,14 +282,17 @@ async def create_session(
 
 @router.delete("/sessions/{slug}", status_code=202, response_model=schemas.SessionView)
 async def discard_session(
-    slug: str, request: Request, pool: Pool, settings: Cfg
+    slug: str, request: Request, pool: Pool, settings: Cfg, force: sessions_api.Force = False
 ) -> schemas.SessionView:
+    """`?force=true` abandons the target's owed pre-discard hooks, also when it is already
+    deleting (a discard stuck on a hook receiver that is down)."""
     _, caller = caller_of(request)
+    force = sessions_api.force_flag(request)
     async with pool.connection() as conn:
         target = await _target(conn, slug, caller)
         if target.id == caller.id:
             raise ApiError(422, "own_session", "a session cannot discard itself")
-        return await sessions_api.discard(conn, target.id, settings)
+        return await sessions_api.discard(conn, target.id, settings, force=force)
 
 
 # ---------------------------------------------------------------- restart (O8)

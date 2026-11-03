@@ -497,12 +497,25 @@ async def get_session(
         return await one_view(conn, session, settings)
 
 
-async def discard(conn, session_id: uuid.UUID, settings: Settings) -> schemas.SessionView:
+async def discard(
+    conn, session_id: uuid.UUID, settings: Settings, *, force: bool = False
+) -> schemas.SessionView:
     try:
-        session = await repo.request_delete(conn, session_id)
+        session = await repo.request_delete(conn, session_id, force=force)
     except repo.SessionNotFound:
         raise not_found("session") from None
     return await one_view(conn, session, settings)
+
+
+# Documents the flag; `force_flag` reads it strictly (only `true` or `false`, no other parameter).
+Force = Annotated[
+    bool,
+    Query(
+        description="Abandon the session's owed pre-discard hooks (reason `forced`) so the"
+        " discard finishes without them, also for a session already deleting; the workspace"
+        " PVC is kept as the backup. Refused on the service port."
+    ),
+]
 
 
 @router.delete("/sessions/{session_id}", status_code=202, response_model=schemas.SessionView)
@@ -511,21 +524,39 @@ async def discard_session(
     request: Request,
     pool: Pool,
     settings: Cfg,
+    force: Force = False,
 ) -> schemas.SessionView:
     """Discard the session. On the service port a service may discard only a session it created
-    itself; any other session answers 404 `not_found`, like an unknown one."""
-    if request.query_params:
-        raise ApiError(
-            422, "invalid_request", "discard takes no parameters; it always deletes everything"
-        )
+    itself; any other session answers 404 `not_found`, like an unknown one. `?force=true` (main
+    port only) abandons the owed pre-discard hooks, also of a session already deleting."""
     service = calling_service(request)
+    force = force_flag(request, allowed=service is None)
     async with pool.connection() as conn:
         if service is not None:
             # created_by_service never changes after insert, so check-then-discard needs no lock.
             session = await repo.get(conn, session_id)
             if session is None or session.created_by_service != service:
                 raise not_found("session")
-        return await discard(conn, session_id, settings)
+        return await discard(conn, session_id, settings, force=force)
+
+
+def force_flag(request: Request, *, allowed: bool = True) -> bool:
+    """The discard's only query parameter, `force` (`true` or `false`); anything else is 422."""
+    params = request.query_params
+    extra = set(params) - {"force"}
+    if extra or not allowed and params:
+        raise ApiError(
+            422,
+            "invalid_request",
+            "discard takes only the force parameter (main and admin ports); it always deletes"
+            " everything",
+        )
+    value = params.getlist("force")
+    if not value:
+        return False
+    if len(value) > 1 or value[0] not in ("true", "false"):
+        raise ApiError(422, "invalid_request", "force must be true or false")
+    return value[0] == "true"
 
 
 @router.delete("/sessions/{session_id}/close", response_model=schemas.SessionView)
