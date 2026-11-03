@@ -162,6 +162,7 @@ async def test_create_applies_the_secret_rules(call, pool, canary):
     preset = (await call("POST", P, json={"name": "needs-key", "spec": unset})).json()
     r = await call("POST", S, json={"preset_id": preset["id"], "slug": "child-bad"})
     assert_error(r, 422, "secret_unset")
+    assert r.json()["error"]["fields"] == ["env.API_KEY"]
     assert await row(pool, "child-bad") is None
     # a spec without a preset is refused outright
     r = await call("POST", S, json={"slug": "child-bad2", "spec": unset})

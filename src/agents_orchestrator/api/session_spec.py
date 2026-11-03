@@ -33,6 +33,14 @@ from agents_orchestrator.spec import default_cache_key
 _TRIES = 3
 
 
+def not_superleader() -> ApiError:
+    return ApiError(403, "not_superleader", "another session's spec needs a superleader session")
+
+
+def not_leader() -> ApiError:
+    return ApiError(403, "not_leader", "only the session's leader may read or edit its spec")
+
+
 def _fixed_refused(paths: list[str]) -> ApiError:
     return ApiError(
         422,
@@ -54,16 +62,24 @@ async def patch(
     superleader: bool,
 ) -> schemas.SessionView:
     """Apply `body.spec` (RFC 7396) to the target's stored spec. The caller passed the gate:
-    a superleader on its own or a manageable session, or a regular leader on its own. The
-    source preset is never written; a changed spec bumps the generation once."""
+    a superleader on its own or a manageable session, or a regular leader on its own (any
+    other session is refused here too). The source preset is never written; a changed spec
+    bumps the generation once."""
     own = target.id == caller.id
+    if not own and not superleader:
+        raise not_superleader()
+
+    def as_superleader(base: dict[str, Any]) -> bool:
+        """On its own session the caller's rules follow the row being edited (a human may turn
+        `session_messaging` off mid-patch); on another one only a superleader got here."""
+        return bool(base.get("session_messaging")) if own else superleader
 
     def guards(
         base: dict[str, Any], new: dict[str, Any], values: Iterable[str], versions: dict[str, str]
     ) -> None:
         """Plan 3.3 steps 3 to 7 on `base` (the stored spec); each refusal notes its paths."""
         guard_agent_edit(base, new, values, request, privileged=not own)
-        if not superleader and (
+        if not as_superleader(base) and (
             looser := tighten_changes(
                 base,
                 new,
@@ -108,7 +124,7 @@ async def patch(
             """The same guards on the fresh locked row, then who may still edit it: the
             preset is held FOR SHARE (lock order sessions, then presets)."""
             guards(locked.spec, new, values, locked.secret_versions)
-            if superleader and not own:
+            if not own:
                 preset = (
                     await presets_repo.get_for_share(conn, locked.preset_id)
                     if locked.preset_id is not None
@@ -116,8 +132,8 @@ async def patch(
                 )
                 if preset is None or not preset.superleader_manageable:
                     raise not_found("session")
-            elif not superleader and not await _leads(conn, caller_agent, target):
-                raise ApiError(403, "not_leader", "only the session's leader may edit its spec")
+            elif not as_superleader(locked.spec) and not await _leads(conn, caller_agent, target):
+                raise not_leader()
 
         try:
             saved, _ = await repo.replace_spec(conn, target.id, stored, filled, recheck)

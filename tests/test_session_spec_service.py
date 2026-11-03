@@ -109,17 +109,18 @@ async def _patch(
         )
 
 
-async def _refused(pool, settings, target, caller, spec, status, code, fields=None, **kw):
+async def _refused(
+    pool, settings, target, caller, spec, status, code, fields=None, *, request=None, **kw
+):
     before = await _row(pool, target.id)
-    request = _request()
+    request = request if request is not None else _request()
     with pytest.raises(ApiError) as caught:
         await _patch(pool, settings, target, caller, spec, request=request, **kw)
     exc = caught.value
     assert (exc.status, exc.code) == (status, code), exc.message
     if fields is not None:
         assert request.state.preset_fields == fields
-        if code != "secret_unset":  # its body names the variables in the message, as on create
-            assert exc.extra["fields"] == fields
+        assert exc.extra["fields"] == fields
     assert await _row(pool, target.id) == before
     return exc
 
@@ -309,6 +310,19 @@ async def test_foreign_privileged_target_usage_quota_passes(pool, settings, boss
     assert view.spec.usage_quota.five_hour_pct == 40
 
 
+async def test_regular_leader_on_a_foreign_session_refused(pool, settings):
+    """The gate keeps a regular leader on its own slug; the service refuses on its own too,
+    before reading the target, and notes no paths."""
+    plain = await alone(pool, "svc-plain")
+    target, _, _ = await _managed(pool, settings, "svc-plain-target", {})
+    request = _request()
+    exc = await _refused(
+        pool, settings, target, plain, {"peers": False}, 403, "not_superleader", request=request
+    )
+    assert exc.extra is None
+    assert not hasattr(request.state, "preset_fields")
+
+
 # ---------------------------------------------------------------- fixed fields
 
 FIXED = [
@@ -425,6 +439,29 @@ async def test_leader_cannot_loosen_against_the_setting_default(pool, settings):
         "human_only_field",
         ["inactivity.close_seconds"],
     )
+
+
+@pytest.mark.parametrize("key", ["five_hour_pct", "seven_day_pct"])
+async def test_leader_cannot_raise_an_unset_quota_above_the_setting_default(pool, settings, key):
+    """An unset quota reads as `usage_quota_default`: with a default of 50, 80 is looser and
+    40 is tighter."""
+    low = settings.model_copy(update={"usage_quota_default": 50})
+    me = await alone(pool, f"svc-quota-default-{key[:4]}")
+    stored = await _seed(pool, low, me, {})
+    assert "usage_quota" not in stored
+    await _refused(
+        pool,
+        low,
+        me,
+        me,
+        {"usage_quota": {key: 80}},
+        403,
+        "human_only_field",
+        [f"usage_quota.{key}"],
+    )
+    before = await _row(pool, me.id)
+    await _patch(pool, low, me, me, {"usage_quota": {key: 40}})
+    assert (await _row(pool, me.id))["generation"] == before["generation"] + 1
 
 
 @pytest.mark.parametrize("patch", TIGHTER)
@@ -569,6 +606,35 @@ async def test_race_concurrent_scale_retries_and_keeps_replicas(pool, settings, 
     assert view.spec.replicas == 3 and view.spec.peers is False
 
 
+async def test_race_session_messaging_turned_off_applies_leader_rules(pool, settings, monkeypatch):
+    """A superleader loosening its own limit while a human turns `session_messaging` off: the
+    retry derives the rules from the fresh row, not the gate, so the loosening is refused."""
+    me = await alone(pool, "svc-race-demoted", superleader=True)
+    await _seed(pool, settings, me, LIMITS)
+
+    async def demote():
+        await _exec(
+            pool,
+            "UPDATE sessions SET spec = spec || '{\"session_messaging\": false}'::jsonb"
+            " WHERE id = %s",
+            (me.id,),
+        )
+
+    calls = _between_read_and_write(monkeypatch, demote)
+    request = _request()
+    with pytest.raises(ApiError) as caught:
+        await _patch(
+            pool, settings, me, me, {"usage_quota": {"five_hour_pct": 80}}, request=request
+        )
+    assert (caught.value.status, caught.value.code) == (403, "human_only_field")
+    assert caught.value.extra["fields"] == ["usage_quota.five_hour_pct"]
+    assert request.state.preset_fields == ["usage_quota.five_hour_pct"]
+    assert len(calls) == 1
+    after = await _row(pool, me.id)
+    assert after["spec"]["usage_quota"] == {"five_hour_pct": 50}
+    assert after["spec"]["session_messaging"] is False
+
+
 async def test_spec_changed_three_times_is_a_conflict(pool, settings, monkeypatch):
     me = await alone(pool, "svc-race-conflict")
     await _seed(pool, settings, me, {})
@@ -594,8 +660,7 @@ async def _refused_after_change(pool, settings, target, caller, spec, status, co
     assert (exc.status, exc.code) == (status, code), exc.message
     if fields is not None:
         assert request.state.preset_fields == fields
-        if code != "secret_unset":  # its body names the variables in the message, as on create
-            assert exc.extra["fields"] == fields
+        assert exc.extra["fields"] == fields
     after = await _row(pool, target.id)
     assert after["generation"] == gen_before
     assert after["spec"].get("peers") is True
