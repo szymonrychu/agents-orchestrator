@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
 from typing import Any
 
@@ -182,6 +183,14 @@ class Dispatcher:
                 try:
                     async with self.pool.connection() as conn:
                         claim = await queue.claim_and_pick(conn)
+                        if claim is not None:
+                            # loaded here, in claim order, so the sends keep their order
+                            claim = dataclasses.replace(
+                                claim,
+                                attachments=tuple(
+                                    await queue.message_attachments(conn, claim.message_id)
+                                ),
+                            )
                 except BaseException:
                     slots.release()
                     raise
@@ -233,10 +242,26 @@ class Dispatcher:
                 # on every send makes a re-send answer the turn the first one started.
                 message_id = f"orch-{claim.message_id}"
                 timeout = s.priority_send_timeout_seconds
+            attachments = claim.attachments
+            if attachments:
+                # The wrapper writes the files under .attachments/<message_id>/, so every
+                # lane needs the stable id; a re-send overwrites the same paths.
+                message_id = f"orch-{claim.message_id}"
+                paths = ", ".join(f".attachments/{message_id}/{a.name}" for a in attachments)
+                text += (
+                    "\n\nAttached files (paths relative to your working directory; Read each"
+                    f" one): {paths}"
+                )
             heartbeat = asyncio.create_task(self._heartbeat(claim.message_id))
             try:
                 outcome = await client.submit_turn(
-                    claim.wrapper_session_id, text, metadata, claim.lane, message_id, timeout
+                    claim.wrapper_session_id,
+                    text,
+                    metadata,
+                    claim.lane,
+                    message_id,
+                    timeout,
+                    attachments,
                 )
             finally:
                 heartbeat.cancel()

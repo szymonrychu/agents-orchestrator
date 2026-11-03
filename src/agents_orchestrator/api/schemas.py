@@ -341,12 +341,28 @@ MessageStatus = Literal["queued", "dispatching", "verifying", "sent", "failed", 
 Notice = Literal["inactivity_reminder", "inactivity_close"]
 
 
+class MessageAttachment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    mime: str
+    data_b64: str
+
+
+class MessageAttachmentView(BaseModel):
+    name: str
+    mime: str
+    size: int
+    path: str
+
+
 class PostMessage(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     text: str = Field(min_length=1)
     target_agent_id: uuid.UUID | None = None
     lane: Lane = "regular"
+    attachments: list[MessageAttachment] = []
 
 
 class MessageAccepted(BaseModel):
@@ -379,6 +395,7 @@ class MessageView(BaseModel):
     dispatched_at: datetime | None
     turn: TurnView | None
     notice: Notice | None = None
+    attachments: list[MessageAttachmentView]
 
 
 class CommandAccepted(BaseModel):

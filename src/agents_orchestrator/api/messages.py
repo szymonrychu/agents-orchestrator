@@ -10,9 +10,10 @@ from agents_common.templating import TemplateError
 from fastapi import APIRouter, Query, Response
 
 from agents_orchestrator import rendering
+from agents_orchestrator.api import attachments as attachments_mod
 from agents_orchestrator.api import schemas
 from agents_orchestrator.api.errors import ApiError, not_found
-from agents_orchestrator.api.sessions import Pool
+from agents_orchestrator.api.sessions import Cfg, Pool
 from agents_orchestrator.db import queue, views
 from agents_orchestrator.db import sessions as repo
 from agents_orchestrator.spec import SessionSpec
@@ -51,6 +52,10 @@ def _message_view(r: dict) -> schemas.MessageView:
         dispatched_at=r["dispatched_at"],
         turn=turn,
         notice=r["notice"],
+        attachments=[
+            schemas.MessageAttachmentView(**a, path=f".attachments/orch-{r['id']}/{a['name']}")
+            for a in r["attachments"]
+        ],
     )
 
 
@@ -82,8 +87,9 @@ async def _with_start_prompt(session: repo.Session, text: str) -> str:
     "/sessions/{session_id}/messages", status_code=202, response_model=schemas.MessageAccepted
 )
 async def post_message(
-    session_id: uuid.UUID, body: schemas.PostMessage, pool: Pool
+    session_id: uuid.UUID, body: schemas.PostMessage, pool: Pool, settings: Cfg
 ) -> schemas.MessageAccepted:
+    stored = attachments_mod.decode(body.attachments, settings)
     async with pool.connection() as conn, conn.transaction():
         session = await _require_open_session(conn, session_id)
         if body.target_agent_id is not None:
@@ -106,6 +112,7 @@ async def post_message(
                 body.target_agent_id,
                 lane=body.lane,
                 carries_start_prompt=carries,
+                attachments=stored,
             )
         except repo.SessionBeingDeleted as exc:
             raise ApiError(409, "session_deleting", "session is being discarded") from exc
