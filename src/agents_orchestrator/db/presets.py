@@ -28,6 +28,10 @@ class PresetNotFound(Exception):
     pass
 
 
+class PresetChanged(Exception):
+    """The row changed since the caller read it (compare-and-swap on updated_at)."""
+
+
 class PresetDefault(Exception):
     """The default preset cannot be renamed or deleted."""
 
@@ -124,8 +128,12 @@ async def update(
     spec: dict[str, Any],
     superleader_manageable: bool | None = None,
     labels: list[str] | None = None,
+    expected_updated_at: datetime | None = None,
 ) -> Preset:
-    """Replace name and spec; a None flag or None labels keep the stored values."""
+    """Replace name and spec; a None flag or None labels keep the stored values.
+
+    With `expected_updated_at`, the row must still carry that timestamp (checked under the row
+    lock) or `PresetChanged` is raised and nothing is written."""
     validate_preset_name(name)
     try:
         async with conn.transaction():
@@ -134,6 +142,8 @@ async def update(
             )
             if not current:
                 raise PresetNotFound(str(preset_id))
+            if expected_updated_at is not None and current[0].updated_at != expected_updated_at:
+                raise PresetChanged(str(preset_id))
             if current[0].is_default and name != current[0].name:
                 raise PresetDefault(current[0].name)
             rows = await _fetch(
@@ -151,6 +161,11 @@ async def update(
 async def manageable_ids(conn: psycopg.AsyncConnection) -> set[uuid.UUID]:
     cur = await conn.execute("SELECT id FROM presets WHERE superleader_manageable")
     return {r[0] for r in await cur.fetchall()}
+
+
+async def manageable_specs(conn: psycopg.AsyncConnection) -> dict[uuid.UUID, dict[str, Any]]:
+    cur = await conn.execute("SELECT id, spec FROM presets WHERE superleader_manageable")
+    return {r[0]: r[1] for r in await cur.fetchall()}
 
 
 async def delete(conn: psycopg.AsyncConnection, preset_id: uuid.UUID) -> None:

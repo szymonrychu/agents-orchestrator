@@ -94,6 +94,12 @@ def test_guard_fields_exist_upstream():
             schema = ok["content"]["application/json"]["schema"]
             item = _resolve(doc, schema.get("items", schema))
             assert field in item["properties"], (service, method, template)
+        if guard.rule:
+            schemas = doc["components"]["schemas"]
+            assert {"list", "kind", "value"} <= set(schemas["RuleIn"]["properties"])
+            assert {"allow", "deny"} <= set(schemas["RulesView"]["properties"])
+            assert "id" in schemas["RuleView"]["properties"]
+            assert {"room_id", "preset_id"} <= set(schemas["RoomView"]["properties"])
         if guard.cursor:
             params = {p["name"]: p for p in op["parameters"]}
             assert params["limit"]["schema"]["default"] == HISTORY_DEFAULT_LIMIT, template

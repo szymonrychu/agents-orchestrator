@@ -16,6 +16,7 @@ from test_api_sessions import client_for as main_client
 
 from agents_orchestrator.api.admin import ADMIN_PREFIX
 from agents_orchestrator.api.app import create_app
+from agents_orchestrator.preset_policy import privileged
 
 S = f"{ADMIN_PREFIX}/sessions"
 P = f"{ADMIN_PREFIX}/presets"
@@ -34,7 +35,10 @@ async def boss(pool):
 
 @pytest.fixture
 def app(pool, dsn):
-    return create_app(make_settings(dsn), pool, kube=FakeKube(namespace="agents"))
+    settings = make_settings(dsn).model_copy(
+        update={"kube_access_service_account": "kube-sa", "docker_image": "docker:27-dind"}
+    )
+    return create_app(settings, pool, kube=FakeKube(namespace="agents"))
 
 
 @pytest.fixture
@@ -182,3 +186,64 @@ async def test_discard_another_session(call, pool):
 async def test_discarding_the_callers_own_session_is_refused(call, pool):
     assert_error(await call("DELETE", f"{S}/adm-boss"), 422, "own_session")
     assert (await row(pool, "adm-boss"))["desired"] == "active"
+
+
+async def last_admin_call(pool, session_id):
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT data FROM events WHERE session_id = %s AND type = 'admin_call' "
+            "ORDER BY id DESC LIMIT 1",
+            (session_id,),
+        )
+        return (await cur.fetchone())["data"]
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        {"kube_access": True},
+        {"session_messaging": True},
+        {"docker": True},
+        {"kube_access": True, "docker": True},
+    ],
+)
+async def test_admin_create_from_privileged_preset_403(call, main, pool, boss, flags):
+    made = await main(
+        "POST", M, json={"name": "priv", "spec": flags, "superleader_manageable": True}
+    )
+    assert made.status_code == 201, made.text
+    r = await call("POST", S, json={"preset_id": made.json()["id"], "slug": "child-p"})
+    assert_error(r, 403, "privileged_target")
+    assert r.json()["error"]["fields"] == privileged(flags)
+    assert await row(pool, "child-p") is None
+    audit = await last_admin_call(pool, boss.id)
+    assert audit["status"] == 403 and audit["fields"] == privileged(flags)
+
+
+async def test_admin_create_from_preset_with_flags_off_201(call, main):
+    spec = {
+        "kube_access": False,
+        "session_messaging": None,
+        "discard_hook_url": "https://h.example",
+    }
+    made = await main("POST", M, json={"name": "off", "spec": spec, "superleader_manageable": True})
+    assert made.status_code == 201, made.text
+    r = await call("POST", S, json={"preset_id": made.json()["id"], "slug": "child-off"})
+    assert r.status_code == 201, r.text
+
+
+async def test_admin_create_hidden_privileged_is_404(call, main):
+    made = await main("POST", M, json={"name": "hidp", "spec": {"kube_access": True}})
+    assert made.status_code == 201, made.text
+    r = await call("POST", S, json={"preset_id": made.json()["id"], "slug": "child-hp"})
+    assert_error(r, 404, "not_found")
+
+
+async def test_main_create_from_privileged_preset_201(main):
+    spec = {"kube_access": True, "session_messaging": True}
+    made = await main("POST", M, json={"name": "mainp", "spec": spec})
+    assert made.status_code == 201, made.text
+    r = await main(
+        "POST", "/api/v1/sessions", json={"preset_id": made.json()["id"], "slug": "human-p"}
+    )
+    assert r.status_code == 201, r.text

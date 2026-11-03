@@ -66,14 +66,16 @@ async def _audit(request: Request, status: int) -> None:
         return  # refused at the gate: not an admin call
     agent, session = admitted
     secrets = sorted(set(request.state.admin_secrets))
+    fields = getattr(request.state, "preset_fields", None)
     path = request.url.path
     log.info(
-        "admin %s %s -> %s session=%s secrets=%s",
+        "admin %s %s -> %s session=%s secrets=%s%s",
         request.method,
         path,
         status,
         session.slug,
         secrets,
+        "" if fields is None else f" fields={fields}",
     )
     data = {
         "method": request.method,
@@ -82,6 +84,8 @@ async def _audit(request: Request, status: int) -> None:
         "session": session.slug,
         "secrets": secrets,
     }
+    if fields is not None:
+        data["fields"] = fields
     try:
         async with request.app.state.pool.connection() as conn:
             await events_repo.insert_events(
@@ -142,6 +146,7 @@ ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("POST", f"{ADMIN_PREFIX}/presets"): "create",
     ("GET", f"{ADMIN_PREFIX}/presets/{{ref}}"): "preset",
     ("PUT", f"{ADMIN_PREFIX}/presets/{{ref}}"): "preset",
+    ("PATCH", f"{ADMIN_PREFIX}/presets/{{ref}}"): "preset",
     ("DELETE", f"{ADMIN_PREFIX}/presets/{{ref}}"): "preset",
     ("POST", f"{ADMIN_PREFIX}/presets/{{ref}}/copy"): "preset",
     ("PUT", f"{ADMIN_PREFIX}/presets/{{ref}}/secrets/{{name}}"): "preset",
@@ -197,6 +202,15 @@ async def replace_preset(
         return await presets_api.replace(request, conn, settings, found.id, body, superleader=True)
 
 
+@router.patch("/presets/{ref}", response_model=schemas.PresetView)
+async def patch_preset(
+    ref: str, body: schemas.PresetPatch, request: Request, pool: Pool, settings: Cfg
+) -> schemas.PresetView:
+    async with pool.connection() as conn:
+        found = await _manageable_preset(conn, ref)
+        return await presets_api.patch(request, conn, settings, found.id, body)
+
+
 @router.delete("/presets/{ref}", status_code=204, response_model=None)
 async def delete_preset(ref: str, request: Request, pool: Pool, settings: Cfg) -> Response:
     async with pool.connection() as conn:
@@ -207,11 +221,13 @@ async def delete_preset(ref: str, request: Request, pool: Pool, settings: Cfg) -
 
 @router.post("/presets/{ref}/copy", status_code=201, response_model=schemas.PresetView)
 async def copy_preset(
-    ref: str, pool: Pool, body: schemas.CopyPreset | None = None
+    ref: str, request: Request, pool: Pool, body: schemas.CopyPreset | None = None
 ) -> schemas.PresetView:
     async with pool.connection() as conn:
         found = await _manageable_preset(conn, ref)
-        return await presets_api.copy(conn, found.id, body.name if body else None)
+        return await presets_api.copy(
+            conn, found.id, body.name if body else None, superleader=True, request=request
+        )
 
 
 @router.put("/presets/{ref}/secrets/{name}", response_model=schemas.SecretView)
@@ -221,7 +237,9 @@ async def set_preset_secret(
     touched(request, name)
     async with pool.connection() as conn:
         found = await _manageable_preset(conn, ref)
-        return await presets_api.put_secret(request, conn, settings, str(found.id), name, body)
+        return await presets_api.put_secret(
+            request, conn, settings, str(found.id), name, body, superleader=True
+        )
 
 
 # ---------------------------------------------------------------- sessions (O7)
@@ -257,9 +275,14 @@ async def create_session(
     """Same body and rules as the main port, usage gate included; the caller's session is
     recorded as the creator and `created_by_service` stays empty."""
     _, caller = caller_of(request)
-    return await sessions_api.create(
-        pool, settings, body, created_by_session=caller.id, usage=usage
-    )
+    try:
+        return await sessions_api.create(
+            pool, settings, body, created_by_session=caller.id, usage=usage
+        )
+    except ApiError as exc:
+        if exc.code == "privileged_target":
+            request.state.preset_fields = exc.extra["fields"]
+        raise
 
 
 @router.delete("/sessions/{slug}", status_code=202, response_model=schemas.SessionView)

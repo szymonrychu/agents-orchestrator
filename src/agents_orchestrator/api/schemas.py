@@ -41,6 +41,21 @@ class PresetIn(BaseModel):
         return None if value is None else normalize_labels(value)
 
 
+class PresetPatch(BaseModel):
+    """Admin partial edit: `spec` is an RFC 7396 merge patch of the stored spec."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = None
+    labels: list[str] | None = None
+    spec: dict[str, Any] | None = None
+
+    @field_validator("labels")
+    @classmethod
+    def _labels(cls, value: list[str] | None) -> list[str] | None:
+        return None if value is None else normalize_labels(value)
+
+
 class SessionLabelsIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
