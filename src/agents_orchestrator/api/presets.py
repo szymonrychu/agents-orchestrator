@@ -513,9 +513,14 @@ async def put_secret(
     if len(value.encode()) > SECRET_MAX_BYTES:
         raise ApiError(413, "secret_too_large", f"a secret holds at most {SECRET_MAX_BYTES} bytes")
     found = await by_ref(conn, preset)
-    if superleader and (refused := privileged_target_changes(found.spec, found.spec, [name])):
-        _note_fields(request, refused)
-        raise privileged_edit_refused(refused)
+
+    def refuse_privileged(spec: dict) -> None:
+        if refused := privileged_target_changes(spec, spec, [name]):
+            _note_fields(request, refused)
+            raise privileged_edit_refused(refused)
+
+    if superleader:
+        refuse_privileged(found.spec)
     entry = found.spec.get("env", {}).get(name)
     if not (isinstance(entry, dict) and entry.get("protected")):
         raise ApiError(
@@ -524,7 +529,13 @@ async def put_secret(
     kube = secret_store.kube_of(request)
     try:
         meta = await secret_store.set_secret(
-            conn, kube, settings.namespace, found.id, name, body.value
+            conn,
+            kube,
+            settings.namespace,
+            found.id,
+            name,
+            body.value,
+            recheck=refuse_privileged if superleader else None,
         )
     except secret_store.PresetNotFound:
         raise not_found("preset") from None

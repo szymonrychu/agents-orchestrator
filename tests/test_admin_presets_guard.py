@@ -639,6 +639,40 @@ async def test_privileged_secret_route_403(
     assert last["data"]["secrets"] == ["K"]
 
 
+async def test_secret_route_grant_flipped_between_check_and_write_403(
+    call, human, seed, kube, canary, pool, boss, monkeypatch
+):
+    """TOCTOU: a human turns kube_access on after the route read the preset but before the
+    Secret write. The write re-reads the row under lock and refuses: 403, no Secret version."""
+    pid, _ = await _protected_seed(human, seed, canary)
+    secrets_before = kube.names("Secret")
+    real = presets_api.by_ref
+    reads = []
+
+    async def flip_after_read(conn, ref):
+        found = await real(conn, ref)
+        reads.append(ref)
+        if len(reads) < 2:  # the route's manageable lookup, then put_secret's own read
+            return found
+        async with pool.connection() as other:
+            await other.execute(
+                "UPDATE presets SET spec = spec || '{\"kube_access\": true}'::jsonb WHERE id = %s",
+                (uuid.UUID(pid),),
+            )
+        return found
+
+    monkeypatch.setattr(presets_api, "by_ref", flip_after_read)
+    r = await call("PUT", f"{A}/{pid}/secrets/K", json={"value": canary + "-new"})
+    assert_error(r, 403, "privileged_target")
+    assert r.json()["error"]["fields"] == ["env.K"]
+    assert canary not in r.text
+    assert kube.names("Secret") == secrets_before
+    assert (await human("GET", f"{M}/{pid}")).json()["spec"]["env"]["K"]["version"] == 1
+    last = (await events(pool, boss.id))[-1]
+    assert last["data"]["status"] == 403 and last["data"]["fields"] == ["env.K"]
+    assert last["data"]["secrets"] == ["K"]
+
+
 async def test_privileged_add_protected_env_403(call, human, seed):
     pid = await seed({**KUBE})
     before = (await human("GET", f"{M}/{pid}")).json()
