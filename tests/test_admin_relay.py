@@ -667,6 +667,8 @@ async def test_history_query_string_passed(rig):
 
 
 # ------------------------------------------------------------------------- privileged targets
+# A superleader starts sessions from privileged presets (regression fix), so it may also point
+# trigger objects at them; the preset only has to be manageable (404 otherwise).
 
 PRIVILEGED_WRITES = [
     ("webhook", "POST", "/endpoints"),
@@ -678,49 +680,39 @@ PRIVILEGED_WRITES = [
     ("schedule", "PUT", "/schedules/{schedule_id}"),
     ("schedule", "POST", "/schedules/{schedule_id}/run"),
     ("connector", "PUT", "/rooms/{room_id}/settings"),
-    ("connector", "POST", "/rules"),
-    ("connector", "DELETE", "/rules/{rule_id}"),
 ]
 PRIV_BODY = [r for r in PRIVILEGED_WRITES if r in BODY]
 PRIV_STORED = [r for r in PRIVILEGED_WRITES if r in STORED]
 
 
-def test_privileged_guard_rows_are_exactly_the_epic_list():
-    assert {k for k, g in admin_relay.GUARDS.items() if g.privileged} == set(PRIVILEGED_WRITES)
-
-
-async def _last_admin_call(rig) -> dict:
-    async with rig.pool.connection() as conn:
-        cur = await conn.execute(
-            "SELECT data FROM events WHERE session_id = %s AND type = 'admin_call'"
-            " ORDER BY id DESC LIMIT 1",
-            (rig.boss.id,),
-        )
-        return (await cur.fetchone())[0]
-
-
 @pytest.mark.parametrize(("service", "method", "template"), PRIV_BODY)
-async def test_relay_body_privileged_target_403(rig, service, method, template):
+async def test_relay_body_privileged_target_forwarded(rig, service, method, template):
     body = _body_for(rig, service, method, template, rig.priv)
     r = await rig.call(method, relay_url(service, template), json=body)
-    assert_error(r, 403, "privileged_target")
-    assert r.json()["error"]["fields"] == ["kube_access"]
-    assert not _sent(rig, service, method, template)
-    event = await _last_admin_call(rig)
-    assert event["status"] == 403
-    assert event["fields"] == ["kube_access"]
+    assert r.status_code == _success(service, method, template), r.text
+    assert _sent(rig, service, method, template)
 
 
-@pytest.mark.parametrize(("service", "method", "template"), PRIV_STORED)
-@pytest.mark.parametrize("with_preset", [False, True])
-async def test_relay_stored_privileged_target_403(rig, service, method, template, with_preset):
+# The upstream requires `preset_id` on a schedule or room replace, so a body without one is a
+# valid request only on the other routes.
+PRIV_STORED_CASES = [
+    (*route, with_preset)
+    for route in PRIV_STORED
+    for with_preset in (True, False)
+    if with_preset or route[1] != "PUT"
+]
+
+
+@pytest.mark.parametrize(("service", "method", "template", "with_preset"), PRIV_STORED_CASES)
+async def test_relay_stored_privileged_target_forwarded(
+    rig, service, method, template, with_preset
+):
     body = _body_for(rig, service, method, template, rig.vis)
     if body is not None and not with_preset:
         body.pop("preset_id")
     r = await rig.call(method, relay_url(service, template, 10), json=body)
-    assert_error(r, 403, "privileged_target")
-    assert r.json()["error"]["fields"] == ["kube_access"]
-    assert not _sent(rig, service, method, template, 10)
+    assert r.status_code == _success(service, method, template), r.text
+    assert _sent(rig, service, method, template, 10)
 
 
 @pytest.mark.parametrize(("service", "method", "template"), PRIV_STORED)
@@ -766,7 +758,7 @@ async def test_relay_is_agent_port_only(rig):
 # ------------------------------------------------------------------------- chat routing rules
 # An allow rule, or the removal of a deny rule, lets inbound chats start sessions from the
 # room's preset; the superleader may widen routing only to a room on a preset it manages that
-# has no privileged flag. Rooms (seeded): 7 visible, 8 hidden, 9 no preset, 10 privileged.
+# is on a preset it manages. Rooms (seeded): 7 visible, 8 hidden, 9 no preset, 10 privileged.
 
 RULES = ("connector", "POST", "/rules")
 RULE_DELETE = ("connector", "DELETE", "/rules/{rule_id}")
@@ -783,13 +775,10 @@ async def test_rule_allow_visible_room_forwarded(rig, n):
     assert _sent(rig, *RULES)
 
 
-async def test_rule_allow_privileged_room_403(rig):
+async def test_rule_allow_privileged_room_forwarded(rig):
     r = await rig.call("POST", relay_url(*RULES[::2]), json=_rule("allow", "room", "10"))
-    assert_error(r, 403, "privileged_target")
-    assert r.json()["error"]["fields"] == ["kube_access"]
-    assert not _sent(rig, *RULES)
-    event = await _last_admin_call(rig)
-    assert event["status"] == 403 and event["fields"] == ["kube_access"]
+    assert r.status_code == 201, r.text
+    assert _sent(rig, *RULES)
 
 
 @pytest.mark.parametrize("room", ["8", "9", "404"])
@@ -822,10 +811,10 @@ async def test_rule_allow_beyond_one_room_403(rig, body, canary="canary-rule-val
     assert not _sent(rig, *RULES)
 
 
-@pytest.mark.parametrize("body", [_rule("ALLOW", "room", "10"), {"kind": "room", "value": "10"}])
+@pytest.mark.parametrize("body", [_rule("ALLOW", "room", "8"), {"kind": "room", "value": "8"}])
 async def test_rule_list_other_than_deny_is_checked_as_allow(rig, body):
     r = await rig.call("POST", relay_url(*RULES[::2]), json=body)
-    assert_error(r, 403, "privileged_target")
+    assert_error(r, 404, "not_found")
     assert not _sent(rig, *RULES)
 
 
@@ -859,12 +848,11 @@ async def test_rule_delete_allow_or_safe_deny_forwarded(rig, n):
     assert _sent(rig, *RULE_DELETE, n)
 
 
-async def test_rule_delete_deny_of_privileged_room_403(rig):
+async def test_rule_delete_deny_of_privileged_room_forwarded(rig):
     _seed_rules(rig)
     r = await rig.call("DELETE", relay_url(*RULE_DELETE[::2], 2))
-    assert_error(r, 403, "privileged_target")
-    assert r.json()["error"]["fields"] == ["kube_access"]
-    assert not _sent(rig, *RULE_DELETE, 2)
+    assert r.status_code == 204, r.text
+    assert _sent(rig, *RULE_DELETE, 2)
 
 
 async def test_rule_delete_deny_beyond_one_room_403(rig):

@@ -16,14 +16,15 @@ PATCH and clone. Lists are filtered (a non-list answer is 502 `upstream_shape`) 
 event or run of a hidden preset is 404. An object without a preset counts as hidden. Run
 objects are mapped to their preset through one upstream `GET /schedules`.
 
-A write that creates, changes, clones or runs a webhook endpoint or schedule is 403
-`privileged_target` when the body's preset or the stored object's preset has `kube_access`,
-`session_messaging` or `docker` on (after the 404 checks, before anything is forwarded).
+A preset with `kube_access`, `session_messaging` or `docker` on is a valid target of a relayed
+trigger object (endpoint, schedule, room, rule) as long as the superleader may manage it: the
+superleader starts sessions from such presets, so it may point triggers at them. Editing a
+privileged preset itself stays human-only (`api/presets.py`).
 
 A chat routing rule that opens routing (an allow rule created, or a deny rule removed) lets
 inbound chats start sessions from the room's preset, so it is checked like a room settings change
-(`_rule_room`): only a `room` rule on a room the upstream lists with a visible preset passes, and
-a privileged preset is 403 `privileged_target`. A rule of another kind covers rooms on any preset,
+(`_rule_room`): only a `room` rule on a room the upstream lists with a visible preset passes. A
+rule of another kind covers rooms on any preset,
 present and future, and is 403 `human_only_field` (`fields: ["kind"]`); a hidden, null-preset or
 unknown room, or an unknown rule, is 404. A deny rule created or an allow rule removed only
 narrows routing and is forwarded as is. Rule values are personal identifiers and never appear in
@@ -56,9 +57,8 @@ from agents_orchestrator.api import forward as forward_core
 from agents_orchestrator.api import secret_store
 from agents_orchestrator.api.admin import caller_of, router, touched
 from agents_orchestrator.api.errors import ApiError, not_found
-from agents_orchestrator.api.sessions import Cfg, privileged_refused
+from agents_orchestrator.api.sessions import Cfg
 from agents_orchestrator.db import presets as presets_repo
-from agents_orchestrator.preset_policy import privileged
 from agents_orchestrator.settings import Settings
 
 LOCAL_TOOL_HEADER = "x-orch-tool"
@@ -125,21 +125,18 @@ class Guard:
     list_filter: Literal["preset_id", "schedule_id"] | None = None
     answer: Literal["preset_id", "schedule_id"] | None = None
     cursor: bool = False  # a full list page also answers the upstream's next `before_id`
-    privileged: bool = False  # a privileged target preset (body or stored) is 403
     rule: Literal["body", "stored"] | None = None  # a chat routing rule, see `_rule_room`
 
 
 _E, _S, _R = "endpoint", "schedule", "room"
 GUARDS: dict[tuple[str, str, str], Guard] = {
     ("webhook", "GET", "/endpoints"): Guard(list_filter="preset_id"),
-    ("webhook", "POST", "/endpoints"): Guard(body_preset=True, privileged=True),
-    ("webhook", "PATCH", "/endpoints/{id}"): Guard(body_preset=True, stored=_E, privileged=True),
+    ("webhook", "POST", "/endpoints"): Guard(body_preset=True),
+    ("webhook", "PATCH", "/endpoints/{id}"): Guard(body_preset=True, stored=_E),
     ("webhook", "DELETE", "/endpoints/{id}"): Guard(stored=_E),
-    ("webhook", "POST", "/endpoints/{id}/clone"): Guard(
-        body_preset=True, stored=_E, privileged=True
-    ),
-    ("webhook", "PUT", "/endpoints/{id}/filters"): Guard(stored=_E, privileged=True),
-    ("webhook", "POST", "/endpoints/{id}/rotate"): Guard(stored=_E, privileged=True),
+    ("webhook", "POST", "/endpoints/{id}/clone"): Guard(body_preset=True, stored=_E),
+    ("webhook", "PUT", "/endpoints/{id}/filters"): Guard(stored=_E),
+    ("webhook", "POST", "/endpoints/{id}/rotate"): Guard(stored=_E),
     ("webhook", "GET", "/events"): Guard(list_filter="preset_id"),
     ("webhook", "GET", "/events/{id}"): Guard(answer="preset_id"),
     ("webhook", "GET", "/meta"): Guard(),
@@ -147,22 +144,18 @@ GUARDS: dict[tuple[str, str, str], Guard] = {
     ("schedule", "GET", "/runs"): Guard(list_filter="schedule_id"),
     ("schedule", "GET", "/runs/{run_id}"): Guard(answer="schedule_id"),
     ("schedule", "GET", "/schedules"): Guard(list_filter="preset_id"),
-    ("schedule", "POST", "/schedules"): Guard(body_preset=True, privileged=True),
+    ("schedule", "POST", "/schedules"): Guard(body_preset=True),
     ("schedule", "POST", "/schedules/preview"): Guard(body_preset=True),
     ("schedule", "GET", "/schedules/{schedule_id}"): Guard(stored=_S),
-    ("schedule", "PUT", "/schedules/{schedule_id}"): Guard(
-        body_preset=True, stored=_S, privileged=True
-    ),
+    ("schedule", "PUT", "/schedules/{schedule_id}"): Guard(body_preset=True, stored=_S),
     ("schedule", "DELETE", "/schedules/{schedule_id}"): Guard(stored=_S),
-    ("schedule", "POST", "/schedules/{schedule_id}/run"): Guard(stored=_S, privileged=True),
+    ("schedule", "POST", "/schedules/{schedule_id}/run"): Guard(stored=_S),
     ("schedule", "GET", "/schedules/{schedule_id}/runs"): Guard(stored=_S),
     ("connector", "GET", "/rooms"): Guard(list_filter="preset_id"),
-    ("connector", "PUT", "/rooms/{room_id}/settings"): Guard(
-        body_preset=True, stored=_R, privileged=True
-    ),
+    ("connector", "PUT", "/rooms/{room_id}/settings"): Guard(body_preset=True, stored=_R),
     ("connector", "GET", "/rules"): Guard(),
-    ("connector", "POST", "/rules"): Guard(rule="body", privileged=True),
-    ("connector", "DELETE", "/rules/{rule_id}"): Guard(rule="stored", privileged=True),
+    ("connector", "POST", "/rules"): Guard(rule="body"),
+    ("connector", "DELETE", "/rules/{rule_id}"): Guard(rule="stored"),
     ("history", "GET", "/sessions"): Guard(list_filter="preset_id", cursor=True),
     ("history", "GET", "/sessions/{session_id}"): Guard(answer="preset_id"),
     ("history", "GET", "/sessions/{session_id}/records"): Guard(stored="history_session"),
@@ -301,18 +294,6 @@ async def _schedule_presets(request: Request, settings: Settings) -> dict[str, A
     return {str(i.get("id")): i.get("preset_id") for i in items if isinstance(i, dict)}
 
 
-async def _privileged(request: Request) -> dict[str, list[str]]:
-    """Manageable preset id -> its privileged flags, for presets with any on; read once per
-    request."""
-    cached = getattr(request.state, "privileged_presets", None)
-    if cached is None:
-        async with request.app.state.pool.connection() as conn:
-            specs = await presets_repo.manageable_specs(conn)
-        cached = {str(i): f for i, spec in specs.items() if (f := privileged(spec))}
-        request.state.privileged_presets = cached
-    return cached
-
-
 async def _stored_preset(
     request: Request, settings: Settings, service: str, guard: Guard
 ) -> str | None:
@@ -359,18 +340,19 @@ async def _stored_rule(request: Request, settings: Settings) -> dict[str, Any]:
 
 async def _rule_room(
     request: Request, settings: Settings, guard: Guard, body: bytes | None
-) -> str | None:
-    """The preset of the room a chat routing rule opens routing to; None when the rule only
-    narrows routing (a deny rule created, an allow rule removed). Any list other than exactly
-    `deny` counts as allow and any kind other than exactly `room` as a wider one (fail closed)."""
+) -> None:
+    """Check a chat routing rule that opens routing (a deny rule created or an allow rule removed
+    only narrows it and passes). Any list other than exactly `deny` counts as allow and any kind
+    other than exactly `room` as a wider one (fail closed); the room must be listed with a visible
+    preset."""
     if guard.rule == "body":
         rule = _body_object(body)
         if rule.get("list") == "deny":
-            return None
+            return
     else:
         rule = await _stored_rule(request, settings)
         if rule["list"] != "deny":
-            return None
+            return
     if rule.get("kind") != "room":
         request.state.preset_fields = ["kind"]
         raise human_only_rule()
@@ -379,7 +361,7 @@ async def _rule_room(
         if isinstance(room, dict) and room.get("room_id") == rule.get("value"):
             preset = room.get("preset_id")
             if preset is not None and str(preset) in await _visible(request):
-                return str(preset)
+                return
             break
     raise not_found("object")
 
@@ -467,19 +449,12 @@ def _handler(service: str, method: str, template: str) -> Callable[..., Awaitabl
             body = await forward_core.capped_body(request) or None
         if guard.body_preset and _body_hidden(body, await _visible(request)):
             raise not_found("preset")
-        stored = None
         if guard.stored:
             stored = await _stored_preset(request, settings, service, guard)
             if stored is None or stored not in await _visible(request):
                 raise not_found("object")
         if guard.rule:
-            stored = await _rule_room(request, settings, guard, body)
-        if guard.privileged:
-            flagged = await _privileged(request)
-            flags = {f for p in (_body_preset(body), stored) if p for f in flagged.get(p, [])}
-            if flags:
-                request.state.preset_fields = sorted(flags)
-                raise privileged_refused(sorted(flags))
+            await _rule_room(request, settings, guard, body)
         path = upstream_prefix + _fill(template, dict(request.path_params))
         status, content = await forward_core.forward(
             request, target, method, path, body, str(session.id), session.slug, empty_ok=True

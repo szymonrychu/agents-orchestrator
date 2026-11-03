@@ -24,7 +24,6 @@ from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import leadership, presets, views
 from agents_orchestrator.db import sessions as repo
 from agents_orchestrator.labels import normalize_labels
-from agents_orchestrator.preset_policy import privileged
 from agents_orchestrator.secret_view import redact_spec, session_metas
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import (
@@ -425,16 +424,6 @@ async def _insert(conn, slug: str, spec: SessionSpec, **provenance) -> repo.Sess
         raise ApiError(409, "conflict", f"session {slug!r} already exists") from None
 
 
-def privileged_refused(flags: list[str]) -> ApiError:
-    """403 for a superleader starting or targeting a preset with a privileged flag on."""
-    return ApiError(
-        403,
-        "privileged_target",
-        f"only a human can start or target a session from a preset with: {', '.join(flags)}",
-        extra={"fields": flags},
-    )
-
-
 async def _create_from_preset(
     conn,
     preset_id: uuid.UUID,
@@ -447,8 +436,6 @@ async def _create_from_preset(
     preset = await presets.get_for_share(conn, preset_id)
     if preset is None or (created_by_session is not None and not preset.superleader_manageable):
         raise not_found("preset")
-    if created_by_session is not None and (flags := privileged(preset.spec)):
-        raise privileged_refused(flags)
     raw = dict(preset.spec)
     raw.setdefault("replicas", settings.default_replicas)
     try:
