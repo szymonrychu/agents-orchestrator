@@ -39,6 +39,7 @@ ALLOWED_ROUTES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
         ("GET", "/api/v1/sessions/{uuid}"),
         ("GET", "/api/v1/sessions/{uuid}/messages"),
         ("POST", "/api/v1/sessions/{uuid}/messages"),
+        ("GET", "/api/v1/sessions/{uuid}/files/download"),
         ("GET", "/api/v1/messages/{int}"),
         ("GET", "/api/v1/stream"),
     )

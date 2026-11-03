@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 import logging
-from collections.abc import AsyncIterator
-from typing import Any, Literal
+from collections.abc import AsyncIterator, Sequence
+from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
 
@@ -27,6 +28,9 @@ from agents_orchestrator.wrapper.models import (
     WrapperUnreachable,
 )
 from agents_orchestrator.wrapper.sse import SSEParser
+
+if TYPE_CHECKING:
+    from agents_orchestrator.db.queue import StoredAttachment
 
 log = logging.getLogger(__name__)
 
@@ -149,14 +153,25 @@ class WrapperClient:
         lane: str = "regular",
         message_id: str | None = None,
         timeout: float | None = None,
+        attachments: Sequence[StoredAttachment] = (),
     ) -> SubmitOutcome:
         """`message_id` makes a priority send idempotent: the wrapper answers a repeat with
-        the turn the first send started. `timeout` overrides the send timeout (priority)."""
+        the turn the first send started. `timeout` overrides the send timeout (priority).
+        `attachments` become files under `.attachments/<message_id>/` in the agent workdir."""
         body: dict[str, Any] = {"text": text, "lane": lane}
         if metadata is not None:
             body["metadata"] = metadata
         if message_id is not None:
             body["message_id"] = message_id
+        if attachments:
+            body["attachments"] = [
+                {
+                    "name": a.name,
+                    "mime": a.mime,
+                    "data_b64": base64.b64encode(a.data).decode("ascii"),
+                }
+                for a in attachments
+            ]
         try:
             resp = await self._http.post(
                 self._url(f"/sessions/{session_id}/turns"),
