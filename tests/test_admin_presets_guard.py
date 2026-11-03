@@ -447,6 +447,16 @@ async def test_patch_invalid_spec_matches_put_422(call, seed, spec):
     assert patch.status_code == 422 and patch.json() == put.json()
 
 
+async def test_patch_empty_name_matches_put_422(call, human, seed):
+    """`"name": ""` is a bad name like on PUT, not "keep the stored name"; nothing changes."""
+    pid = await seed({}, name="keepme")
+    put = await call("PUT", f"{A}/{pid}", json={"name": "", "spec": {}})
+    patch = await call("PATCH", f"{A}/{pid}", json={"name": ""})
+    assert put.status_code == 422, put.text
+    assert patch.status_code == 422 and patch.json() == put.json()
+    assert (await human("GET", f"{M}/{pid}")).json()["name"] == "keepme"
+
+
 async def test_patch_hidden_preset_404(call, human):
     r = await human("POST", M, json={"name": "hid", "spec": {}, "superleader_manageable": False})
     r = await call("PATCH", f"{A}/{r.json()['id']}", json={"spec": {}})
@@ -705,6 +715,39 @@ async def test_secret_route_entry_dropped_between_check_and_write_422(
 
     monkeypatch.setattr(presets_api, "by_ref", flip_after_read)
     r = await call("PUT", f"{A}/{pid}/secrets/K", json={"value": canary + "-new"})
+    assert_error(r, 422, "invalid_request")
+    assert canary not in r.text
+    assert kube.names("Secret") == secrets_before
+    assert await _secret_rows(pool, pid) == rows_before
+
+
+@pytest.mark.parametrize("flip", ["unprotect", "remove"])
+async def test_main_secret_route_entry_dropped_between_check_and_write_422(
+    human, seed, kube, canary, pool, flip, monkeypatch
+):
+    """The main-port twin: a human secret PUT that races a human unprotect or removal is 422 under
+    the row lock, with no Secret version and no live preset_secrets row for the undeclared name."""
+    pid, _ = await _protected_seed(human, seed, canary)
+    secrets_before = kube.names("Secret")
+    rows_before = await _secret_rows(pool, pid)
+    real = presets_api.by_ref
+    change = (
+        "jsonb_set(spec, '{env,K,protected}', 'false'::jsonb)"
+        if flip == "unprotect"
+        else "spec #- '{env,K}'"
+    )
+
+    async def flip_after_read(conn, ref):
+        found = await real(conn, ref)  # put_secret's own read, the only one on the main port
+        async with pool.connection() as other:
+            await other.execute(
+                f"UPDATE presets SET spec = {change} WHERE id = %s",  # noqa: S608
+                (uuid.UUID(pid),),
+            )
+        return found
+
+    monkeypatch.setattr(presets_api, "by_ref", flip_after_read)
+    r = await human("PUT", f"{M}/{pid}/secrets/K", json={"value": canary + "-new"})
     assert_error(r, 422, "invalid_request")
     assert canary not in r.text
     assert kube.names("Secret") == secrets_before
