@@ -326,7 +326,11 @@ def _merged_body(stored: repo.Preset, body: schemas.PresetPatch) -> schemas.Pres
     except ValidationError as exc:
         errors = [{**e, "loc": ("body", "spec", *e["loc"])} for e in exc.errors()]
         raise RequestValidationError(errors) from None
-    return schemas.PresetIn(name=body.name or stored.name, spec=spec, labels=body.labels)
+    return schemas.PresetIn(
+        name=stored.name if body.name is None else body.name,
+        spec=spec,
+        labels=body.labels,
+    )
 
 
 async def patch(
