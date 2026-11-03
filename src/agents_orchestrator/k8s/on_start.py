@@ -31,6 +31,10 @@ HIVE_TOOLS = [
 SESSION_TOOLS = ["sessions_list", "session_send"]
 INIT_SCRIPTS_TOOLS = ["init_scripts_get", "init_scripts_edit"]
 CHAT_TOOLS = ["chat_rooms", "chat_send", "chat_react", "chat_status"]
+# Read and patch the session's own spec (plan 3.2): every session gets them, the API gate admits
+# the session's own leader (a regular session) or any superleader; a superleader lists them among
+# its admin tools instead.
+SESSION_EDIT_TOOLS = ["session_get", "session_patch"]
 CLOSE_TOOL = "self_close"
 # Taskboard tools (the agent-visible names are orchestrator_<tool>, like the chat tools): every
 # session gets them, trigger-created ones included (a decision_ask they raise is answered on the
@@ -44,8 +48,8 @@ TASK_TOOLS = [
 # only: there is no history delete tool, deleting a stored session is for the user (web UI).
 ADMIN_TOOLS = [
     "presets_list", "preset_get", "preset_create", "preset_replace", "preset_patch",
-    "preset_delete", "preset_copy", "session_get", "session_create", "session_discard",
-    "session_restart",
+    "preset_delete", "preset_copy", "session_get", "session_patch", "session_create",
+    "session_discard", "session_restart",
     "agent_restart", "command_get", "webhooks_list", "webhook_get_meta", "webhook_create",
     "webhook_update", "webhook_clone", "webhook_rotate", "webhook_delete",
     "webhook_filters_set", "webhook_events", "webhook_event", "webhook_template_preview",
@@ -64,15 +68,15 @@ def orchestrator_allow(spec: SessionSpec) -> list[str]:
     the task tools, alone sessions included, which also get `me`; the agent API decides what each
     caller may list, send, edit and say in the chat (leader only). The admin tools and
     `secret_set` are listed exactly when `session_messaging` is enabled, whoever created the
-    session; every other session gets `self_close` last instead (a superleader is never offered
-    it).
+    session; every other session gets `session_get`, `session_patch` and `self_close` last
+    instead (a superleader is never offered `self_close`; it has the first two as admin tools).
     """
     shared = [
         *SESSION_TOOLS,
         *INIT_SCRIPTS_TOOLS,
         *CHAT_TOOLS,
         *TASK_TOOLS,
-        *(ADMIN_TOOLS if spec.session_messaging else [CLOSE_TOOL]),
+        *(ADMIN_TOOLS if spec.session_messaging else [*SESSION_EDIT_TOOLS, CLOSE_TOOL]),
     ]
     if not spec.hive:
         return ["me", *shared]
