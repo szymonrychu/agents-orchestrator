@@ -9,23 +9,17 @@ from typing import Any
 
 from fastapi import APIRouter, Request, Response
 from fastapi.concurrency import run_in_threadpool
-from fastapi.exceptions import RequestValidationError
 from pydantic import SecretStr, ValidationError
 
 from agents_orchestrator.api import schemas, secret_store
 from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.sessions import Cfg, Pool, check_spec
+from agents_orchestrator.api.spec_edit import guard_agent_edit, merged_spec_in, note_fields
 from agents_orchestrator.db import presets as repo
-from agents_orchestrator.preset_policy import (
-    changed_paths,
-    human_only_changes,
-    merge_patch,
-    privileged_target_changes,
-    strip_grants,
-)
+from agents_orchestrator.preset_policy import changed_paths, strip_grants
 from agents_orchestrator.secret_view import EnvMeta, redact_spec_dict
 from agents_orchestrator.settings import Settings
-from agents_orchestrator.spec import SessionSpec, SessionSpecIn, default_cache_key
+from agents_orchestrator.spec import SessionSpec, default_cache_key
 
 SECRET_MAX_BYTES = 1024 * 1024  # F1.9: a Kubernetes Secret holds at most 1 MiB
 
@@ -59,30 +53,6 @@ def _checked_name(name: str) -> str:
         raise ApiError(422, "invalid_request", str(exc)) from None
 
 
-def human_only_refused(paths: list[str]) -> ApiError:
-    return ApiError(
-        403,
-        "human_only_field",
-        f"only a human can change: {', '.join(paths)}",
-        extra={"fields": paths},
-    )
-
-
-def privileged_edit_refused(paths: list[str]) -> ApiError:
-    return ApiError(
-        403,
-        "privileged_target",
-        "only a human can change these fields of a preset with kube_access, session_messaging "
-        f"or docker on: {', '.join(paths)}",
-        extra={"fields": paths},
-    )
-
-
-def _note_fields(request: Request, paths: list[str]) -> None:
-    """Hand the changed (or refused) paths to the admin audit; paths only, never values."""
-    request.state.preset_fields = sorted(paths)
-
-
 async def _validated(
     body: schemas.PresetIn,
     settings: Settings,
@@ -100,14 +70,7 @@ async def _validated(
     spec, values = body.spec.split()
     if human_only_base is not None:
         dumped = spec.model_dump(mode="json", exclude_unset=True)
-        if refused := human_only_changes(human_only_base, dumped):
-            if request is not None:
-                _note_fields(request, refused)
-            raise human_only_refused(refused)
-        if refused := privileged_target_changes(human_only_base, dumped, values):
-            if request is not None:
-                _note_fields(request, refused)
-            raise privileged_edit_refused(refused)
+        guard_agent_edit(human_only_base, dumped, values, request, privileged=True)
     stored_spec = None
     if stored is not None:
         try:
@@ -234,7 +197,7 @@ async def create(
     except repo.PresetExists:
         raise _exists(body.name) from None
     if superleader:
-        _note_fields(
+        note_fields(
             request, changed_paths({}, spec) + ["name"] + (["labels"] if body.labels else [])
         )
     return _view(preset, metas)
@@ -294,38 +257,13 @@ async def replace(
             paths.append("name")
         if body.labels is not None and body.labels != stored.labels:
             paths.append("labels")
-        _note_fields(request, paths)
+        note_fields(request, paths)
     return _view(preset, metas)
-
-
-def _secret_in_patch(patch: dict[str, Any], merged: dict[str, Any]) -> None:
-    """422 when the patch gives a value to a variable that is protected after the merge (the
-    merge fills `protected` from the stored entry, so the patch need not repeat it)."""
-    env, merged_env = patch.get("env"), merged.get("env")
-    for name, entry in (env if isinstance(env, dict) else {}).items():
-        kept = merged_env.get(name) if isinstance(merged_env, dict) else None
-        if (
-            isinstance(entry, dict)
-            and entry.get("value") is not None
-            and isinstance(kept, dict)
-            and kept.get("protected")
-        ):
-            raise ApiError(
-                422,
-                "secret_in_spec",
-                f"protected variable {name} carries a value; set it through the secret route",
-            )
 
 
 def _merged_body(stored: repo.Preset, body: schemas.PresetPatch) -> schemas.PresetIn:
     """The stored spec with the patch merged in, as the body a PUT would carry."""
-    merged = merge_patch(stored.spec, body.spec or {})
-    _secret_in_patch(body.spec or {}, merged)
-    try:
-        spec = SessionSpecIn.model_validate(merged)
-    except ValidationError as exc:
-        errors = [{**e, "loc": ("body", "spec", *e["loc"])} for e in exc.errors()]
-        raise RequestValidationError(errors) from None
+    _, spec = merged_spec_in(stored.spec, body.spec or {})
     return schemas.PresetIn(
         name=stored.name if body.name is None else body.name,
         spec=spec,
@@ -376,7 +314,7 @@ async def patch(
             paths.append("name")
         if merged.labels is not None and merged.labels != stored.labels:
             paths.append("labels")
-        _note_fields(request, paths)
+        note_fields(request, paths)
         return _view(preset, metas)
     raise ApiError(409, "conflict", "the preset changed since it was read; retry")
 
@@ -466,7 +404,7 @@ async def copy(
     if superleader:
         spec, removed = strip_grants(spec)
         if request is not None:
-            _note_fields(request, removed)
+            note_fields(request, removed)
     for _ in range(_COPY_TRIES):
         taken = {p.name.lower() for p in await repo.list_presets(conn)}
         name = explicit if explicit is not None else _copy_name(source.name, taken)
@@ -519,9 +457,7 @@ async def put_secret(
     found = await by_ref(conn, preset)
 
     def refuse_privileged(spec: dict) -> None:
-        if refused := privileged_target_changes(spec, spec, [name]):
-            _note_fields(request, refused)
-            raise privileged_edit_refused(refused)
+        guard_agent_edit(spec, spec, [name], request, privileged=True)
 
     def refuse_undeclared(spec: dict) -> None:
         entry = spec.get("env", {}).get(name)
