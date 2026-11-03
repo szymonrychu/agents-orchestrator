@@ -259,7 +259,10 @@ def tighten(stored, new, **defaults):
 @pytest.mark.parametrize("metric", ["five_hour_pct", "seven_day_pct"])
 def test_tighten_quota(metric):
     path = f"usage_quota.{metric}"
-    q = lambda v: {"usage_quota": {metric: v}}  # noqa: E731
+
+    def q(v):
+        return {"usage_quota": {metric: v}}
+
     assert tighten(q(50), q(80)) == [path]  # up is looser
     assert tighten(q(80), q(50)) == []  # down is tighter
     assert tighten(q(50), q(50)) == []
@@ -285,7 +288,10 @@ def test_tighten_quota_metrics_are_independent():
 @pytest.mark.parametrize("key", ["reminder_seconds", "close_seconds"])
 def test_tighten_inactivity(key):
     path = f"inactivity.{key}"
-    i = lambda v: {"inactivity": {key: v}}  # noqa: E731
+
+    def i(v):
+        return {"inactivity": {key: v}}
+
     assert tighten(i(3600), i(0)) == [path]  # 0 is off, infinite: looser
     assert tighten(i(0), i(3600)) == []  # on from off: tighter
     assert tighten(i(3600), i(7200)) == [path]  # longer is looser

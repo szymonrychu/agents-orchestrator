@@ -4,7 +4,7 @@ audit note. Paths only, never values."""
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from fastapi import Request
@@ -57,16 +57,18 @@ def guard_agent_edit(
     the call gives a value). The refused paths go to the audit note before the raise."""
     refused = human_only_changes(base, new)
     if refused:
-        if request is not None:
-            note_fields(request, refused)
-        raise human_only_refused(refused)
-    if not privileged:
-        return
-    refused = privileged_target_changes(base, new, values)
-    if refused:
-        if request is not None:
-            note_fields(request, refused)
-        raise privileged_edit_refused(refused)
+        raise _noted(request, refused, human_only_refused)
+    if privileged and (refused := privileged_target_changes(base, new, values)):
+        raise _noted(request, refused, privileged_edit_refused)
+
+
+def _noted(
+    request: Request | None, paths: list[str], refusal: Callable[[list[str]], ApiError]
+) -> ApiError:
+    """The refusal for `paths`, with the paths noted for the audit first."""
+    if request is not None:
+        note_fields(request, paths)
+    return refusal(paths)
 
 
 def secret_in_patch(patch: dict[str, Any], merged: dict[str, Any]) -> None:
