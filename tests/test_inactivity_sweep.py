@@ -553,3 +553,24 @@ async def test_remind_write_is_status_guarded(pool, monkeypatch):
     assert await _remind(pool) == []
     assert (await _row(pool, s["id"]))["inactivity_reminded_at"] is None
     assert await _notices(pool, s["id"]) == []
+
+
+async def test_two_replicas_remind_once(pool):
+    """Every api replica runs the sweeper: two passes at once send one notice."""
+    for i in range(10):
+        s, _ = await _session(pool)
+        await _shift(pool, s["id"], 3700)
+        first, second = await _race(i, _remind(pool), _remind(pool))
+        assert sorted([first, second], key=len) == [[], [s["id"]]]
+        assert len(await _notices(pool, s["id"])) == 1
+
+
+async def test_two_replicas_close_once(pool):
+    """Two close passes at once request one close and send one notice."""
+    for i in range(10):
+        s, _ = await _session(pool)
+        await _shift(pool, s["id"], 14405)
+        first, second = await _race(i, _close(pool), _close(pool))
+        assert sorted([first, second], key=len) == [[], [s["id"]]]
+        assert await _notices(pool, s["id"]) == [("inactivity_close", "regular", None, "close")]
+        assert (await _row(pool, s["id"]))["close_kind"] == "inactivity"

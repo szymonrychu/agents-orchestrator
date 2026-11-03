@@ -83,14 +83,15 @@ def _reminder_notice(settings: Settings) -> Callable[[sessions.Session, datetime
 
 def _close_notice(settings: Settings) -> Callable[[sessions.Session, datetime, datetime], str]:
     def compose(session: sessions.Session, last_update: datetime, deadline: datetime) -> str:
-        assert session.close_requested_at is not None
+        if session.close_requested_at is None:
+            raise ValueError(f"session {session.id} has no close request to compose a notice for")
         return inactivity.close_text(
             quiet_seconds=int((session.close_requested_at - last_update).total_seconds()),
             deadline=deadline,
             grace_seconds=settings.close_grace_seconds,
             chat=settings.chat_available,
             taskboard=settings.taskboard_available,
-            workdir_saved=sessions_api._backup(session, settings).workdir,
+            workdir_saved=sessions_api.session_backup(session, settings).workdir,
         )
 
     return compose

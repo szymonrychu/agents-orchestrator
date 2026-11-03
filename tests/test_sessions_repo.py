@@ -562,3 +562,15 @@ async def test_touch_update_stamps_an_active_session_only(pool, dsn):
     assert abs((after[active["id"]][2] - after[active["id"]][0]).total_seconds()) < 2
     assert after[active["id"]][1] == before[active["id"]][1]  # no generation bump
     assert after[gone["id"]][:2] == before[gone["id"]]
+
+
+async def test_request_close_refuses_an_unknown_kind(pool):
+    s = await insert_session(pool)
+    async with pool.connection() as conn:
+        with pytest.raises(ValueError, match="unknown close kind"):
+            await sessions.request_close(conn, s["id"], "done", kind="bogus")
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT close_requested_at, close_kind FROM sessions WHERE id = %s", (s["id"],)
+        )
+        assert await cur.fetchone() == (None, None)

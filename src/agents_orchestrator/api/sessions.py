@@ -104,7 +104,7 @@ def _last_backup(run: object) -> schemas.BackupRun | None:
     return schemas.BackupRun(finished_at=run["finished_at"], bytes=run["bytes"])
 
 
-def _backup(session: repo.Session, settings: Settings) -> schemas.SessionBackup:
+def session_backup(session: repo.Session, settings: Settings) -> schemas.SessionBackup:
     """What the discard would save, by the reconciler's own save rule (`save_skip`)."""
     cache = session.status.get("cache")
     cache = cache if isinstance(cache, dict) else {}
@@ -151,7 +151,7 @@ def _view(session: repo.Session, agg: dict | None, settings: Settings) -> schema
         leader_reason=agg.get("leader_reason"),
         closes_at=_closes_at(session),
         init_edited_since_run=_init_edited(session),
-        backup=_backup(session, settings),
+        backup=session_backup(session, settings),
         close_requested_at=session.close_requested_at,
         close_reason=session.close_reason,
         close_kind=session.close_kind,

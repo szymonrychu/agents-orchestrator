@@ -311,12 +311,17 @@ async def _lock_active(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> 
     return rows[0]
 
 
+CLOSE_KINDS = ("self", "inactivity")
+
+
 async def request_close(
     conn: psycopg.AsyncConnection, session_id: uuid.UUID, reason: str, *, kind: str = "self"
 ) -> CloseOutcome:
     """Record a request to close the session once idle, by its leader (`kind` 'self') or the
     orchestrator ('inactivity'). The first request wins: a pending one is returned unchanged
-    (`already`) and its clock is not reset."""
+    (`already`) and its clock is not reset. Raises ValueError for any other `kind`."""
+    if kind not in CLOSE_KINDS:
+        raise ValueError(f"unknown close kind {kind!r}, expected one of {CLOSE_KINDS}")
     async with conn.transaction():
         existing = await _lock_active(conn, session_id)
         if existing.close_requested_at is not None:
