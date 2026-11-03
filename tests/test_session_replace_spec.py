@@ -182,6 +182,18 @@ async def test_recheck_mutating_the_locked_spec_does_not_move_the_decision(pool,
     assert gen2 == gen + int(change)
 
 
+async def test_get_stored_returns_the_row_and_the_stored_json(pool):
+    s = await _created(pool)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE sessions SET spec = %s WHERE id = %s", (Jsonb({"image": "img:1"}), s.id)
+        )
+        session, stored = await sessions.get_stored(conn, s.id)
+        assert await sessions.get_stored(conn, uuid.uuid4()) is None
+    assert stored == {"image": "img:1"}
+    assert session.id == s.id and session.spec.image == "img:1"
+
+
 async def _wait_for_lock_wait(pool, timeout=5.0):
     """Until some backend waits on a row lock."""
     loop = asyncio.get_running_loop()

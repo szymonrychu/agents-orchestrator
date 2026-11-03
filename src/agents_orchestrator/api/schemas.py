@@ -56,6 +56,14 @@ class PresetPatch(BaseModel):
         return None if value is None else normalize_labels(value)
 
 
+class SessionSpecPatch(BaseModel):
+    """Agent edit of a live session: `spec` is an RFC 7396 merge patch of the stored spec."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    spec: dict[str, Any]
+
+
 class SessionLabelsIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

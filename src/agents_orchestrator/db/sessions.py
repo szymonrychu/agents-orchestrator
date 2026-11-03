@@ -168,6 +168,16 @@ async def get(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Session |
     return rows[0] if rows else None
 
 
+async def get_stored(
+    conn: psycopg.AsyncConnection, session_id: uuid.UUID
+) -> tuple[Session, dict[str, Any]] | None:
+    """The session and its spec JSONB as stored (the `expected` of `replace_spec`)."""
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute("SELECT * FROM sessions WHERE id = %s", (session_id,))
+        row = await cur.fetchone()
+    return None if row is None else (_from_row(row), row["spec"])
+
+
 async def get_by_slug(conn: psycopg.AsyncConnection, slug: str) -> Session | None:
     rows = await _fetch(conn, "SELECT * FROM sessions WHERE slug = %s", (slug,))
     return rows[0] if rows else None
