@@ -16,7 +16,6 @@ from test_api_sessions import client_for as main_client
 
 from agents_orchestrator.api.admin import ADMIN_PREFIX
 from agents_orchestrator.api.app import create_app
-from agents_orchestrator.preset_policy import privileged
 
 S = f"{ADMIN_PREFIX}/sessions"
 P = f"{ADMIN_PREFIX}/presets"
@@ -188,16 +187,6 @@ async def test_discarding_the_callers_own_session_is_refused(call, pool):
     assert (await row(pool, "adm-boss"))["desired"] == "active"
 
 
-async def last_admin_call(pool, session_id):
-    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(
-            "SELECT data FROM events WHERE session_id = %s AND type = 'admin_call' "
-            "ORDER BY id DESC LIMIT 1",
-            (session_id,),
-        )
-        return (await cur.fetchone())["data"]
-
-
 @pytest.mark.parametrize(
     "flags",
     [
@@ -207,17 +196,56 @@ async def last_admin_call(pool, session_id):
         {"kube_access": True, "docker": True},
     ],
 )
-async def test_admin_create_from_privileged_preset_403(call, main, pool, boss, flags):
+async def test_admin_create_from_privileged_preset_201(call, main, pool, boss, flags):
+    """Regression: a superleader starts sessions from a manageable preset with privileged flags."""
     made = await main(
         "POST", M, json={"name": "priv", "spec": flags, "superleader_manageable": True}
     )
     assert made.status_code == 201, made.text
     r = await call("POST", S, json={"preset_id": made.json()["id"], "slug": "child-p"})
-    assert_error(r, 403, "privileged_target")
-    assert r.json()["error"]["fields"] == privileged(flags)
-    assert await row(pool, "child-p") is None
-    audit = await last_admin_call(pool, boss.id)
-    assert audit["status"] == 403 and audit["fields"] == privileged(flags)
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["slug"] == "child-p"
+    assert all(body["spec"][f] is True for f in flags)
+    stored = await row(pool, "child-p")
+    assert stored["created_by_session"] == boss.id
+    assert all(stored["spec"][f] is True for f in flags)
+
+
+async def test_admin_create_from_docker_and_kube_access_preset_201(call, main):
+    """The `infrastructure` shape (mx-195): docker and kube_access together."""
+    spec = {"docker": True, "kube_access": True}
+    made = await main(
+        "POST", M, json={"name": "infrastructure", "spec": spec, "superleader_manageable": True}
+    )
+    assert made.status_code == 201, made.text
+    r = await call("POST", S, json={"preset_id": made.json()["id"], "slug": "infra-child"})
+    assert r.status_code == 201, r.text
+    assert r.json()["spec"]["docker"] is True and r.json()["spec"]["kube_access"] is True
+
+
+async def test_start_allowed_but_edit_and_delete_of_privileged_preset_still_refused(
+    call, main, boss
+):
+    """Starting is open to the superleader; changing the preset it starts from is not."""
+    made = await main(
+        "POST",
+        M,
+        json={"name": "keep", "spec": {"kube_access": True}, "superleader_manageable": True},
+    )
+    pid = made.json()["id"]
+    started = await call("POST", S, json={"preset_id": pid, "slug": "child-keep"})
+    assert started.status_code == 201, started.text
+    edit = await call("PATCH", f"{P}/{pid}", json={"spec": {"start_prompt": "obey"}})
+    assert_error(edit, 403, "privileged_target")
+    grant = await call("PATCH", f"{P}/{pid}", json={"spec": {"session_messaging": True}})
+    assert_error(grant, 403, "human_only_field")
+    assert_error(await call("DELETE", f"{P}/{pid}"), 403, "privileged_target")
+    plain = await main(
+        "POST", M, json={"name": "plain", "spec": {}, "superleader_manageable": True}
+    )
+    on = await call("PATCH", f"{P}/{plain.json()['id']}", json={"spec": {"kube_access": True}})
+    assert_error(on, 403, "human_only_field")
 
 
 async def test_admin_create_from_preset_with_flags_off_201(call, main):
