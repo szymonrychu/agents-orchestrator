@@ -617,3 +617,44 @@ def test_close_grace_default_and_bounds(monkeypatch):
         monkeypatch.setenv("ORCH_CLOSE_GRACE_SECONDS", bad)
         with pytest.raises(SettingsError, match="ORCH_CLOSE_GRACE_SECONDS"):
             Settings()
+
+
+def test_inactivity_defaults_off():
+    s = Settings()
+    assert (s.inactivity_reminder_seconds, s.inactivity_close_seconds) == (0, 0)
+    assert s.inactivity_handoff_seconds == 300
+
+
+def test_inactivity_reminder_must_be_below_close(monkeypatch):
+    def load(reminder: str, close: str) -> Settings:
+        monkeypatch.setenv("ORCH_INACTIVITY_REMINDER_SECONDS", reminder)
+        monkeypatch.setenv("ORCH_INACTIVITY_CLOSE_SECONDS", close)
+        return Settings()
+
+    for bad in (("3600", "3600"), ("7200", "3600")):
+        with pytest.raises(SettingsError, match="ORCH_INACTIVITY_REMINDER_SECONDS"):
+            load(*bad)
+    for ok in (("3600", "14400"), ("3600", "0"), ("0", "600"), ("0", "0")):
+        s = load(*ok)
+        assert (s.inactivity_reminder_seconds, s.inactivity_close_seconds) == tuple(map(int, ok))
+
+
+def test_inactivity_bounds(monkeypatch):
+    for var in ("REMINDER", "CLOSE"):
+        name = f"ORCH_INACTIVITY_{var}_SECONDS"
+        for bad in ("59", "2592001", "-1"):
+            monkeypatch.setenv(name, bad)
+            with pytest.raises(SettingsError, match=name):
+                Settings()
+        for ok in ("0", "60", "2592000"):
+            monkeypatch.setenv(name, ok)
+            assert getattr(Settings(), name.removeprefix("ORCH_").lower()) == int(ok)
+        monkeypatch.delenv(name)
+    name = "ORCH_INACTIVITY_HANDOFF_SECONDS"
+    for bad in ("-1", "3601"):
+        monkeypatch.setenv(name, bad)
+        with pytest.raises(SettingsError, match=name):
+            Settings()
+    for ok in ("0", "3600"):
+        monkeypatch.setenv(name, ok)
+        assert Settings().inactivity_handoff_seconds == int(ok)

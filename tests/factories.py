@@ -162,13 +162,14 @@ async def insert_message(
     ambiguous_at: datetime | None = None,
     carries_start_prompt: bool = False,
     lane: str = "idle",  # queue tests pin the agent_free rules, which only idle messages obey
+    notice: str | None = None,
 ) -> dict[str, Any]:
     return await _one(
         pool,
         "INSERT INTO messages (session_id, target_agent_id, text, status, agent_id, turn_id,"
         " attempts, error, heartbeat_at, dispatched_at, not_before, ambiguous_at, lane,"
-        " carries_start_prompt)"
-        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+        " carries_start_prompt, notice)"
+        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
         (
             session_id,
             target_agent_id,
@@ -184,6 +185,7 @@ async def insert_message(
             ambiguous_at,
             lane,
             carries_start_prompt,
+            notice,
         ),
     )
 

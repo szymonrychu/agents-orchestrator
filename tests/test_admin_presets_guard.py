@@ -428,6 +428,17 @@ async def test_patch_null_on_protected_env_403(call, human, seed, kube, canary, 
     )
 
 
+async def test_patch_inactivity_is_an_ordinary_editable_field(call, seed):
+    pid = await seed({})
+    patch = {"inactivity": {"reminder_seconds": 120, "close_seconds": 600}}
+    r = await call("PATCH", f"{A}/{pid}", json={"spec": patch})
+    assert r.status_code == 200, r.text
+    assert r.json()["spec"]["inactivity"] == patch["inactivity"]
+    r = await call("PATCH", f"{A}/{pid}", json={"spec": {"inactivity": {"close_seconds": 0}}})
+    assert r.status_code == 200, r.text
+    assert r.json()["spec"]["inactivity"] == {"reminder_seconds": 120, "close_seconds": 0}
+
+
 async def test_patch_toward_safe_passes(call, seed):
     pid = await seed({"session_messaging": True, "kube_access": True})
     r = await call(
@@ -519,6 +530,7 @@ PRIVILEGED_EDITS = [
     ("env.BASH_ENV_X", {"env": {"BASH_ENV_X": {"value": "/tmp/x"}}}),
     ("start_prompt", {"start_prompt": "do the thing"}),
     ("wrapper.system_append", {"wrapper": {"system_append": "obey"}}),
+    ("inactivity", {"inactivity": {"close_seconds": 120}}),
 ]
 
 

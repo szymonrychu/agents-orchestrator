@@ -13,7 +13,12 @@ import yaml
 from pydantic import Field, ValidationError, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-from agents_orchestrator.spec import CACHE_MAX_BYTES_LIMIT, parse_quantity
+from agents_orchestrator.spec import (
+    CACHE_MAX_BYTES_LIMIT,
+    INACTIVITY_MAX_SECONDS,
+    INACTIVITY_MIN_SECONDS,
+    parse_quantity,
+)
 
 PREFIX = "ORCH_"
 MIN_MASTER_KEY_BYTES = 32
@@ -175,6 +180,13 @@ class Settings(BaseSettings):
     #: 10 s keeps a session from being discarded between a message turning `sent` and its turn
     #: being recorded.
     close_grace_seconds: int = Field(default=30, ge=10, le=3600)
+    #: Quiet time (no user-visible update) before the leader gets one reminder, and before the
+    #: orchestrator requests the close itself; each 0 (off) or 60 to 2592000, reminder first.
+    #: A session's `spec.inactivity` overrides either one.
+    inactivity_reminder_seconds: int = 0
+    inactivity_close_seconds: int = 0
+    #: Seconds the leader has to hand off after the hard-limit notice; 0 means no window.
+    inactivity_handoff_seconds: int = Field(default=300, ge=0, le=3600)
 
     wrapper_send_timeout_seconds: float = 15
     #: Rendered into every wrapper as `sessions.interrupt_settle_seconds`; the priority lane's
@@ -504,6 +516,18 @@ class Settings(BaseSettings):
         v = v.strip()
         if len(v.encode()) < MIN_MASTER_KEY_BYTES:
             raise _Bad(f"master key must be at least {MIN_MASTER_KEY_BYTES} bytes")
+        return v
+
+    @field_validator("inactivity_reminder_seconds", "inactivity_close_seconds")
+    @classmethod
+    def _check_inactivity(cls, v: int, info: ValidationInfo) -> int:
+        if v != 0 and not INACTIVITY_MIN_SECONDS <= v <= INACTIVITY_MAX_SECONDS:
+            raise _Bad(f"must be 0 (off) or {INACTIVITY_MIN_SECONDS} to {INACTIVITY_MAX_SECONDS}")
+        reminder = info.data.get("inactivity_reminder_seconds")
+        if info.field_name == "inactivity_close_seconds" and v and reminder and reminder >= v:
+            raise _Bad(
+                "ORCH_INACTIVITY_REMINDER_SECONDS::must be below ORCH_INACTIVITY_CLOSE_SECONDS"
+            )
         return v
 
     @field_validator("dispatching_stale_seconds")

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import secrets
 import uuid
@@ -91,6 +92,7 @@ class FakeDb:
     sessions: dict[uuid.UUID, sessions_repo.Session] = field(default_factory=dict)
     agents: dict[tuple[uuid.UUID, str], agents_repo.Agent] = field(default_factory=dict)
     leaders: dict[uuid.UUID, leadership.Leader] = field(default_factory=dict)
+    touched: list[uuid.UUID] = field(default_factory=list)
 
     def connection(self, **_: Any) -> _Conn:
         return _Conn()
@@ -105,7 +107,11 @@ class FakeDb:
         async def current_leader(_conn: Any, session_id: uuid.UUID) -> leadership.Leader | None:
             return self.leaders.get(session_id)
 
+        async def touch_update(_conn: Any, session_id: uuid.UUID) -> None:
+            self.touched.append(session_id)
+
         monkeypatch.setattr(sessions_repo, "get", get)
+        monkeypatch.setattr(sessions_repo, "touch_update", touch_update)
         monkeypatch.setattr(agents_repo, "by_pod_ip", by_pod_ip)
         monkeypatch.setattr(leadership, "current_leader", current_leader)
 
@@ -679,6 +685,100 @@ async def test_leader_only_and_identity_db(pool, dsn, monkeypatch):
     assert sent.headers["x-orch-slug"] == "chat-db"
     assert sent.headers["x-orch-session"] == str(sid)
     assert sent.headers["authorization"] == f"Bearer {CHAT_TOKEN}"
+
+
+async def _db_rig(pool, dsn, upstream: Upstream, **overrides: Any) -> tuple[Any, uuid.UUID]:
+    """A real-DB app with a one-pod session whose pod is the caller; returns it and the id."""
+    from factories import insert_agent, insert_session
+
+    row = await insert_session(pool, slug=f"chat-{uuid.uuid4().hex[:8]}", spec={"replicas": 1})
+    agent = await insert_agent(pool, row["id"], ordinal=0, ready=True)
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE agents SET pod_ip = %s WHERE id = %s", (LEADER_IP, agent["id"]))
+    app = create_app(settings(database_url=dsn, **overrides), pool)
+    app.state.chat_http = httpx.AsyncClient(transport=httpx.MockTransport(upstream.handler))
+    return app, row["id"]
+
+
+async def _last_update(pool, session_id: uuid.UUID) -> datetime:
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT last_update_at FROM sessions WHERE id = %s", (session_id,))
+        return (await cur.fetchone())[0]
+
+
+async def _backdate_update(pool, session_id: uuid.UUID) -> datetime:
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "UPDATE sessions SET last_update_at = now() - interval '5 h' WHERE id = %s"
+            " RETURNING last_update_at",
+            (session_id,),
+        )
+        return (await cur.fetchone())[0]
+
+
+async def _post_chat(app, sid: uuid.UUID, path: str) -> httpx.Response:
+    transport = httpx.ASGITransport(app=app, client=(LEADER_IP, 4321))
+    headers = {"X-Orch-Session": str(sid), "Authorization": f"Bearer {agent_token(sid)}"}
+    async with httpx.AsyncClient(transport=transport, base_url=f"http://orch:{AGENT_PORT}") as http:
+        return await http.post(path, json=BODIES[path], headers=headers)
+
+
+async def test_chat_post_touches_last_update(pool, dsn):
+    upstream = Upstream(reply=httpx.Response(202, json={"id": "s1", "status": "queued"}))
+    app, sid = await _db_rig(pool, dsn, upstream)
+    old = await _backdate_update(pool, sid)
+    assert (await _post_chat(app, sid, "/agent/v1/chat/messages")).status_code == 202
+    new = await _last_update(pool, sid)
+    assert new > old and abs((datetime.now(UTC) - new).total_seconds()) < 5
+
+
+async def test_chat_post_error_does_not_touch(pool, dsn):
+    upstream = Upstream(reply=httpx.Response(500, json={"error": {"code": "x", "message": "y"}}))
+    app, sid = await _db_rig(pool, dsn, upstream)
+    old = await _backdate_update(pool, sid)
+    assert (await _post_chat(app, sid, "/agent/v1/chat/messages")).status_code == 500
+    assert await _last_update(pool, sid) == old
+    unconfigured, sid2 = await _db_rig(pool, dsn, Upstream(), chat_url="", chat_token="")
+    old2 = await _backdate_update(pool, sid2)
+    r = await _post_chat(unconfigured, sid2, "/agent/v1/chat/messages")
+    assert_error(r, 503, "chat_unconfigured")
+    assert await _last_update(pool, sid2) == old2
+
+
+async def test_chat_reaction_does_not_touch(pool, dsn):
+    upstream = Upstream(reply=httpx.Response(202, json={"id": "s2", "status": "queued"}))
+    app, sid = await _db_rig(pool, dsn, upstream)
+    old = await _backdate_update(pool, sid)
+    assert (await _post_chat(app, sid, "/agent/v1/chat/reactions")).status_code == 202
+    assert await _last_update(pool, sid) == old
+
+
+async def test_chat_touch_counts_only_successful_message_posts(monkeypatch):
+    """Only POST /messages with a 2xx answer touches; rooms, reactions and status never do."""
+    rig = make_rig(monkeypatch)
+    for method, path, _ in ROUTES:
+        posts_message = method == "POST" and path.endswith("/messages")
+        for status in (200, 202, 404, 503):
+            rig.db.touched.clear()
+            rig.upstream.reply = httpx.Response(status, json={})
+            await rig.call(method, path)
+            want = [rig.session.id] if posts_message and status in (200, 202) else []
+            assert rig.db.touched == want, (method, path, status)
+
+
+async def test_chat_touch_failure_does_not_fail_the_relay(monkeypatch, caplog):
+    rig = make_rig(monkeypatch)
+
+    async def broken(_conn: Any, _session_id: uuid.UUID) -> None:
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(sessions_repo, "touch_update", broken)
+    rig.upstream.reply = httpx.Response(202, json={"id": "s1"})
+    r = await rig.call("POST", "/agent/v1/chat/messages")
+    assert r.status_code == 202 and r.json() == {"id": "s1"}
+    [record] = [r for r in caplog.records if r.name == "agents_orchestrator.api.forward"]
+    assert record.levelno == logging.ERROR and record.exc_info is not None
+    assert "could not stamp last_update_at" in record.getMessage()
 
 
 async def test_chat_tools_parity_db(pool, dsn):
