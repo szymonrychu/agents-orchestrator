@@ -147,7 +147,9 @@ async def test_route_allowlist(app, pool):
     cl = await insert_session(pool)
     async with client(app, 8002) as c:
         for method, path in [
-            ("DELETE", f"/api/v1/sessions/{cl['id']}"),
+            ("DELETE", f"/api/v1/sessions/{cl['id']}/close"),
+            ("DELETE", f"/api/v1/sessions/{cl['id']}/"),
+            ("DELETE", f"/api/v1/sessions/{cl['id']}x"),
             ("PUT", f"/api/v1/presets/{DEFAULT_ID}"),
             ("DELETE", f"/api/v1/presets/{DEFAULT_ID}"),
             ("POST", "/api/v1/presets"),
@@ -168,8 +170,10 @@ async def test_route_allowlist(app, pool):
             assert r.status_code == 403, (method, path, r.status_code)
             if method != "HEAD":
                 assert_error(r, 403, "forbidden")
-        # the refused DELETE never reached the route
-        assert (await c.get(f"/api/v1/sessions/{cl['id']}")).status_code == 200
+        # the refused DELETEs never reached a route
+        r = await c.get(f"/api/v1/sessions/{cl['id']}")
+        assert r.status_code == 200
+        assert r.json()["desired"] == "active"
         r = await c.get("/agent/v1/me")
         assert_error(r, 404, "not_found")
     async with client(app, 8002, token=None) as c:
@@ -437,3 +441,74 @@ async def test_service_port_message_with_attachment_round_trip(app):
         r = await c.get(f"/api/v1/messages/{mid}")
         assert r.status_code == 200, r.text
         assert [a["name"] for a in r.json()["attachments"]] == ["s.png"]
+
+
+async def test_route_allowlist_serves_session_discard_only():
+    """DELETE of a session id is on the list; the `/close` sub-route and other shapes are not."""
+    sid = uuid.uuid4()
+    assert service_auth.route_allowed("DELETE", f"/api/v1/sessions/{sid}")
+    assert not service_auth.route_allowed("DELETE", f"/api/v1/sessions/{sid}/close")
+    assert not service_auth.route_allowed("DELETE", "/api/v1/sessions")
+    assert not service_auth.route_allowed("DELETE", f"/api/v1/sessions/{sid}\n")
+
+
+async def desired(pool, session_id) -> str:
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT desired FROM sessions WHERE id = %s", (session_id,))
+        return (await cur.fetchone())[0]
+
+
+async def test_service_discards_its_own_session(app, pool):
+    async with client(app, 8002) as c:
+        r = await c.post("/api/v1/sessions", json={"preset_id": DEFAULT_ID, "slug": "wh-own"})
+        assert r.status_code == 201, r.text
+        session_id = r.json()["id"]
+        r = await c.delete(f"/api/v1/sessions/{session_id}")
+        assert r.status_code == 202, r.text
+        assert r.json()["id"] == session_id
+        assert r.json()["desired"] == "deleting"
+        # a repeat delete is idempotent: still 202, still deleting
+        r = await c.delete(f"/api/v1/sessions/{session_id}")
+        assert r.status_code == 202, r.text
+        assert r.json()["desired"] == "deleting"
+    assert await desired(pool, session_id) == "deleting"
+
+
+async def test_service_cannot_discard_another_services_session(app, pool):
+    cl = await insert_session(pool, created_by_service="agents-schedule")
+    async with client(app, 8002) as c:
+        assert_error(await c.delete(f"/api/v1/sessions/{cl['id']}"), 404, "not_found")
+    assert await desired(pool, cl["id"]) == "active"
+
+
+async def test_service_cannot_discard_a_user_created_session(app, pool):
+    cl = await insert_session(pool)
+    async with client(app, 8002) as c:
+        assert_error(await c.delete(f"/api/v1/sessions/{cl['id']}"), 404, "not_found")
+    assert await desired(pool, cl["id"]) == "active"
+
+
+async def test_service_cannot_discard_a_superleader_created_session(app, pool):
+    leader = await insert_session(pool, spec={"session_messaging": True})
+    cl = await insert_session(pool, created_by_session=leader["id"])
+    async with client(app, 8002) as c:
+        assert_error(await c.delete(f"/api/v1/sessions/{cl['id']}"), 404, "not_found")
+    assert await desired(pool, cl["id"]) == "active"
+
+
+async def test_service_discard_of_an_unknown_session_is_404(app):
+    async with client(app, 8002) as c:
+        assert_error(await c.delete(f"/api/v1/sessions/{uuid.uuid4()}"), 404, "not_found")
+
+
+async def test_main_port_discard_unchanged(app, pool):
+    """On the main port any session is discarded, whoever created it."""
+    owned = await insert_session(pool, created_by_service="agents-webhook")
+    other = await insert_session(pool, created_by_service="agents-schedule")
+    user = await insert_session(pool)
+    async with client(app, 8000, peer=INSIDE, token=None) as c:
+        for cl in (owned, other, user):
+            r = await c.delete(f"/api/v1/sessions/{cl['id']}")
+            assert r.status_code == 202, r.text
+            assert r.json()["desired"] == "deleting"
+        assert_error(await c.delete(f"/api/v1/sessions/{uuid.uuid4()}"), 404, "not_found")

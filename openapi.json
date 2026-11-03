@@ -11311,6 +11311,7 @@
     },
     "/api/v1/sessions/{session_id}": {
       "delete": {
+        "description": "Discard the session. On the service port a service may discard only a session it created\nitself; any other session answers 404 `not_found`, like an unknown one.",
         "operationId": "discard_session_api_v1_sessions__session_id__delete",
         "parameters": [
           {
