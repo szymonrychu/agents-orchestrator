@@ -4,7 +4,8 @@ In-cluster trigger services (agents-webhook, agents-schedule) call the orchestra
 ORCH_SERVICE_PORT with `Authorization: Bearer <token>`. Only the sha256 of each token is
 configured (ORCH_SERVICE_TOKENS), compared in constant time against every entry. The port
 serves a fixed list of method and path pairs and never a WebSocket; the token value never
-reaches a log line or an error body.
+reaches a log line or an error body. `DELETE /api/v1/sessions/{id}` is on the list, but the
+route lets a service discard only a session it created itself (any other answers 404).
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ ALLOWED_ROUTES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
         ("GET", "/api/v1/sessions"),
         ("POST", "/api/v1/sessions"),
         ("GET", "/api/v1/sessions/{uuid}"),
+        ("DELETE", "/api/v1/sessions/{uuid}"),
         ("GET", "/api/v1/sessions/{uuid}/messages"),
         ("POST", "/api/v1/sessions/{uuid}/messages"),
         ("GET", "/api/v1/sessions/{uuid}/files/download"),

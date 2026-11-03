@@ -12,12 +12,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
 
 from agents_orchestrator.api.errors import ApiError
+from agents_orchestrator.db import sessions as sessions_repo
 
 log = logging.getLogger(__name__)
 
@@ -43,6 +46,19 @@ async def close_client(app: FastAPI, attr: str) -> None:
     if http is not None:
         setattr(app.state, attr, None)
         await http.aclose()
+
+
+async def touch_on_success(pool: Any, session_id: uuid.UUID, status: int) -> None:
+    """Count a relayed call as a user-visible update of the session (`last_update_at`) when the
+    upstream answered 2xx. Best effort: the upstream call already happened, so a failed stamp is
+    logged and the answer still goes back."""
+    if not 200 <= status < 300:
+        return
+    try:
+        async with pool.connection() as conn:
+            await sessions_repo.touch_update(conn, session_id)
+    except Exception:
+        log.exception("relay: could not stamp last_update_at of session %s", session_id)
 
 
 def too_large() -> ApiError:

@@ -16,7 +16,7 @@ from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.sessions import Cfg, Pool, check_spec
 from agents_orchestrator.api.spec_edit import guard_agent_edit, merged_spec_in, note_fields
 from agents_orchestrator.db import presets as repo
-from agents_orchestrator.preset_policy import changed_paths, strip_grants
+from agents_orchestrator.preset_policy import changed_paths, privileged, strip_grants
 from agents_orchestrator.secret_view import EnvMeta, redact_spec_dict
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import SessionSpec, default_cache_key
@@ -319,10 +319,36 @@ async def patch(
     raise ApiError(409, "conflict", "the preset changed since it was read; retry")
 
 
-async def remove(request: Request, conn, settings: Settings, preset_id: uuid.UUID) -> None:
+def privileged_delete_refused(flags: list[str]) -> ApiError:
+    return ApiError(
+        403,
+        "privileged_target",
+        "only a human can delete a preset with kube_access, session_messaging or docker on",
+        extra={"fields": flags},
+    )
+
+
+async def remove(
+    request: Request,
+    conn,
+    settings: Settings,
+    preset_id: uuid.UUID,
+    superleader: bool = False,
+) -> None:
+    """Delete a preset and retire its Secret rows.
+
+    The superleader may not delete a privileged preset (403 `privileged_target`, `fields` the
+    flags that are on). The check runs on the spec read under the row lock, before the delete
+    and before any Secret cleanup, so a human turning a flag on concurrently cannot be raced."""
+
+    def recheck(spec: dict) -> None:
+        if superleader and (flags := privileged(spec)):
+            note_fields(request, flags)
+            raise privileged_delete_refused(flags)
+
     try:
         async with conn.transaction():
-            await repo.delete(conn, preset_id)
+            await repo.delete(conn, preset_id, recheck=recheck)
             # no FK: the rows outlive the preset, so retire them here; gc then treats them
             # as dead and deletes the versions no live session names
             collect = await secret_store.has_rows(conn, preset_id)

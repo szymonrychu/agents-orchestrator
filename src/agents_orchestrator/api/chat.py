@@ -97,7 +97,14 @@ async def forward(
 
 
 async def _relay(
-    request: Request, agent: Caller, pool: Pool, settings: Cfg, method: str, path: str
+    request: Request,
+    agent: Caller,
+    pool: Pool,
+    settings: Cfg,
+    method: str,
+    path: str,
+    *,
+    counts_as_update: bool = False,
 ) -> Response:
     async with pool.connection() as conn:
         own = await _session(conn, agent)
@@ -106,7 +113,10 @@ async def _relay(
     if not settings.chat_available:
         raise ApiError(503, "chat_unconfigured", "no chat upstream is configured")
     body = await forward_core.capped_body(request) if method == "POST" else None
-    return await forward(request, method, path, body, str(own.id), own.slug)
+    response = await forward(request, method, path, body, str(own.id), own.slug)
+    if counts_as_update:
+        await forward_core.touch_on_success(pool, own.id, response.status_code)
+    return response
 
 
 @router.get(
@@ -126,7 +136,7 @@ async def rooms(request: Request, agent: Caller, pool: Pool, settings: Cfg) -> R
     openapi_extra=_json_body(ChatMessageIn),
 )
 async def send_message(request: Request, agent: Caller, pool: Pool, settings: Cfg) -> Response:
-    return await _relay(request, agent, pool, settings, "POST", "/messages")
+    return await _relay(request, agent, pool, settings, "POST", "/messages", counts_as_update=True)
 
 
 @router.post(

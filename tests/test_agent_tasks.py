@@ -9,8 +9,11 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import logging
 import secrets
+import uuid
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -61,6 +64,11 @@ class Rig:
     app: Any
     upstream: Upstream
     session: sessions_repo.Session
+    db: FakeDb | None = None
+
+    def db_touched(self) -> list:
+        assert self.db is not None
+        return self.db.touched
 
     async def call(self, method: str, path: str, **kw: Any) -> httpx.Response:
         sid = self.session.id
@@ -90,7 +98,7 @@ def make_rig(
     app = create_app(settings(**overrides), pool=None)
     app.state.pool = db
     app.state.taskboard_http = httpx.AsyncClient(transport=httpx.MockTransport(upstream.handler))
-    return Rig(app, upstream, session)
+    return Rig(app, upstream, session, db)
 
 
 ROUTES = (
@@ -308,3 +316,93 @@ async def test_requires_agent_credentials(monkeypatch):
     r = await rig.call("GET", "/agent/v1/tasks", headers={"Authorization": "Bearer wrong"})
     assert r.status_code == 401
     assert rig.upstream.seen == []
+
+
+async def test_task_write_touches_session(monkeypatch):
+    """A 2xx answer to POST, PUT or PATCH touches the caller's session; a GET or any other
+    status never does."""
+    rig = make_rig(monkeypatch)
+    for method, path, _ in ROUTES:
+        for status in (200, 201, 204, 400, 404, 409, 500, 503):
+            rig.db_touched().clear()
+            rig.upstream.reply = httpx.Response(status, json={})
+            await rig.call(method, path, **kwargs(method))
+            write = method != "GET" and status < 300
+            assert rig.db_touched() == ([rig.session.id] if write else []), (method, path, status)
+
+
+def test_every_relayed_write_method_stamps_the_update():
+    """The relay's write routes are exactly the methods that stamp `last_update_at` (spec 3.2:
+    POST, PUT, PATCH); reads never do."""
+    methods = {m for route in tasks.router.routes for m in route.methods}
+    assert methods - {"GET"} == tasks._WRITES == {"POST", "PUT", "PATCH"}
+
+
+async def test_task_touch_failure_does_not_fail_the_relay(monkeypatch, caplog):
+    rig = make_rig(monkeypatch)
+
+    async def broken(_conn, _session_id):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(sessions_repo, "touch_update", broken)
+    rig.upstream.reply = httpx.Response(201, json={"key": "T-1"})
+    r = await rig.call("POST", "/agent/v1/tasks", json={"title": "x"})
+    assert r.status_code == 201 and r.json() == {"key": "T-1"}
+    [record] = [r for r in caplog.records if r.name == "agents_orchestrator.api.forward"]
+    assert record.levelno == logging.ERROR and record.exc_info is not None
+    assert "could not stamp last_update_at" in record.getMessage()
+
+
+async def _db_app(pool, dsn, upstream: Upstream):
+    from factories import insert_agent, insert_session
+
+    row = await insert_session(pool, slug=f"tb-{uuid.uuid4().hex[:8]}", spec={"replicas": 1})
+    agent = await insert_agent(pool, row["id"], ordinal=0, ready=True)
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE agents SET pod_ip = %s WHERE id = %s", (LEADER_IP, agent["id"]))
+        cur = await conn.execute(
+            "UPDATE sessions SET last_update_at = now() - interval '5 h' WHERE id = %s"
+            " RETURNING last_update_at",
+            (row["id"],),
+        )
+        old = (await cur.fetchone())[0]
+    app = create_app(settings(database_url=dsn), pool)
+    app.state.taskboard_http = httpx.AsyncClient(transport=httpx.MockTransport(upstream.handler))
+    return app, row["id"], old
+
+
+async def _call_db(app, sid, method: str, path: str) -> httpx.Response:
+    headers = {"X-Orch-Session": str(sid), "Authorization": f"Bearer {agent_token(sid)}"}
+    transport = httpx.ASGITransport(app=app, client=(LEADER_IP, 4321))
+    async with httpx.AsyncClient(transport=transport, base_url=f"http://orch:{AGENT_PORT}") as c:
+        return await c.request(method, path, headers=headers, **kwargs(method))
+
+
+async def _last_update(pool, sid):
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT last_update_at FROM sessions WHERE id = %s", (sid,))
+        return (await cur.fetchone())[0]
+
+
+async def test_task_write_touches_last_update(pool, dsn):
+    for method, path in (
+        ("POST", "/agent/v1/tasks"),
+        ("PUT", "/agent/v1/tasks/T-1"),
+        ("PATCH", "/agent/v1/tasks/T-1"),
+    ):
+        app, sid, old = await _db_app(pool, dsn, Upstream(reply=httpx.Response(201, json={})))
+        assert (await _call_db(app, sid, method, path)).status_code == 201
+        new = await _last_update(pool, sid)
+        assert new > old and abs((datetime.now(UTC) - new).total_seconds()) < 5, method
+
+
+async def test_task_read_and_client_error_do_not_touch(pool, dsn):
+    for method, path, status in (
+        ("GET", "/agent/v1/tasks", 200),
+        ("POST", "/agent/v1/tasks", 422),
+        ("PATCH", "/agent/v1/tasks/T-1", 404),
+        ("POST", "/agent/v1/tasks/T-1/comments", 500),
+    ):
+        app, sid, old = await _db_app(pool, dsn, Upstream(reply=httpx.Response(status, json={})))
+        assert (await _call_db(app, sid, method, path)).status_code == status
+        assert await _last_update(pool, sid) == old, (method, path, status)

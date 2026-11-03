@@ -13,7 +13,7 @@ from fastapi.concurrency import run_in_threadpool
 from psycopg_pool import AsyncConnectionPool
 from pydantic import ValidationError
 
-from agents_orchestrator import rendering
+from agents_orchestrator import inactivity, rendering
 from agents_orchestrator.api import schemas, secret_store, usage_gate
 from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.service_auth import calling_service
@@ -83,13 +83,29 @@ def _closes_at(session: repo.Session) -> datetime | None:
     return None if after is None else session.created_at + timedelta(seconds=after)
 
 
+def _inactivity(
+    session: repo.Session, last_update: datetime | None, settings: Settings
+) -> tuple[datetime | None, datetime | None]:
+    """`reminder_at` and `inactivity_closes_at`: the quiet clock plus each effective limit, null
+    when that limit is off (superleaders have both off); no reminder while a close is pending."""
+    limits = inactivity.effective(session.spec, settings)
+
+    def due(seconds: int) -> datetime | None:
+        if last_update is None or seconds == 0:
+            return None
+        return last_update + timedelta(seconds=seconds)
+
+    reminder = None if session.close_requested_at is not None else due(limits.reminder_seconds)
+    return reminder, due(limits.close_seconds)
+
+
 def _last_backup(run: object) -> schemas.BackupRun | None:
     if not isinstance(run, dict) or run.get("state") != "saved":
         return None
     return schemas.BackupRun(finished_at=run["finished_at"], bytes=run["bytes"])
 
 
-def _backup(session: repo.Session, settings: Settings) -> schemas.SessionBackup:
+def session_backup(session: repo.Session, settings: Settings) -> schemas.SessionBackup:
     """What the discard would save, by the reconciler's own save rule (`save_skip`)."""
     cache = session.status.get("cache")
     cache = cache if isinstance(cache, dict) else {}
@@ -113,6 +129,8 @@ def _backup(session: repo.Session, settings: Settings) -> schemas.SessionBackup:
 
 def _view(session: repo.Session, agg: dict | None, settings: Settings) -> schemas.SessionView:
     agg = agg or {}
+    last_update = agg.get("last_update")
+    reminder_at, inactivity_closes_at = _inactivity(session, last_update, settings)
     return schemas.SessionView(
         id=session.id,
         slug=session.slug,
@@ -134,9 +152,15 @@ def _view(session: repo.Session, agg: dict | None, settings: Settings) -> schema
         leader_reason=agg.get("leader_reason"),
         closes_at=_closes_at(session),
         init_edited_since_run=_init_edited(session),
-        backup=_backup(session, settings),
+        backup=session_backup(session, settings),
         close_requested_at=session.close_requested_at,
         close_reason=session.close_reason,
+        close_kind=session.close_kind,
+        close_deadline_at=session.close_deadline_at,
+        inactivity_reminded_at=session.inactivity_reminded_at,
+        last_update_at=last_update,
+        reminder_at=reminder_at,
+        inactivity_closes_at=inactivity_closes_at,
         created_by_service=session.created_by_service,
         created_by_session=session.created_by_session,
         labels=session.labels,
@@ -248,6 +272,11 @@ async def meta(settings: Cfg) -> schemas.Meta:
         permission_modes=[schemas.MetaPermissionMode(**m) for m in PERMISSION_MODES],
         usage=schemas.MetaUsage(
             configured=settings.usage_available, quota_default_pct=settings.usage_quota_default
+        ),
+        inactivity=schemas.MetaInactivity(
+            reminder_seconds=settings.inactivity_reminder_seconds,
+            close_seconds=settings.inactivity_close_seconds,
+            handoff_seconds=settings.inactivity_handoff_seconds,
         ),
     )
 
@@ -496,11 +525,19 @@ async def discard_session(
     pool: Pool,
     settings: Cfg,
 ) -> schemas.SessionView:
+    """Discard the session. On the service port a service may discard only a session it created
+    itself; any other session answers 404 `not_found`, like an unknown one."""
     if request.query_params:
         raise ApiError(
             422, "invalid_request", "discard takes no parameters; it always deletes everything"
         )
+    service = calling_service(request)
     async with pool.connection() as conn:
+        if service is not None:
+            # created_by_service never changes after insert, so check-then-discard needs no lock.
+            session = await repo.get(conn, session_id)
+            if session is None or session.created_by_service != service:
+                raise not_found("session")
         return await discard(conn, session_id, settings)
 
 

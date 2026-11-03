@@ -8,11 +8,11 @@ from typing import Any
 import psycopg
 from psycopg.rows import dict_row
 
-from agents_orchestrator.db.sessions import Session
+from agents_orchestrator.db.sessions import Session, quiet_clock_sql
 from agents_orchestrator.dispatcher.hive import compact_pct
 from agents_orchestrator.settings import Settings
 
-_AGGREGATES = """
+_AGGREGATES = f"""
 SELECT c.id AS session_id,
        count(a.id) FILTER (WHERE a.ready AND a.gone_at IS NULL) AS ready,
        count(s.agent_id) FILTER (WHERE a.gone_at IS NULL AND s.state = 'busy') AS busy,
@@ -31,12 +31,13 @@ SELECT c.id AS session_id,
        (SELECT min(m.created_at) FROM messages m
          WHERE m.session_id = c.id AND m.status = 'queued') AS oldest_queued_at,
        l.agent_id AS leader_agent_id, l.epoch AS leader_epoch,
-       l.since AS leader_since, l.reason AS leader_reason
+       l.since AS leader_since, l.reason AS leader_reason,
+       {quiet_clock_sql("c")} AS last_update
 FROM sessions c
 LEFT JOIN session_leaders l ON l.session_id = c.id
 LEFT JOIN agents a ON a.session_id = c.id
 LEFT JOIN agent_status s ON s.agent_id = a.id
-{where}
+{{where}}
 GROUP BY c.id, l.agent_id, l.epoch, l.since, l.reason
 """
 
@@ -109,7 +110,7 @@ SELECT m.id, m.session_id, m.target_agent_id, m.agent_id, m.text, m.status, m.la
        t.status AS turn_status, t.started_at AS turn_started_at,
        t.completed_at AS turn_completed_at, t.final_text AS turn_final_text,
        t.usage AS turn_usage,
-       (t.turn_id IS NOT NULL) AS has_turn,
+       (t.turn_id IS NOT NULL) AS has_turn, m.notice,
        coalesce((SELECT jsonb_agg(jsonb_build_object('name', a.name, 'mime', a.mime,
                                                      'size', a.size) ORDER BY a.position)
                  FROM message_attachments a WHERE a.message_id = m.id), '[]'::jsonb) AS attachments

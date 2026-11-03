@@ -1,8 +1,10 @@
 """The JSONL history export a pre-discard hook receives (D15).
 
-One `session` record (`id`, `slug`, `spec`, `created_at` and the provenance `preset_id`,
-`preset_name`, `created_by_service`, `created_by_session`, `close_requested_at` and
-`close_reason`, each null when unset), then the
+One `session` record (`id`, `slug`, `spec`, `created_at`, the provenance `preset_id`,
+`preset_name`, `created_by_service`, `created_by_session`, the close request
+`close_requested_at`, `close_reason`, `close_kind` and `close_deadline_at`, and the inactivity
+`inactivity_reminded_at` and `last_update_at` (the api-written update stamp, not the computed
+quiet clock), each null when unset), then the
 `agent`, `message`, `turn`, `command`, `check` and `event` records of that session, each kind in
 id order (turns in started_at order). Every kind is read through a server-side cursor, so a long
 history is never held in memory.
@@ -64,7 +66,8 @@ async def export_session_history(
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
                 "SELECT id, slug, spec, created_at, preset_id, preset_name, created_by_service,"
-                " created_by_session, secret_versions, close_requested_at, close_reason"
+                " created_by_session, secret_versions, close_requested_at, close_reason,"
+                " close_kind, close_deadline_at, inactivity_reminded_at, last_update_at"
                 " FROM sessions WHERE id = %s",
                 (session_id,),
             )

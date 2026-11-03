@@ -231,10 +231,51 @@ async def test_export_session_record_is_the_union_of_provenance_and_close_reques
         "created_by_session",
         "close_requested_at",
         "close_reason",
+        "close_kind",
+        "close_deadline_at",
+        "inactivity_reminded_at",
+        "last_update_at",
     } <= head.keys()
     assert "secret_versions" not in head
     assert head["preset_name"] == "bench" and head["created_by_service"] == "agents-schedule"
     assert head["close_reason"] == "done" and head["close_requested_at"] is not None
+
+
+async def test_export_session_record_inactivity_columns(env):
+    c = await env.session("alpha")
+    await env.sql(
+        "UPDATE sessions SET inactivity_reminded_at = now() - interval '3 h',"
+        " close_requested_at = now(), close_kind = 'inactivity',"
+        " close_reason = 'No update for 4 h (inactivity limit 14400 s)',"
+        " close_deadline_at = now() + interval '5 min' WHERE id = %s",
+        (c.id,),
+    )
+    await insert_message(env.pool, c.id, text="closing", notice="inactivity_close")
+    await insert_message(env.pool, c.id, text="hi")
+    records = await env.export(c.id)
+    head = records[0]
+    keys = list(head)
+    at = keys.index("close_reason")
+    assert keys[at + 1 : at + 5] == [
+        "close_kind",
+        "close_deadline_at",
+        "inactivity_reminded_at",
+        "last_update_at",
+    ]
+    stored = await env.get(c.id)
+    assert head["close_kind"] == "inactivity"
+    assert datetime.fromisoformat(head["close_deadline_at"]) == stored.close_deadline_at
+    assert datetime.fromisoformat(head["inactivity_reminded_at"]) == stored.inactivity_reminded_at
+    assert datetime.fromisoformat(head["last_update_at"]) == stored.last_update_at
+    messages = [r for r in records if r["kind"] == "message"]
+    assert [(m["text"], m["notice"]) for m in messages] == [
+        ("closing", "inactivity_close"),
+        ("hi", None),
+    ]
+
+    plain = (await env.export((await env.session("bravo")).id))[0]
+    assert plain["close_kind"] is None and plain["close_deadline_at"] is None
+    assert plain["inactivity_reminded_at"] is None and plain["last_update_at"] is not None
 
 
 async def test_export_streams_with_a_server_side_cursor(env):
