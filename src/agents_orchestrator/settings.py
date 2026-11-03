@@ -167,6 +167,9 @@ class Settings(BaseSettings):
     max_pvc_size: str = "100Gi"
     max_sessions: int = 20
     autoclose_min_seconds: int = Field(default=300, ge=1)
+    attachments_max_bytes: int = Field(default=6291456, ge=1)
+    attachments_max_total_bytes: int = Field(default=8388608, ge=1)
+    attachments_max_count: int = Field(default=8, ge=0)
     #: Seconds a session with a requested self-close stays idle before the sweeper discards it,
     #: so readers of the final answer (matrix connector, trigger runs) get it first. The floor of
     #: 10 s keeps a session from being discarded between a message turning `sent` and its turn

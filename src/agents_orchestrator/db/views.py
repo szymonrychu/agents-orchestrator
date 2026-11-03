@@ -109,7 +109,10 @@ SELECT m.id, m.session_id, m.target_agent_id, m.agent_id, m.text, m.status, m.la
        t.status AS turn_status, t.started_at AS turn_started_at,
        t.completed_at AS turn_completed_at, t.final_text AS turn_final_text,
        t.usage AS turn_usage,
-       (t.turn_id IS NOT NULL) AS has_turn
+       (t.turn_id IS NOT NULL) AS has_turn,
+       coalesce((SELECT jsonb_agg(jsonb_build_object('name', a.name, 'mime', a.mime,
+                                                     'size', a.size) ORDER BY a.position)
+                 FROM message_attachments a WHERE a.message_id = m.id), '[]'::jsonb) AS attachments
 FROM messages m
 JOIN sessions c ON c.id = m.session_id
 LEFT JOIN turns t ON t.turn_id = m.turn_id

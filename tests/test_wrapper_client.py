@@ -7,6 +7,7 @@ import json
 import httpx
 import pytest
 
+from agents_orchestrator.db.queue import StoredAttachment
 from agents_orchestrator.wrapper import (
     Ambiguous,
     Busy,
@@ -112,6 +113,41 @@ async def test_submit_turn_maps_202_409_503(resp):
         raise httpx.ConnectError("refused")
 
     assert isinstance(await client(boom).submit_turn("ses_1", "hi"), Unavailable)
+
+
+async def test_submit_turn_sends_attachments_base64():
+    seen = {}
+
+    def handler(r):
+        seen["body"] = json.loads(r.content)
+        return httpx.Response(202, json={"turn_id": "t1"})
+
+    atts = [
+        StoredAttachment("s.png", "image/png", b"\x89PNG\r\n"),
+        StoredAttachment("n.txt", "text/plain", b"hi"),
+    ]
+    out = await client(handler).submit_turn("ses_1", "hi", message_id="orch-5", attachments=atts)
+    assert isinstance(out, TurnAccepted)
+    assert seen["body"] == {
+        "text": "hi",
+        "lane": "regular",
+        "message_id": "orch-5",
+        "attachments": [
+            {"name": "s.png", "mime": "image/png", "data_b64": "iVBORw0K"},
+            {"name": "n.txt", "mime": "text/plain", "data_b64": "aGk="},
+        ],
+    }
+
+
+async def test_submit_turn_omits_empty_attachments():
+    seen = {}
+
+    def handler(r):
+        seen["body"] = json.loads(r.content)
+        return httpx.Response(202, json={"turn_id": "t1"})
+
+    await client(handler).submit_turn("ses_1", "hi", attachments=[])
+    assert "attachments" not in seen["body"]
 
 
 async def test_submit_5xx_mapping():

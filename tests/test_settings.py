@@ -267,6 +267,20 @@ def test_any_mcp_plugins_ref_must_be_release_tag(monkeypatch):
             Settings()
 
 
+def test_attachment_caps_defaults_and_env(monkeypatch):
+    s = Settings()
+    assert (s.attachments_max_bytes, s.attachments_max_total_bytes, s.attachments_max_count) == (
+        6291456,
+        8388608,
+        8,
+    )
+    monkeypatch.setenv("ORCH_ATTACHMENTS_MAX_COUNT", "0")
+    assert Settings().attachments_max_count == 0
+    monkeypatch.setenv("ORCH_ATTACHMENTS_MAX_BYTES", "0")
+    with pytest.raises(SettingsError, match="ORCH_ATTACHMENTS_MAX_BYTES"):
+        Settings()
+
+
 def test_env_names_documented_in_readme():
     text = README.read_text()
     assert "## Configuration" in text

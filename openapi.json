@@ -2178,6 +2178,58 @@
         "title": "MessageAccepted",
         "type": "object"
       },
+      "MessageAttachment": {
+        "additionalProperties": false,
+        "properties": {
+          "data_b64": {
+            "title": "Data B64",
+            "type": "string"
+          },
+          "mime": {
+            "title": "Mime",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "mime",
+          "data_b64"
+        ],
+        "title": "MessageAttachment",
+        "type": "object"
+      },
+      "MessageAttachmentView": {
+        "properties": {
+          "mime": {
+            "title": "Mime",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "mime",
+          "size",
+          "path"
+        ],
+        "title": "MessageAttachmentView",
+        "type": "object"
+      },
       "MessageView": {
         "properties": {
           "agent_id": {
@@ -2191,6 +2243,13 @@
               }
             ],
             "title": "Agent Id"
+          },
+          "attachments": {
+            "items": {
+              "$ref": "#/components/schemas/MessageAttachmentView"
+            },
+            "title": "Attachments",
+            "type": "array"
           },
           "attempts": {
             "title": "Attempts",
@@ -2323,7 +2382,8 @@
           "error",
           "created_at",
           "dispatched_at",
-          "turn"
+          "turn",
+          "attachments"
         ],
         "title": "MessageView",
         "type": "object"
@@ -2892,6 +2952,14 @@
       "PostMessage": {
         "additionalProperties": false,
         "properties": {
+          "attachments": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/MessageAttachment"
+            },
+            "title": "Attachments",
+            "type": "array"
+          },
           "lane": {
             "default": "regular",
             "enum": [

@@ -409,3 +409,31 @@ async def test_logged_path_cannot_inject_lines(app, caplog):
     lines = [rec.getMessage() for rec in caplog.records if rec.name == service_auth.log.name]
     assert len(lines) == 2, lines
     assert all("\n" not in m for m in lines), lines
+
+
+def test_download_route_allowed_on_service_port():
+    cid = DEFAULT_ID
+    assert service_auth.route_allowed("GET", f"/api/v1/sessions/{cid}/files/download")
+    assert not service_auth.route_allowed("POST", f"/api/v1/sessions/{cid}/files/download")
+    assert not service_auth.route_allowed("GET", f"/api/v1/sessions/{cid}/files/content")
+    assert not service_auth.route_allowed("GET", f"/api/v1/sessions/{cid}/files")
+    assert not service_auth.route_allowed("GET", "/api/v1/sessions/../files/download")
+
+
+async def test_service_port_message_with_attachment_round_trip(app):
+    import base64
+
+    png = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16).decode()
+    att = {"name": "s.png", "mime": "image/png", "data_b64": png}
+    async with client(app, 8002) as c:
+        r = await c.post("/api/v1/sessions", json={"preset_id": DEFAULT_ID, "slug": "att-1"})
+        assert r.status_code == 201, r.text
+        sid = r.json()["id"]
+        r = await c.post(
+            f"/api/v1/sessions/{sid}/messages", json={"text": "hi", "attachments": [att]}
+        )
+        assert r.status_code == 202, r.text
+        mid = r.json()["message_id"]
+        r = await c.get(f"/api/v1/messages/{mid}")
+        assert r.status_code == 200, r.text
+        assert [a["name"] for a in r.json()["attachments"]] == ["s.png"]
