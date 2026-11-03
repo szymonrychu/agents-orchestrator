@@ -453,7 +453,7 @@ async def test_valid_jpeg_json_and_text_accepted(http, pool):
         pool,
         _att("a.jpg", "image/jpeg", b"\xff\xd8\xff\xe0abc"),
         _att("b.json", "application/json", b'{"a": 1}'),
-        _att("c.txt", "text/plain", "café".encode()),
+        _att("c.txt", "text/plain", "caf\u00e9".encode()),
     )
     assert r.status_code == 202, r.text
 
