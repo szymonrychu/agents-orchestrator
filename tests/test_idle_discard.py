@@ -14,16 +14,12 @@ from factories import (
     insert_turn,
     set_agent_status,
 )
-from pydantic import ValidationError
 
 from agents_orchestrator.api import autoclose
 from agents_orchestrator.api.app import create_app
 from agents_orchestrator.db import queue, sessions
 from agents_orchestrator.db.queue import SessionBeingDeleted
 from agents_orchestrator.settings import Settings
-from agents_orchestrator.spec import SessionSpec
-
-IDLE = {"discard_after_idle_seconds": 60}
 
 
 async def _age(pool, session_id, seconds: int = 120) -> None:
@@ -43,7 +39,7 @@ async def _age(pool, session_id, seconds: int = 120) -> None:
 
 
 async def _idle_session(pool, spec=None, status=None):
-    s = await insert_session(pool, spec=spec if spec is not None else IDLE, status=status)
+    s = await insert_session(pool, spec=spec if spec is not None else {}, status=status)
     a = await insert_agent(pool, s["id"], ready=True)
     await set_agent_status(pool, a["id"], state="idle")
     await _age(pool, s["id"])
@@ -81,6 +77,14 @@ async def _age_all(pool, session_id, seconds: int) -> None:
     await _age_close(pool, session_id, seconds)
 
 
+async def _closing_session(pool, status=None):
+    """An idle session whose close request is older than the default grace (30 s)."""
+    s, a = await _idle_session(pool, status=status)
+    await _request(pool, s["id"])
+    await _age_all(pool, s["id"], 120)
+    return s, a
+
+
 async def _lock_waiters(pool, at_least: int, timeout: float = 10.0) -> None:
     """Wait until `at_least` other backends of this database wait on a lock.
 
@@ -101,36 +105,28 @@ async def _lock_waiters(pool, at_least: int, timeout: float = 10.0) -> None:
             await asyncio.sleep(0.02)
 
 
-def test_spec_field_minimum_60_and_default_unset():
-    assert SessionSpec().discard_after_idle_seconds is None
-    assert SessionSpec(discard_after_idle_seconds=60).discard_after_idle_seconds == 60
-    with pytest.raises(ValidationError):
-        SessionSpec(discard_after_idle_seconds=59)
-
-
 async def test_idle_session_is_discarded_with_generation_bump(pool):
-    s, _ = await _idle_session(pool)
+    s, _ = await _closing_session(pool)
     assert await _run(pool) == [s["id"]]
     async with pool.connection() as conn:
         cur = await conn.execute("SELECT desired, generation FROM sessions WHERE id=%s", (s["id"],))
         assert await cur.fetchone() == ("deleting", s["generation"] + 1)
 
 
-async def test_off_when_unset_or_null(pool):
-    a, _ = await _idle_session(pool, spec={})
-    b, _ = await _idle_session(pool, spec={"discard_after_idle_seconds": None})
+async def test_idle_session_without_close_request_is_never_discarded(pool):
+    s, _ = await _idle_session(pool)
     assert await _run(pool) == []
-    assert await _desired(pool, a["id"]) == await _desired(pool, b["id"]) == "active"
+    assert await _desired(pool, s["id"]) == "active"
 
 
 async def test_not_idle_long_enough(pool):
-    s, a = await _idle_session(pool)
+    s, a = await _closing_session(pool)
     await set_agent_status(pool, a["id"], state="idle")  # free_since = now
     assert await _run(pool) == []
 
 
 async def test_busy_agent_blocks(pool):
-    s, a = await _idle_session(pool)
+    s, a = await _closing_session(pool)
     b = await insert_agent(pool, s["id"], ready=True)
     await set_agent_status(pool, b["id"], state="busy")
     await _age(pool, s["id"])
@@ -138,7 +134,7 @@ async def test_busy_agent_blocks(pool):
 
 
 async def test_running_turn_blocks(pool):
-    s, a = await _idle_session(pool)
+    s, a = await _closing_session(pool)
     await set_agent_status(pool, a["id"], state="idle", current_turn_id="t1")
     await _age(pool, s["id"])
     assert await _run(pool) == []
@@ -146,25 +142,25 @@ async def test_running_turn_blocks(pool):
 
 @pytest.mark.parametrize("status", ["queued", "dispatching", "verifying"])
 async def test_pending_message_blocks(pool, status):
-    s, a = await _idle_session(pool)
+    s, a = await _closing_session(pool)
     await insert_message(pool, s["id"], status=status)
     await _age(pool, s["id"])
     assert await _run(pool) == []
 
 
 async def test_sent_message_does_not_block_but_restarts_clock(pool):
-    s, a = await _idle_session(pool)
+    s, a = await _closing_session(pool)
     m = await insert_message(pool, s["id"], status="sent")
     await _age(pool, s["id"])
     assert await _run(pool) == [s["id"]]
-    s2, _ = await _idle_session(pool)
+    s2, _ = await _closing_session(pool)
     await insert_message(pool, s2["id"], status="sent")  # created now: clock restarts
     assert await _run(pool) == []
     assert m["status"] == "sent"
 
 
 async def test_attention_blocks(pool):
-    s, a = await _idle_session(pool)
+    s, a = await _closing_session(pool)
     async with pool.connection() as conn:
         await conn.execute(
             "UPDATE agent_status SET waiting_reason='permission',"
@@ -176,27 +172,28 @@ async def test_attention_blocks(pool):
 
 
 async def test_init_in_progress_blocks(pool):
-    s, _ = await _idle_session(
+    s, _ = await _closing_session(
         pool, status={"init": {"state": "running", "started_at": "2000-01-01T00:00:00+00:00"}}
     )
     assert await _run(pool) == []
 
 
 async def test_recent_init_finish_restarts_clock(pool):
-    s, _ = await _idle_session(
+    s, _ = await _closing_session(
         pool, status={"init": {"state": "succeeded", "finished_at": "2999-01-01T00:00:00+00:00"}}
     )
     assert await _run(pool) == []
 
 
 async def test_no_agents_or_gone_only_does_not_discard(pool):
-    s = await insert_session(pool, spec=IDLE)
-    await _age(pool, s["id"])
+    s = await insert_session(pool, spec={})
+    await _request(pool, s["id"])
+    await _age_all(pool, s["id"], 120)
     assert await _run(pool) == []
 
 
 async def test_already_deleting_untouched_and_idempotent(pool):
-    s, _ = await _idle_session(pool)
+    s, _ = await _closing_session(pool)
     one, two = await asyncio.gather(_run(pool), _run(pool))
     assert sorted(one + two) == [s["id"]]
     async with pool.connection() as conn:
@@ -206,7 +203,7 @@ async def test_already_deleting_untouched_and_idempotent(pool):
 
 async def test_message_wins_race_against_pending_discard(pool):
     """A message committed first blocks the discard; one racing it either wins or is refused."""
-    s, _ = await _idle_session(pool)
+    s, _ = await _closing_session(pool)
     async with pool.connection() as conn:
         await queue.enqueue_message(conn, s["id"], "follow-up")
     assert await _run(pool) == []
@@ -214,7 +211,7 @@ async def test_message_wins_race_against_pending_discard(pool):
 
 
 async def test_discard_holding_lock_makes_enqueue_refuse_not_lose_message(pool):
-    s, _ = await _idle_session(pool)
+    s, _ = await _closing_session(pool)
 
     async def discard():
         return await _run(pool)
@@ -238,7 +235,7 @@ async def test_discard_holding_lock_makes_enqueue_refuse_not_lose_message(pool):
 
 async def test_discard_blocked_between_check_and_flip_by_interleaved_message(pool):
     """Deterministic interleave: the discard's session lock is held while a message waits."""
-    s, _ = await _idle_session(pool)
+    s, _ = await _closing_session(pool)
     async with pool.connection() as holder:
         async with holder.transaction():
             await holder.execute("SELECT 1 FROM sessions WHERE id=%s FOR UPDATE", (s["id"],))
@@ -263,7 +260,7 @@ async def _enqueue_outcome(pool, session_id) -> str:
 
 async def test_sweeper_discards_idle_session(dsn, pool, monkeypatch):
     monkeypatch.setattr(autoclose, "AUTOCLOSE_POLL_SECONDS", 0.1)
-    s, _ = await _idle_session(pool)
+    s, _ = await _closing_session(pool)
     app = create_app(Settings(database_url=dsn, agent_image="img:1"))
     async with app.router.lifespan_context(app):
         for _ in range(50):
@@ -276,7 +273,7 @@ async def test_sweeper_discards_idle_session(dsn, pool, monkeypatch):
 # Self-close (hive-self-close): a requested close is discarded once idle plus the grace.
 
 
-async def test_requested_close_flips_after_grace_without_spec_idle(pool, caplog):
+async def test_requested_close_flips_after_grace(pool, caplog):
     s, _ = await _idle_session(pool, spec={})
     await _request(pool, s["id"])
     await _age_close(pool, s["id"], 40)
@@ -284,14 +281,6 @@ async def test_requested_close_flips_after_grace_without_spec_idle(pool, caplog)
         assert await _run(pool, grace=30) == [s["id"]]
     assert await _desired(pool, s["id"]) == "deleting"
     assert f"self-close: session {s['id']} is idle, discarding" in caplog.messages
-
-
-async def test_idle_discard_keeps_its_log_line(pool, caplog):
-    s, _ = await _idle_session(pool)
-    with caplog.at_level(logging.INFO, logger="agents_orchestrator.db.sessions"):
-        assert await _run(pool) == [s["id"]]
-    assert f"idle discard: session {s['id']} has been idle long enough" in caplog.messages
-    assert not any(m.startswith("self-close") for m in caplog.messages)
 
 
 async def test_requested_close_waits_for_grace(pool):
@@ -368,23 +357,6 @@ async def test_grace_zero_flips_on_next_pass_when_idle(pool):
     assert await _run(pool, grace=0) == [s["id"]]
 
 
-async def test_smaller_threshold_wins(pool):
-    s, _ = await _idle_session(pool, spec={"discard_after_idle_seconds": 600})
-    await _request(pool, s["id"])
-    await _age_all(pool, s["id"], 40)
-    assert await _run(pool, grace=30) == [s["id"]]
-
-    s2, _ = await _idle_session(pool, spec={"discard_after_idle_seconds": 60})
-    await _age(pool, s2["id"], 40)
-    assert await _run(pool, grace=30) == []  # no request: the spec threshold alone applies
-    assert await _desired(pool, s2["id"]) == "active"
-
-    s3, _ = await _idle_session(pool, spec={"discard_after_idle_seconds": 60})
-    await _request(pool, s3["id"])
-    await _age_all(pool, s3["id"], 100)
-    assert await _run(pool, grace=600) == [s3["id"]]  # the spec threshold is the smaller one
-
-
 async def test_cancel_before_flip_keeps_session(pool):
     s, _ = await _idle_session(pool, spec={})
     await _request(pool, s["id"])
@@ -445,7 +417,10 @@ async def test_sweep_passes_grace(monkeypatch, pool):
         return []
 
     monkeypatch.setattr(sessions, "discard_idle", fake_discard_idle)
-    task = asyncio.create_task(autoclose.sweep(pool, 7))
+    settings = Settings(
+        database_url="postgresql://x/y", agent_image="img:1", close_grace_seconds=17
+    )
+    task = asyncio.create_task(autoclose.sweep(pool, settings))
     for _ in range(100):
         if seen:
             break
@@ -453,7 +428,7 @@ async def test_sweep_passes_grace(monkeypatch, pool):
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert seen and set(seen) == {7}
+    assert seen and set(seen) == {17}
 
 
 async def test_sweeper_uses_close_grace_setting(dsn, pool, monkeypatch):

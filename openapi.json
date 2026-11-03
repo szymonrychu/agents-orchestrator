@@ -1548,6 +1548,36 @@
         "title": "HandoverIn",
         "type": "object"
       },
+      "InactivityLimits": {
+        "additionalProperties": false,
+        "description": "Per-preset inactivity limits, in seconds, overriding `ORCH_INACTIVITY_REMINDER_SECONDS` and\n`ORCH_INACTIVITY_CLOSE_SECONDS`: unset uses the setting, 0 turns the limit off.",
+        "properties": {
+          "close_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Close Seconds"
+          },
+          "reminder_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reminder Seconds"
+          }
+        },
+        "title": "InactivityLimits",
+        "type": "object"
+      },
       "InitScriptsIn": {
         "properties": {
           "scripts": {
@@ -2312,6 +2342,21 @@
             ],
             "title": "Next Attempt At"
           },
+          "notice": {
+            "anyOf": [
+              {
+                "enum": [
+                  "inactivity_reminder",
+                  "inactivity_close"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notice"
+          },
           "session_id": {
             "format": "uuid",
             "title": "Session Id",
@@ -2436,6 +2481,9 @@
             "title": "Hook Events",
             "type": "array"
           },
+          "inactivity": {
+            "$ref": "#/components/schemas/MetaInactivity"
+          },
           "kube_access": {
             "$ref": "#/components/schemas/MetaKubeAccess"
           },
@@ -2470,7 +2518,8 @@
           "docker",
           "hook_events",
           "permission_modes",
-          "usage"
+          "usage",
+          "inactivity"
         ],
         "title": "Meta",
         "type": "object"
@@ -2653,6 +2702,29 @@
           "interval_required"
         ],
         "title": "MetaHookEvent",
+        "type": "object"
+      },
+      "MetaInactivity": {
+        "properties": {
+          "close_seconds": {
+            "title": "Close Seconds",
+            "type": "integer"
+          },
+          "handoff_seconds": {
+            "title": "Handoff Seconds",
+            "type": "integer"
+          },
+          "reminder_seconds": {
+            "title": "Reminder Seconds",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "reminder_seconds",
+          "close_seconds",
+          "handoff_seconds"
+        ],
+        "title": "MetaInactivity",
         "type": "object"
       },
       "MetaKubeAccess": {
@@ -3591,19 +3663,6 @@
               }
             ]
           },
-          "discard_after_idle_seconds": {
-            "anyOf": [
-              {
-                "maximum": 2592000.0,
-                "minimum": 60.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Discard After Idle Seconds"
-          },
           "discard_hook_url": {
             "anyOf": [
               {
@@ -3691,6 +3750,16 @@
               }
             ],
             "title": "Image"
+          },
+          "inactivity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InactivityLimits"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "init_scripts": {
             "default": [],
@@ -3923,19 +3992,6 @@
               }
             ]
           },
-          "discard_after_idle_seconds": {
-            "anyOf": [
-              {
-                "maximum": 2592000.0,
-                "minimum": 60.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Discard After Idle Seconds"
-          },
           "discard_hook_url": {
             "anyOf": [
               {
@@ -4023,6 +4079,16 @@
               }
             ],
             "title": "Image"
+          },
+          "inactivity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InactivityLimits"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "init_scripts": {
             "default": [],
@@ -4279,6 +4345,33 @@
           "backup": {
             "$ref": "#/components/schemas/SessionBackup"
           },
+          "close_deadline_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Close Deadline At"
+          },
+          "close_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "self",
+                  "inactivity"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Close Kind"
+          },
           "close_reason": {
             "anyOf": [
               {
@@ -4363,6 +4456,30 @@
             "title": "Id",
             "type": "string"
           },
+          "inactivity_closes_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inactivity Closes At"
+          },
+          "inactivity_reminded_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inactivity Reminded At"
+          },
           "init_edited_since_run": {
             "title": "Init Edited Since Run",
             "type": "boolean"
@@ -4374,6 +4491,18 @@
             },
             "title": "Labels",
             "type": "array"
+          },
+          "last_update_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Update At"
           },
           "leader_agent_id": {
             "anyOf": [
@@ -4451,6 +4580,18 @@
               }
             ],
             "title": "Preset Name"
+          },
+          "reminder_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reminder At"
           },
           "slug": {
             "title": "Slug",

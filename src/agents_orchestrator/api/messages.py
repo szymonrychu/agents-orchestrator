@@ -51,6 +51,7 @@ def _message_view(r: dict) -> schemas.MessageView:
         created_at=r["created_at"],
         dispatched_at=r["dispatched_at"],
         turn=turn,
+        notice=r["notice"],
         attachments=[
             schemas.MessageAttachmentView(**a, path=f".attachments/orch-{r['id']}/{a['name']}")
             for a in r["attachments"]

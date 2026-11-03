@@ -75,6 +75,8 @@ def _wants_mine(request: Request, path: str) -> bool:
     )
 
 
+# Relayed writes that count as a user-visible update of the session (spec 3.2).
+_WRITES = frozenset({"POST", "PUT", "PATCH"})
 _PASS_THROUGH = {"description": "The taskboard upstream's status and JSON body, unchanged"}
 _RESPONSES: dict[int | str, dict[str, Any]] = {
     200: _PASS_THROUGH,
@@ -111,6 +113,8 @@ async def _relay(request: Request, agent: Caller, pool: Pool, settings: Cfg, pat
     status, content = await forward_core.forward(
         request, target, request.method, "/tasks" + path, body, str(own.id), own.slug, query=query
     )
+    if request.method in _WRITES:
+        await forward_core.touch_on_success(pool, own.id, status)
     return Response(content, status, media_type="application/json")
 
 

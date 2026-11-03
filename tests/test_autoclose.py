@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import logging
 
 import psycopg
+import pytest
 from factories import insert_session
 
+from agents_orchestrator import inactivity
 from agents_orchestrator.api import autoclose
 from agents_orchestrator.api.app import create_app
 from agents_orchestrator.db import sessions
@@ -89,3 +93,137 @@ async def test_sweeper_runs_in_api_lifespan(dsn, pool, monkeypatch):
         assert (await _row(pool, due["id"]))["desired"] == "deleting"
         assert not task.done()
     assert task.cancelled() or task.done()
+
+
+async def test_sweep_step_order(monkeypatch, pool):
+    """One poll runs the steps in this order: expired, released, overdue, closed, reminded,
+    discarded idle."""
+    monkeypatch.setattr(autoclose, "AUTOCLOSE_POLL_SECONDS", 0.05)
+    calls: list[str] = []
+
+    def record(name):
+        async def step(conn, *args):
+            calls.append(name)
+            return []
+
+        return step
+
+    names = [
+        "close_expired",
+        "release_inactive_close",
+        "close_overdue",
+        "close_inactive",
+        "remind_inactive",
+        "discard_idle",
+    ]
+    for name in names:
+        monkeypatch.setattr(sessions, name, record(name))
+    task = asyncio.create_task(autoclose.sweep(pool, Settings(database_url="x", agent_image="i")))
+    for _ in range(100):
+        if len(calls) >= len(names):
+            break
+        await asyncio.sleep(0.05)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert calls[: len(names)] == names
+
+
+async def _quiet_for(pool, session_id, seconds: int) -> None:
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE sessions SET created_at = now() - make_interval(secs => %s),"
+            " last_update_at = now() - make_interval(secs => %s) WHERE id = %s",
+            (seconds, seconds, session_id),
+        )
+
+
+async def test_sweeper_sends_inactivity_notices(dsn, pool, monkeypatch):
+    monkeypatch.setattr(autoclose, "AUTOCLOSE_POLL_SECONDS", 0.1)
+    quiet = await insert_session(pool, spec={})
+    silent = await insert_session(pool, spec={})
+    await _quiet_for(pool, quiet["id"], 3700)
+    await _quiet_for(pool, silent["id"], 14405)
+    settings = Settings(
+        database_url=dsn,
+        agent_image="img:1",
+        inactivity_reminder_seconds=3600,
+        inactivity_close_seconds=14400,
+    )
+    app = create_app(settings)
+
+    async def notices(session_id) -> list[tuple]:
+        async with pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT notice, text FROM messages WHERE session_id = %s AND notice IS NOT NULL",
+                (session_id,),
+            )
+            return await cur.fetchall()
+
+    async with app.router.lifespan_context(app):
+        for _ in range(50):
+            if await notices(quiet["id"]) and await notices(silent["id"]):
+                break
+            await asyncio.sleep(0.1)
+    [(kind, text)] = await notices(quiet["id"])
+    assert kind == inactivity.NOTICE_REMINDER
+    assert text.startswith(inactivity.REMINDER_PREFIX)
+    assert "for 1 h (last update" in text and "holding 0 agent pods" in text
+    assert "keep posting at least every 1 h" not in text  # no update tool configured
+    assert "with 5 min to hand off" in text
+    [(kind, text)] = await notices(silent["id"])
+    assert kind == inactivity.NOTICE_CLOSE
+    assert text.startswith(inactivity.CLOSE_PREFIX)
+    assert "for 4 h, so the orchestrator is closing it" in text
+    assert "discarded 30 s after your turn ends" in text
+    row = await _row(pool, silent["id"])
+    assert row["close_kind"] == "inactivity" and row["desired"] == "active"
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        "close_expired",
+        "release_inactive_close",
+        "close_overdue",
+        "close_inactive",
+        "remind_inactive",
+        "discard_idle",
+    ],
+)
+async def test_failing_step_does_not_skip_the_others(monkeypatch, pool, caplog, broken):
+    """A step that raises on every poll is logged and the other steps still run each poll."""
+    monkeypatch.setattr(autoclose, "AUTOCLOSE_POLL_SECONDS", 0.05)
+    calls: list[str] = []
+
+    def step(name):
+        async def run(conn, *args):
+            calls.append(name)
+            if name == broken:
+                raise RuntimeError(f"{name} is broken")
+            return []
+
+        return run
+
+    names = [
+        "close_expired",
+        "release_inactive_close",
+        "close_overdue",
+        "close_inactive",
+        "remind_inactive",
+        "discard_idle",
+    ]
+    for name in names:
+        monkeypatch.setattr(sessions, name, step(name))
+    caplog.set_level(logging.ERROR, logger=autoclose.__name__)
+    task = asyncio.create_task(autoclose.sweep(pool, Settings(database_url="x", agent_image="i")))
+    for _ in range(100):
+        if len(calls) >= 2 * len(names):  # two full polls
+            break
+        await asyncio.sleep(0.05)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert calls[: 2 * len(names)] == names * 2
+    failures = [r for r in caplog.records if broken in r.getMessage()]
+    assert failures and all(r.exc_info for r in failures)

@@ -436,6 +436,44 @@ async def test_request_close_sets_columns_and_notifies(pool, dsn):
     assert got == [json.dumps({"session_id": str(s["id"])})]
 
 
+async def test_request_close_writes_kind(pool):
+    own = await insert_session(pool)
+    forced = await insert_session(pool)
+    async with pool.connection() as conn:
+        assert (await sessions.request_close(conn, own["id"], "done")).session.close_kind == "self"
+        out = await sessions.request_close(conn, forced["id"], "quiet", kind="inactivity")
+        cur = await conn.execute(
+            "SELECT id, close_kind FROM sessions WHERE id = ANY(%s)", ([own["id"], forced["id"]],)
+        )
+        stored = dict(await cur.fetchall())
+    assert out.session.close_kind == "inactivity"
+    assert stored == {own["id"]: "self", forced["id"]: "inactivity"}
+
+
+async def test_cancel_close_clears_kind_and_deadline_and_touches_update(pool):
+    s = await insert_session(pool)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE sessions SET close_requested_at = now(), close_reason = 'quiet',"
+            " close_kind = 'inactivity', close_deadline_at = now() + interval '5 min',"
+            " last_update_at = now() - interval '5 h' WHERE id = %s",
+            (s["id"],),
+        )
+    async with pool.connection() as conn:
+        cleared = await sessions.cancel_close(conn, s["id"])
+        cur = await conn.execute("SELECT now()")
+        now = (await cur.fetchone())[0]
+    assert (cleared.close_kind, cleared.close_deadline_at, cleared.close_requested_at) == (
+        None,
+        None,
+        None,
+    )
+    assert abs((now - cleared.last_update_at).total_seconds()) < 2
+    async with pool.connection() as conn:
+        again = await sessions.cancel_close(conn, s["id"])  # nothing pending: no write
+    assert again.last_update_at == cleared.last_update_at
+
+
 async def test_request_close_repeat_keeps_first(pool, dsn):
     s = await insert_session(pool)
     async with pool.connection() as conn:
@@ -493,3 +531,46 @@ async def test_cancel_close_refuses_deleting(pool):
             await sessions.cancel_close(conn, s["id"])
     requested_at, reason = await _close_columns(pool, s["id"])
     assert requested_at is not None and reason == "done"
+
+
+async def test_touch_update_stamps_an_active_session_only(pool, dsn):
+    active = await insert_session(pool)
+    gone = await insert_session(pool)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE sessions SET last_update_at = now() - interval '5 h',"
+            " desired = CASE WHEN id = %s THEN 'deleting' ELSE desired END"
+            " WHERE id IN (%s, %s)",
+            (gone["id"], active["id"], gone["id"]),
+        )
+        cur = await conn.execute(
+            "SELECT id, last_update_at, generation FROM sessions WHERE id IN (%s, %s)",
+            (active["id"], gone["id"]),
+        )
+        before = {r[0]: r[1:] for r in await cur.fetchall()}
+    async with _Listener(dsn) as lis, pool.connection() as conn:
+        await sessions.touch_update(conn, active["id"])
+        await sessions.touch_update(conn, gone["id"])
+        await sessions.touch_update(conn, uuid.uuid4())  # unknown: no error
+        assert await lis.payloads() == []  # no NOTIFY
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT id, last_update_at, generation, now() FROM sessions WHERE id IN (%s, %s)",
+            (active["id"], gone["id"]),
+        )
+        after = {r[0]: r[1:] for r in await cur.fetchall()}
+    assert abs((after[active["id"]][2] - after[active["id"]][0]).total_seconds()) < 2
+    assert after[active["id"]][1] == before[active["id"]][1]  # no generation bump
+    assert after[gone["id"]][:2] == before[gone["id"]]
+
+
+async def test_request_close_refuses_an_unknown_kind(pool):
+    s = await insert_session(pool)
+    async with pool.connection() as conn:
+        with pytest.raises(ValueError, match="unknown close kind"):
+            await sessions.request_close(conn, s["id"], "done", kind="bogus")
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT close_requested_at, close_kind FROM sessions WHERE id = %s", (s["id"],)
+        )
+        assert await cur.fetchone() == (None, None)
