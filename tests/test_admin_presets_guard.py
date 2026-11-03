@@ -673,6 +673,54 @@ async def test_secret_route_grant_flipped_between_check_and_write_403(
     assert last["data"]["secrets"] == ["K"]
 
 
+@pytest.mark.parametrize("flip", ["unprotect", "remove"])
+async def test_secret_route_entry_dropped_between_check_and_write_422(
+    call, human, seed, kube, canary, pool, flip, monkeypatch
+):
+    """TOCTOU: a human unprotects or removes the entry after the route read the preset but before
+    the Secret write. The declared-entry check re-runs on the locked row: 422, no Secret version,
+    no live preset_secrets row for the undeclared name."""
+    pid, _ = await _protected_seed(human, seed, canary)
+    secrets_before = kube.names("Secret")
+    rows_before = await _secret_rows(pool, pid)
+    real = presets_api.by_ref
+    reads = []
+    change = (
+        "jsonb_set(spec, '{env,K,protected}', 'false'::jsonb)"
+        if flip == "unprotect"
+        else "spec #- '{env,K}'"
+    )
+
+    async def flip_after_read(conn, ref):
+        found = await real(conn, ref)
+        reads.append(ref)
+        if len(reads) < 2:  # the route's manageable lookup, then put_secret's own read
+            return found
+        async with pool.connection() as other:
+            await other.execute(
+                f"UPDATE presets SET spec = {change} WHERE id = %s",  # noqa: S608
+                (uuid.UUID(pid),),
+            )
+        return found
+
+    monkeypatch.setattr(presets_api, "by_ref", flip_after_read)
+    r = await call("PUT", f"{A}/{pid}/secrets/K", json={"value": canary + "-new"})
+    assert_error(r, 422, "invalid_request")
+    assert canary not in r.text
+    assert kube.names("Secret") == secrets_before
+    assert await _secret_rows(pool, pid) == rows_before
+
+
+async def _secret_rows(pool, pid):
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT name, version, retired_at FROM preset_secrets WHERE preset_id = %s"
+            " ORDER BY name",
+            (uuid.UUID(pid),),
+        )
+        return await cur.fetchall()
+
+
 async def test_privileged_add_protected_env_403(call, human, seed):
     pid = await seed({**KUBE})
     before = (await human("GET", f"{M}/{pid}")).json()

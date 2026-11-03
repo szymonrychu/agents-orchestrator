@@ -519,13 +519,21 @@ async def put_secret(
             _note_fields(request, refused)
             raise privileged_edit_refused(refused)
 
-    if superleader:
-        refuse_privileged(found.spec)
-    entry = found.spec.get("env", {}).get(name)
-    if not (isinstance(entry, dict) and entry.get("protected")):
-        raise ApiError(
-            422, "invalid_request", f"{name!r} is not a protected variable of this preset"
-        )
+    def refuse_undeclared(spec: dict) -> None:
+        entry = spec.get("env", {}).get(name)
+        if not (isinstance(entry, dict) and entry.get("protected")):
+            raise ApiError(
+                422, "invalid_request", f"{name!r} is not a protected variable of this preset"
+            )
+
+    def recheck(spec: dict) -> None:
+        # runs on the spec read under the preset row lock, so a concurrent unprotect or removal
+        # of the entry (or a grant turned on) cannot slip a write through
+        if superleader:
+            refuse_privileged(spec)
+        refuse_undeclared(spec)
+
+    recheck(found.spec)
     kube = secret_store.kube_of(request)
     try:
         meta = await secret_store.set_secret(
@@ -535,7 +543,7 @@ async def put_secret(
             found.id,
             name,
             body.value,
-            recheck=refuse_privileged if superleader else None,
+            recheck=recheck,
         )
     except secret_store.PresetNotFound:
         raise not_found("preset") from None
