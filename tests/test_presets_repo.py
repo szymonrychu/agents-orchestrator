@@ -143,3 +143,20 @@ async def test_manageable_ids(pool):
         p2 = await presets.create(conn, "b", {}, superleader_manageable=True)
         await presets.create(conn, "c", {})
         assert await presets.manageable_ids(conn) == {p1.id, p2.id}
+
+
+async def test_manageable_specs_only_manageable(pool):
+    async with pool.connection() as conn:
+        p1 = await presets.create(conn, "a", {"kube_access": True}, superleader_manageable=True)
+        await presets.create(conn, "c", {"docker": True})
+        assert await presets.manageable_specs(conn) == {p1.id: {"kube_access": True}}
+
+
+async def test_update_expected_updated_at_mismatch_raises(pool):
+    async with pool.connection() as conn:
+        one = await presets.create(conn, "Cas", {"a": 1})
+        ok = await presets.update(conn, one.id, "Cas", {"a": 2}, expected_updated_at=one.updated_at)
+        assert ok.spec == {"a": 2}
+        with pytest.raises(presets.PresetChanged):
+            await presets.update(conn, one.id, "Cas", {"a": 3}, expected_updated_at=one.updated_at)
+        assert (await presets.get(conn, one.id)).spec == {"a": 2}

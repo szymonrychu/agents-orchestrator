@@ -14,8 +14,10 @@ from __future__ import annotations
 import hashlib
 import logging
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 
 import psycopg
 from psycopg.rows import dict_row
@@ -133,6 +135,7 @@ async def set_secret(
     value: SecretStr,
     *,
     collect: bool = True,
+    recheck: Callable[[dict[str, Any]], None] | None = None,
 ) -> SecretMeta:
     """Store `value` as the next version of the preset's protected variable `name`.
 
@@ -140,12 +143,19 @@ async def set_secret(
     as dead and would delete the Secret just written. A caller whose transaction may still roll
     back passes `collect=False` and calls `gc` after its commit, so the previous version is never
     deleted for a write that did not stick.
+
+    The preset row is locked first (the order every writer of a preset and its secrets uses), and
+    `recheck`, when given, sees the locked row's spec before anything is written: it raises to
+    refuse a write the caller decided on a spec that has since changed.
     """
     async with conn.transaction():
-        await _lock(conn, preset_id, name)
-        cur = await conn.execute("SELECT 1 FROM presets WHERE id = %s", (preset_id,))
-        if await cur.fetchone() is None:
+        cur = await conn.execute("SELECT spec FROM presets WHERE id = %s FOR UPDATE", (preset_id,))
+        row = await cur.fetchone()
+        if row is None:
             raise PresetNotFound(f"preset not found for secret {name}")
+        if recheck is not None:
+            recheck(row[0])
+        await _lock(conn, preset_id, name)
         cur = await conn.execute(
             "SELECT version FROM preset_secrets WHERE preset_id = %s AND name = %s",
             (preset_id, name),

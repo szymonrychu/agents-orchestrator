@@ -9,15 +9,23 @@ from typing import Any
 
 from fastapi import APIRouter, Request, Response
 from fastapi.concurrency import run_in_threadpool
+from fastapi.exceptions import RequestValidationError
 from pydantic import SecretStr, ValidationError
 
 from agents_orchestrator.api import schemas, secret_store
 from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.sessions import Cfg, Pool, check_spec
 from agents_orchestrator.db import presets as repo
+from agents_orchestrator.preset_policy import (
+    changed_paths,
+    human_only_changes,
+    merge_patch,
+    privileged_target_changes,
+    strip_grants,
+)
 from agents_orchestrator.secret_view import EnvMeta, redact_spec_dict
 from agents_orchestrator.settings import Settings
-from agents_orchestrator.spec import SessionSpec, default_cache_key
+from agents_orchestrator.spec import SessionSpec, SessionSpecIn, default_cache_key
 
 SECRET_MAX_BYTES = 1024 * 1024  # F1.9: a Kubernetes Secret holds at most 1 MiB
 
@@ -25,6 +33,7 @@ router = APIRouter(prefix="/api/v1")
 
 _COPY = " copy"
 _COPY_TRIES = 5
+_PATCH_TRIES = 3
 
 
 def _view(
@@ -50,16 +59,55 @@ def _checked_name(name: str) -> str:
         raise ApiError(422, "invalid_request", str(exc)) from None
 
 
+def human_only_refused(paths: list[str]) -> ApiError:
+    return ApiError(
+        403,
+        "human_only_field",
+        f"only a human can change: {', '.join(paths)}",
+        extra={"fields": paths},
+    )
+
+
+def privileged_edit_refused(paths: list[str]) -> ApiError:
+    return ApiError(
+        403,
+        "privileged_target",
+        "only a human can change these fields of a preset with kube_access, session_messaging "
+        f"or docker on: {', '.join(paths)}",
+        extra={"fields": paths},
+    )
+
+
+def _note_fields(request: Request, paths: list[str]) -> None:
+    """Hand the changed (or refused) paths to the admin audit; paths only, never values."""
+    request.state.preset_fields = sorted(paths)
+
+
 async def _validated(
     body: schemas.PresetIn,
     settings: Settings,
     stored: dict[str, Any] | None = None,
     preset_id: uuid.UUID | None = None,
+    human_only_base: dict[str, Any] | None = None,
+    request: Request | None = None,
 ) -> tuple[dict[str, Any], dict[str, SecretStr]]:
     """Check name and spec; return the spec as the caller sent it (no defaults filled) and the
-    protected values it carried, which never go into the spec."""
+    protected values it carried, which never go into the spec.
+
+    With `human_only_base` (the stored spec, `{}` on create) the human-only fields may only move
+    toward safe, else 403 before anything is written."""
     _checked_name(body.name)
     spec, values = body.spec.split()
+    if human_only_base is not None:
+        dumped = spec.model_dump(mode="json", exclude_unset=True)
+        if refused := human_only_changes(human_only_base, dumped):
+            if request is not None:
+                _note_fields(request, refused)
+            raise human_only_refused(refused)
+        if refused := privileged_target_changes(human_only_base, dumped, values):
+            if request is not None:
+                _note_fields(request, refused)
+            raise privileged_edit_refused(refused)
     stored_spec = None
     if stored is not None:
         try:
@@ -170,7 +218,9 @@ async def create(
 ) -> schemas.PresetView:
     if superleader and body.superleader_manageable is False:
         raise manageable_main_port_only()
-    spec, values = await _validated(body, settings)
+    spec, values = await _validated(
+        body, settings, human_only_base={} if superleader else None, request=request
+    )
     manageable = superleader or bool(body.superleader_manageable)
     try:
         preset, metas = await _save(
@@ -183,6 +233,10 @@ async def create(
         )
     except repo.PresetExists:
         raise _exists(body.name) from None
+    if superleader:
+        _note_fields(
+            request, changed_paths({}, spec) + ["name"] + (["labels"] if body.labels else [])
+        )
     return _view(preset, metas)
 
 
@@ -206,9 +260,17 @@ async def replace(
         raise manageable_main_port_only()
     flag = None if superleader else body.superleader_manageable
     stored = await repo.get(conn, preset_id)
-    if stored is None:
+    if stored is None or (superleader and not stored.superleader_manageable):
         raise not_found("preset")
-    spec, values = await _validated(body, settings, stored.spec, preset_id)
+    spec, values = await _validated(
+        body,
+        settings,
+        stored.spec,
+        preset_id,
+        human_only_base=stored.spec if superleader else None,
+        request=request,
+    )
+    expected = stored.updated_at if superleader else None
     try:
         preset, metas = await _save(
             request,
@@ -216,15 +278,107 @@ async def replace(
             settings,
             spec,
             values,
-            lambda: repo.update(conn, preset_id, body.name, spec, flag, body.labels),
+            lambda: repo.update(conn, preset_id, body.name, spec, flag, body.labels, expected),
         )
-        return _view(preset, metas)
     except repo.PresetNotFound:
         raise not_found("preset") from None
+    except repo.PresetChanged:
+        raise ApiError(409, "conflict", "the preset changed since it was read; retry") from None
     except repo.PresetDefault as exc:
         raise _default_error(exc) from None
     except repo.PresetExists:
         raise _exists(body.name) from None
+    if superleader:
+        paths = changed_paths(stored.spec, spec)
+        if body.name != stored.name:
+            paths.append("name")
+        if body.labels is not None and body.labels != stored.labels:
+            paths.append("labels")
+        _note_fields(request, paths)
+    return _view(preset, metas)
+
+
+def _secret_in_patch(patch: dict[str, Any], merged: dict[str, Any]) -> None:
+    """422 when the patch gives a value to a variable that is protected after the merge (the
+    merge fills `protected` from the stored entry, so the patch need not repeat it)."""
+    env, merged_env = patch.get("env"), merged.get("env")
+    for name, entry in (env if isinstance(env, dict) else {}).items():
+        kept = merged_env.get(name) if isinstance(merged_env, dict) else None
+        if (
+            isinstance(entry, dict)
+            and entry.get("value") is not None
+            and isinstance(kept, dict)
+            and kept.get("protected")
+        ):
+            raise ApiError(
+                422,
+                "secret_in_spec",
+                f"protected variable {name} carries a value; set it through the secret route",
+            )
+
+
+def _merged_body(stored: repo.Preset, body: schemas.PresetPatch) -> schemas.PresetIn:
+    """The stored spec with the patch merged in, as the body a PUT would carry."""
+    merged = merge_patch(stored.spec, body.spec or {})
+    _secret_in_patch(body.spec or {}, merged)
+    try:
+        spec = SessionSpecIn.model_validate(merged)
+    except ValidationError as exc:
+        errors = [{**e, "loc": ("body", "spec", *e["loc"])} for e in exc.errors()]
+        raise RequestValidationError(errors) from None
+    return schemas.PresetIn(
+        name=stored.name if body.name is None else body.name,
+        spec=spec,
+        labels=body.labels,
+    )
+
+
+async def patch(
+    request: Request, conn, settings: Settings, preset_id: uuid.UUID, body: schemas.PresetPatch
+) -> schemas.PresetView:
+    """Merge-patch a preset for the superleader: the patch is applied to the stored spec, so
+    what it does not name (a stored protected variable, a grant) is kept; a concurrent edit makes
+    it re-read and retry."""
+    for _ in range(_PATCH_TRIES):
+        stored = await repo.get(conn, preset_id)
+        if stored is None or not stored.superleader_manageable:
+            raise not_found("preset")
+        merged = _merged_body(stored, body)
+        spec, values = await _validated(
+            merged,
+            settings,
+            stored.spec,
+            preset_id,
+            human_only_base=stored.spec,
+            request=request,
+        )
+        try:
+            preset, metas = await _save(
+                request,
+                conn,
+                settings,
+                spec,
+                values,
+                lambda m=merged, sp=spec, at=stored.updated_at: repo.update(
+                    conn, preset_id, m.name, sp, None, m.labels, at
+                ),
+            )
+        except repo.PresetNotFound:
+            raise not_found("preset") from None
+        except repo.PresetChanged:
+            continue
+        except repo.PresetDefault as exc:
+            raise _default_error(exc) from None
+        except repo.PresetExists:
+            raise _exists(merged.name) from None
+        paths = changed_paths(stored.spec, spec)
+        if merged.name != stored.name:
+            paths.append("name")
+        if merged.labels is not None and merged.labels != stored.labels:
+            paths.append("labels")
+        _note_fields(request, paths)
+        return _view(preset, metas)
+    raise ApiError(409, "conflict", "the preset changed since it was read; retry")
 
 
 async def remove(request: Request, conn, settings: Settings, preset_id: uuid.UUID) -> None:
@@ -296,13 +450,23 @@ def _without_derived_key(spec: dict[str, Any], preset_id: uuid.UUID) -> dict[str
     return spec
 
 
-async def copy(conn, preset_id: uuid.UUID, explicit: str | None) -> schemas.PresetView:
+async def copy(
+    conn,
+    preset_id: uuid.UUID,
+    explicit: str | None,
+    superleader: bool = False,
+    request: Request | None = None,
+) -> schemas.PresetView:
     if explicit is not None:
         _checked_name(explicit)
     source = await repo.get(conn, preset_id)
-    if source is None:
+    if source is None or (superleader and not source.superleader_manageable):
         raise not_found("preset")
     spec = _without_derived_key(source.spec, preset_id)
+    if superleader:
+        spec, removed = strip_grants(spec)
+        if request is not None:
+            _note_fields(request, removed)
     for _ in range(_COPY_TRIES):
         taken = {p.name.lower() for p in await repo.list_presets(conn)}
         name = explicit if explicit is not None else _copy_name(source.name, taken)
@@ -338,22 +502,52 @@ async def by_ref(conn, ref: str) -> repo.Preset:
 
 
 async def put_secret(
-    request: Request, conn, settings: Settings, preset: str, name: str, body: schemas.SecretIn
+    request: Request,
+    conn,
+    settings: Settings,
+    preset: str,
+    name: str,
+    body: schemas.SecretIn,
+    superleader: bool = False,
 ) -> schemas.SecretView:
-    """Set the value of a protected variable (a new version). The value is never echoed."""
+    """Set the value of a protected variable (a new version). The value is never echoed.
+
+    The superleader may not set one on a privileged preset (403 `privileged_target`)."""
     value = body.value.get_secret_value()
     if len(value.encode()) > SECRET_MAX_BYTES:
         raise ApiError(413, "secret_too_large", f"a secret holds at most {SECRET_MAX_BYTES} bytes")
     found = await by_ref(conn, preset)
-    entry = found.spec.get("env", {}).get(name)
-    if not (isinstance(entry, dict) and entry.get("protected")):
-        raise ApiError(
-            422, "invalid_request", f"{name!r} is not a protected variable of this preset"
-        )
+
+    def refuse_privileged(spec: dict) -> None:
+        if refused := privileged_target_changes(spec, spec, [name]):
+            _note_fields(request, refused)
+            raise privileged_edit_refused(refused)
+
+    def refuse_undeclared(spec: dict) -> None:
+        entry = spec.get("env", {}).get(name)
+        if not (isinstance(entry, dict) and entry.get("protected")):
+            raise ApiError(
+                422, "invalid_request", f"{name!r} is not a protected variable of this preset"
+            )
+
+    def recheck(spec: dict) -> None:
+        # runs on the spec read under the preset row lock, so a concurrent unprotect or removal
+        # of the entry (or a grant turned on) cannot slip a write through
+        if superleader:
+            refuse_privileged(spec)
+        refuse_undeclared(spec)
+
+    recheck(found.spec)
     kube = secret_store.kube_of(request)
     try:
         meta = await secret_store.set_secret(
-            conn, kube, settings.namespace, found.id, name, body.value
+            conn,
+            kube,
+            settings.namespace,
+            found.id,
+            name,
+            body.value,
+            recheck=recheck,
         )
     except secret_store.PresetNotFound:
         raise not_found("preset") from None

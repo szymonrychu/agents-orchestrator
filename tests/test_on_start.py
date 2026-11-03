@@ -42,8 +42,9 @@ TAIL_TOOLS = [*SESSION_TOOLS, *INIT_SCRIPTS_TOOLS, *CHAT_TOOLS, *TASK_TOOLS]
 ALONE_TOOLS = ["me", *TAIL_TOOLS]
 CLOSE = ["self_close"]  # offered last to every session without session_messaging
 ADMIN_TOOLS = [
-    "presets_list", "preset_get", "preset_create", "preset_replace", "preset_delete",
-    "preset_copy", "session_get", "session_create", "session_discard", "session_restart",
+    "presets_list", "preset_get", "preset_create", "preset_replace", "preset_patch",
+    "preset_delete", "preset_copy", "session_get", "session_create", "session_discard",
+    "session_restart",
     "agent_restart", "command_get", "webhooks_list", "webhook_get_meta", "webhook_create",
     "webhook_update", "webhook_clone", "webhook_rotate", "webhook_delete",
     "webhook_filters_set", "webhook_events", "webhook_event", "webhook_template_preview",
