@@ -313,6 +313,7 @@ In-cluster trigger services (agents-webhook, agents-schedule) call the orchestra
   - `GET /api/v1/sessions`
   - `POST /api/v1/sessions`
   - `GET /api/v1/sessions/{session_id}`
+  - `DELETE /api/v1/sessions/{session_id}` (owner-only: a service discards only a session whose `created_by_service` is its own name; any other session, one created by another service, in the UI or by a superleader, answers 404 `not_found` like an unknown id. `DELETE /api/v1/sessions/{session_id}/close` is not served)
   - `GET /api/v1/sessions/{session_id}/messages`
   - `POST /api/v1/sessions/{session_id}/messages`
   - `GET /api/v1/sessions/{session_id}/files/download`
@@ -858,7 +859,7 @@ One session view: `id`, `slug`, `spec`, `desired`, `status`, `generation`, `obse
 
 ### `DELETE /api/v1/sessions/{session_id}`
 
-Discards the session: after the optional history-export hook, deletes every Kubernetes object, the PVC and the chat history. Takes no query parameters. Response 202 with the session view (`desired: deleting`). Errors: 404 `not_found`, 422 `invalid_request` (any query parameter).
+Discards the session: after the optional history-export hook, deletes every Kubernetes object, the PVC and the chat history. Takes no query parameters. Response 202 with the session view (`desired: deleting`); a repeat delete of a session already being discarded answers 202 again. Also served on the service port, owner-only: a service discards only a session it created (`created_by_service` equal to its name), every other session answers 404 `not_found` there; the main port discards any session. Errors: 404 `not_found`, 422 `invalid_request` (any query parameter).
 
 ### `DELETE /api/v1/sessions/{session_id}/close`
 

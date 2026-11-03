@@ -525,11 +525,19 @@ async def discard_session(
     pool: Pool,
     settings: Cfg,
 ) -> schemas.SessionView:
+    """Discard the session. On the service port a service may discard only a session it created
+    itself; any other session answers 404 `not_found`, like an unknown one."""
     if request.query_params:
         raise ApiError(
             422, "invalid_request", "discard takes no parameters; it always deletes everything"
         )
+    service = calling_service(request)
     async with pool.connection() as conn:
+        if service is not None:
+            # created_by_service never changes after insert, so check-then-discard needs no lock.
+            session = await repo.get(conn, session_id)
+            if session is None or session.created_by_service != service:
+                raise not_found("session")
         return await discard(conn, session_id, settings)
 
 

@@ -126,6 +126,7 @@ SERVICE_ROUTES = (
     "GET /api/v1/sessions",
     "POST /api/v1/sessions",
     "GET /api/v1/sessions/{session_id}",
+    "DELETE /api/v1/sessions/{session_id}",
     "GET /api/v1/sessions/{session_id}/messages",
     "POST /api/v1/sessions/{session_id}/messages",
     "GET /api/v1/sessions/{session_id}/files/download",
