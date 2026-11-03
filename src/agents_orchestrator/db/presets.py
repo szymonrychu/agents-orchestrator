@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -168,15 +169,23 @@ async def manageable_specs(conn: psycopg.AsyncConnection) -> dict[uuid.UUID, dic
     return {r[0]: r[1] for r in await cur.fetchall()}
 
 
-async def delete(conn: psycopg.AsyncConnection, preset_id: uuid.UUID) -> None:
+async def delete(
+    conn: psycopg.AsyncConnection,
+    preset_id: uuid.UUID,
+    recheck: Callable[[dict[str, Any]], None] | None = None,
+) -> None:
+    """Delete a preset. `recheck(spec)` runs on the spec read under the row lock, before
+    anything is deleted; it raises to refuse."""
     async with conn.transaction():
         # Lock every row in a fixed order: concurrent deletes queue here, so the count below
         # is taken after the earlier delete has committed and the last row cannot go.
-        cur = await conn.execute("SELECT id, is_default FROM presets ORDER BY id FOR UPDATE")
+        cur = await conn.execute("SELECT id, is_default, spec FROM presets ORDER BY id FOR UPDATE")
         rows = await cur.fetchall()
         match = [r for r in rows if r[0] == preset_id]
         if not match:
             raise PresetNotFound(str(preset_id))
+        if recheck is not None:
+            recheck(match[0][2])
         if match[0][1]:
             raise PresetDefault(str(preset_id))
         if len(rows) == 1:
