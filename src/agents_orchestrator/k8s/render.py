@@ -14,7 +14,13 @@ import yaml
 from agents_orchestrator import rendering
 from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.dispatcher.hive import compact_pct
-from agents_orchestrator.k8s.labels import object_names, prefix, selector, session_labels
+from agents_orchestrator.k8s.labels import (
+    object_names,
+    prefix,
+    selector,
+    session_labels,
+    workspace_pvc,
+)
 from agents_orchestrator.k8s.on_start import render_on_start
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import WORKDIR_ROOT, SessionSpec, WrapperSettings, parse_quantity
@@ -533,7 +539,7 @@ def render_session(
     session: Session, settings: Settings, tokens: SessionTokens
 ) -> list[dict[str, Any]]:
     spec, slug = session.spec, session.slug
-    names = object_names(slug)
+    names = {**object_names(slug), "pvc": workspace_pvc(slug, session.status)}
     labels = session_labels(slug)
 
     config_data = {

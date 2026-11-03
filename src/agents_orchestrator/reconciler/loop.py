@@ -61,6 +61,8 @@ from agents_orchestrator.k8s.labels import (
     SESSION_LABEL,
     object_names,
     session_labels,
+    suffixed_workspace_pvc,
+    workspace_pvc,
 )
 from agents_orchestrator.k8s.render import pod_url, render_session
 from agents_orchestrator.reconciler.cache import CacheGate, CacheRunner
@@ -104,6 +106,22 @@ _HOOK_FAILURE_KEYS = (
 # the session and managed-by labels, so no selector of the session finds it again; its
 # annotations `<label>-session-id` and `<label>-reason` say what it was and why it was kept.
 RETAINED_LABEL = "agents.szymonrichert.pl/retained-from"
+
+
+def _abandoned_note(abandoned: dict[str, Any] | None) -> str:
+    """The phase message part naming the hooks a discard goes on without ("" for none)."""
+    if not abandoned:
+        return ""
+    return "discarding without the pre-discard hook " + ", ".join(
+        f"{name} ({entry.get('reason')})" for name, entry in sorted(abandoned.items())
+    )
+
+
+def _deleting(message: str, status: dict[str, Any]) -> dict[str, Any]:
+    """Status fields of a discard step, its message followed by the abandoned hooks if any."""
+    note = _abandoned_note(status.get("discard_hook_abandoned"))
+    return {"phase": "deleting", "message": "; ".join(filter(None, [message, note]))}
+
 
 WrapperFactory = Callable[[str, str], Any]
 """(base_url, auth_token) -> wrapper client; used by session bootstrap."""
@@ -249,8 +267,9 @@ class Reconciler:
         hooks of this pass have used `discard_hook_pass_budget_seconds`, a hook not yet run is
         left owed (nothing run or recorded for it) and the result is False: the session waits
         for the next pass. Each call is cut at `_hook_deadline`. A failure once
-        `discard_hook_give_up_seconds` have passed since `discard_hook_first_failed_at` abandons
-        the hooks that failed (`_abandon`, reason `retry_limit`) instead of backing off.
+        `discard_hook_give_up_seconds` have passed since that hook's own first failure
+        (`discard_hook_first_failed_at`, {name: time}, dropped once it is delivered) abandons
+        the hooks that failed (`_abandon`, reason `timeout`) instead of backing off.
         """
         delivered, owed = self._owed_hooks(session)
         if not owed:
@@ -293,33 +312,54 @@ class Reconciler:
         if not failed:
             return not skipped  # a skipped hook is still owed: nothing may be deleted unexported
         now = await self._db_now()
-        first = datetime.fromisoformat(
-            status.get("discard_hook_first_failed_at") or now.isoformat()
-        )
-        if (now - first).total_seconds() >= self.settings.discard_hook_give_up_seconds:
-            await self._abandon(session, errors, "retry_limit")
+        # one give-up clock per hook: a hook's first failure is kept only while it keeps failing
+        # (or is skipped), so a hook that recovers never spends another hook's window
+        kept = status.get("discard_hook_first_failed_at")
+        kept = kept if isinstance(kept, dict) else {}
+        firsts = {n: t for n, t in kept.items() if n not in delivered and n not in errors}
+        firsts |= {n: kept.get(n) or now.isoformat() for n in errors}
+        give_up = self.settings.discard_hook_give_up_seconds
+        expired = {
+            n: e
+            for n, e in errors.items()
+            if (now - datetime.fromisoformat(firsts[n])).total_seconds() >= give_up
+        }
+        if len(expired) == len(errors):
+            await self._abandon(session, expired, "timeout")
             return not skipped
+        retrying = {n: e for n, e in errors.items() if n not in expired}
         failures = int(status.get("discard_hook_failures", 0)) + 1
         delay = self.settings.retry_delay_seconds(failures)
-        retry_at = now + timedelta(seconds=delay)
-        await self._write_status(
-            session,
-            {
-                "discard_hook_failed": failed,
-                "discard_hook_failures": failures,
-                "discard_hook_next_at": retry_at.isoformat(),
-                "discard_hook_first_failed_at": first.isoformat(),
-                "discard_hook_errors": dict(status.get("discard_hook_errors") or {}) | errors,
+        retry = {
+            "discard_hook_failed": next(f"{n}: {e}" for n, e in retrying.items()),
+            "discard_hook_failures": failures,
+            "discard_hook_next_at": (now + timedelta(seconds=delay)).isoformat(),
+            "discard_hook_first_failed_at": {n: t for n, t in firsts.items() if n not in expired},
+            "discard_hook_errors": {
+                n: e
+                for n, e in (dict(status.get("discard_hook_errors") or {}) | errors).items()
+                if n not in delivered and n not in expired
             },
-            session.observed_generation,
-        )
+        }
+        if expired:
+            await self._abandon(session, expired, "timeout", retry)
+        else:
+            await self._write_status(session, retry, session.observed_generation)
         return False
 
-    async def _abandon(self, session: Session, errors: dict[str, str], reason: str) -> None:
+    async def _abandon(
+        self,
+        session: Session,
+        errors: dict[str, str],
+        reason: str,
+        retry: dict[str, Any] | None = None,
+    ) -> None:
         """Give up on the hooks named in `errors` ({name: last error or ""}): each is recorded in
         `discard_hook_abandoned` ({reason, error, at}), so it is owed no more, and the retry
-        state is dropped. Logged at WARNING like a hook failure; the discard then goes on and
-        keeps the workspace PVC (`_retain_pvc`)."""
+        state is replaced by `retry` (the hooks still failing; none: dropped). The phase message
+        names the hooks discarded without, and the status write NOTIFYs `status` as a hook
+        failure does. Logged at WARNING; the discard then goes on and keeps the workspace PVC
+        (`_retain_pvc`). `reason` is `timeout` or `forced`."""
         at = (await self._db_now()).isoformat()
         abandoned = dict(session.status.get("discard_hook_abandoned") or {})
         for name, error in errors.items():
@@ -334,7 +374,12 @@ class Reconciler:
             )
         await self._write_status(
             session,
-            {"discard_hook_abandoned": abandoned},
+            {
+                "phase": "deleting",
+                "message": _abandoned_note(abandoned),
+                "discard_hook_abandoned": abandoned,
+            }
+            | (retry or {}),
             session.observed_generation,
             drop=_HOOK_FAILURE_KEYS,
         )
@@ -394,6 +439,7 @@ class Reconciler:
         if not self.settings.agent_api_url and session.id not in self._warned_no_agent_url:
             self._warned_no_agent_url.add(session.id)
             log.warning("ORCH_AGENT_API_URL unset: session %s agents get no ORCH_AGENT_URL", slug)
+        session = await self._pin_workspace_pvc(session)
         replicas = session.spec.replicas
         applied, since = await self._drain_replicas(session)
         rendered = (
@@ -463,6 +509,32 @@ class Reconciler:
         log.debug("session %s in %s: %s", slug, ns, phase)
         drop = (*(() if draining else ("drain",)), *(() if rollout else ("rollout",)))
         await self._write_status(session, fields, session.generation, drop=drop)
+
+    async def _pin_workspace_pvc(self, session: Session) -> Session:
+        """Record the session's workspace PVC name in `status.workspace_pvc` once, before any
+        object of it is rendered. The deterministic `agent-<slug>-workspace` unless a PVC kept
+        from an earlier session of the same slug (`RETAINED_LABEL`, `_retain_pvc`) holds that
+        name: then `suffixed_workspace_pvc`, so the new session neither mounts the old workspace
+        nor stops on a foreign object, and the backup stays untouched. Decided once: the slug is
+        unique, so a retained PVC of it exists before this session's row does, and an operator
+        deleting it later never moves the workspace."""
+        if session.status.get("workspace_pvc"):
+            return session
+        ns, slug = self.settings.namespace, session.slug
+        name = object_names(slug)["pvc"]
+        pvc = await self.kube.get_object("PersistentVolumeClaim", ns, name)
+        labels = ((pvc or {}).get("metadata") or {}).get("labels") or {}
+        if pvc is not None and not is_owned(pvc, slug) and RETAINED_LABEL in labels:
+            name = suffixed_workspace_pvc(slug, session.id)
+            log.warning(
+                "session %s: PersistentVolumeClaim %s is kept from an earlier session of this"
+                " slug; using %s as the workspace",
+                slug,
+                object_names(slug)["pvc"],
+                name,
+            )
+        await self._write_status(session, {"workspace_pvc": name}, session.observed_generation)
+        return await self._reload(session)
 
     async def _apply(self, obj: Obj, live: Obj | None, reason: str) -> None:
         """Server-side apply `obj` unless it is unchanged; `reason` names a scale-down.
@@ -660,9 +732,10 @@ class Reconciler:
             )
             return
         if not await self.pre_discard(session):
+            session = await self._reload(session)  # a hook may have been abandoned meanwhile
             await self._write_status(
                 session,
-                {"phase": "deleting", "message": "waiting for the pre-discard hook"},
+                _deleting("waiting for the pre-discard hook", session.status),
                 session.observed_generation,
             )
             return
@@ -679,7 +752,7 @@ class Reconciler:
         if remaining:
             await self._write_status(
                 session,
-                {"phase": "deleting", "message": "waiting for " + ", ".join(remaining)},
+                _deleting("waiting for " + ", ".join(remaining), session.status),
                 session.generation,
             )
             return
@@ -696,7 +769,7 @@ class Reconciler:
         An operator deletes it once it is no longer needed. Idempotent: a PVC already detached
         is not found by its labels and left alone."""
         ns, slug = self.settings.namespace, session.slug
-        name = object_names(slug)["pvc"]
+        name = workspace_pvc(slug, session.status)
         pvc = await self.kube.get_object("PersistentVolumeClaim", ns, name)
         if pvc is None or not is_owned(pvc, slug):
             return

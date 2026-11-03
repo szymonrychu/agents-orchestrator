@@ -48,7 +48,7 @@ from agents_orchestrator.cache.presign import CacheTarget, latest_under, presign
 from agents_orchestrator.cache.save_rule import PODS_EXIST, save_skip
 from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.k8s.kube import KubeApi, KubeError, Obj, is_owned
-from agents_orchestrator.k8s.labels import object_names, prefix, session_labels
+from agents_orchestrator.k8s.labels import prefix, session_labels, workspace_pvc
 from agents_orchestrator.k8s.render import (
     SESSIONS_ROOT,
     WORKSPACE_VOLUME,
@@ -156,7 +156,7 @@ def render_cache_job(
     volumes: list[dict[str, Any]] = [
         {
             "name": WORKSPACE_VOLUME,
-            "persistentVolumeClaim": {"claimName": object_names(slug)["pvc"]},
+            "persistentVolumeClaim": {"claimName": workspace_pvc(session.slug, session.status)},
         },
         {"name": "tmp", "emptyDir": {}},
     ]
