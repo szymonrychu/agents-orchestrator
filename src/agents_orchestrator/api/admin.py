@@ -215,7 +215,7 @@ async def patch_preset(
 async def delete_preset(ref: str, request: Request, pool: Pool, settings: Cfg) -> Response:
     async with pool.connection() as conn:
         found = await _manageable_preset(conn, ref)
-        await presets_api.remove(request, conn, settings, found.id)
+        await presets_api.remove(request, conn, settings, found.id, superleader=True)
     return Response(status_code=204)
 
 

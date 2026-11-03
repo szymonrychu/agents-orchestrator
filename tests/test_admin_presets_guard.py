@@ -1108,3 +1108,88 @@ async def test_secret_route_answer_is_metadata_only(call, seed, canary):
     assert r.status_code == 200, r.text
     assert set(r.json()) == {"name", "set", "version", "updated_at"}
     assert canary not in r.text
+
+
+@pytest.mark.parametrize(("flag", "grant"), FLAGS)
+async def test_privileged_delete_is_403(call, human, seed, kube, canary, pool, boss, flag, grant):
+    """A superleader may not delete a privileged preset: 403 before the delete and before any
+    Secret cleanup, the row, its Secret version and its preset_secrets rows stay."""
+    pid, before = await _protected_seed(human, seed, canary, grant)
+    secrets_before = kube.names("Secret")
+    rows_before = await _secret_rows(pool, pid)
+    r = await call("DELETE", f"{A}/{pid}")
+    assert_error(r, 403, "privileged_target")
+    assert r.json()["error"]["fields"] == [flag]
+    assert canary not in r.text
+    assert (await human("GET", f"{M}/{pid}")).json() == before
+    assert kube.names("Secret") == secrets_before
+    assert await _secret_rows(pool, pid) == rows_before
+    last = (await events(pool, boss.id))[-1]
+    assert last["data"]["status"] == 403 and last["data"]["fields"] == [flag]
+
+
+async def test_privileged_delete_fields_list_every_flag_on(call, human, seed):
+    pid = await seed({"kube_access": True, "session_messaging": True})
+    r = await call("DELETE", f"{A}/{pid}")
+    assert_error(r, 403, "privileged_target")
+    assert r.json()["error"]["fields"] == ["kube_access", "session_messaging"]
+    assert (await human("GET", f"{M}/{pid}")).status_code == 200
+
+
+async def test_privileged_delete_by_name_is_403(call, human, seed):
+    pid = await seed({"docker": True}, name="by-name")
+    r = await call("DELETE", f"{A}/by-name")
+    assert_error(r, 403, "privileged_target")
+    assert (await human("GET", f"{M}/{pid}")).status_code == 200
+
+
+async def test_non_privileged_delete_unchanged(call, human, seed, kube, canary, pool):
+    pid, _ = await _protected_seed(human, seed, canary)
+    r = await call("DELETE", f"{A}/{pid}")
+    assert r.status_code == 204, r.text
+    assert (await human("GET", f"{M}/{pid}")).status_code == 404
+    # the cleanup ran as before: the rows are retired and collected, their Secret versions gone
+    assert await _secret_rows(pool, pid) == []
+    assert kube.names("Secret") == []
+
+
+async def test_privileged_turned_off_then_delete_passes(call, human, seed):
+    pid = await seed({"kube_access": True})
+    assert (await call("PUT", f"{A}/{pid}", json={"name": "seeded", "spec": {}})).status_code == 200
+    assert (await call("DELETE", f"{A}/{pid}")).status_code == 204
+
+
+@pytest.mark.parametrize(("flag", "grant"), FLAGS)
+async def test_human_delete_of_privileged_unchanged(human, seed, flag, grant):
+    pid = await seed(grant)
+    assert (await human("DELETE", f"{M}/{pid}")).status_code == 204
+    assert (await human("GET", f"{M}/{pid}")).status_code == 404
+
+
+async def test_delete_grant_flipped_between_check_and_delete_403(
+    call, human, seed, kube, canary, pool, monkeypatch
+):
+    """TOCTOU: a human turns kube_access on after the route read the preset but before the
+    delete. The delete re-reads the row under lock and refuses: 403, nothing deleted."""
+    pid, before = await _protected_seed(human, seed, canary)
+    secrets_before = kube.names("Secret")
+    rows_before = await _secret_rows(pool, pid)
+    real = admin._manageable_preset
+
+    async def flip_after_read(conn, ref):
+        found = await real(conn, ref)
+        async with pool.connection() as other:
+            await other.execute(
+                "UPDATE presets SET spec = spec || '{\"kube_access\": true}'::jsonb WHERE id = %s",
+                (uuid.UUID(pid),),
+            )
+        return found
+
+    monkeypatch.setattr(admin, "_manageable_preset", flip_after_read)
+    r = await call("DELETE", f"{A}/{pid}")
+    assert_error(r, 403, "privileged_target")
+    assert r.json()["error"]["fields"] == ["kube_access"]
+    assert canary not in r.text
+    assert (await human("GET", f"{M}/{pid}")).json()["spec"]["kube_access"] is True
+    assert kube.names("Secret") == secrets_before
+    assert await _secret_rows(pool, pid) == rows_before

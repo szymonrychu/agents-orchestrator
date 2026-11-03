@@ -20,6 +20,7 @@ from agents_orchestrator.preset_policy import (
     changed_paths,
     human_only_changes,
     merge_patch,
+    privileged,
     privileged_target_changes,
     strip_grants,
 )
@@ -381,10 +382,36 @@ async def patch(
     raise ApiError(409, "conflict", "the preset changed since it was read; retry")
 
 
-async def remove(request: Request, conn, settings: Settings, preset_id: uuid.UUID) -> None:
+def privileged_delete_refused(flags: list[str]) -> ApiError:
+    return ApiError(
+        403,
+        "privileged_target",
+        "only a human can delete a preset with kube_access, session_messaging or docker on",
+        extra={"fields": flags},
+    )
+
+
+async def remove(
+    request: Request,
+    conn,
+    settings: Settings,
+    preset_id: uuid.UUID,
+    superleader: bool = False,
+) -> None:
+    """Delete a preset and retire its Secret rows.
+
+    The superleader may not delete a privileged preset (403 `privileged_target`, `fields` the
+    flags that are on). The check runs on the spec read under the row lock, before the delete
+    and before any Secret cleanup, so a human turning a flag on concurrently cannot be raced."""
+
+    def recheck(spec: dict) -> None:
+        if superleader and (flags := privileged(spec)):
+            _note_fields(request, flags)
+            raise privileged_delete_refused(flags)
+
     try:
         async with conn.transaction():
-            await repo.delete(conn, preset_id)
+            await repo.delete(conn, preset_id, recheck=recheck)
             # no FK: the rows outlive the preset, so retire them here; gc then treats them
             # as dead and deletes the versions no live session names
             collect = await secret_store.has_rows(conn, preset_id)
