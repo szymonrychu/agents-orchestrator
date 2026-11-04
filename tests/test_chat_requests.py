@@ -58,6 +58,8 @@ class Connector:
         fake.answers[GET] = lambda call, p: (200, self.row)
         fake.answers[DECISION] = self.attach
         fake.answers[CONFIRM] = self.settle
+        fake.document(DECISION, 409)
+        fake.document(CONFIRM, 409)
 
     def attach(self, call, params):
         body = call.json()
@@ -257,6 +259,7 @@ async def test_confirm_not_pending_409(rig):
 
 async def test_confirm_unknown_request_404_passes_through(rig):
     missing = (404, {"error": {"code": "not_found", "message": "no such request"}})
+    rig.fakes["connector"].document(GET, 404)
     rig.fakes["connector"].answers[GET] = missing
     assert_error(await rig.call("POST", confirm_url(77)), 404, "not_found")
 

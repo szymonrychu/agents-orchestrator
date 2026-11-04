@@ -892,7 +892,9 @@ async def test_room_detail_forwarded(rig):
 
 async def test_room_detail_not_found_passes_through(rig):
     missing = (404, {"error": {"code": "not_found", "message": "no such room"}})
-    rig.fakes["connector"].answers[("GET", "/chat/v1/admin/rooms/{room_id}")] = missing
+    key = ("GET", "/chat/v1/admin/rooms/{room_id}")
+    rig.fakes["connector"].document(key, 404)
+    rig.fakes["connector"].answers[key] = missing
     r = await rig.call("GET", relay_url("connector", "/rooms/{room_id}", 404))
     assert_error(r, 404, "not_found")
 
