@@ -156,6 +156,7 @@ ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/restart"): "session",
     ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/agents/{{pod}}/restart"): "session",
     ("GET", f"{ADMIN_PREFIX}/commands/{{command_id}}"): "none",
+    ("GET", f"{ADMIN_PREFIX}/usage"): "none",
 }
 
 
@@ -385,3 +386,38 @@ async def get_command(command_id: int, request: Request, pool: Pool) -> schemas.
     _, caller = caller_of(request)
     async with pool.connection() as conn:
         return await messages_api.command_view(conn, command_id, caller.id)
+
+
+# ---------------------------------------------------------------- usage
+
+
+@router.get("/usage", response_model=schemas.UsageView)
+async def get_usage(usage: Usage) -> schemas.UsageView:
+    """The account's five_hour and seven_day windows, read-only, from the same cached
+    `UsageSource` the usage gate reads. An unconfigured or unreachable usage service answers
+    200 with `available` false and null windows: the gate allows then, and so does this."""
+    windows = await usage.current() if usage is not None else None
+    windows = windows or {}
+
+    def view(metric: str) -> schemas.UsageWindowView | None:
+        w = windows.get(metric)
+        if w is None:
+            return None
+        return schemas.UsageWindowView(
+            utilization_pct=w.percent,
+            resets_at=w.resets_at,
+            stale=w.stale,
+            observed_at=w.observed_at,
+            source=w.source,
+        )
+
+    five, seven = view("five_hour"), view("seven_day")
+    seen = [w.observed_at for w in (five, seven) if w is not None and w.observed_at]
+    return schemas.UsageView(
+        configured=usage is not None,
+        available=bool(windows),
+        source="agents-usage",
+        updated_at=max(seen, default=None),
+        five_hour=five,
+        seven_day=seven,
+    )

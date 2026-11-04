@@ -52,7 +52,7 @@ ADMIN_TOOLS = [
     "schedule_run", "schedule_runs", "schedule_runs_all", "schedule_run_get",
     "schedule_preview", "chat_admin_rooms", "chat_room_settings", "chat_rules",
     "chat_rule_add", "chat_rule_delete", "secret_set", "history_search", "history_get",
-    "history_records",
+    "history_records", "usage_get",
 ]  # fmt: skip
 SECRET = "s3cr3t-token-value"
 PLUGINS_REPO = "https://github.com/szymonrychu/any-mcp-tatara-plugins"

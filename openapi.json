@@ -4915,6 +4915,114 @@
         "title": "UsageQuota",
         "type": "object"
       },
+      "UsageView": {
+        "description": "The account's usage windows as the usage gate reads them (read-only).",
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "configured": {
+            "title": "Configured",
+            "type": "boolean"
+          },
+          "five_hour": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageWindowView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "seven_day": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageWindowView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "configured",
+          "available",
+          "source",
+          "updated_at",
+          "five_hour",
+          "seven_day"
+        ],
+        "title": "UsageView",
+        "type": "object"
+      },
+      "UsageWindowView": {
+        "properties": {
+          "observed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed At"
+          },
+          "resets_at": {
+            "format": "date-time",
+            "title": "Resets At",
+            "type": "string"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "stale": {
+            "title": "Stale",
+            "type": "boolean"
+          },
+          "utilization_pct": {
+            "title": "Utilization Pct",
+            "type": "number"
+          }
+        },
+        "required": [
+          "utilization_pct",
+          "resets_at",
+          "stale",
+          "observed_at",
+          "source"
+        ],
+        "title": "UsageWindowView",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -7603,6 +7711,72 @@
           }
         },
         "summary": "Restart Session",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/agent/v1/admin/usage": {
+      "get": {
+        "description": "The account's five_hour and seven_day windows, read-only, from the same cached\n`UsageSource` the usage gate reads. An unconfigured or unreachable usage service answers\n200 with `available` false and null windows: the gate allows then, and so does this.",
+        "operationId": "get_usage_agent_v1_admin_usage_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Usage",
         "tags": [
           "admin"
         ]

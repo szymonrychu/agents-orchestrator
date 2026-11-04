@@ -327,6 +327,25 @@ class MetaUsage(BaseModel):
     quota_default_pct: int
 
 
+class UsageWindowView(BaseModel):
+    utilization_pct: float
+    resets_at: datetime
+    stale: bool
+    observed_at: datetime | None
+    source: str | None
+
+
+class UsageView(BaseModel):
+    """The account's usage windows as the usage gate reads them (read-only)."""
+
+    configured: bool
+    available: bool
+    source: str
+    updated_at: datetime | None
+    five_hour: UsageWindowView | None
+    seven_day: UsageWindowView | None
+
+
 class MetaInactivity(BaseModel):
     reminder_seconds: int
     close_seconds: int
