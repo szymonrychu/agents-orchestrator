@@ -17,6 +17,7 @@ import httpx
 import pytest
 from fakes import fake_upstream as fu
 from fakes.fake_kube import FakeKube
+from fakes.fake_taskboard import FakeTaskboard
 from psycopg.types.json import Jsonb
 from test_agent_session_messaging import alone
 from test_api_agent import KEY, client_for, headers, make_settings
@@ -54,7 +55,7 @@ class Hosts(httpx.AsyncBaseTransport):
 
 def make_app(dsn, pool, **overrides):
     tokens = {n: f"{n}-" + stdlib_secrets.token_hex(16) for n in HOSTS}
-    values = {}
+    values = {"taskboard_url": "http://taskboard.test", "taskboard_token": "tb-secret-token"}
     for name in HOSTS:
         values[f"{name}_url"] = HOSTS[name]
         values[f"{name}_token"] = tokens[name]
@@ -66,6 +67,9 @@ def make_app(dsn, pool, **overrides):
     app = create_app(settings, pool, kube=kube)
     hosts = Hosts(fakes)
     app.state.admin_http = httpx.AsyncClient(transport=hosts)
+    board = FakeTaskboard(settings.taskboard_token)
+    app.state.taskboard_http = httpx.AsyncClient(transport=httpx.MockTransport(board.handler))
+    app.state.fake_taskboard = board
     return app, fakes, kube, hosts, tokens
 
 

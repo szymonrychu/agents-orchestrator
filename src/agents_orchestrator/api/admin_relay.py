@@ -30,6 +30,11 @@ passes. A rule of another kind covers rooms on any preset, present and future, a
 created or an allow rule removed only narrows routing and is forwarded as is. Rule values are
 personal identifiers and never appear in an error.
 
+Room requests (`POST /chats/room-requests`) never queue without the user's yes: the relay
+checks the task on the taskboard, forwards, then asks and attaches a decision as the calling
+session, and `POST /chats/room-requests/{request_id}/confirm` settles the request from the
+answer (`api/chat_requests.py`).
+
 History is read-only for the superleader: three GET routes and no DELETE (deleting a stored
 session is for the user, through the web UI), so the router answers any other method 405 and
 nothing reaches the upstream. The session list is paged upstream by `before_id`, and agents-history
@@ -53,8 +58,8 @@ from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import SecretStr
 
+from agents_orchestrator.api import chat_requests, secret_store
 from agents_orchestrator.api import forward as forward_core
-from agents_orchestrator.api import secret_store
 from agents_orchestrator.api.admin import caller_of, router, touched
 from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.sessions import Cfg
@@ -461,10 +466,15 @@ def _handler(service: str, method: str, template: str) -> Callable[..., Awaitabl
                 raise not_found("object")
         if guard.rule:
             await _rule_room(request, settings, guard, body)
+        if guard.ask_decision:
+            await chat_requests.check_task(request, settings, body)
         path = upstream_prefix + _fill(template, dict(request.path_params))
         status, content = await forward_core.forward(
             request, target, method, path, body, str(session.id), session.slug, empty_ok=True
         )
+        if guard.ask_decision and status == 201:
+            row = await chat_requests.on_created(request, settings, json.loads(content))
+            return JSONResponse(row, status)
         headers = _next_cursor(request, guard, status, content)
         content = await _filter_answer(request, settings, guard, status, content)
         if service == "webhook":
