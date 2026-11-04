@@ -155,6 +155,84 @@
         "title": "ChatRooms",
         "type": "object"
       },
+      "ConfirmIn": {
+        "additionalProperties": false,
+        "properties": {
+          "approved": {
+            "title": "Approved",
+            "type": "boolean"
+          },
+          "decision_id": {
+            "minimum": 1.0,
+            "title": "Decision Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "decision_id",
+          "approved"
+        ],
+        "title": "ConfirmIn",
+        "type": "object"
+      },
+      "DecisionIn": {
+        "additionalProperties": false,
+        "properties": {
+          "decision_id": {
+            "minimum": 1.0,
+            "title": "Decision Id",
+            "type": "integer"
+          },
+          "task_key": {
+            "pattern": "^T-[0-9]+$",
+            "title": "Task Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_key",
+          "decision_id"
+        ],
+        "title": "DecisionIn",
+        "type": "object"
+      },
+      "DeniedSender": {
+        "properties": {
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "facebook_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Facebook Id"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "display_name",
+          "facebook_id"
+        ],
+        "title": "DeniedSender",
+        "type": "object"
+      },
       "ErrorBody": {
         "properties": {
           "error": {
@@ -282,6 +360,68 @@
         "title": "MessageIn",
         "type": "object"
       },
+      "PendingView": {
+        "description": "Why a room is waiting: not allowed yet, an open invite, a Messenger message request, and\nthe messages the policy refused (count and senders, never bodies).",
+        "properties": {
+          "allowed": {
+            "title": "Allowed",
+            "type": "boolean"
+          },
+          "denied_count": {
+            "title": "Denied Count",
+            "type": "integer"
+          },
+          "denied_senders": {
+            "items": {
+              "$ref": "#/components/schemas/DeniedSender"
+            },
+            "title": "Denied Senders",
+            "type": "array"
+          },
+          "invited": {
+            "title": "Invited",
+            "type": "boolean"
+          },
+          "inviter": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inviter"
+          },
+          "last_denied_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Denied At"
+          },
+          "message_request": {
+            "title": "Message Request",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "allowed",
+          "invited",
+          "inviter",
+          "message_request",
+          "denied_count",
+          "last_denied_at",
+          "denied_senders"
+        ],
+        "title": "PendingView",
+        "type": "object"
+      },
       "ReactionIn": {
         "additionalProperties": false,
         "properties": {
@@ -301,8 +441,64 @@
         "title": "ReactionIn",
         "type": "object"
       },
-      "RoomDetail": {
+      "RoomAllowIn": {
+        "description": "As `RoomSettingsIn`: preset and trigger are stored as sent (omitted clears), a null\n`agents_may_initiate` keeps the stored flag.",
         "properties": {
+          "agents_may_initiate": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agents May Initiate"
+          },
+          "preset_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preset Id"
+          },
+          "trigger": {
+            "anyOf": [
+              {
+                "enum": [
+                  "all",
+                  "mention"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trigger"
+          }
+        },
+        "title": "RoomAllowIn",
+        "type": "object"
+      },
+      "RoomAllowView": {
+        "properties": {
+          "accept_request_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Accept Request Id"
+          },
           "access": {
             "$ref": "#/components/schemas/AccessView"
           },
@@ -330,6 +526,18 @@
                 "type": "null"
               }
             ]
+          },
+          "effective_preset_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective Preset Id"
           },
           "effective_trigger": {
             "enum": [
@@ -396,6 +604,196 @@
             ],
             "title": "Name"
           },
+          "pending": {
+            "$ref": "#/components/schemas/PendingView"
+          },
+          "preset_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preset Id"
+          },
+          "queued": {
+            "title": "Queued",
+            "type": "integer"
+          },
+          "room_id": {
+            "title": "Room Id",
+            "type": "string"
+          },
+          "rule_id": {
+            "title": "Rule Id",
+            "type": "integer"
+          },
+          "session": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SessionView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "trigger": {
+            "anyOf": [
+              {
+                "enum": [
+                  "all",
+                  "mention"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trigger"
+          }
+        },
+        "required": [
+          "room_id",
+          "name",
+          "alias",
+          "kind",
+          "encrypted",
+          "message_request",
+          "membership",
+          "member_count",
+          "access",
+          "preset_id",
+          "effective_preset_id",
+          "trigger",
+          "effective_trigger",
+          "agents_may_initiate",
+          "session",
+          "binding",
+          "last_event_at",
+          "queued",
+          "pending",
+          "members",
+          "rule_id",
+          "accept_request_id"
+        ],
+        "title": "RoomAllowView",
+        "type": "object"
+      },
+      "RoomDetail": {
+        "properties": {
+          "access": {
+            "$ref": "#/components/schemas/AccessView"
+          },
+          "agents_may_initiate": {
+            "title": "Agents May Initiate",
+            "type": "boolean"
+          },
+          "alias": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alias"
+          },
+          "binding": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BindingView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "effective_preset_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective Preset Id"
+          },
+          "effective_trigger": {
+            "enum": [
+              "all",
+              "mention"
+            ],
+            "title": "Effective Trigger",
+            "type": "string"
+          },
+          "encrypted": {
+            "title": "Encrypted",
+            "type": "boolean"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
+          },
+          "last_event_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Event At"
+          },
+          "member_count": {
+            "title": "Member Count",
+            "type": "integer"
+          },
+          "members": {
+            "items": {
+              "$ref": "#/components/schemas/MemberView"
+            },
+            "title": "Members",
+            "type": "array"
+          },
+          "membership": {
+            "title": "Membership",
+            "type": "string"
+          },
+          "message_request": {
+            "title": "Message Request",
+            "type": "boolean"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "pending": {
+            "$ref": "#/components/schemas/PendingView"
+          },
           "preset_id": {
             "anyOf": [
               {
@@ -453,6 +851,7 @@
           "member_count",
           "access",
           "preset_id",
+          "effective_preset_id",
           "trigger",
           "effective_trigger",
           "agents_may_initiate",
@@ -460,9 +859,207 @@
           "binding",
           "last_event_at",
           "queued",
+          "pending",
           "members"
         ],
         "title": "RoomDetail",
+        "type": "object"
+      },
+      "RoomRequestIn": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "default": "open",
+            "enum": [
+              "open",
+              "invite"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "room_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Room Id"
+          },
+          "target": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Target",
+            "type": "string"
+          },
+          "task_key": {
+            "pattern": "^T-[0-9]+$",
+            "title": "Task Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target",
+          "task_key"
+        ],
+        "title": "RoomRequestIn",
+        "type": "object"
+      },
+      "RoomRequestView": {
+        "properties": {
+          "action": {
+            "enum": [
+              "open",
+              "invite",
+              "accept"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "candidates": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Candidates"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "decision_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decision Id"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "room_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Room Id"
+          },
+          "status": {
+            "enum": [
+              "resolving",
+              "candidates",
+              "pending_confirmation",
+              "confirmed",
+              "working",
+              "done",
+              "failed",
+              "rejected"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target"
+          },
+          "target_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "matrix",
+                  "facebook",
+                  "name"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Kind"
+          },
+          "task_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Key"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "action",
+          "status",
+          "target_kind",
+          "target",
+          "display_name",
+          "room_id",
+          "candidates",
+          "task_key",
+          "decision_id",
+          "reason",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "RoomRequestView",
         "type": "object"
       },
       "RoomSettingsIn": {
@@ -539,6 +1136,18 @@
               }
             ]
           },
+          "effective_preset_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective Preset Id"
+          },
           "effective_trigger": {
             "enum": [
               "all",
@@ -597,6 +1206,9 @@
             ],
             "title": "Name"
           },
+          "pending": {
+            "$ref": "#/components/schemas/PendingView"
+          },
           "preset_id": {
             "anyOf": [
               {
@@ -654,13 +1266,15 @@
           "member_count",
           "access",
           "preset_id",
+          "effective_preset_id",
           "trigger",
           "effective_trigger",
           "agents_may_initiate",
           "session",
           "binding",
           "last_event_at",
-          "queued"
+          "queued",
+          "pending"
         ],
         "title": "RoomView",
         "type": "object"
@@ -923,6 +1537,55 @@
         "title": "SessionView",
         "type": "object"
       },
+      "UserView": {
+        "properties": {
+          "access": {
+            "$ref": "#/components/schemas/AccessView"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "facebook_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Facebook Id"
+          },
+          "rooms": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Rooms",
+            "type": "array"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "display_name",
+          "facebook_id",
+          "rooms",
+          "access"
+        ],
+        "title": "UserView",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -971,6 +1634,118 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/chat/v1/admin/room-requests": {
+      "post": {
+        "description": "Queue an open or invite. Nothing happens on Matrix or Facebook until the user's yes\non the taskboard decision is confirmed through the internal confirm route.",
+        "operationId": "create_chat_v1_admin_room_requests_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Orch-Session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Orch-Slug",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoomRequestIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoomRequestView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create"
+      }
+    },
+    "/chat/v1/admin/room-requests/{request_id}": {
+      "get": {
+        "operationId": "get_chat_v1_admin_room_requests__request_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoomRequestView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get"
+      }
+    },
     "/chat/v1/admin/rooms": {
       "get": {
         "operationId": "list_rooms_chat_v1_admin_rooms_get",
@@ -1046,6 +1821,127 @@
           }
         },
         "summary": "List Rooms"
+      }
+    },
+    "/chat/v1/admin/rooms/{room_id}": {
+      "get": {
+        "operationId": "get_room_chat_v1_admin_rooms__room_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "room_id",
+            "required": true,
+            "schema": {
+              "title": "Room Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoomDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Room"
+      }
+    },
+    "/chat/v1/admin/rooms/{room_id}/allow": {
+      "post": {
+        "description": "Allow the room in one transaction: its settings, an `allow/room` rule (reused when it\nexists) and, for a Messenger message request or a room still at `invite`, an accept\nrequest the bot executes once the room is joined.",
+        "operationId": "allow_room_chat_v1_admin_rooms__room_id__allow_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "room_id",
+            "required": true,
+            "schema": {
+              "title": "Room Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Orch-Session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Orch-Slug",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoomAllowIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoomAllowView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Allow Room"
       }
     },
     "/chat/v1/admin/rooms/{room_id}/settings": {
@@ -1181,6 +2077,168 @@
           }
         },
         "summary": "Delete Rule"
+      }
+    },
+    "/chat/v1/admin/users": {
+      "get": {
+        "operationId": "list_users_chat_v1_admin_users_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Q"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/UserView"
+                  },
+                  "title": "Response List Users Chat V1 Admin Users Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Users"
+      }
+    },
+    "/chat/v1/internal/room-requests/{request_id}/confirm": {
+      "post": {
+        "description": "The user's answer: confirmed (approved) or rejected. Only with the attached\ndecision id.",
+        "operationId": "confirm_chat_v1_internal_room_requests__request_id__confirm_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoomRequestView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Confirm"
+      }
+    },
+    "/chat/v1/internal/room-requests/{request_id}/decision": {
+      "put": {
+        "description": "Attach the taskboard decision the orchestrator asked; once, and only while the row\nwaits for confirmation.",
+        "operationId": "attach_decision_chat_v1_internal_room_requests__request_id__decision_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecisionIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoomRequestView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Attach Decision"
       }
     },
     "/chat/v1/messages": {
