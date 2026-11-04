@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
@@ -42,6 +43,7 @@ from agents_orchestrator.spec import (
     validate_slug,
     validate_spec,
 )
+from agents_orchestrator.tokens import tokens_for
 
 
 def get_settings(request: Request) -> Settings:
@@ -495,6 +497,39 @@ async def get_session(
         if session is None:
             raise not_found("session")
         return await one_view(conn, session, settings)
+
+
+@router.post(
+    "/sessions/{session_id}/agent-token/verify",
+    response_model=schemas.AgentTokenVerified,
+    summary="Check an agent token of a live session the calling service created",
+)
+async def verify_agent_token(
+    session_id: uuid.UUID,
+    body: schemas.AgentTokenIn,
+    request: Request,
+    pool: Pool,
+    settings: Cfg,
+) -> schemas.AgentTokenVerified:
+    """Service port only. 200 when `token` is the agent token of this session, the session is
+    active and the calling service created it; every other case (also the main port) answers
+    the same 404 `not_found`, so the answer never says which part was wrong."""
+    service = calling_service(request)
+    if service is None:
+        raise not_found("session")
+    async with pool.connection() as conn:
+        session = await repo.get(conn, session_id)
+    expected = tokens_for(settings, session_id).agent
+    presented = body.token.get_secret_value()
+    matches = hmac.compare_digest(presented.encode(), expected.encode())
+    if (
+        session is None
+        or session.created_by_service != service
+        or session.desired != "active"
+        or not matches
+    ):
+        raise not_found("session")
+    return schemas.AgentTokenVerified(session_id=session_id)
 
 
 async def discard(

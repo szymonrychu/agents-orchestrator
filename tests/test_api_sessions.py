@@ -276,15 +276,16 @@ def _imports(path: Path) -> set[str]:
 
 
 def test_api_never_imports_k8s_or_wrapper():
-    """Only api/workspace.py (the proxy seam, N1) may call wrappers; it and api/agent.py may
-    derive tokens. Nothing in api imports k8s or the reconciler, except api/secret_store.py, the
-    seam to the preset secret store (superleader-crud D5)."""
+    """Only api/workspace.py (the proxy seam, N1) may call wrappers; it, api/agent.py and
+    api/sessions.py (agent-token verify for services) may derive tokens. Nothing in api imports
+    k8s or the reconciler, except api/secret_store.py, the seam to the preset secret store
+    (superleader-crud D5)."""
     always = ("agents_orchestrator.k8s", "agents_orchestrator.reconciler")
     k8s_seam = "secret_store.py"
     wrapper = "agents_orchestrator.wrapper"
     tokens = "agents_orchestrator.tokens"
     seam = "workspace.py"
-    token_users = {seam, "agent.py"}
+    token_users = {seam, "agent.py", "sessions.py"}
     files = list(Path(api_pkg.__file__).parent.glob("*.py"))
     assert len(files) >= 6
     assert seam in {f.name for f in files}

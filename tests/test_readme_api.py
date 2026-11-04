@@ -130,6 +130,7 @@ SERVICE_ROUTES = (
     "GET /api/v1/sessions/{session_id}/messages",
     "POST /api/v1/sessions/{session_id}/messages",
     "GET /api/v1/sessions/{session_id}/files/download",
+    "POST /api/v1/sessions/{session_id}/agent-token/verify",
     "GET /api/v1/messages/{message_id}",
     "GET /api/v1/stream",
 )
