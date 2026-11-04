@@ -456,7 +456,6 @@ def ids(response, field: str = "id") -> set[str]:
         ("webhook", "/events", "id"),
         ("schedule", "/schedules", "id"),
         ("schedule", "/runs", "id"),
-        ("connector", "/rooms", "room_id"),
     ],
 )
 async def test_lists_filtered(rig, service, template, field):
@@ -464,7 +463,7 @@ async def test_lists_filtered(rig, service, template, field):
     assert r.status_code == 200
     # object 10 (endpoint, schedule, room) sits on the visible privileged preset: listed,
     # not writable
-    seen = (7, 10) if template in ("/endpoints", "/schedules", "/rooms") else (7,)
+    seen = (7, 10) if template in ("/endpoints", "/schedules") else (7,)
     assert ids(r, field) == {str(ident(service, n)) for n in seen}
 
 
@@ -557,13 +556,24 @@ async def test_unguarded_routes_unchanged(rig):
         assert rig.fakes[service].answers[key] is not None
 
 
-async def test_null_preset_room_hidden(rig):
+async def test_all_rooms_listed_whatever_preset(rig):
+    """Q1 = A (matrix-integration): rooms on a visible, hidden, privileged or no preset are all
+    listed, answered unchanged."""
     r = await rig.call("GET", relay_url("connector", "/rooms"))
-    assert "9" not in ids(r, "room_id")
-    body = _body_for(rig, "connector", "PUT", "/rooms/{room_id}/settings", rig.vis)
-    url = relay_url("connector", "/rooms/{room_id}/settings", 9)
-    assert_error(await rig.call("PUT", url, json=body), 404, "not_found")
-    assert not _sent(rig, "connector", "PUT", "/rooms/{room_id}/settings", 9)
+    assert r.status_code == 200
+    assert ids(r, "room_id") == {"7", "8", "9", "10"}
+
+
+@pytest.mark.parametrize("n", [7, 8, 9, 10])
+async def test_room_settings_any_preset_forwarded(rig, n):
+    """A stored hidden or null preset no longer blocks a settings change, and neither does a
+    hidden or null preset in the body."""
+    template = "/rooms/{room_id}/settings"
+    for preset in (rig.vis, rig.hid, None):
+        body = _body_for(rig, "connector", "PUT", template, preset)
+        r = await rig.call("PUT", relay_url("connector", template, n), json=body)
+        assert r.status_code == 200, r.text
+    assert _sent(rig, "connector", "PUT", template, n)
 
 
 # ------------------------------------------------------------------------------ the history
@@ -757,8 +767,8 @@ async def test_relay_is_agent_port_only(rig):
 
 # ------------------------------------------------------------------------- chat routing rules
 # An allow rule, or the removal of a deny rule, lets inbound chats start sessions from the
-# room's preset; the superleader may widen routing only to a room on a preset it manages that
-# is on a preset it manages. Rooms (seeded): 7 visible, 8 hidden, 9 no preset, 10 privileged.
+# room's preset; the superleader may widen routing only to one listed room (any preset, Q1 = A).
+# Rooms (seeded): 7 visible, 8 hidden, 9 no preset, 10 privileged.
 
 RULES = ("connector", "POST", "/rules")
 RULE_DELETE = ("connector", "DELETE", "/rules/{rule_id}")
@@ -768,23 +778,16 @@ def _rule(list_: str, kind: str, value: str) -> dict:
     return {"list": list_, "kind": kind, "value": value, "note": None}
 
 
-@pytest.mark.parametrize("n", [7])
-async def test_rule_allow_visible_room_forwarded(rig, n):
-    r = await rig.call("POST", relay_url(*RULES[::2]), json=_rule("allow", "room", str(n)))
-    assert r.status_code == 201, r.text
-    assert _sent(rig, *RULES)
-
-
-async def test_rule_allow_privileged_room_forwarded(rig):
-    r = await rig.call("POST", relay_url(*RULES[::2]), json=_rule("allow", "room", "10"))
-    assert r.status_code == 201, r.text
-    assert _sent(rig, *RULES)
-
-
-@pytest.mark.parametrize("room", ["8", "9", "404"])
-async def test_rule_allow_hidden_room_404(rig, room):
-    """Hidden preset, no preset (the connector's default preset, unknown here) or no such room."""
+@pytest.mark.parametrize("room", ["7", "8", "9", "10"])
+async def test_rule_allow_any_listed_room_forwarded(rig, room):
+    """Q1 = A: a room only has to be listed, whatever its preset (hidden, none, privileged)."""
     r = await rig.call("POST", relay_url(*RULES[::2]), json=_rule("allow", "room", room))
+    assert r.status_code == 201, r.text
+    assert _sent(rig, *RULES)
+
+
+async def test_rule_allow_unknown_room_404(rig):
+    r = await rig.call("POST", relay_url(*RULES[::2]), json=_rule("allow", "room", "404"))
     assert_error(r, 404, "not_found")
     assert not _sent(rig, *RULES)
 
@@ -811,7 +814,7 @@ async def test_rule_allow_beyond_one_room_403(rig, body, canary="canary-rule-val
     assert not _sent(rig, *RULES)
 
 
-@pytest.mark.parametrize("body", [_rule("ALLOW", "room", "8"), {"kind": "room", "value": "8"}])
+@pytest.mark.parametrize("body", [_rule("ALLOW", "room", "404"), {"kind": "room", "value": "404"}])
 async def test_rule_list_other_than_deny_is_checked_as_allow(rig, body):
     r = await rig.call("POST", relay_url(*RULES[::2]), json=body)
     assert_error(r, 404, "not_found")
@@ -840,7 +843,7 @@ def _seed_rules(rig) -> None:
     )
 
 
-@pytest.mark.parametrize("n", [1, 3])
+@pytest.mark.parametrize("n", [1, 3, 5])
 async def test_rule_delete_allow_or_safe_deny_forwarded(rig, n):
     _seed_rules(rig)
     r = await rig.call("DELETE", relay_url(*RULE_DELETE[::2], n))
@@ -863,8 +866,7 @@ async def test_rule_delete_deny_beyond_one_room_403(rig):
     assert not _sent(rig, *RULE_DELETE, 4)
 
 
-@pytest.mark.parametrize("n", [5, 99])
-async def test_rule_delete_hidden_room_or_unknown_rule_404(rig, n):
+async def test_rule_delete_unknown_rule_404(rig, n=99):
     _seed_rules(rig)
     r = await rig.call("DELETE", relay_url(*RULE_DELETE[::2], n))
     assert_error(r, 404, "not_found")

@@ -8,27 +8,27 @@ caller's `X-Orch-Session` and `X-Orch-Slug` (see `forward`). The upstream status
 come back unchanged, except for webhook credentials (D9, `credentials` below). A failed call
 or a non-JSON answer is 503 `upstream_unavailable`. The upstream validates the bodies.
 
-The superleader sees only objects of presets it may manage (`superleader_manageable`). `GUARDS`
-holds one `Guard` per route: a body naming a hidden or null preset, or a stored object
-(endpoint, schedule, room) on a hidden preset, is 404 and never forwarded. A body without
-`preset_id` passes: the upstream requires it on create and PUT, and the stored check covers
-PATCH and clone. Lists are filtered (a non-list answer is 502 `upstream_shape`) and a single
-event or run of a hidden preset is 404. An object without a preset counts as hidden. Run
-objects are mapped to their preset through one upstream `GET /schedules`.
+The superleader sees only objects of presets it may manage (`superleader_manageable`), except chat
+rooms (below). `GUARDS` holds one `Guard` per route: a body naming a hidden or null preset, or a
+stored object (endpoint, schedule) on a hidden preset, is 404 and never forwarded. A body without
+`preset_id` passes: the upstream requires it on create and PUT, and the stored check covers PATCH
+and clone. Lists are filtered (a non-list answer is 502 `upstream_shape`) and a single event or
+run of a hidden preset is 404. An object without a preset counts as hidden. Run objects are mapped
+to their preset through one upstream `GET /schedules`.
 
 A preset with `kube_access`, `session_messaging` or `docker` on is a valid target of a relayed
 trigger object (endpoint, schedule, room, rule) as long as the superleader may manage it: the
 superleader starts sessions from such presets, so it may point triggers at them. Editing a
 privileged preset itself stays human-only (`api/presets.py`).
 
-A chat routing rule that opens routing (an allow rule created, or a deny rule removed) lets
-inbound chats start sessions from the room's preset, so it is checked like a room settings change
-(`_rule_room`): only a `room` rule on a room the upstream lists with a visible preset passes. A
-rule of another kind covers rooms on any preset,
-present and future, and is 403 `human_only_field` (`fields: ["kind"]`); a hidden, null-preset or
-unknown room, or an unknown rule, is 404. A deny rule created or an allow rule removed only
-narrows routing and is forwarded as is. Rule values are personal identifiers and never appear in
-an error.
+Chat rooms are the exception (user decision Q1, matrix-integration, 2026-11-04): the superleader
+manages ALL rooms whatever their preset, so the room list, room settings and room rules carry no
+preset check. A chat routing rule that opens routing (an allow rule created, or a deny rule
+removed) is checked by kind (`_rule_room`): only a `room` rule on a room the upstream lists
+passes. A rule of another kind covers rooms on any preset, present and future, and is 403
+`human_only_field` (`fields: ["kind"]`); an unlisted room, or an unknown rule, is 404. A deny rule
+created or an allow rule removed only narrows routing and is forwarded as is. Rule values are
+personal identifiers and never appear in an error.
 
 History is read-only for the superleader: three GET routes and no DELETE (deleting a stored
 session is for the user, through the web UI), so the router answers any other method 405 and
@@ -121,14 +121,14 @@ class Guard:
     """What the superleader's remit changes on one relay route (see the module docstring)."""
 
     body_preset: bool = False
-    stored: Literal["endpoint", "schedule", "room", "history_session"] | None = None
+    stored: Literal["endpoint", "schedule", "history_session"] | None = None
     list_filter: Literal["preset_id", "schedule_id"] | None = None
     answer: Literal["preset_id", "schedule_id"] | None = None
     cursor: bool = False  # a full list page also answers the upstream's next `before_id`
     rule: Literal["body", "stored"] | None = None  # a chat routing rule, see `_rule_room`
 
 
-_E, _S, _R = "endpoint", "schedule", "room"
+_E, _S = "endpoint", "schedule"
 GUARDS: dict[tuple[str, str, str], Guard] = {
     ("webhook", "GET", "/endpoints"): Guard(list_filter="preset_id"),
     ("webhook", "POST", "/endpoints"): Guard(body_preset=True),
@@ -151,8 +151,8 @@ GUARDS: dict[tuple[str, str, str], Guard] = {
     ("schedule", "DELETE", "/schedules/{schedule_id}"): Guard(stored=_S),
     ("schedule", "POST", "/schedules/{schedule_id}/run"): Guard(stored=_S),
     ("schedule", "GET", "/schedules/{schedule_id}/runs"): Guard(stored=_S),
-    ("connector", "GET", "/rooms"): Guard(list_filter="preset_id"),
-    ("connector", "PUT", "/rooms/{room_id}/settings"): Guard(body_preset=True, stored=_R),
+    ("connector", "GET", "/rooms"): Guard(),
+    ("connector", "PUT", "/rooms/{room_id}/settings"): Guard(),
     ("connector", "GET", "/rules"): Guard(),
     ("connector", "POST", "/rules"): Guard(rule="body"),
     ("connector", "DELETE", "/rules/{rule_id}"): Guard(rule="stored"),
@@ -164,7 +164,6 @@ GUARDS: dict[tuple[str, str, str], Guard] = {
 _STORED = {
     "endpoint": ("/endpoints", "id", "id"),
     "schedule": ("/schedules", "id", "schedule_id"),
-    "room": ("/rooms", "room_id", "room_id"),
 }
 # stored object kind -> (upstream path of the one object below the service prefix, path
 # parameter that fills it): kinds whose list is paged, so the object is looked up on its own
@@ -343,8 +342,7 @@ async def _rule_room(
 ) -> None:
     """Check a chat routing rule that opens routing (a deny rule created or an allow rule removed
     only narrows it and passes). Any list other than exactly `deny` counts as allow and any kind
-    other than exactly `room` as a wider one (fail closed); the room must be listed with a visible
-    preset."""
+    other than exactly `room` as a wider one (fail closed); the room must be listed (any preset)."""
     if guard.rule == "body":
         rule = _body_object(body)
         if rule.get("list") == "deny":
@@ -359,10 +357,7 @@ async def _rule_room(
     rooms = await _upstream_json(_bare(request), settings, "connector", "/rooms")
     for room in rooms if isinstance(rooms, list) else []:
         if isinstance(room, dict) and room.get("room_id") == rule.get("value"):
-            preset = room.get("preset_id")
-            if preset is not None and str(preset) in await _visible(request):
-                return
-            break
+            return
     raise not_found("object")
 
 
