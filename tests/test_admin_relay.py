@@ -187,6 +187,7 @@ SEEDED = {
     ("GET", "/schedules/api/v1/runs/{run_id}"),
     ("GET", "/chat/v1/admin/rooms"),
     ("GET", "/chat/v1/admin/rules"),
+    ("GET", "/chat/v1/admin/rooms/{room_id}"),
     ("GET", "/history/v1/sessions"),
     ("GET", "/history/v1/sessions/{session_id}"),
 }
@@ -244,6 +245,8 @@ async def test_every_route_round_trips_the_documented_answer(rig, name):
             body = fu.sample(DOCS[name], _body_schema(fake, key))
             if isinstance(body, dict) and "preset_id" in body:
                 body["preset_id"] = rig.vis
+            if isinstance(body, dict) and "task_key" in body:  # the sampler skips patterns
+                body["task_key"] = "T-1"
             if isinstance(body, dict) and "list" in body:  # a chat rule: room 7 is visible
                 body.update(list="allow", kind="room", value="7")
         r = await rig.call(method, relay_url(name, template), json=body)
@@ -871,3 +874,52 @@ async def test_rule_delete_unknown_rule_404(rig, n=99):
     r = await rig.call("DELETE", relay_url(*RULE_DELETE[::2], n))
     assert_error(r, 404, "not_found")
     assert not _sent(rig, *RULE_DELETE, n)
+
+
+# ------------------------------------------------------------------ chat rooms, users, requests
+# matrix-integration O2: the new connector admin routes are relayed 1:1 and unguarded.
+
+
+async def test_room_detail_forwarded(rig):
+    r = await rig.call("GET", relay_url("connector", "/rooms/{room_id}", 9))
+    assert r.status_code == 200, r.text
+    assert any(c.path == "/chat/v1/admin/rooms/9" for c in rig.fakes["connector"].calls)
+
+
+async def test_room_detail_not_found_passes_through(rig):
+    missing = (404, {"error": {"code": "not_found", "message": "no such room"}})
+    rig.fakes["connector"].answers[("GET", "/chat/v1/admin/rooms/{room_id}")] = missing
+    r = await rig.call("GET", relay_url("connector", "/rooms/{room_id}", 404))
+    assert_error(r, 404, "not_found")
+
+
+async def test_users_query_forwarded(rig):
+    r = await rig.call("GET", ADMIN_PREFIX + "/chats/users?q=jane&limit=5")
+    assert r.status_code == 200, r.text
+    (call,) = rig.fakes["connector"].calls
+    assert call.path == "/chat/v1/admin/users" and call.query == "q=jane&limit=5"
+    assert call.headers["authorization"] == f"Bearer {rig.tokens['connector']}"
+
+
+async def test_allow_forwarded(rig):
+    body = {"preset_id": rig.vis, "trigger": "mention", "agents_may_initiate": True}
+    r = await rig.call("POST", relay_url("connector", "/rooms/{room_id}/allow", 9), json=body)
+    assert r.status_code == 200, r.text
+    (call,) = rig.fakes["connector"].calls
+    assert call.path == "/chat/v1/admin/rooms/9/allow" and call.json() == body
+    assert call.headers["x-orch-slug"] == "rel-boss"
+
+
+async def test_allow_hidden_preset_forwarded_too(rig):
+    """Q1 = A: no preset check on a room allow either; the connector validates the preset."""
+    r = await rig.call(
+        "POST", relay_url("connector", "/rooms/{room_id}/allow", 8), json={"preset_id": rig.hid}
+    )
+    assert r.status_code == 200, r.text
+
+
+async def test_room_request_get_forwarded(rig):
+    r = await rig.call("GET", ADMIN_PREFIX + "/chats/room-requests/5")
+    assert r.status_code == 200, r.text
+    (call,) = rig.fakes["connector"].calls
+    assert call.path == "/chat/v1/admin/room-requests/5"

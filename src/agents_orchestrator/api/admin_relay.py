@@ -95,7 +95,12 @@ _SCHEDULES = [
 ]
 _CHATS = [
     ("GET", "/rooms", 200),
+    ("GET", "/rooms/{room_id}", 200),
     ("PUT", "/rooms/{room_id}/settings", 200),
+    ("POST", "/rooms/{room_id}/allow", 200),
+    ("GET", "/users", 200),
+    ("POST", "/room-requests", 201),
+    ("GET", "/room-requests/{request_id}", 200),
     ("GET", "/rules", 200),
     ("POST", "/rules", 201),
     ("DELETE", "/rules/{rule_id}", 204),
@@ -126,6 +131,7 @@ class Guard:
     answer: Literal["preset_id", "schedule_id"] | None = None
     cursor: bool = False  # a full list page also answers the upstream's next `before_id`
     rule: Literal["body", "stored"] | None = None  # a chat routing rule, see `_rule_room`
+    ask_decision: bool = False  # a 201 room request asks the user's yes (`chat_requests`)
 
 
 _E, _S = "endpoint", "schedule"
@@ -152,7 +158,12 @@ GUARDS: dict[tuple[str, str, str], Guard] = {
     ("schedule", "POST", "/schedules/{schedule_id}/run"): Guard(stored=_S),
     ("schedule", "GET", "/schedules/{schedule_id}/runs"): Guard(stored=_S),
     ("connector", "GET", "/rooms"): Guard(),
+    ("connector", "GET", "/rooms/{room_id}"): Guard(),
     ("connector", "PUT", "/rooms/{room_id}/settings"): Guard(),
+    ("connector", "POST", "/rooms/{room_id}/allow"): Guard(),
+    ("connector", "GET", "/users"): Guard(),
+    ("connector", "POST", "/room-requests"): Guard(ask_decision=True),
+    ("connector", "GET", "/room-requests/{request_id}"): Guard(),
     ("connector", "GET", "/rules"): Guard(),
     ("connector", "POST", "/rules"): Guard(rule="body"),
     ("connector", "DELETE", "/rules/{rule_id}"): Guard(rule="stored"),
