@@ -14,7 +14,7 @@ import logging
 import math
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 import httpx
@@ -36,6 +36,9 @@ class UsageWindow:
     percent: float
     resets_at: datetime
     stale: bool
+    # Display only (the admin usage route): not part of a window's identity.
+    observed_at: datetime | None = field(default=None, compare=False)
+    source: str | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -125,6 +128,8 @@ class _Window(BaseModel):
     percent: StrictFloat | StrictInt
     resets_at: datetime
     stale: StrictBool
+    observed_at: datetime | None = None
+    source: str | None = None
 
 
 class _Current(BaseModel):
@@ -133,13 +138,19 @@ class _Current(BaseModel):
     windows: dict[str, _Window]
 
 
+def _utc(moment: datetime) -> datetime:
+    return moment if moment.tzinfo else moment.replace(tzinfo=UTC)
+
+
 def _parse(body: bytes) -> dict[str, UsageWindow]:
     current = _Current.model_validate_json(body)
     return {
         metric: UsageWindow(
             float(w.percent),
-            w.resets_at if w.resets_at.tzinfo else w.resets_at.replace(tzinfo=UTC),
+            _utc(w.resets_at),
             w.stale,
+            _utc(w.observed_at) if w.observed_at else None,
+            w.source,
         )
         for metric, w in current.windows.items()
     }
