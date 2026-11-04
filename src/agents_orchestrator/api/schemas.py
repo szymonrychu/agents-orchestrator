@@ -67,6 +67,18 @@ class SessionLabelsIn(BaseModel):
         return normalize_labels(value)
 
 
+class AgentTokenIn(BaseModel):
+    """An agent token a service was handed by one of its sessions' agents, to be checked."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    token: SecretStr = Field(min_length=1, max_length=512)
+
+
+class AgentTokenVerified(BaseModel):
+    session_id: uuid.UUID
+
+
 class SecretIn(BaseModel):
     """The new value of one protected variable; it is never echoed."""
 

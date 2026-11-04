@@ -16,6 +16,7 @@ from test_api_sessions import assert_error, make_settings
 from agents_orchestrator.api import service_auth
 from agents_orchestrator.api.app import create_app
 from agents_orchestrator.settings import Settings, SettingsError
+from agents_orchestrator.tokens import derive_tokens
 
 DB = "postgresql://u:p@h/db"
 DEFAULT_ID = "00000000-0000-0000-0000-000000000001"
@@ -521,3 +522,91 @@ async def test_main_port_discard_unchanged(app, pool):
             assert r.status_code == 202, r.text
             assert r.json()["desired"] == "deleting"
         assert_error(await c.delete(f"/api/v1/sessions/{uuid.uuid4()}"), 404, "not_found")
+
+
+# Agent token verification: a service checks that a bearer an agent presented to it is the
+# agent token of a live session the service created (agents-app-connector MCP tools).
+KEY = "k" * 32
+
+
+def agent_token(session_id) -> str:
+    return derive_tokens(KEY.encode(), session_id).agent
+
+
+@pytest_asyncio.fixture
+async def keyed_app(pool, dsn):
+    return create_app(make_settings(dsn, service_tokens=TOKENS, master_key=KEY), pool)
+
+
+def verify_path(session_id) -> str:
+    return f"/api/v1/sessions/{session_id}/agent-token/verify"
+
+
+async def test_verify_agent_token_of_own_live_session(keyed_app, pool, caplog):
+    caplog.set_level(logging.DEBUG)
+    cl = await insert_session(pool, created_by_service="agents-webhook")
+    async with client(keyed_app, 8002) as c:
+        r = await c.post(verify_path(cl["id"]), json={"token": agent_token(cl["id"])})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"session_id": str(cl["id"])}
+    assert all(agent_token(cl["id"]) not in rec.getMessage() for rec in caplog.records)
+
+
+async def test_verify_refusals_share_one_answer(keyed_app, pool, caplog):
+    caplog.set_level(logging.DEBUG)
+    own = await insert_session(pool, created_by_service="agents-webhook")
+    other = await insert_session(pool, created_by_service="agents-schedule")
+    user = await insert_session(pool)
+    gone = await insert_session(pool, created_by_service="agents-webhook", desired="deleting")
+    cases = [
+        (own["id"], agent_token(other["id"])),  # another session's token
+        (own["id"], agent_token(own["id"]) + "x"),
+        (other["id"], agent_token(other["id"])),  # created by another service
+        (user["id"], agent_token(user["id"])),  # created in the UI
+        (gone["id"], agent_token(gone["id"])),  # not live
+        (uuid.uuid4(), "whatever"),  # unknown
+    ]
+    async with client(keyed_app, 8002) as c:
+        bodies = set()
+        for session_id, tok in cases:
+            r = await c.post(verify_path(session_id), json={"token": tok})
+            assert_error(r, 404, "not_found")
+            assert tok not in r.text
+            bodies.add(r.text)
+    assert len(bodies) == 1, bodies
+    assert all(
+        agent_token(s["id"]) not in rec.getMessage()
+        for rec in caplog.records
+        for s in (own, other, user, gone)
+    )
+
+
+@pytest.mark.parametrize(
+    "body", [{}, {"token": ""}, {"token": "a", "session_id": DEFAULT_ID}, {"token": "x" * 513}]
+)
+async def test_verify_body_is_strict(keyed_app, pool, body):
+    cl = await insert_session(pool, created_by_service="agents-webhook")
+    async with client(keyed_app, 8002) as c:
+        r = await c.post(verify_path(cl["id"]), json=body)
+    assert r.status_code == 422, r.text
+
+
+async def test_verify_needs_a_service_token(keyed_app, pool):
+    cl = await insert_session(pool, created_by_service="agents-webhook")
+    async with client(keyed_app, 8002, token=agent_token(cl["id"])) as c:
+        r = await c.post(verify_path(cl["id"]), json={"token": agent_token(cl["id"])})
+    assert_error(r, 401, "unauthorized")
+
+
+async def test_verify_is_not_served_on_the_main_port(keyed_app, pool):
+    cl = await insert_session(pool, created_by_service="agents-webhook")
+    async with client(keyed_app, 8000, peer=INSIDE, token=None) as c:
+        r = await c.post(verify_path(cl["id"]), json={"token": agent_token(cl["id"])})
+    assert_error(r, 404, "not_found")
+
+
+def test_verify_route_is_post_only_and_exact():
+    cid = uuid.uuid4()
+    assert service_auth.route_allowed("POST", verify_path(cid))
+    assert not service_auth.route_allowed("GET", verify_path(cid))
+    assert not service_auth.route_allowed("POST", "/api/v1/sessions/x/agent-token/verify")
