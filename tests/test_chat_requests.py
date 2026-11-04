@@ -15,6 +15,7 @@ from test_agent_session_messaging import alone
 from test_api_agent import client_for, headers
 from test_api_sessions import assert_error
 
+from agents_orchestrator.api import chat_requests
 from agents_orchestrator.api.admin import ADMIN_PREFIX
 
 
@@ -97,7 +98,12 @@ async def test_open_asks_decision_as_caller(rig):
     (decision,) = rig.app.state.fake_taskboard.decisions
     assert decision["asking_session"] == str(rig.boss.id)
     assert decision["asking_slug"] == "rel-boss"
-    assert decision["client_key"] == "room-request-5"
+    key = decision["client_key"]
+    assert key.startswith("room-request-5-") and key != "room-request-5"
+    assert rig.tokens["connector"] not in key
+    assert key == chat_requests.decision_key("5", rig.tokens["connector"])
+    assert key != chat_requests.decision_key("6", rig.tokens["connector"])
+    assert key != chat_requests.decision_key("5", "another-secret")
     assert [o["label"] for o in decision["options"]] == ["Yes, open it", "No"]
     assert [bool(o.get("recommended")) for o in decision["options"]] == [True, False]
     assert decision["question"] == (

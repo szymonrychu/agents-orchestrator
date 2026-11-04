@@ -15,6 +15,8 @@ for a task the taskboard does not know is 422 `unknown_task` and nothing is forw
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import re
@@ -97,6 +99,13 @@ async def check_task(request: Request, settings: Settings, body: bytes | None) -
         raise ApiError(503, "taskboard_unavailable", f"the taskboard answered {status}")
 
 
+def decision_key(request_id: Any, secret: str) -> str:
+    """The decision's `client_key`: keyed with the connector token, so no agent can guess it and
+    pre-create a decision with spoofed wording that `ensure_decision` would then reuse."""
+    mac = hmac.new(secret.encode(), f"room-request-{request_id}".encode(), hashlib.sha256)
+    return f"room-request-{request_id}-{mac.hexdigest()[:32]}"
+
+
 def _question(row: dict[str, Any]) -> str:
     target = row.get("target")
     if row.get("action") == "invite":
@@ -125,7 +134,7 @@ async def ensure_decision(
         "question": _question(row),
         "context": f"Requested by session {session.slug} with chat_open; room request {row['id']}.",
         "options": [{"label": YES, "recommended": True}, {"label": NO}],
-        "client_key": f"room-request-{row['id']}",
+        "client_key": decision_key(row["id"], settings.connector_token),
     }
     status, decision = await _call(request, board, "POST", _task_path(key, "/decisions"), ask)
     if status not in (200, 201) or not isinstance(decision, dict) or "id" not in decision:
