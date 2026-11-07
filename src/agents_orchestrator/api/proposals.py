@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -31,6 +32,8 @@ from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.preset_policy import changed_paths, classify
 from agents_orchestrator.secret_view import EnvMeta, redact_spec_dict
 from agents_orchestrator.settings import Settings
+
+log = logging.getLogger(__name__)
 
 MAX_SECRETS = 20
 
@@ -195,8 +198,12 @@ async def _stage(
 
 async def _rolled_back(request: Request, settings: Settings, staged: list[str]) -> None:
     """The transaction did not commit: delete the staged Secrets `release` would never find."""
-    if staged:
-        await presets_api._forget(secret_store.kube_of(request), settings.namespace, staged)
+    if not staged:
+        return
+    try:
+        await presets_api.forget(secret_store.kube_of(request), settings.namespace, staged)
+    except Exception as exc:  # never mask the error that caused the rollback
+        log.error("could not delete %d staged secrets: %s", len(staged), type(exc).__name__)
 
 
 async def create(
@@ -219,7 +226,7 @@ async def create(
     if not superleader:
         raise session_spec.not_superleader()
     _check_values(body.secrets)
-    target = await admin._manageable_preset(conn, body.target)
+    target = await admin.manageable_preset(conn, body.target)
     staged: list[str] = []
     try:
         async with conn.transaction():
@@ -252,7 +259,7 @@ async def create(
         return await get_view(conn, settings, exc.proposal_id, proposer=caller.id), False
     except secret_store.SecretStoreError:
         await _rolled_back(request, settings, staged)
-        raise presets_api._store_failed() from None
+        raise presets_api.store_failed() from None
     except BaseException:
         await _rolled_back(request, settings, staged)
         raise
@@ -301,7 +308,7 @@ async def revise(
             )
     except secret_store.SecretStoreError:
         await _rolled_back(request, settings, staged)
-        raise presets_api._store_failed() from None
+        raise presets_api.store_failed() from None
     except BaseException:
         await _rolled_back(request, settings, staged)
         raise

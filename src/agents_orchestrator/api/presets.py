@@ -100,11 +100,11 @@ def check_secret_size(value: SecretStr) -> None:
         raise ApiError(413, "secret_too_large", f"a secret holds at most {SECRET_MAX_BYTES} bytes")
 
 
-def _store_failed() -> ApiError:
+def store_failed() -> ApiError:
     return ApiError(502, "secret_store_failed", "could not store a protected variable")
 
 
-async def _forget(kube, namespace: str, names: list[str]) -> None:
+async def forget(kube, namespace: str, names: list[str]) -> None:
     """Best effort: delete Secret versions written for a save that did not stick."""
     for name in names:
         with contextlib.suppress(Exception):
@@ -144,13 +144,13 @@ async def _save(
                     conn, kube, settings.namespace, preset.id, declared, collect=False
                 )
     except secret_store.SecretStoreError as exc:
-        await _forget(kube, settings.namespace, created)
+        await forget(kube, settings.namespace, created)
         if isinstance(exc, secret_store.PresetNotFound):
             raise not_found("preset") from None
-        raise _store_failed() from None
+        raise store_failed() from None
     except BaseException:
         if kube is not None:
-            await _forget(kube, settings.namespace, created)
+            await forget(kube, settings.namespace, created)
         raise
     if kube is not None:
         await secret_store.gc(conn, kube, settings.namespace, preset_id=preset.id)
@@ -531,7 +531,7 @@ async def put_secret(
     except secret_store.PresetNotFound:
         raise not_found("preset") from None
     except secret_store.SecretStoreError:
-        raise _store_failed() from None
+        raise store_failed() from None
     return schemas.SecretView(
         name=meta.name, set=meta.set, version=meta.version, updated_at=meta.updated_at
     )

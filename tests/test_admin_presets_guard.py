@@ -1278,7 +1278,7 @@ async def test_delete_grant_flipped_between_check_and_delete_403(
     pid, before = await _protected_seed(human, seed, canary)
     secrets_before = kube.names("Secret")
     rows_before = await _secret_rows(pool, pid)
-    real = admin._manageable_preset
+    real = admin.manageable_preset
 
     async def flip_after_read(conn, ref):
         found = await real(conn, ref)
@@ -1290,7 +1290,7 @@ async def test_delete_grant_flipped_between_check_and_delete_403(
             )
         return found
 
-    monkeypatch.setattr(admin, "_manageable_preset", flip_after_read)
+    monkeypatch.setattr(admin, "manageable_preset", flip_after_read)
     r = await call("DELETE", f"{A}/{pid}")
     assert_error(r, 403, "privileged_target")
     assert r.json()["error"]["fields"] == ["kube_cluster_access"]
