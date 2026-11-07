@@ -21,6 +21,7 @@ PROSE_CHARS = 4000
 CALL_CHARS = 200
 _LAUNCH_TOOLS = ("Agent", "Task")
 _VOLUNTARY = "handover:"
+_FORCED_ROLLOUT = "rollout"
 
 
 @dataclass(frozen=True)
@@ -40,9 +41,11 @@ class InFlight:
 
 
 def summary_of(reason: str) -> str | None:
-    """The leader's summary when the move was voluntary (`handover: x`), else None."""
+    """The leader's summary when the move was voluntary (`handover: x`), else None.
+    The reconciler's forced rollout request (`handover: rollout`) is a forced move."""
     if reason.startswith(_VOLUNTARY):
-        return reason[len(_VOLUNTARY) :].strip() or None
+        text = reason[len(_VOLUNTARY) :].strip()
+        return None if text == _FORCED_ROLLOUT else text or None
     return None
 
 
@@ -73,7 +76,11 @@ def _one_line(text: str, limit: int) -> str:
 
 
 def _reason_label(header: Header) -> str:
-    return "handover" if header.summary is not None else _esc(header.reason)
+    if header.summary is not None:
+        return "handover"
+    if header.reason == f"{_VOLUNTARY} {_FORCED_ROLLOUT}":
+        return _FORCED_ROLLOUT
+    return _esc(header.reason)
 
 
 def _call_line(data: Mapping[str, Any]) -> str:
@@ -207,13 +214,18 @@ def render_transcript(
     return out + "".join(line + "\n" for line in body[dropped:])
 
 
-def notice_text(header: Header) -> str:
+def _size(n: int) -> str:
+    return f"{n // 1024} KiB" if n % 1024 == 0 else f"{n} bytes"
+
+
+def notice_text(header: Header, budget_bytes: int = 65536) -> str:
     summary = _esc(header.summary) if header.summary is not None else "none (forced move)"
     return (
         f"{HANDOVER_PREFIX} You now lead hive {_esc(header.slug)} (epoch {header.epoch}, "
         f"{_reason_label(header)}), taking over from {_esc(header.predecessor_pod)}. "
         f"Their summary: {summary}. The attached file is their rendered transcript "
-        "(at most 64 KiB, newest at the end): read it, starting with the 'In flight' section. "
+        f"(at most {_size(budget_bytes)}, newest at the end): "
+        "read it, starting with the 'In flight' section. "
         "Do not restart work that is in flight; check its outputs. "
         "Then continue with the user's goal."
     )

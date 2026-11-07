@@ -25,6 +25,7 @@ def test_header_and_summary_first():
 def test_summary_of():
     assert ht.summary_of("handover: x") == "x"
     assert ht.summary_of("leader_lost") is None
+    assert ht.summary_of("handover: rollout") is None  # the reconciler's forced request
     assert ht.attachment_name(7) == "handover-7.md"
 
 
@@ -167,3 +168,18 @@ def test_output_is_ascii_when_input_is():
     ]
     text = render(rows) + ht.notice_text(HEADER)
     assert text.isascii()
+
+
+def test_forced_rollout_reads_as_forced_move():
+    reason = "handover: rollout"
+    header = ht.Header("hive-a", 3, reason, "agent-0", T0, ht.summary_of(reason))
+    notice = ht.notice_text(header)
+    assert "Their summary: none (forced move)." in notice and "(epoch 3, rollout)" in notice
+    text = render([], header=header)
+    assert "- Reason: rollout" in text and "Summary of the previous leader" not in text
+
+
+def test_notice_names_the_real_budget():
+    assert "(at most 64 KiB, newest at the end)" in ht.notice_text(HEADER)
+    assert "(at most 8 KiB, newest at the end)" in ht.notice_text(HEADER, 8192)
+    assert "(at most 1024 KiB," in ht.notice_text(HEADER, 1 << 20)

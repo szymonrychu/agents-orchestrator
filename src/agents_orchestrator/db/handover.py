@@ -93,7 +93,7 @@ async def deliver_handover(
         await enqueue_message(
             conn,
             session_id,
-            ht.notice_text(header),
+            ht.notice_text(header, budget_bytes),
             row["agent_id"],
             lane="regular",
             notice=ht.NOTICE_HANDOVER,
