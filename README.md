@@ -1243,7 +1243,7 @@ The init, check and cache Jobs never get the sidecar, the socket or `DOCKER_HOST
 
 View fields: `closes_at`, `leader_since` and `leader_reason` (see `GET /api/v1/sessions/{session_id}`).
 
-Refusals are 422 `invalid_request` on `POST /api/v1/sessions`, `POST /api/v1/presets` and `PUT /api/v1/presets/{preset_id}`; the message names the field: `wrapper.hooks.<event>: unknown hook event`, `wrapper.hooks.<event>.<i>.matcher: only allowed on onAgentToolCall, onToolResult`, `wrapper.hooks.<event>.<i>.interval_seconds: required on onTick`, `wrapper.mcp_servers.<any-mcp or ccw>: the name is reserved`, `wrapper.plugins.install.<i>.plugin: marketplace '<m>' is not listed in marketplaces or claude-plugins-official`, and `autoclose_after_seconds <n> is below the minimum <floor>`. Values outside a numeric range (for example `leader_lease_seconds` under 60) are refused with the field name in the message too.
+Refusals are 422 `invalid_request` on `POST /api/v1/sessions`, `POST /api/v1/presets` and `PUT /api/v1/presets/{preset_id}`; the message names the field: `wrapper.hooks.<event>: unknown hook event`, `wrapper.hooks.<event>.<i>.matcher: only allowed on onAgentToolCall, onToolResult`, `wrapper.hooks.<event>.<i>.interval_seconds: required on onTick`, `wrapper.mcp_servers.<any-mcp or ccw>: the name is reserved`, `wrapper.plugins.install.<i>.plugin: marketplace '<m>' is not listed in marketplaces or claude-plugins-official`, and `autoclose_after_seconds <n> is below the minimum <floor>`. Values outside a numeric range (for example `replicas` under 1) are refused with the field name in the message too.
 
 ### Scaling
 
