@@ -35,6 +35,16 @@ ELIGIBLE = f"{READY_STAYS} AND a.wrapper_session_id IS NOT NULL"
 LEAVING = f"a.ordinal >= {REPLICAS}"
 HANDOVER_TRIGGER = f"(a.gone_at IS NULL AND {LEAVING})"
 
+# The notice hold: after a leader change the new leader gets the handover notice first, so
+# untargeted messages wait until the api sweeper has queued it (it then sets
+# `sessions.handover_notice_epoch`). The hold ends at the latest NOTICE_HOLD_SECONDS after the
+# change, so a down sweeper cannot stall the session. Aliases `l` (session_leaders), `c` (sessions).
+NOTICE_HOLD_SECONDS = 60
+NOTICE_PENDING = (
+    "(l.previous_agent_id IS NOT NULL AND l.epoch > c.handover_notice_epoch"
+    f" AND l.since > now() - make_interval(secs => {NOTICE_HOLD_SECONDS}))"
+)
+
 # A running background subagent keeps its leader from being moved.
 # `agent_status.background_subagents` maps subagent id -> start time; an entry older than
 # BACKGROUND_STALE_SECONDS is ignored, so a lost stop event cannot pin a leader forever.
