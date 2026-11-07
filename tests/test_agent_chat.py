@@ -427,6 +427,45 @@ async def test_max_text_passes_cap(monkeypatch):
         assert json.loads(sent.content)["text"] == text
 
 
+async def test_occupier_never_reaches_agent(monkeypatch):
+    """No chat route and no refusal status lets the connector's `occupier` reach an agent. The
+    relayable case (POST /messages, 409 room_bound with an occupier) needs the database and is
+    covered by tests/test_chat_relay.py."""
+    from fakes import fake_chat
+
+    rig = make_rig(monkeypatch)
+    fake = FakeChat(CHAT_TOKEN)
+    rig.app.state.chat_http = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=fake.app), base_url="http://chat"
+    )
+    occupier = str(uuid.uuid4())
+    checked = 0
+    for method, path, upstream_path in ROUTES:
+        template = (
+            "/chat/v1/messages/{id}"
+            if upstream_path.startswith("/chat/v1/messages/")
+            else (upstream_path)
+        )
+        route = f"{method} {template}"
+        statuses = [
+            int(code)
+            for code in fake_chat.operations()[(method, template)]["responses"]
+            if int(code) >= 400
+        ]
+        for status in statuses:
+            if (route, status) == ("POST /chat/v1/messages", 409):
+                continue
+            fake.refuse(
+                route, status, "room_bound" if status == 409 else "x", extra={"occupier": occupier}
+            )
+            r = await rig.call(method, path)
+            assert r.status_code == status, (route, status, r.text)
+            assert occupier not in r.text and "occupier" not in r.text, (route, status)
+            checked += 1
+        fake.allow(route)
+    assert checked >= 20
+
+
 # ------------------------------------------------------------------------- identity and ports
 
 

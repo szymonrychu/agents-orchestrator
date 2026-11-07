@@ -15,10 +15,10 @@ from typing import Any
 import httpx
 from psycopg_pool import AsyncConnectionPool
 
-from agents_orchestrator.db import leadership, queue
+from agents_orchestrator.db import leadership, queue, session_messaging
 from agents_orchestrator.db.pool import listen
 from agents_orchestrator.dispatcher import hive
-from agents_orchestrator.dispatcher.session_frame import frame
+from agents_orchestrator.dispatcher.session_frame import frame, relay_notice
 from agents_orchestrator.dispatcher.verify import Verifier, session_max_attempts
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.tokens import tokens_for
@@ -233,7 +233,14 @@ class Dispatcher:
                 "orch_attempt": claim.attempts + 1,
             }
             if claim.sender_slug is not None:
-                text = frame(claim.text, claim.sender_slug, claim.message_id)
+                async with self.pool.connection() as conn:
+                    mark = await session_messaging.relay_mark(conn, claim.message_id)
+                if mark is None:
+                    text = frame(claim.text, claim.sender_slug, claim.message_id)
+                else:
+                    text = relay_notice(
+                        claim.text, claim.sender_slug, claim.message_id, mark.send_id, mark.room_id
+                    )
                 metadata["orch_sender_session"] = claim.sender_slug
             message_id: str | None = None
             timeout: float | None = None

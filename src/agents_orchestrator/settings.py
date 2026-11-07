@@ -271,6 +271,7 @@ class Settings(BaseSettings):
     session_message_queued_max: int = Field(default=20, ge=1)
     session_message_max_hops: int = Field(default=8, ge=1)
     session_message_pair_max_per_hour: int = Field(default=30, ge=1)
+    session_reply_window_seconds: int = Field(default=86400, ge=0)
 
     chat_url: str = ""
     chat_token: str = Field(default="", repr=False)

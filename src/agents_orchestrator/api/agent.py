@@ -17,7 +17,7 @@ from xml.sax.saxutils import escape
 from fastapi import APIRouter, Depends, Header, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
-from agents_orchestrator.api import schemas
+from agents_orchestrator.api import schemas, session_limits
 from agents_orchestrator.api import sessions as sessions_api
 from agents_orchestrator.api.errors import ApiError
 from agents_orchestrator.api.sessions import (
@@ -400,8 +400,6 @@ async def locks_reassign(body: LockReassignIn, agent: Caller, pool: Pool) -> Loc
 # ---------------------------------------------------------------- cross-session messaging
 
 SESSION_MESSAGE_MAX_CHARS = 16000
-_RATE_WINDOW_SECONDS = 60
-_PAIR_WINDOW_SECONDS = 3600
 
 
 class SessionPeer(BaseModel):
@@ -478,35 +476,18 @@ async def session_send(
             raise ApiError(404, "not_found", f"session {slug} not found")
         if target.id == own.id:
             raise ApiError(422, "self_send", "a session cannot send a message to itself")
-        if not (own.spec.session_messaging or target.spec.session_messaging):
-            raise ApiError(
-                403,
-                "target_not_superleader",
-                f"session {slug} is not a superleader and neither is the caller's session",
-            )
+        if not await session_limits.may_message(conn, own, target, settings):
+            window = settings.session_reply_window_seconds
+            message = f"session {slug} is not a superleader and neither is the caller's session"
+            if window > 0:
+                message = (
+                    f"session {slug} is not a superleader, neither is the caller's session,"
+                    f" and it has not messaged it in the last {window // 3600} hours"
+                )
+            raise ApiError(403, "target_not_superleader", message)
         if target.desired == "deleting":
             raise ApiError(409, "session_deleting", f"session {slug} is being discarded")
-        previous = await q.turn_hop(conn, agent.id)
-        hop = previous + 1 if previous is not None else 1
-        if hop > settings.session_message_max_hops:
-            raise ApiError(
-                409,
-                "hop_limit",
-                f"hop {hop} exceeds the maximum of {settings.session_message_max_hops}",
-            )
-        rate = settings.session_message_rate_per_minute
-        if await q.count_sent_by(conn, own.id, _RATE_WINDOW_SECONDS) >= rate:
-            raise ApiError(429, "rate_limited", f"at most {rate} messages per minute")
-        pair = settings.session_message_pair_max_per_hour
-        if await q.count_between(conn, own.id, target.id, _PAIR_WINDOW_SECONDS) >= pair:
-            raise ApiError(
-                429, "pair_budget", f"at most {pair} messages per hour between two sessions"
-            )
-        cap = settings.session_message_queued_max
-        if await q.count_queued_session_messages(conn, target.id) >= cap:
-            raise ApiError(
-                409, "target_queue_full", f"session {slug} holds {cap} queued session messages"
-            )
+        hop = await session_limits.check_limits(conn, agent.id, own, target, settings)
         try:
             message_id = await q.enqueue_message(
                 conn,

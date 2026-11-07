@@ -658,3 +658,12 @@ def test_inactivity_bounds(monkeypatch):
     for ok in ("0", "3600"):
         monkeypatch.setenv(name, ok)
         assert Settings().inactivity_handoff_seconds == int(ok)
+
+
+def test_session_reply_window(monkeypatch):
+    assert Settings().session_reply_window_seconds == 86400
+    monkeypatch.setenv("ORCH_SESSION_REPLY_WINDOW_SECONDS", "0")
+    assert Settings().session_reply_window_seconds == 0
+    monkeypatch.setenv("ORCH_SESSION_REPLY_WINDOW_SECONDS", "-1")
+    with pytest.raises(SettingsError, match="ORCH_SESSION_REPLY_WINDOW_SECONDS"):
+        Settings()
