@@ -458,3 +458,47 @@ async def test_deleting_a_proposal_cascades_to_revisions_and_items(pool):
                     " VALUES (%s, 1, 'x', false, false)",
                     (pid,),
                 )
+
+
+async def test_transition_keeps_the_first_revision_outcome(pool):
+    async with pool.connection() as conn:
+        pid = await _insert(conn)
+        await proposals.transition(conn, pid, from_states=("open",), to="stale", outcome="stale")
+        await proposals.transition(conn, pid, from_states=("stale",), to="rework", outcome="rework")
+        got = await proposals.get(conn, pid)
+    assert got.status == "rework"
+    assert got.revisions[0].outcome == "stale"
+
+
+async def test_record_review_refuses_a_closed_or_old_revision_and_empty_review(pool):
+    async with pool.connection() as conn:
+        pid = await _insert(conn)
+        await proposals.record_review(conn, pid, 1, {})
+        assert (await proposals.get(conn, pid)).revisions[0].reviewed_at is None
+        with pytest.raises(proposals.NotInState):
+            await proposals.record_review(conn, pid, 2, {"replicas": ("approved", None)})
+        await proposals.transition(conn, pid, from_states=("open",), to="denied")
+        with pytest.raises(proposals.NotInState):
+            await proposals.record_review(conn, pid, 1, {"replicas": ("approved", None)})
+        got = await proposals.get(conn, pid)
+    assert got.revisions[0].reviewed_at is None
+    assert got.revisions[0].items[0].decision == "pending"
+
+
+async def test_concurrent_client_key_replay_makes_one_row(pool):
+    session = uuid.uuid4()
+
+    async def file():
+        async with pool.connection() as conn:
+            return await _insert(conn, session, client_key="race")
+
+    r1, r2 = await asyncio.gather(file(), file(), return_exceptions=True)
+    results = [r1, r2]
+    assert sum(isinstance(r, int) for r in results) == 1
+    loser = next(r for r in results if not isinstance(r, int))
+    winner = next(r for r in results if isinstance(r, int))
+    assert isinstance(loser, proposals.ProposalExists)
+    assert loser.proposal_id == winner
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT count(*) FROM change_proposals WHERE client_key = 'race'")
+        assert (await cur.fetchone())[0] == 1

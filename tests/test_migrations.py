@@ -1187,7 +1187,8 @@ def test_command_issuer_migration_adds_nullable_columns_idempotently(empty_dsn, 
     run_migrations(empty_dsn, tmp_path)
     assert run_migrations(empty_dsn) == [
         "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031",
-        "0032", "0035", "0036", "0038",
+        "0032", "0035", "0036",
+        "0038",
     ]  # fmt: skip
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         c.execute((MIGRATIONS_DIR / "0022_command_issuer.sql").read_text())  # second run: no-op
@@ -1201,7 +1202,8 @@ def test_permission_mode_state_migration_adds_nullable_columns_idempotently(empt
             shutil.copy(path, tmp_path)
     run_migrations(empty_dsn, tmp_path)
     assert run_migrations(empty_dsn) == [
-        "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0035", "0036", "0038",
+        "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0035", "0036",
+        "0038",
     ]  # fmt: skip
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         c.execute(
@@ -1224,8 +1226,8 @@ def test_cache_sweep_tables_apply_after_a_database_already_at_0027(empty_dsn, tm
 
 
 def test_session_close_columns_apply_after_a_database_already_at_0027(empty_dsn, tmp_path):
-    # 0030 backfills close_kind from close_requested_at, so it waits for 0026 as well; 0035 and 0038 need
-    # the messages.notice column of 0030
+    # 0030 backfills close_kind from close_requested_at, so it waits for 0026 as well; 0035 and
+    # 0038 need the messages.notice column of 0030
     for path in MIGRATIONS_DIR.glob("*.sql"):
         if not path.name.startswith(("0026_", "0030_", "0035_", "0038_")):
             shutil.copy(path, tmp_path)
@@ -1531,7 +1533,7 @@ def test_0035_strips_leader_lease(empty_dsn, tmp_path):
             "INSERT INTO presets (id, name, spec) VALUES (gen_random_uuid(), 'old', %s)",
             (json.dumps(spec),),
         )
-    assert run_migrations(empty_dsn) == ["0035", "0036"]
+    assert run_migrations(empty_dsn) == ["0035", "0036", "0038"]
 
     def read():
         with psycopg.connect(empty_dsn) as c:

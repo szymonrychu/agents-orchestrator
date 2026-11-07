@@ -68,6 +68,9 @@ CREATE TABLE IF NOT EXISTS change_proposal_secrets (
     PRIMARY KEY (preset_id, name, version)
 );
 
+CREATE INDEX IF NOT EXISTS change_proposal_secrets_proposal
+    ON change_proposal_secrets (proposal_id);
+
 -- Notice kinds: the union of every kind on main (0030 inactivity, 0035 handover) plus proposal.
 -- Whichever of T-18, T-19 and T-54 merges second carries the union.
 ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_notice_check;

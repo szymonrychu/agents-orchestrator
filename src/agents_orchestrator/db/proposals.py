@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime
 from typing import Any
 
@@ -86,6 +86,9 @@ class Proposal:
     expires_at: datetime
     closed_at: datetime | None
     revisions: list[Revision]
+
+
+_COLS = ", ".join(f.name for f in fields(Proposal) if f.name != "revisions")
 
 
 def _json(value: Any) -> Jsonb | None:
@@ -224,7 +227,8 @@ async def transition(
 ) -> None:
     """Move the status from one of from_states to `to`; raise NotInState when no row matched.
 
-    A terminal `to` stamps closed_at. `outcome`, when given, is written on the current revision.
+    A terminal `to` stamps closed_at. `outcome`, when given, is written on the current revision
+    only while it has none (the first terminal outcome, such as `stale`, is kept).
     """
     async with conn.transaction():
         row = await _one(
@@ -239,7 +243,7 @@ async def transition(
         if outcome is not None:
             await conn.execute(
                 "UPDATE change_proposal_revisions SET outcome = %s"
-                " WHERE proposal_id = %s AND revision = %s",
+                " WHERE proposal_id = %s AND revision = %s AND outcome IS NULL",
                 (outcome, proposal_id, row["revision"]),
             )
 
@@ -252,9 +256,20 @@ async def record_review(
 ) -> None:
     """Write each path's (decision, note) on that revision only and stamp its reviewed_at.
 
-    A path that is not an item of the revision raises UnknownItem and writes nothing.
+    The proposal must be open and `revision` its current one, else NotInState. A path that is not
+    an item of the revision raises UnknownItem and writes nothing. No decisions is a no-op.
     """
+    if not decisions:
+        return
     async with conn.transaction():
+        guard = await _one(
+            conn,
+            "SELECT id FROM change_proposals WHERE id = %s AND status = 'open' AND revision = %s"
+            " FOR UPDATE",
+            (proposal_id, revision),
+        )
+        if guard is None:
+            raise NotInState(proposal_id)
         for path, (decision, note) in decisions.items():
             cur = await conn.execute(
                 "UPDATE change_proposal_items SET decision = %s, note = %s"
@@ -291,6 +306,7 @@ async def _load(
         return []
     ids = [r["id"] for r in rows]
     only = " AND r.revision = p.revision" if current_only else ""
+    only_i = " AND i.revision = p.revision" if current_only else ""
     revs = await _all(
         conn,
         "SELECT r.* FROM change_proposal_revisions r"
@@ -301,9 +317,7 @@ async def _load(
     items = await _all(
         conn,
         "SELECT i.* FROM change_proposal_items i JOIN change_proposals p ON p.id = i.proposal_id"
-        " JOIN change_proposal_revisions r"
-        " ON (r.proposal_id, r.revision) = (i.proposal_id, i.revision)"
-        f" WHERE i.proposal_id = ANY(%s){only} ORDER BY i.proposal_id, i.revision, i.path",
+        f" WHERE i.proposal_id = ANY(%s){only_i} ORDER BY i.proposal_id, i.revision, i.path",
         (ids,),
     )
     by_rev: dict[tuple[int, int], list[Item]] = {}
@@ -329,7 +343,7 @@ async def _load(
 async def lock(conn: psycopg.AsyncConnection, proposal_id: int) -> Proposal | None:
     """SELECT ... FOR UPDATE inside the caller's transaction; the current revision only."""
     rows = await _all(
-        conn, "SELECT * FROM change_proposals WHERE id = %s FOR UPDATE", (proposal_id,)
+        conn, f"SELECT {_COLS} FROM change_proposals WHERE id = %s FOR UPDATE", (proposal_id,)
     )
     found = await _load(conn, rows, current_only=True)
     return found[0] if found else None
@@ -341,7 +355,7 @@ async def get(
     """The proposal with its whole revision history; with proposer_session, only that one's."""
     rows = await _all(
         conn,
-        "SELECT * FROM change_proposals WHERE id = %s"
+        f"SELECT {_COLS} FROM change_proposals WHERE id = %s"
         " AND (%s::uuid IS NULL OR proposer_session = %s)",
         (proposal_id, proposer_session, proposer_session),
     )
@@ -359,7 +373,7 @@ async def list_for(
     """Newest first, in `statuses`, of one proposer or (None) of everyone; current revision only."""
     rows = await _all(
         conn,
-        "SELECT * FROM change_proposals WHERE status = ANY(%s)"
+        f"SELECT {_COLS} FROM change_proposals WHERE status = ANY(%s)"
         " AND (%s::uuid IS NULL OR proposer_session = %s) ORDER BY id DESC LIMIT %s",
         (list(statuses), proposer_session, proposer_session, limit),
     )
