@@ -94,9 +94,13 @@ async def test_start_prompt_render_failure_refuses_the_create(pool, dsn, monkeyp
 
     async with client_for(create_app(make_settings(dsn), pool)) as http:
         pid = await _preset(http, "bad", {"start_prompt": "x"})
+        # Spec validation passes (its trial render is stubbed), so the 422 comes from the
+        # render in _queue_start_prompt inside the create transaction.
+        monkeypatch.setattr(rendering, "problem", lambda template, surface, env: (None, None))
         monkeypatch.setattr(rendering, "render_text", boom)
         r = await http.post(C, json={"preset_id": pid, "slug": "bad"})
     assert_error(r, 422, "invalid_request")
+    assert not r.json()["error"]["message"].startswith("preset ")
     assert "start_prompt" in r.json()["error"]["message"]
     async with pool.connection() as conn:
         cur = await conn.execute("SELECT count(*) FROM sessions WHERE slug = 'bad'")
