@@ -1557,7 +1557,7 @@
             "type": "integer"
           },
           "reason": {
-            "maxLength": 500,
+            "maxLength": 2000,
             "minLength": 1,
             "title": "Reason",
             "type": "string"
@@ -1788,9 +1788,20 @@
       },
       "LeadershipRequested": {
         "properties": {
+          "applies": {
+            "default": "when your turn has ended and your background agents have reported",
+            "title": "Applies",
+            "type": "string"
+          },
           "request_id": {
             "title": "Request Id",
             "type": "integer"
+          },
+          "status": {
+            "const": "pending",
+            "default": "pending",
+            "title": "Status",
+            "type": "string"
           }
         },
         "required": [

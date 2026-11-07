@@ -790,3 +790,80 @@ async def test_steps_reread_leader_after_change(pool):
     row = await leader_row(pool, c["id"])
     assert (row["epoch"], row["reason"]) == (4, "scale_down")
     assert row["agent_id"] in (a0["id"], a1["id"])
+
+
+# ---------------------------------------------------------------- the true boundary
+
+
+async def age_request(pool, request_id: int, seconds: int) -> None:
+    await run(
+        pool,
+        "UPDATE leadership_requests SET created_at = now() - make_interval(secs => %s)"
+        " WHERE id = %s",
+        (seconds, request_id),
+    )
+
+
+async def test_agent_handover_waits_mid_turn(pool):
+    c, (a0, a1, _) = await hive(pool)
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
+    await status(pool, a0["id"], "busy", 10)
+    rid = await request(pool, c["id"], "handover", a0["id"], a1["id"], "context full", 3)
+    assert await lpass(pool, c["id"]) is None
+    assert (await rows(pool, "SELECT status FROM leadership_requests WHERE id = %s", (rid,)))[0][
+        "status"
+    ] == "queued"
+    await status(pool, a0["id"], "idle", 10)
+    change = await lpass(pool, c["id"])
+    assert change is not None and change.agent_id == a1["id"]
+    assert await decided(pool, rid) == ("applied", None)
+
+
+async def test_agent_handover_waits_for_background(pool):
+    c, (a0, a1, _) = await hive(pool)
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
+    await status(pool, a0["id"], "idle", 10, bg=True)
+    rid = await request(pool, c["id"], "handover", a0["id"], a1["id"], "summary text", 3)
+    assert await lpass(pool, c["id"]) is None
+    assert (await rows(pool, "SELECT status FROM leadership_requests WHERE id = %s", (rid,)))[0][
+        "status"
+    ] == "queued"
+    await status(pool, a0["id"], "idle", 10)
+    change = await lpass(pool, c["id"])
+    assert change is not None and change.agent_id == a1["id"]
+    assert change.reason == "handover: summary text"
+
+
+async def test_rollout_handover_ignores_background_when_overdue(pool):
+    c, (a0, a1, _) = await hive(pool)
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
+    await status(pool, a0["id"], "idle", 10, bg=True)
+    fresh = await request(pool, c["id"], "handover", a0["id"], a1["id"], "rollout", 3)
+    assert await lpass(pool, c["id"]) is None
+    await age_request(pool, fresh, 14400 + 60)
+    # overdue only lifts the background wait, never the turn boundary
+    await status(pool, a0["id"], "busy", 10, bg=True)
+    assert await lpass(pool, c["id"]) is None
+    await status(pool, a0["id"], "idle", 10, bg=True)
+    change = await lpass(pool, c["id"])
+    assert change is not None and change.agent_id == a1["id"]
+    assert await decided(pool, fresh) == ("applied", None)
+
+
+async def test_non_rollout_handover_never_overdue(pool):
+    c, (a0, a1, _) = await hive(pool)
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
+    await status(pool, a0["id"], "idle", 10, bg=True)
+    rid = await request(pool, c["id"], "handover", a0["id"], a1["id"], "context", 3)
+    await age_request(pool, rid, 14400 + 60)
+    assert await lpass(pool, c["id"]) is None
+
+
+async def test_user_make_leader_never_waits(pool):
+    c, (a0, a1, _) = await hive(pool)
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
+    await status(pool, a0["id"], "busy", 10, bg=True)
+    rid = await request(pool, c["id"], "user", None, a1["id"], "user", None)
+    change = await lpass(pool, c["id"])
+    assert change is not None and change.agent_id == a1["id"]
+    assert await decided(pool, rid) == ("applied", None)

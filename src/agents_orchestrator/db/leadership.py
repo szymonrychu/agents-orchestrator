@@ -27,6 +27,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from agents_orchestrator.db.eligibility import (
+    BACKGROUND_BUSY,
     DEAD,
     ELIGIBLE,
     HANDOVER_TRIGGER,
@@ -176,6 +177,7 @@ async def _leader(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> dict 
         "   AND s.state = 'idle')"
         " AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.agent_id = l.agent_id"
         "   AND m.status IN ('dispatching', 'verifying')) AS at_boundary,"
+        f" {BACKGROUND_BUSY} AS background_busy,"
         " l.unready_since IS NOT NULL AND l.unready_since"
         "   < now() - make_interval(secs => %s) AS grace_over,"
         " a.ready, a.gone_at IS NOT NULL AS gone,"
@@ -183,6 +185,7 @@ async def _leader(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> dict 
         f" {LEAVING} AS leaving"
         " FROM session_leaders l JOIN agents a ON a.id = l.agent_id"
         " JOIN sessions c ON c.id = l.session_id"
+        " LEFT JOIN agent_status s ON s.agent_id = l.agent_id"
         " WHERE l.session_id = %s FOR UPDATE OF l",
         (LEADER_GRACE_SECONDS, session_id),
     )
@@ -299,16 +302,21 @@ async def _judge(
     return None, picked, reason
 
 
-def _mid_turn_rollout(req: dict, leader: dict | None) -> bool:
-    """A `rollout` handover from the current leader while that leader is not at a boundary."""
-    return (
+def _waits_for_boundary(req: dict, leader: dict | None) -> bool:
+    """A `handover` from the current leader at the current epoch waits for the leader's true
+    boundary: its turn ended and no background subagent running. A `rollout` handover older than
+    the deferral cap (`overdue`) stops waiting for background work, never for the turn. A `user`
+    request never waits."""
+    if not (
         req["kind"] == "handover"
-        and req["reason"] == "rollout"
         and leader is not None
         and req["from_agent_id"] == leader["agent_id"]
         and req["epoch"] == leader["epoch"]
-        and not leader["at_boundary"]
-    )
+    ):
+        return False
+    if not leader["at_boundary"]:
+        return True
+    return bool(leader["background_busy"]) and not (req["reason"] == "rollout" and req["overdue"])
 
 
 async def leadership_pass(
@@ -348,16 +356,17 @@ async def leadership_pass(
                 leader = await _leader(conn, session_id)
 
         # 2. Queued requests in id order, each re-checked against the leader as it is now. A
-        # `rollout` handover from the current leader waits for its turn boundary: while the
-        # leader is mid-turn it stays queued for a later pass.
+        # `handover` from the current leader waits for the leader's true boundary (see
+        # _waits_for_boundary): until then it stays queued for a later pass.
         for req in await _all(
             conn,
-            "SELECT id, kind, from_agent_id, to_agent_id, reason, epoch"
+            "SELECT id, kind, from_agent_id, to_agent_id, reason, epoch,"
+            " created_at < now() - make_interval(secs => %s) AS overdue"
             " FROM leadership_requests WHERE session_id = %s AND status = 'queued'"
             " ORDER BY id FOR UPDATE",
-            (session_id,),
+            (policy.rollout_max_defer_seconds, session_id),
         ):
-            if _mid_turn_rollout(req, leader):
+            if _waits_for_boundary(req, leader):
                 continue
             reject, target, reason = await _judge(conn, session_id, req, leader, policy)
             if not await _decide(conn, req["id"], reject):
