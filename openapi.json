@@ -2380,7 +2380,8 @@
               {
                 "enum": [
                   "inactivity_reminder",
-                  "inactivity_close"
+                  "inactivity_close",
+                  "handover"
                 ],
                 "type": "string"
               },
