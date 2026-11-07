@@ -28,7 +28,7 @@ serviceAccount:
   # If not set and create is true, a name is generated using the fullname template.
   name: ""
 
-# The unprivileged <fullname>-agent ServiceAccount (agent pods without kube_access, every Job).
+# The unprivileged <fullname>-agent ServiceAccount (agent pods without Kubernetes access, every Job).
 agentServiceAccount:
   # Annotations of the agent ServiceAccount only. Never copied from serviceAccount.annotations, so
   # cloud-identity annotations of the api ServiceAccount cannot reach agent pods.
