@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -106,7 +107,7 @@ async def test_patch_session_retired_405(http):
         for path, methods in _walk_routes(http._transport.app)  # type: ignore[attr-defined]
         if path.startswith("/api/v1")
         and "PATCH" in methods
-        and not path.endswith("/labels")
+        and not path.endswith(("/labels", "/project"))
         and not path.startswith("/api/v1/projects/")
     ]
     spec = (await http.get("/api/v1/openapi.json")).json()
@@ -115,7 +116,7 @@ async def test_patch_session_retired_405(http):
         for p, ops in spec["paths"].items()
         if p.startswith("/api/v1")
         and "patch" in ops
-        and not p.endswith("/labels")
+        and not p.endswith(("/labels", "/project"))
         and not p.startswith("/api/v1/projects/")
     ]
 
@@ -613,3 +614,159 @@ async def test_agent_view_and_summary_surface_permission_mode_unavailable(pool, 
         assert agents[1]["permission_mode_reason"] is None
         summary = (await http.get(f"/api/v1/sessions/{c['id']}")).json()["summary"]
         assert summary["permission_unavailable_agents"] == 1
+
+
+# ---------------------------------------------------------------- session project (projects P4)
+
+PROJECTS = "/api/v1/projects"
+S = "/api/v1/sessions"
+
+
+async def make_project(http, slug, archived=False):
+    r = await http.post(PROJECTS, json={"slug": slug, "name": slug.title()})
+    assert r.status_code == 201, r.text
+    if archived:
+        r = await http.patch(f"{PROJECTS}/{slug}", json={"archived": True})
+        assert r.status_code == 200, r.text
+
+
+async def test_create_takes_body_project(http):
+    await make_project(http, "alpha")
+    r = await http.post(S, json={"slug": "in-alpha", "spec": {}, "project": "alpha"})
+    assert r.status_code == 201, r.text
+    assert r.json()["project"] == "alpha"
+    assert (await http.get(f"{S}/{r.json()['id']}")).json()["project"] == "alpha"
+    assert (await http.get(f"{PROJECTS}/alpha")).json()["sessions"] == 1
+
+
+async def test_spec_only_session_defaults_to_default(http):
+    r = await http.post(S, json={"slug": "plain", "spec": {}})
+    assert r.status_code == 201, r.text
+    assert r.json()["project"] == "default"
+
+
+async def test_create_archived_project_422(http):
+    await make_project(http, "gone", archived=True)
+    r = await http.post(S, json={"slug": "late", "spec": {}, "project": "gone"})
+    assert_error(r, 422, "project_archived")
+    r = await http.post(S, json={"slug": "late", "spec": {}, "project": "nope"})
+    assert_error(r, 422, "unknown_project")
+    assert (await http.get(S)).json() == []
+
+
+async def test_create_waits_on_project_lock_and_sees_archive(http, pool):
+    """The create holds the project row FOR SHARE: an archive committed while the create waits
+    turns the create into 422 `project_archived`, never a session in an archived project."""
+    await make_project(http, "alpha")
+    async with pool.connection() as conn, conn.transaction():
+        await conn.execute("UPDATE projects SET archived_at = now() WHERE slug = 'alpha'")
+        create = asyncio.create_task(
+            http.post(S, json={"slug": "racer", "spec": {}, "project": "alpha"})
+        )
+        done, _ = await asyncio.wait({create}, timeout=0.5)
+        assert not done
+    assert_error(await create, 422, "project_archived")
+
+
+async def _projects_of(http, **params) -> list[str]:
+    r = await http.get(S, params=params)
+    assert r.status_code == 200, r.text
+    return sorted(s["slug"] for s in r.json())
+
+
+async def test_list_filter_project(http):
+    await make_project(http, "alpha")
+    await make_project(http, "beta")
+    for slug, project in (("a1", "alpha"), ("a2", "alpha"), ("b1", "beta")):
+        r = await http.post(S, json={"slug": slug, "spec": {}, "project": project})
+        assert r.status_code == 201, r.text
+    await http.post(S, json={"slug": "d1", "spec": {}})
+    assert await _projects_of(http, project="alpha") == ["a1", "a2"]
+    assert await _projects_of(http, project="beta") == ["b1"]
+    assert await _projects_of(http, project="default") == ["d1"]
+    assert await _projects_of(http) == ["a1", "a2", "b1", "d1"]
+    assert_error(await http.get(S, params={"project": "nope"}), 422, "unknown_project")
+    # an archived project still lists its sessions
+    await http.patch(f"{PROJECTS}/beta", json={"archived": True})
+    assert await _projects_of(http, project="beta") == ["b1"]
+
+
+async def test_list_superleaders_include(http):
+    await make_project(http, "alpha")
+    await http.post(S, json={"slug": "a1", "spec": {}, "project": "alpha"})
+    await http.post(S, json={"slug": "boss", "spec": {"session_messaging": True}})
+    await http.post(S, json={"slug": "other", "spec": {"session_messaging": False}})
+    assert await _projects_of(http, project="alpha") == ["a1"]
+    assert await _projects_of(http, project="alpha", superleaders="include") == ["a1", "boss"]
+    assert await _projects_of(http, superleaders="include") == ["a1", "boss", "other"]
+    assert_error(await http.get(S, params={"superleaders": "only"}), 422, "invalid_request")
+
+
+async def test_list_slug_exact(http):
+    await http.post(S, json={"slug": "exact", "spec": {}})
+    await http.post(S, json={"slug": "exact-more", "spec": {}})
+    assert await _projects_of(http, slug="exact") == ["exact"]
+    assert await _projects_of(http, slug="exac") == []
+    assert await _projects_of(http, slug="exact", project="default") == ["exact"]
+
+
+async def test_patch_project_moves(http):
+    await make_project(http, "alpha")
+    sid = (await http.post(S, json={"slug": "mover", "spec": {}})).json()["id"]
+    r = await http.patch(f"{S}/{sid}/project", json={"project": "alpha"})
+    assert r.status_code == 200, r.text
+    assert r.json()["project"] == "alpha"
+    assert r.json()["generation"] == 1  # not a spec change
+    assert (await http.get(f"{S}/{sid}")).json()["project"] == "alpha"
+    assert await _projects_of(http, project="alpha") == ["mover"]
+    assert_error(
+        await http.patch(f"{S}/{uuid.uuid4()}/project", json={"project": "alpha"}),
+        404,
+        "not_found",
+    )
+    assert_error(
+        await http.patch(f"{S}/{sid}/project", json={"project": "nope"}), 422, "unknown_project"
+    )
+    assert_error(
+        await http.patch(f"{S}/{sid}/project", json={"project": "alpha", "x": 1}),
+        422,
+        "invalid_request",
+    )
+
+
+async def test_patch_project_deleting_409(http, pool):
+    await make_project(http, "alpha")
+    c = await insert_session(pool, slug="dying", desired="deleting")
+    r = await http.patch(f"{S}/{c['id']}/project", json={"project": "alpha"})
+    assert_error(r, 409, "session_deleting")
+
+
+async def test_patch_project_archived_422(http):
+    """Moving a session into an archived project is a new placement: 422 `project_archived`."""
+    await make_project(http, "gone", archived=True)
+    sid = (await http.post(S, json={"slug": "stay", "spec": {}})).json()["id"]
+    r = await http.patch(f"{S}/{sid}/project", json={"project": "gone"})
+    assert_error(r, 422, "project_archived")
+    assert (await http.get(f"{S}/{sid}")).json()["project"] == "default"
+
+
+async def test_patch_project_waits_on_project_lock_and_sees_archive(http, pool):
+    await make_project(http, "alpha")
+    sid = (await http.post(S, json={"slug": "racer", "spec": {}})).json()["id"]
+    async with pool.connection() as conn, conn.transaction():
+        await conn.execute("UPDATE projects SET archived_at = now() WHERE slug = 'alpha'")
+        move = asyncio.create_task(http.patch(f"{S}/{sid}/project", json={"project": "alpha"}))
+        done, _ = await asyncio.wait({move}, timeout=0.5)
+        assert not done
+    assert_error(await move, 422, "project_archived")
+
+
+async def test_existing_session_keeps_working_after_project_archived(http):
+    await make_project(http, "alpha")
+    sid = (await http.post(S, json={"slug": "old", "spec": {}, "project": "alpha"})).json()["id"]
+    await http.patch(f"{PROJECTS}/alpha", json={"archived": True})
+    r = await http.post(f"{S}/{sid}/messages", json={"text": "still here"})
+    assert r.status_code == 202, r.text
+    assert (await http.get(f"{S}/{sid}")).json()["project"] == "alpha"
+    r = await http.patch(f"{S}/{sid}/labels", json={"labels": ["kept"]})
+    assert r.status_code == 200, r.text

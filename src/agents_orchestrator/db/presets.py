@@ -17,6 +17,8 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from agents_orchestrator.db.projects import DEFAULT
+
 NAME_MAX = 40
 _NAME = re.compile(r"[A-Za-z0-9 ._-]{1,40}")
 
@@ -51,7 +53,7 @@ class Preset:
     labels: list[str]
     created_at: datetime
     updated_at: datetime
-    project: str = "default"
+    project: str = DEFAULT
 
 
 def validate_preset_name(name: str) -> str:
@@ -115,7 +117,7 @@ async def create(
     spec: dict[str, Any],
     superleader_manageable: bool = False,
     labels: list[str] | None = None,
-    project: str = "default",
+    project: str = DEFAULT,
 ) -> Preset:
     validate_preset_name(name)
     try:

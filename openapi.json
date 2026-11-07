@@ -1110,6 +1110,17 @@
             ],
             "title": "Preset Id"
           },
+          "project": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project"
+          },
           "slug": {
             "anyOf": [
               {
@@ -3781,6 +3792,20 @@
         "title": "SessionPeers",
         "type": "object"
       },
+      "SessionProjectIn": {
+        "additionalProperties": false,
+        "properties": {
+          "project": {
+            "title": "Project",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "title": "SessionProjectIn",
+        "type": "object"
+      },
       "SessionRestartAccepted": {
         "properties": {
           "command_ids": {
@@ -4796,6 +4821,10 @@
             ],
             "title": "Preset Name"
           },
+          "project": {
+            "title": "Project",
+            "type": "string"
+          },
           "reminder_at": {
             "anyOf": [
               {
@@ -4849,7 +4878,8 @@
           "leader_reason",
           "closes_at",
           "init_edited_since_run",
-          "backup"
+          "backup",
+          "project"
         ],
         "title": "SessionView",
         "type": "object"
@@ -12272,7 +12302,7 @@
     },
     "/api/v1/sessions": {
       "get": {
-        "description": "All sessions; `label` (repeatable) keeps live sessions that carry any of the labels.",
+        "description": "All sessions. `label` (repeatable) keeps live sessions that carry any of the labels;\n`project` keeps that project's sessions (422 `unknown_project`; an archived one still\nlists), and with `superleaders=include` every superleader session is added; `slug` is an\nexact match. The filters combine.",
         "operationId": "list_sessions_api_v1_sessions_get",
         "parameters": [
           {
@@ -12292,6 +12322,55 @@
                 }
               ],
               "title": "Label"
+            }
+          },
+          {
+            "in": "query",
+            "name": "project",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Project"
+            }
+          },
+          {
+            "in": "query",
+            "name": "superleaders",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "const": "include",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Superleaders"
+            }
+          },
+          {
+            "in": "query",
+            "name": "slug",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Slug"
             }
           }
         ],
@@ -13501,6 +13580,57 @@
           }
         },
         "summary": "Put Permission Mode"
+      }
+    },
+    "/api/v1/sessions/{session_id}/project": {
+      "patch": {
+        "description": "Move a live session to another project. Scope is read live per request, so the move\ntakes effect at once. A move is a new placement: the target must exist and be active (422\n`unknown_project`, `project_archived`); its row is locked before the session row.",
+        "operationId": "patch_project_api_v1_sessions__session_id__project_patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionProjectIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Project"
       }
     },
     "/api/v1/sessions/{session_id}/restart": {

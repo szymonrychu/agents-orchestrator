@@ -448,3 +448,30 @@ async def test_preset_save_holds_project_row_share_lock(http, pool):
         assert not done
     r = await save
     assert r.status_code == 201, r.text
+
+
+async def test_preset_copy_waits_on_project_lock_and_sees_archive(http, pool):
+    """A copy holds the target project row FOR SHARE: it waits for a writer holding the row
+    FOR UPDATE, and an archive that writer commits turns the copy into 422 `project_archived`."""
+    await make_project(http, "alpha")
+    src = await make(http, "src")
+    async with pool.connection() as conn, conn.transaction():
+        await conn.execute("UPDATE projects SET archived_at = now() WHERE slug = 'alpha'")
+        copy = asyncio.create_task(http.post(f"{P}/{src['id']}/copy", json={"project": "alpha"}))
+        done, _ = await asyncio.wait({copy}, timeout=0.5)
+        assert not done
+    assert_error(await copy, 422, "project_archived")
+    assert [p["name"] for p in (await http.get(P)).json()] == ["Default", "src"]
+
+
+async def test_preset_copy_waits_on_project_lock_then_succeeds(http, pool):
+    await make_project(http, "alpha")
+    src = await make(http, "src")
+    async with pool.connection() as conn, conn.transaction():
+        await conn.execute("SELECT 1 FROM projects WHERE slug = 'alpha' FOR UPDATE")
+        copy = asyncio.create_task(http.post(f"{P}/{src['id']}/copy", json={"project": "alpha"}))
+        done, _ = await asyncio.wait({copy}, timeout=0.5)
+        assert not done
+    r = await copy
+    assert r.status_code == 201, r.text
+    assert r.json()["project"] == "alpha"

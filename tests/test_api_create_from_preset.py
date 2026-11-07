@@ -181,3 +181,38 @@ async def test_main_port_ignores_flag(pool, dsn):
         assert (await http.post(C, json={"preset_id": p["id"], "slug": "m-one"})).status_code == 201
         raw = await http.post(C, json={"slug": "m-two", "spec": {}})
         assert raw.status_code == 201, raw.text
+
+
+async def _project(http, slug):
+    r = await http.post("/api/v1/projects", json={"slug": slug, "name": slug.title()})
+    assert r.status_code == 201, r.text
+
+
+async def test_create_defaults_to_preset_project(pool, dsn):
+    async with app_client(pool, dsn) as http:
+        await _project(http, "alpha")
+        await _project(http, "beta")
+        r = await http.post(P, json={"name": "in-alpha", "project": "alpha"})
+        pid = r.json()["id"]
+        r = await http.post(C, json={"preset_id": pid})
+        assert r.status_code == 201, r.text
+        assert r.json()["project"] == "alpha"
+        # a body project wins over the preset's: the preset is a template usable anywhere
+        r = await http.post(C, json={"preset_id": pid, "project": "beta"})
+        assert r.status_code == 201, r.text
+        assert r.json()["project"] == "beta"
+        r = await http.post(C, json={"preset_id": DEFAULT_ID})
+        assert r.json()["project"] == "default"
+
+
+async def test_create_from_preset_in_archived_project_422(pool, dsn):
+    """Without a body project the preset's project is the placement, so an archived one is 422;
+    a body project elsewhere still works."""
+    async with app_client(pool, dsn) as http:
+        await _project(http, "alpha")
+        pid = (await http.post(P, json={"name": "old", "project": "alpha"})).json()["id"]
+        await http.patch("/api/v1/projects/alpha", json={"archived": True})
+        assert_error(await http.post(C, json={"preset_id": pid}), 422, "project_archived")
+        r = await http.post(C, json={"preset_id": pid, "project": "default"})
+        assert r.status_code == 201, r.text
+        assert r.json()["project"] == "default"

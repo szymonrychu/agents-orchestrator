@@ -16,7 +16,7 @@ from psycopg.types.json import Jsonb
 from agents_orchestrator.db import leadership
 from agents_orchestrator.db.eligibility import ELIGIBLE
 from agents_orchestrator.db.pool import notify
-from agents_orchestrator.db.projects import UnknownProject
+from agents_orchestrator.db.projects import DEFAULT, UnknownProject
 from agents_orchestrator.db.queue import SessionBeingDeleted, enqueue_message
 from agents_orchestrator.inactivity import NOTICE_CLOSE, NOTICE_REMINDER, close_reason
 from agents_orchestrator.spec import SessionSpec, validate_slug
@@ -83,7 +83,7 @@ class Session:
     # set by a forced discard (DELETE ...?force=true): owed pre-discard hooks are abandoned
     discard_forced_at: datetime | None = None
     # the project it belongs to (projects.slug); moved by set_project, never by a spec change
-    project: str = "default"
+    project: str = DEFAULT
 
 
 @dataclass(frozen=True)
@@ -143,6 +143,7 @@ async def create(
     secret_versions: dict[str, str] | None = None,
     created_by_session: uuid.UUID | None = None,
     labels: list[str] | None = None,
+    project: str = DEFAULT,
 ) -> Session:
     validate_slug(slug)
     try:
@@ -150,8 +151,8 @@ async def create(
             rows = await _fetch(
                 conn,
                 "INSERT INTO sessions (id, slug, spec, preset_id, preset_name, created_by_service,"
-                " secret_versions, created_by_session, labels)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
+                " secret_versions, created_by_session, labels, project)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
                 (
                     uuid.uuid4(),
                     slug,
@@ -162,6 +163,7 @@ async def create(
                     Jsonb(secret_versions) if secret_versions else None,
                     created_by_session,
                     labels or [],
+                    project,
                 ),
             )
             await _notify(conn, rows[0].id)
@@ -222,17 +224,34 @@ async def claim_self_restart(
     return SelfRestartClaim(False, max(1, int(row["wait"])))
 
 
+_SUPERLEADER = "COALESCE((spec->>'session_messaging')::boolean, false)"
+
+
 async def list_sessions(
-    conn: psycopg.AsyncConnection, labels: list[str] | None = None
+    conn: psycopg.AsyncConnection,
+    *,
+    labels: list[str] | None = None,
+    project: str | None = None,
+    slug: str | None = None,
+    superleaders: bool = False,
 ) -> list[Session]:
-    """Every session; with `labels`, only live (not being deleted) sessions sharing any."""
-    if not labels:
-        return await _fetch(conn, "SELECT * FROM sessions ORDER BY created_at, slug", ())
+    """Every session, narrowed by each filter given (they combine): `labels` keeps live (not
+    being deleted) sessions sharing any; `project` keeps that project's sessions, plus every
+    superleader session with `superleaders`; `slug` is an exact match."""
+    where: list[str] = []
+    params: list[Any] = []
+    if labels:
+        where.append("labels && %s::text[] AND desired = 'active'")
+        params.append(labels)
+    if project is not None:
+        where.append(f"(project = %s OR {_SUPERLEADER})" if superleaders else "project = %s")
+        params.append(project)
+    if slug is not None:
+        where.append("slug = %s")
+        params.append(slug)
+    clause = " WHERE " + " AND ".join(where) if where else ""
     return await _fetch(
-        conn,
-        "SELECT * FROM sessions WHERE labels && %s::text[] AND desired = 'active'"
-        " ORDER BY created_at, slug",
-        (labels,),
+        conn, f"SELECT * FROM sessions{clause} ORDER BY created_at, slug", tuple(params)
     )
 
 

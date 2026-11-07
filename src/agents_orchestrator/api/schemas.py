@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
+from agents_orchestrator.db import projects
 from agents_orchestrator.labels import normalize_labels
 from agents_orchestrator.settings import (
     SWEEP_GRACE_SECONDS_MAX,
@@ -24,6 +25,8 @@ class CreateSession(BaseModel):
     slug: str | None = None
     spec: SessionSpecIn | None = None
     preset_id: uuid.UUID | None = None
+    # None: the preset's project, or the default project for a spec-only session
+    project: str | None = None
 
 
 class PresetIn(BaseModel):
@@ -35,7 +38,7 @@ class PresetIn(BaseModel):
     # None keeps the stored labels on PUT and means none on POST
     labels: list[str] | None = None
     # PUT replaces the whole preset, so an omitted project is the default project
-    project: str = "default"
+    project: str = projects.DEFAULT
 
     @field_validator("labels")
     @classmethod
@@ -66,6 +69,12 @@ class SessionSpecPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     spec: dict[str, Any]
+
+
+class SessionProjectIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project: str
 
 
 class SessionLabelsIn(BaseModel):
@@ -236,6 +245,8 @@ class SessionView(BaseModel):
     created_by_service: str | None = None
     created_by_session: uuid.UUID | None = None
     labels: list[str] = []
+    # the project the session belongs to; moved by PATCH /sessions/{id}/project
+    project: str
 
 
 class InitScriptsIn(BaseModel):
