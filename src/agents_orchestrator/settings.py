@@ -293,6 +293,11 @@ class Settings(BaseSettings):
     session_message_pair_max_per_hour: int = Field(default=30, ge=1)
     session_reply_window_seconds: int = Field(default=86400, ge=0)
 
+    # change proposals (preset-change-proposals 3.4)
+    proposal_ttl_seconds: int = Field(default=604800, ge=60)
+    proposals_open_max: int = Field(default=20, ge=1)
+    proposal_sweep_seconds: int = Field(default=60, ge=1)
+
     chat_url: str = ""
     chat_token: str = Field(default="", repr=False)
 

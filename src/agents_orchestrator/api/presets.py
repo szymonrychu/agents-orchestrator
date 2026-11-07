@@ -71,6 +71,18 @@ async def _validated(
     if human_only_base is not None:
         dumped = spec.model_dump(mode="json", exclude_unset=True)
         guard_agent_edit(human_only_base, dumped, values, request, privileged=True)
+    return await validated_spec(spec, settings, stored, preset_id), values
+
+
+async def validated_spec(
+    spec: SessionSpec,
+    settings: Settings,
+    stored: dict[str, Any] | None = None,
+    preset_id: uuid.UUID | None = None,
+) -> dict[str, Any]:
+    """`check_spec` with the stored spec's exemptions (a model or image that left the allowlist
+    stays accepted while unchanged) and the preset's derived cache key; returns the spec as it is
+    stored (no defaults filled). No agent guard runs here."""
     stored_spec = None
     if stored is not None:
         try:
@@ -79,7 +91,13 @@ async def _validated(
             stored_spec = None
     derived = default_cache_key(preset_id) if preset_id is not None else None
     await run_in_threadpool(check_spec, spec, settings, stored_spec, derived_cache_key=derived)
-    return spec.model_dump(mode="json", exclude_unset=True), values
+    return spec.model_dump(mode="json", exclude_unset=True)
+
+
+def check_secret_size(value: SecretStr) -> None:
+    """413 when a value does not fit one Kubernetes Secret."""
+    if len(value.get_secret_value().encode()) > SECRET_MAX_BYTES:
+        raise ApiError(413, "secret_too_large", f"a secret holds at most {SECRET_MAX_BYTES} bytes")
 
 
 def _store_failed() -> ApiError:
@@ -478,9 +496,7 @@ async def put_secret(
     """Set the value of a protected variable (a new version). The value is never echoed.
 
     The superleader may not set one on a privileged preset (403 `privileged_target`)."""
-    value = body.value.get_secret_value()
-    if len(value.encode()) > SECRET_MAX_BYTES:
-        raise ApiError(413, "secret_too_large", f"a secret holds at most {SECRET_MAX_BYTES} bytes")
+    check_secret_size(body.value)
     found = await by_ref(conn, preset)
 
     def refuse_privileged(spec: dict) -> None:

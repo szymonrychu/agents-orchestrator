@@ -121,6 +121,69 @@ class PresetView(BaseModel):
     updated_at: datetime
 
 
+class ProposalIn(BaseModel):
+    """A change proposal (plan 3.4): an RFC 7396 merge `patch` of the target's spec, plus new
+    values of protected variables in `secrets`; a value is never stored or echoed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["preset", "schedule", "session"]
+    target: str  # preset id or name, schedule id, session slug
+    patch: dict[str, Any]
+    secrets: dict[str, SecretStr] = {}
+    reason: str = Field(min_length=1, max_length=4000)
+    client_key: str | None = Field(default=None, max_length=200)
+
+
+class ProposalRevise(BaseModel):
+    """A new revision: a full proposal against the target as it is now, not a delta."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    patch: dict[str, Any]
+    secrets: dict[str, SecretStr] = {}
+    reason: str | None = Field(default=None, min_length=1, max_length=4000)
+
+
+class ProposalItemView(BaseModel):
+    path: str
+    before: Any
+    after: Any
+    security: bool
+    grant: bool
+    secret: Literal["set", "changed"] | None
+    decision: Literal["pending", "approved", "rework", "denied"]
+    note: str | None
+
+
+class ProposalRevisionView(BaseModel):
+    revision: int
+    reason: str
+    created_at: datetime
+    reviewed_at: datetime | None
+    outcome: str | None
+    items: list[ProposalItemView]
+
+
+class ProposalView(BaseModel):
+    id: int
+    kind: Literal["preset", "schedule", "session"]
+    target_id: str
+    target_name: str
+    proposer_slug: str
+    proposer_superleader: bool
+    status: Literal[
+        "open", "rework", "stale", "applied", "denied", "withdrawn", "expired", "target_gone"
+    ]
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+    expires_at: datetime
+    closed_at: datetime | None
+    stale: bool  # the live target differs from the current revision's base (read-only check)
+    revisions: list[ProposalRevisionView]
+
+
 class SessionSummary(BaseModel):
     state: Literal["working", "waiting", "booting", "error", "deleting"]
     ready: int

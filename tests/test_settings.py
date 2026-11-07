@@ -669,6 +669,27 @@ def test_session_reply_window(monkeypatch):
         Settings()
 
 
+def test_proposal_settings_defaults_and_bounds(monkeypatch):
+    s = Settings()
+    assert (s.proposal_ttl_seconds, s.proposals_open_max, s.proposal_sweep_seconds) == (
+        604800,
+        20,
+        60,
+    )
+    cases = {
+        "ORCH_PROPOSAL_TTL_SECONDS": ("60", ("59", "0")),
+        "ORCH_PROPOSALS_OPEN_MAX": ("1", ("0", "-1")),
+        "ORCH_PROPOSAL_SWEEP_SECONDS": ("1", ("0", "-1")),
+    }
+    for name, (ok, bads) in cases.items():
+        for bad in bads:
+            monkeypatch.setenv(name, bad)
+            with pytest.raises(SettingsError, match=name):
+                Settings()
+        monkeypatch.setenv(name, ok)
+        Settings()
+
+
 def test_handover_transcript_defaults_and_bounds(monkeypatch):
     s = Settings()
     assert (s.handover_transcript_bytes, s.handover_output_chars) == (65536, 500)
