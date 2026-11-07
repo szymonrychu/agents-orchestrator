@@ -677,9 +677,9 @@ def test_proposal_settings_defaults_and_bounds(monkeypatch):
         60,
     )
     cases = {
-        "ORCH_PROPOSAL_TTL_SECONDS": ("60", ("59", "0")),
+        "ORCH_PROPOSAL_TTL_SECONDS": ("3600", ("3599", "60", "0")),
         "ORCH_PROPOSALS_OPEN_MAX": ("1", ("0", "-1")),
-        "ORCH_PROPOSAL_SWEEP_SECONDS": ("1", ("0", "-1")),
+        "ORCH_PROPOSAL_SWEEP_SECONDS": ("10", ("9", "1", "0")),
     }
     for name, (ok, bads) in cases.items():
         for bad in bads:

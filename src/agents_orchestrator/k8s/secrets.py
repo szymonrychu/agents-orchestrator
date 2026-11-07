@@ -529,9 +529,10 @@ async def _drop_reservation(
 
 def _lock_order(row: tuple) -> tuple[str, str, int]:
     """The order variable locks are taken in, the one `set_secret`, `stage_secret` (called in
-    `sorted()` name order) and `snapshot_versions` use: preset row first when one is locked, then
-    the variables of a preset in Python `sorted()` name order (not the database collation, which
-    may order "TOKEN" and "api_key" differently and so deadlock against them)."""
+    `sorted()` name order) and `snapshot_versions` use: the sort key is (preset id as a string,
+    variable name, version), so names sort in Python `sorted()` order within a preset (not the
+    database collation, which may order "TOKEN" and "api_key" differently and so deadlock
+    against them)."""
     return (str(row[0]), row[1], row[2] if len(row) > 2 else 0)
 
 

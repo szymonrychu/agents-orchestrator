@@ -117,9 +117,9 @@ Every process reads `ORCH_*` variables (the contract `agents-orchestrator-settin
 | `ORCH_SESSION_MESSAGE_QUEUED_MAX` | `20` | api | queued cross-session messages one target session may hold (at least 1); above it a send is refused 409 `target_queue_full` |
 | `ORCH_SESSION_MESSAGE_MAX_HOPS` | `8` | api | longest chain of cross-session messages each sent in the turn that delivered the previous one (at least 1); above it a send is refused 409 `hop_limit` |
 | `ORCH_SESSION_REPLY_WINDOW_SECONDS` | `86400` | api | how long after session B messaged session A, A may message B back although neither is a superleader (reply right; 0 turns it off); the usual limits still apply |
-| `ORCH_PROPOSAL_TTL_SECONDS` | `604800` | api | seconds (at least 60) a change proposal stays open after its latest revision before it expires |
+| `ORCH_PROPOSAL_TTL_SECONDS` | `604800` | api | seconds (at least 3600) a change proposal stays open after its latest revision before it expires |
 | `ORCH_PROPOSALS_OPEN_MAX` | `20` | api | change proposals one session may have open, in rework or stale at once (409 `too_many_proposals` above) |
-| `ORCH_PROPOSAL_SWEEP_SECONDS` | `60` | api | how often the api proposals sweeper runs (expiry, staleness, staged secret cleanup) |
+| `ORCH_PROPOSAL_SWEEP_SECONDS` | `60` | api | seconds (at least 10), how often the api proposals sweeper runs (expiry, staleness, staged secret cleanup) |
 | `ORCH_SESSION_MESSAGE_PAIR_MAX_PER_HOUR` | `30` | api | cross-session messages one pair of sessions may exchange, both directions, in the last hour (at least 1); above it a send is refused 429 `pair_budget` |
 | `ORCH_CHAT_URL` | empty | api | http or https base URL of the chat upstream (the matrix connector's agent listener); the chat relay calls `{ORCH_CHAT_URL}/chat/v1/...`. No query or fragment. Set together with `ORCH_CHAT_TOKEN` or neither; empty answers every `/agent/v1/chat/*` call 503 `chat_unconfigured` |
 | `ORCH_CHAT_TOKEN` | empty | api | bearer token the chat relay presents to the chat upstream (`Authorization: Bearer`); secret, never in a repr, a log line or an error body. Set together with `ORCH_CHAT_URL` or neither, else a settings error naming both |

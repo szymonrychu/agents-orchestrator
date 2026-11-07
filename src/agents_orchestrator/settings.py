@@ -294,9 +294,9 @@ class Settings(BaseSettings):
     session_reply_window_seconds: int = Field(default=86400, ge=0)
 
     # change proposals (preset-change-proposals 3.4)
-    proposal_ttl_seconds: int = Field(default=604800, ge=60)
+    proposal_ttl_seconds: int = Field(default=604800, ge=3600)
     proposals_open_max: int = Field(default=20, ge=1)
-    proposal_sweep_seconds: int = Field(default=60, ge=1)
+    proposal_sweep_seconds: int = Field(default=60, ge=10)
 
     chat_url: str = ""
     chat_token: str = Field(default="", repr=False)
