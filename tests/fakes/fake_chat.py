@@ -34,6 +34,9 @@ DOC_PATH = HERE / "chat_openapi.json"
 SOURCE_PATH = HERE / "chat_openapi.source"
 DOC: dict[str, Any] = json.loads(DOC_PATH.read_text(encoding="utf-8"))
 PREFIX = "/chat/v1"
+# the vendored document also holds the connector's admin and internal routes; the fake serves
+# only the agent listener's routes
+NOT_AGENT_PREFIXES = (PREFIX + "/admin/", PREFIX + "/internal/")
 DEFAULT_ROOM = "!dm:hs"
 BASE_URI = "urn:chat-openapi"
 _REGISTRY = Registry().with_resource(
@@ -47,7 +50,7 @@ def operations() -> dict[tuple[str, str], dict[str, Any]]:
     return {
         (method.upper(), path): op
         for path, item in DOC["paths"].items()
-        if path.startswith(PREFIX + "/")
+        if path.startswith(PREFIX + "/") and not path.startswith(NOT_AGENT_PREFIXES)
         for method, op in item.items()
     }
 
@@ -118,6 +121,7 @@ class _Refusal:
     status: int
     code: str
     message: str
+    extra: dict[str, Any] | None = None
 
 
 @dataclass
@@ -143,7 +147,7 @@ class FakeChat:
         ]
     )
     sends: dict[str, dict[str, Any]] = field(default_factory=dict)
-    _refusals: dict[tuple[str, str], _Refusal] = field(default_factory=dict)
+    _refusals: dict[tuple[str, str, str | None], _Refusal] = field(default_factory=dict)
 
     # ---------------------------------------------------------------------------- control
 
@@ -154,16 +158,30 @@ class FakeChat:
             raise ValueError(f"the vendored document has no route {route!r}")
         return key
 
-    def refuse(self, route: str, status: int, code: str, message: str = "refused") -> None:
-        """Answer every authenticated call of `route` with the documented error `status`."""
+    def refuse(
+        self,
+        route: str,
+        status: int,
+        code: str,
+        message: str = "refused",
+        *,
+        extra: dict[str, Any] | None = None,
+        session: str | None = None,
+    ) -> None:
+        """Answer every authenticated call of `route` with the documented error `status`.
+
+        `extra` is merged into the error object (for example `{"occupier": "<uuid>"}`). With
+        `session` only calls whose `X-Orch-Session` equals it are refused; a refusal for a session
+        wins over the route-wide one.
+        """
         key = self._key(route)
         if not 400 <= status <= 599 or _response_schema(*key, status) is None:
             raise ValueError(f"{route} documents no {status} error answer")
-        self._refusals[key] = _Refusal(status, code, message)
+        self._refusals[(*key, session)] = _Refusal(status, code, message, extra)
 
-    def allow(self, route: str) -> None:
-        """Lift the refusal of `route`."""
-        self._refusals.pop(self._key(route), None)
+    def allow(self, route: str, session: str | None = None) -> None:
+        """Lift the refusal of `route` (the one for `session` when given)."""
+        self._refusals.pop((*self._key(route), session), None)
 
     # --------------------------------------------------------------------------- the app
 
@@ -216,9 +234,9 @@ class FakeChat:
             return self._error(
                 key, 401, "unauthorized", "X-Orch-Session: a session uuid is required"
             )
-        refusal = self._refusals.get(key)
+        refusal = self._refusals.get((*key, str(session))) or self._refusals.get((*key, None))
         if refusal is not None:
-            return self._error(key, refusal.status, refusal.code, refusal.message)
+            return self._error(key, refusal.status, refusal.code, refusal.message, refusal.extra)
         method, template = key
         if method == "POST":
             return self._post(key, call, session)
@@ -268,13 +286,20 @@ class FakeChat:
             },
         )
 
-    def _error(self, key: tuple[str, str], status: int, code: str, message: str) -> tuple[int, Any]:
+    def _error(
+        self,
+        key: tuple[str, str],
+        status: int,
+        code: str,
+        message: str,
+        extra: dict[str, Any] | None = None,
+    ) -> tuple[int, Any]:
         """An error answer in whichever documented shape the route gives this status."""
         schema = _response_schema(*key, status)
         if schema is not None and schema["$ref"].endswith("/HTTPValidationError"):
             body: Any = {"detail": [{"loc": ["path", "id"], "msg": message, "type": code}]}
         else:
-            body = {"error": {"code": code, "message": message}}
+            body = {"error": {"code": code, "message": message, **(extra or {})}}
         return self._answer(key, status, body)
 
     def _answer(self, key: tuple[str, str], status: int, body: Any) -> tuple[int, Any]:

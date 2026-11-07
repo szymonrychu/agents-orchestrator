@@ -7,7 +7,10 @@ chat upstream configured (503 `chat_unconfigured`), then caps the body at 256 Ki
 carries only the chat bearer (`ORCH_CHAT_TOKEN`), `X-Orch-Session` and `X-Orch-Slug` of the caller
 (the slug read from the sessions repo), and for a POST the body and `Content-Type:
 application/json`; no inbound header and never the agent token. The upstream status and JSON body
-come back unchanged; a connection error, a timeout or a non-JSON answer is 503 `chat_unavailable`.
+come back unchanged, except that the `occupier` field of a 409 `room_bound` never reaches the
+agent, and `POST /messages` answered 409 `room_bound` with an occupier is relayed through the
+occupier's session (`chat_relay`, 202 `relayed`); a connection error, a timeout or a non-JSON
+answer is 503 `chat_unavailable`.
 The orchestrator does not validate the bodies (the upstream does) and stores nothing. Log lines
 carry the method, path and status only, never a token or a body.
 """
@@ -21,10 +24,12 @@ import httpx
 from fastapi import APIRouter, FastAPI, Request, Response
 from pydantic import BaseModel, ConfigDict
 
+from agents_orchestrator.api import chat_relay
 from agents_orchestrator.api import forward as forward_core
 from agents_orchestrator.api.agent import Caller, _leads, _session
 from agents_orchestrator.api.errors import ApiError
 from agents_orchestrator.api.sessions import Cfg, Pool
+from agents_orchestrator.settings import Settings
 
 router = APIRouter(prefix="/agent/v1/chat", tags=["agent"])
 
@@ -79,12 +84,8 @@ def _json_body(model: type[BaseModel]) -> dict[str, Any]:
     return {"requestBody": {"required": True, "content": schema}}
 
 
-async def forward(
-    request: Request, method: str, path: str, body: bytes | None, session: str, slug: str
-) -> Response:
-    """Send one call to the chat upstream and hand its status and JSON body back unchanged."""
-    settings = request.app.state.settings
-    target = forward_core.Target(
+def _target(settings: Settings) -> forward_core.Target:
+    return forward_core.Target(
         "chat relay",
         settings.chat_url.rstrip("/") + UPSTREAM_PREFIX,
         settings.chat_token,
@@ -92,8 +93,6 @@ async def forward(
         "chat_unavailable",
         TIMEOUT_SECONDS,
     )
-    status, content = await forward_core.forward(request, target, method, path, body, session, slug)
-    return Response(content, status, media_type="application/json")
 
 
 async def _relay(
@@ -105,6 +104,7 @@ async def _relay(
     path: str,
     *,
     counts_as_update: bool = False,
+    relay_bound: bool = False,
 ) -> Response:
     async with pool.connection() as conn:
         own = await _session(conn, agent)
@@ -113,7 +113,20 @@ async def _relay(
     if not settings.chat_available:
         raise ApiError(503, "chat_unconfigured", "no chat upstream is configured")
     body = await forward_core.capped_body(request) if method == "POST" else None
-    response = await forward(request, method, path, body, str(own.id), own.slug)
+    target = _target(settings)
+    status, content = await forward_core.forward(
+        request, target, method, path, body, str(own.id), own.slug
+    )
+    occupier = chat_relay.occupier_of(status, content) if relay_bound else None
+    if occupier is not None:
+        assert body is not None
+        response = await chat_relay.relay(
+            request, pool, settings, target, agent.id, own, body, occupier, content
+        )
+    else:
+        response = Response(
+            chat_relay.without_occupier(content), status, media_type="application/json"
+        )
     if counts_as_update:
         await forward_core.touch_on_success(pool, own.id, response.status_code)
     return response
@@ -132,11 +145,20 @@ async def rooms(request: Request, agent: Caller, pool: Pool, settings: Cfg) -> R
     "/messages",
     status_code=202,
     summary="Send a message to the chat (leader only)",
-    responses={202: _PASS_THROUGH, **_POST_RESPONSES},
+    responses={
+        202: {
+            "description": "The chat upstream's status and JSON body, unchanged, or ChatRelayed"
+            " when the room is held by another session and the post was relayed through it",
+            "content": {"application/json": {"schema": chat_relay.ChatRelayed.model_json_schema()}},
+        },
+        **_POST_RESPONSES,
+    },
     openapi_extra=_json_body(ChatMessageIn),
 )
 async def send_message(request: Request, agent: Caller, pool: Pool, settings: Cfg) -> Response:
-    return await _relay(request, agent, pool, settings, "POST", "/messages", counts_as_update=True)
+    return await _relay(
+        request, agent, pool, settings, "POST", "/messages", counts_as_update=True, relay_bound=True
+    )
 
 
 @router.post(

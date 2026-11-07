@@ -8915,10 +8915,46 @@
           "202": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "description": "The 202 answer of a relayed post. `message_id` is None only when the notice was lost\nafter the text was posted.",
+                  "properties": {
+                    "message_id": {
+                      "anyOf": [
+                        {
+                          "type": "integer"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Message Id"
+                    },
+                    "send_id": {
+                      "title": "Send Id",
+                      "type": "string"
+                    },
+                    "status": {
+                      "const": "relayed",
+                      "title": "Status",
+                      "type": "string"
+                    },
+                    "via": {
+                      "title": "Via",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "via",
+                    "send_id",
+                    "message_id"
+                  ],
+                  "title": "ChatRelayed",
+                  "type": "object"
+                }
               }
             },
-            "description": "The chat upstream's status and JSON body, unchanged"
+            "description": "The chat upstream's status and JSON body, unchanged, or ChatRelayed when the room is held by another session and the post was relayed through it"
           },
           "401": {
             "description": "unauthorized: missing or invalid agent credentials"

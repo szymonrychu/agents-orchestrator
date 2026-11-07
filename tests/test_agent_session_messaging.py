@@ -389,6 +389,70 @@ async def test_pair_budget_stops_cross_turn_ping_pong(pool, dsn):
     assert r.status_code == 202, r.text
 
 
+async def _said(pool, sender: Sess, receiver: Sess, *, hours_ago: float = 0) -> None:
+    """A message sender -> receiver of any status, `hours_ago` old."""
+    row = await insert_message(pool, receiver.id)
+    await _exec(
+        pool,
+        "UPDATE messages SET sender_session_id = %s, sender_slug = %s, hop = 1,"
+        " created_at = now() - make_interval(secs => %s::float8 * 3600) WHERE id = %s",
+        (sender.id, sender.slug, hours_ago, row["id"]),
+    )
+
+
+async def test_reply_right_allows_answer_within_window(pool, dsn):
+    app = _app(pool, dsn)
+    a = await hive(pool, "rr-a")
+    b = await alone(pool, "rr-b")
+    assert_error(await _send(app, a, b.slug), 403, "target_not_superleader")
+    await _said(pool, b, a)
+    r = await _send(app, a, b.slug)
+    assert r.status_code == 202, r.text
+
+
+async def test_reply_right_expires(pool, dsn):
+    app = _app(pool, dsn)
+    a = await hive(pool, "re-a")
+    b = await alone(pool, "re-b")
+    await _said(pool, b, a, hours_ago=25)
+    r = await _send(app, a, b.slug)
+    assert_error(r, 403, "target_not_superleader")
+    assert "24 hours" in r.json()["error"]["message"]
+
+
+async def test_reply_right_off_with_zero(pool, dsn):
+    app = _app(pool, dsn, session_reply_window_seconds=0)
+    a = await hive(pool, "rz-a")
+    b = await alone(pool, "rz-b")
+    await _said(pool, b, a)
+    r = await _send(app, a, b.slug)
+    assert_error(r, 403, "target_not_superleader")
+    assert "hours" not in r.json()["error"]["message"]
+
+
+async def test_reply_right_is_not_granted_by_own_message(pool, dsn):
+    app = _app(pool, dsn)
+    a = await hive(pool, "ro-a")
+    b = await alone(pool, "ro-b")
+    await _said(pool, a, b)
+    assert_error(await _send(app, a, b.slug), 403, "target_not_superleader")
+
+
+async def test_reply_right_respects_limits(pool, dsn):
+    a = await hive(pool, "rl-a")
+    b = await alone(pool, "rl-b")
+    await _said(pool, b, a)
+    app = _app(pool, dsn, session_message_pair_max_per_hour=1)
+    assert_error(await _send(app, a, b.slug), 429, "pair_budget")
+    c = await hive(pool, "rl-c")
+    d = await alone(pool, "rl-d")
+    await _said(pool, d, c)
+    app = _app(pool, dsn, session_message_queued_max=1)
+    other = await alone(pool, "rl-e")
+    await _said(pool, other, d)
+    assert_error(await _send(app, c, d.slug), 409, "target_queue_full")
+
+
 async def test_session_tools_parity(pool, dsn):
     """The released any-mcp orchestrator plugin drives sessions_list and session_send against
     the real agent routes."""
