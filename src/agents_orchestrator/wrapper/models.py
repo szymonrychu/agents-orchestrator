@@ -51,6 +51,8 @@ class Snapshot(_Model):
     workdir: str | None = None
     created_at: datetime | None = None
     turns_completed: int = 0
+    # wrapper 0.10.0, additive: running subagents; absent on older wrappers
+    outstanding_subagents: int = 0
     # wrapper 0.7.0, additive: absent on older wrappers
     waiting: Waiting | None = None
     # wrapper 0.7.1, additive: "unavailable" while the requested permission mode cannot be used

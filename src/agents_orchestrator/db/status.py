@@ -109,6 +109,7 @@ async def upsert_status(
     waiting: tuple[str, Timestamp] | None = None,
     bootstrap: tuple[dict[str, Any] | None, dict[str, Any] | None] = (None, None),
     permission_mode: tuple[str | None, str | None] = (None, None),
+    outstanding_subagents: int = 0,
 ) -> StateChange:
     """Seed the row from a wrapper snapshot on attach.
 
@@ -116,6 +117,8 @@ async def upsert_status(
     (reason, since) or None; `bootstrap` is (latest step, failed step);
     `permission_mode` is (state, reason)) except free_since,
     which moves to now() only when the snapshot is idle and the stored state was not.
+    A snapshot with no outstanding subagents empties `background_subagents` (a lost stop event
+    cannot leave a stale entry); with some, the stored map is kept.
     """
     _check_state(state)
     old = await _ensure_row(conn, agent_id)
@@ -129,6 +132,7 @@ async def upsert_status(
         " last_seq=%s, waiting_reason=%s, waiting_since=%s::timestamptz,"
         " bootstrap_step=%s, bootstrap_failure=%s,"
         " permission_mode_state=%s, permission_mode_reason=%s,"
+        " background_subagents = CASE WHEN %s THEN '{}'::jsonb ELSE background_subagents END,"
         " updated_at=now() WHERE agent_id=%s",
         (
             state,
@@ -145,6 +149,7 @@ async def upsert_status(
             _jsonb(bootstrap[1]),
             permission_mode[0],
             permission_mode[1],
+            outstanding_subagents == 0,
             agent_id,
         ),
     )
@@ -271,6 +276,44 @@ async def set_context(
         "UPDATE agent_status SET context_used_tokens=%s, context_window_tokens=%s,"
         " context_pct=%s, updated_at=now() WHERE agent_id=%s",
         (used, window, pct, agent_id),
+    )
+
+
+async def clear_background(conn: psycopg.AsyncConnection, agent_id: uuid.UUID) -> bool:
+    """Empty the background map (claude restarted: its subagents died with the process).
+    True when something was cleared."""
+    cur = await conn.execute(
+        "UPDATE agent_status SET background_subagents = '{}'::jsonb, updated_at=now()"
+        " WHERE agent_id=%s AND background_subagents <> '{}'::jsonb",
+        (agent_id,),
+    )
+    return cur.rowcount > 0
+
+
+async def set_background(
+    conn: psycopg.AsyncConnection,
+    agent_id: uuid.UUID,
+    subagent_id: str,
+    started_at: Timestamp,
+) -> None:
+    """A background subagent started (`started_at` = the event's wrapper time) or, with None,
+    stopped. The map is id -> start time; the eligibility fragment ignores entries older than
+    BACKGROUND_STALE_SECONDS."""
+    await _ensure_row(conn, agent_id)
+    if started_at is None:
+        await conn.execute(
+            "UPDATE agent_status SET background_subagents = background_subagents - %s::text,"
+            " updated_at=now() WHERE agent_id=%s",
+            (subagent_id, agent_id),
+        )
+        return
+    stamp = started_at.isoformat() if isinstance(started_at, datetime) else started_at
+    await conn.execute(
+        "UPDATE agent_status SET"
+        " background_subagents ="
+        " jsonb_set(background_subagents, ARRAY[%s::text], to_jsonb(%s::text)),"
+        " updated_at=now() WHERE agent_id=%s",
+        (subagent_id, stamp, agent_id),
     )
 
 

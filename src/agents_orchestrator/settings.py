@@ -189,6 +189,16 @@ class Settings(BaseSettings):
     inactivity_close_seconds: int = 0
     #: Seconds the leader has to hand off after the hard-limit notice; 0 means no window.
     inactivity_handoff_seconds: int = Field(default=300, ge=0, le=3600)
+    #: Size budget of the predecessor's rendered transcript attached to a handover notice (the
+    #: oldest lines are dropped first), and the cap on each tool output in it.
+    handover_transcript_bytes: int = Field(default=65536, ge=8192, le=1048576)
+    handover_output_chars: int = Field(default=500, ge=100, le=4000)
+    #: Rollout: seconds the leader has, once only its pod is outdated, to hand over at a natural
+    #: boundary before the reconciler queues the forced `rollout` handover; and the cap after
+    #: which background work stops holding a rollout (members since the rollout began, the
+    #: leader since its forced request was queued). The cap must exceed the window.
+    rollout_handover_seconds: int = Field(default=1800, ge=0, le=86400)
+    rollout_max_defer_seconds: int = Field(default=14400, ge=600, le=86400)
 
     wrapper_send_timeout_seconds: float = 15
     #: Rendered into every wrapper as `sessions.interrupt_settle_seconds`; the priority lane's
@@ -592,6 +602,14 @@ class Settings(BaseSettings):
         settle = info.data.get("ambiguous_settle_seconds")
         if settle is not None and v <= settle:
             raise _Bad("must exceed ORCH_AMBIGUOUS_SETTLE_SECONDS")
+        return v
+
+    @field_validator("rollout_max_defer_seconds")
+    @classmethod
+    def _check_rollout_cap(cls, v: int, info: ValidationInfo) -> int:
+        window = info.data.get("rollout_handover_seconds")
+        if window is not None and v <= window:
+            raise _Bad("must exceed ORCH_ROLLOUT_HANDOVER_SECONDS")
         return v
 
     @field_validator("discard_hook_read_timeout_seconds")

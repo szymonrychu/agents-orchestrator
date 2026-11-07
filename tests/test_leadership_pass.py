@@ -21,6 +21,7 @@ from psycopg.rows import dict_row
 from agents_orchestrator.db import leadership
 from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE
 from agents_orchestrator.dispatcher import Dispatcher
+from agents_orchestrator.dispatcher import hive as hive_module
 from agents_orchestrator.dispatcher.loop import CHANNELS
 from agents_orchestrator.settings import Settings
 
@@ -196,16 +197,138 @@ async def test_handover_named(pool):
     )
 
 
-async def test_handover_any(pool):
+async def status(pool, agent_id, state: str, ctx: float | None, *, bg: bool = False) -> None:
+    """Set an agent's state and context %; `bg` gives it a running background subagent."""
+    await run(
+        pool,
+        "UPDATE agent_status SET state = %s, context_pct = %s,"
+        " background_subagents = CASE WHEN %s"
+        "  THEN jsonb_build_object('sub', now()::text) ELSE '{}'::jsonb END"
+        " WHERE agent_id = %s",
+        (state, ctx, bg, agent_id),
+    )
+
+
+async def test_successor_prefers_idle_low_context(pool):
     c, (a0, a1, a2) = await hive(pool)
     await set_leader(pool, c["id"], a0["id"], epoch=3)
-    await free_ago(pool, a0["id"], 900)  # the leader itself is never picked
-    await free_ago(pool, a1["id"], 10)
-    await free_ago(pool, a2["id"], 300)  # free the longest of the others
+    await status(pool, a0["id"], "idle", 5)  # the leader itself is never picked
+    await status(pool, a1["id"], "idle", 40)
+    await status(pool, a2["id"], "idle", 10)
+    await free_ago(pool, a1["id"], 900)  # free the longest no longer decides
     rid = await request(pool, c["id"], "handover", a0["id"], None, "done", 3)
     change = await lpass(pool, c["id"])
     assert change is not None and (change.agent_id, change.epoch) == (a2["id"], 4)
     assert await decided(pool, rid) == ("applied", None)
+
+
+async def test_successor_ranks_background_busy_last(pool):
+    c, (a0, a1, a2) = await hive(pool)
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
+    await status(pool, a1["id"], "idle", 40)
+    await status(pool, a2["id"], "idle", 10, bg=True)
+    await free_ago(pool, a2["id"], 900)
+    await request(pool, c["id"], "handover", a0["id"], None, "done", 3)
+    change = await lpass(pool, c["id"])
+    assert change is not None and change.agent_id == a1["id"]
+
+
+async def test_successor_falls_back_above_threshold(pool):
+    # default compaction 95: threshold 80. Every peer above it: the lowest context is picked.
+    c, (a0, a1, a2) = await hive(pool)
+    await set_leader(pool, c["id"], a2["id"], epoch=3)
+    await status(pool, a0["id"], "idle", 90)
+    await status(pool, a1["id"], "idle", 85)
+    await shrink(pool, c["id"], 2)
+    change = await lpass(pool, c["id"])
+    assert change is not None and (change.agent_id, change.reason) == (a1["id"], "scale_down")
+
+    # below the threshold beats idle: a busy agent at 40 before an idle one at 85
+    c, (b0, b1, b2) = await hive(pool)
+    await set_leader(pool, c["id"], b2["id"], epoch=3)
+    await status(pool, b0["id"], "idle", 85)
+    await status(pool, b1["id"], "busy", 40)
+    await shrink(pool, c["id"], 2)
+    change = await lpass(pool, c["id"])
+    assert change is not None and change.agent_id == b1["id"]
+
+    # the threshold follows the policy and the spec: compaction 50 makes it 35, so both
+    # are above it and the idle one wins
+    half = leadership.PassPolicy(default_auto_compact_pct=50)
+    for policy, spec_pct in ((half, None), (None, 50)):
+        c, (d0, d1, d2) = await hive(pool)
+        if spec_pct is not None:
+            await run(
+                pool,
+                "UPDATE sessions SET spec = spec || jsonb_build_object('auto_compact_pct', %s::int)"
+                " WHERE id = %s",
+                (spec_pct, c["id"]),
+            )
+        await set_leader(pool, c["id"], d2["id"], epoch=3)
+        await status(pool, d0["id"], "idle", 85)
+        await status(pool, d1["id"], "busy", 40)
+        await shrink(pool, c["id"], 2)
+        async with pool.connection() as conn:
+            if policy is None:
+                change = await leadership.leadership_pass(conn, c["id"])
+            else:
+                change = await leadership.leadership_pass(conn, c["id"], policy)
+        assert change is not None and change.agent_id == d0["id"]
+
+
+async def test_leader_lost_and_scale_down_use_successor(pool):
+    c, (a0, a1, a2, a3) = await hive(pool, 4)
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
+    await status(pool, a1["id"], "busy", 5)
+    await status(pool, a2["id"], "idle", 40)
+    await status(pool, a3["id"], "idle", 10)
+    await free_ago(pool, a2["id"], 900)
+    await run(pool, "UPDATE agents SET gone_at = now() WHERE id = %s", (a0["id"],))
+    change = await lpass(pool, c["id"])
+    assert change is not None and (change.agent_id, change.reason) == (a3["id"], "leader_lost")
+
+    await shrink(pool, c["id"], 3)  # a3 leaves
+    change = await lpass(pool, c["id"])
+    assert change is not None and (change.agent_id, change.reason) == (a2["id"], "scale_down")
+
+
+async def test_set_leader_records_previous(pool):
+    c, (a0, a1, _a2) = await hive(pool)
+    change = await lpass(pool, c["id"])
+    assert change is not None and change.previous_agent_id is None
+    assert (await leader_row(pool, c["id"]))["previous_agent_id"] is None
+    await request(pool, c["id"], "handover", a0["id"], a1["id"], "x", 1)
+    change = await lpass(pool, c["id"])
+    assert change is not None and change.previous_agent_id == a0["id"]
+    row = await leader_row(pool, c["id"])
+    assert (row["agent_id"], row["previous_agent_id"]) == (a1["id"], a0["id"])
+
+
+async def test_note_candidates_equal_pass_pick(pool):
+    """Ping-pong regression: the note's first candidate is the agent the pass would pick."""
+    # (state, context %, background) for the leader then three peers; threshold 80
+    mixes = [
+        [("idle", 90, False), ("idle", 40, False), ("idle", 10, False), ("busy", 5, False)],
+        [("idle", 90, False), ("idle", 40, False), ("idle", 10, True), ("busy", 20, False)],
+        [("busy", 85, False), ("busy", 30, False), ("idle", None, False), ("idle", 70, False)],
+        [("idle", 95, False), ("idle", 85, False), ("busy", 50, False), ("idle", 79, True)],
+        [("idle", 82, False), ("busy", None, False), ("busy", 60, True), ("busy", 12, False)],
+    ]
+    for mix in mixes:
+        c, agents = await hive(pool, 4)
+        await set_leader(pool, c["id"], agents[0]["id"])
+        for agent, (state, ctx, bg) in zip(agents, mix, strict=True):
+            await status(pool, agent["id"], state, ctx, bg=bg)
+        async with pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(hive_module._CANDIDATES, (c["id"], agents[0]["id"], 80))
+                note = await cur.fetchall()
+            pick = await leadership._successor(
+                conn, c["id"], agents[0]["id"], leadership.PassPolicy()
+            )
+        assert note, mix
+        by_pod = {a["pod_name"]: a["id"] for a in agents}
+        assert by_pod[note[0]["pod_name"]] == pick, mix
 
 
 async def test_handover_rejections(pool):
@@ -287,9 +410,9 @@ async def test_user_override(pool):
 async def test_lost_leader_fallback(pool):
     c, (a0, a1, a2) = await hive(pool)
     await set_leader(pool, c["id"], a0["id"], epoch=3)
-    await free_ago(pool, a1["id"], 100)
-    await free_ago(pool, a2["id"], 10)
-    # gone: replaced at once by the ready agent free the longest
+    await status(pool, a1["id"], "idle", 10)
+    await status(pool, a2["id"], "idle", 40)
+    # gone: replaced at once by the successor (lowest context)
     await run(pool, "UPDATE agents SET gone_at = now() WHERE id = %s", (a0["id"],))
     change = await lpass(pool, c["id"])
     assert change is not None
@@ -299,7 +422,7 @@ async def test_lost_leader_fallback(pool):
     assert await lpass(pool, c["id"]) is None
     row = await leader_row(pool, c["id"])
     assert row["unready_since"] is not None and (row["agent_id"], row["epoch"]) == (a1["id"], 4)
-    # past the grace: the ready agent free the longest takes over
+    # past the grace: the successor among the ready agents takes over
     await run(
         pool,
         "UPDATE session_leaders SET unready_since = now() - make_interval(secs => %s)"
@@ -497,22 +620,7 @@ async def test_unknown_session_is_a_no_op(pool):
     assert await lpass(pool, uuid.uuid4()) is None
 
 
-# ---------------------------------------------------------------- leader lease
-
-
-async def lease_hive(pool, *, lease: int = 60, n: int = 3, age: int = 120) -> tuple:
-    """A hive whose spec sets `leader_lease_seconds`; a0 leads with a term `age` s old."""
-    c = await insert_session(
-        pool, spec={"replicas": n, "max_replicas": 4, "leader_lease_seconds": lease}
-    )
-    agents = []
-    for i in range(n):
-        a = await insert_agent(pool, c["id"], ordinal=i, ready=True, wrapper_session_id=f"s{i}")
-        await set_agent_status(pool, a["id"], state="idle")
-        agents.append(a)
-    await set_leader(pool, c["id"], agents[0]["id"], epoch=3)
-    await age_term(pool, c["id"], age)
-    return c, agents
+# ---------------------------------------------------------------- long-term leader
 
 
 async def age_term(pool, session_id, seconds: int) -> None:
@@ -524,86 +632,15 @@ async def age_term(pool, session_id, seconds: int) -> None:
     )
 
 
-async def test_lease_expiry_hands_over_idle_leader(pool, dsn):
-    c, (a0, a1, a2) = await lease_hive(pool)
-    await free_ago(pool, a1["id"], 100)
-    await free_ago(pool, a2["id"], 10)
-    before = (await leader_row(pool, c["id"]))["since"]
-    async with Notes(dsn) as notes:
-        change = await lpass(pool, c["id"])
-        got = await notes.drain()
-    assert change is not None
-    assert (change.agent_id, change.epoch, change.reason) == (a1["id"], 4, "lease_expired")
-    row = await leader_row(pool, c["id"])
-    assert (row["agent_id"], row["epoch"], row["reason"]) == (a1["id"], 4, "lease_expired")
-    assert row["since"] > before
-    assert got == [
-        {
-            "session_id": str(c["id"]),
-            "agent_id": str(a1["id"]),
-            "epoch": 4,
-            "reason": "lease_expired",
-        }
-    ]
-    # the fresh term is not expired: the next pass changes nothing
-    assert await lpass(pool, c["id"]) is None
-
-
-async def test_lease_waits_for_turn_boundary(pool):
-    c, (a0, a1, _a2) = await lease_hive(pool)
-    await free_ago(pool, a0["id"], 0, state="busy")
-    assert await lpass(pool, c["id"]) is None
-    await free_ago(pool, a0["id"], 0, state="idle")
-    for status in ("dispatching", "verifying"):
-        msg = await insert_message(pool, c["id"], status=status, agent_id=a0["id"])
-        assert await lpass(pool, c["id"]) is None
-        assert (await leader_row(pool, c["id"]))["agent_id"] == a0["id"]
-        await run(pool, "UPDATE messages SET status = 'sent' WHERE id = %s", (msg["id"],))
-    change = await lpass(pool, c["id"])
-    assert change is not None
-    assert (change.epoch, change.reason) == (4, "lease_expired")
-    assert change.agent_id != a0["id"]
-
-
-async def test_lease_without_peer_keeps_leader(pool):
-    c, (a0, a1, a2) = await lease_hive(pool)
-    await run(pool, "UPDATE agents SET ready = false WHERE id IN (%s, %s)", (a1["id"], a2["id"]))
-    assert await lpass(pool, c["id"]) is None
-    row = await leader_row(pool, c["id"])
-    assert (row["agent_id"], row["epoch"], row["reason"]) == (a0["id"], 3, "initial")
-    # a peer turning ready is handed the lease on the next pass
-    await run(pool, "UPDATE agents SET ready = true WHERE id = %s", (a1["id"],))
-    change = await lpass(pool, c["id"])
-    assert change is not None and change.agent_id == a1["id"]
-
-
-async def test_lease_candidates(pool):
-    c_exp, _ = await lease_hive(pool)
-    c_fresh, _ = await lease_hive(pool, lease=3600, age=120)
-    c_none, (n0, _n1, _n2) = await hive(pool)
-    await set_leader(pool, c_none["id"], n0["id"])
-    await age_term(pool, c_none["id"], 10**6)
+async def test_long_term_leader_is_never_moved(pool):
+    c, (a0, _a1, _a2) = await hive(pool)
+    await set_leader(pool, c["id"], a0["id"])
+    await age_term(pool, c["id"], 10 * 3600)
+    before = await leader_row(pool, c["id"])
     async with pool.connection() as conn:
-        got = set(await leadership.leadership_candidates(conn))
-    assert c_exp["id"] in got
-    assert c_fresh["id"] not in got and c_none["id"] not in got
-    assert await lpass(pool, c_none["id"]) is None
-    assert (await leader_row(pool, c_none["id"]))["agent_id"] == n0["id"]
-
-
-async def test_queued_handover_before_lease(pool):
-    c, (a0, a1, a2) = await lease_hive(pool)
-    await free_ago(pool, a1["id"], 100)
-    await free_ago(pool, a2["id"], 10)
-    rid = await request(pool, c["id"], "user", None, a2["id"])
-    change = await lpass(pool, c["id"])
-    assert change is not None
-    assert (change.agent_id, change.epoch, change.reason) == (a2["id"], 4, "user")
-    assert await decided(pool, rid) == ("applied", None)
-    row = await leader_row(pool, c["id"])
-    assert (row["agent_id"], row["epoch"], row["reason"]) == (a2["id"], 4, "user")
-    # the new leader started a fresh term, so the lease did not fire in the same pass
+        assert c["id"] not in set(await leadership.leadership_candidates(conn))
     assert await lpass(pool, c["id"]) is None
+    assert await leader_row(pool, c["id"]) == before
 
 
 # ---------------------------------------------------------------- auto handover
@@ -627,71 +664,12 @@ async def shrink(pool, session_id, replicas: int) -> None:
     )
 
 
-async def test_compaction_hands_over_at_boundary(pool):
+async def test_compacted_leader_keeps_leading(pool):
     c, (a0, a1, a2) = await hive(pool)
     await set_leader(pool, c["id"], a0["id"], epoch=3)
-    await free_ago(pool, a1["id"], 100)
+    await free_ago(pool, a1["id"], 100)  # an idle peer that could take over
     await free_ago(pool, a2["id"], 10)
     await compacted(pool, a0["id"])
-    change = await lpass(pool, c["id"])
-    assert change is not None
-    assert (change.agent_id, change.epoch, change.reason) == (a1["id"], 4, "compaction")
-    row = await leader_row(pool, c["id"])
-    assert (row["agent_id"], row["epoch"], row["reason"]) == (a1["id"], 4, "compaction")
-    assert await lpass(pool, c["id"]) is None
-
-
-async def test_compaction_waits_for_turn_boundary(pool):
-    c, (a0, a1, _a2) = await hive(pool)
-    await set_leader(pool, c["id"], a0["id"], epoch=3)
-    await compacted(pool, a0["id"])
-    await free_ago(pool, a0["id"], 0, state="busy")
-    assert await lpass(pool, c["id"]) is None
-    await free_ago(pool, a0["id"], 0, state="idle")
-    for status in ("dispatching", "verifying"):
-        msg = await insert_message(pool, c["id"], status=status, agent_id=a0["id"])
-        assert await lpass(pool, c["id"]) is None
-        assert (await leader_row(pool, c["id"]))["agent_id"] == a0["id"]
-        await run(pool, "UPDATE messages SET status = 'sent' WHERE id = %s", (msg["id"],))
-    change = await lpass(pool, c["id"])
-    assert change is not None
-    assert (change.epoch, change.reason) == (4, "compaction")
-    assert change.agent_id != a0["id"]
-
-
-async def test_compaction_without_peer_retries(pool):
-    c, (a0, a1, a2) = await hive(pool)
-    await set_leader(pool, c["id"], a0["id"], epoch=3)
-    await run(pool, "UPDATE agents SET ready = false WHERE id IN (%s, %s)", (a1["id"], a2["id"]))
-    await age_term(pool, c["id"], 60)
-    await run(
-        pool, "UPDATE agent_status SET compaction_at = now() WHERE agent_id = %s", (a0["id"],)
-    )
-    before = await leader_row(pool, c["id"])
-    async with pool.connection() as conn:
-        assert c["id"] in await leadership.leadership_candidates(conn)
-    assert await lpass(pool, c["id"]) is None
-    assert await leader_row(pool, c["id"]) == before
-    async with pool.connection() as conn:
-        assert c["id"] in await leadership.leadership_candidates(conn)  # retried every pass
-    await run(pool, "UPDATE agents SET ready = true WHERE id = %s", (a1["id"],))
-    change = await lpass(pool, c["id"])
-    assert change is not None
-    assert (change.agent_id, change.epoch, change.reason) == (a1["id"], 4, "compaction")
-    # a new term starts clean: the old trigger does not follow a0 back into leadership
-    await request(pool, c["id"], "user", None, a0["id"], "user", None)
-    change = await lpass(pool, c["id"])
-    assert change is not None and (change.agent_id, change.reason) == (a0["id"], "user")
-    assert await lpass(pool, c["id"]) is None
-    async with pool.connection() as conn:
-        assert c["id"] not in await leadership.leadership_candidates(conn)
-
-
-async def test_compaction_before_term_ignored(pool):
-    c, (a0, a1, _a2) = await hive(pool)
-    await set_leader(pool, c["id"], a0["id"], epoch=3)
-    await compacted(pool, a0["id"], after_term=False)  # reported before the term began
-    await compacted(pool, a1["id"])  # a non-leader
     async with pool.connection() as conn:
         assert c["id"] not in await leadership.leadership_candidates(conn)
     assert await lpass(pool, c["id"]) is None
@@ -757,8 +735,8 @@ async def test_picks_skip_leaving_agents(pool):
 
     c, (a0, a1, a2) = await hive(pool)
     await set_leader(pool, c["id"], a0["id"], epoch=3)
-    await free_ago(pool, a1["id"], 10)
-    await free_ago(pool, a2["id"], 1000)  # free the longest, but leaving and still ready
+    await status(pool, a1["id"], "idle", 50)
+    await status(pool, a2["id"], "idle", 5)  # the successor, but leaving and still ready
     await shrink(pool, c["id"], 2)
     # named and user targets that leave are rejected
     named = await request(pool, c["id"], "handover", a0["id"], a2["id"], "full", 3)
@@ -780,7 +758,7 @@ async def test_picks_skip_leaving_agents(pool):
 async def test_auto_handover_candidates(pool):
     c_ok, (o0, _o1, _o2) = await hive(pool)  # healthy, uncompacted, staying
     await set_leader(pool, c_ok["id"], o0["id"])
-    c_comp, (p0, _p1, _p2) = await hive(pool)
+    c_comp, (p0, _p1, _p2) = await hive(pool)  # compacted: an advisory only
     await set_leader(pool, c_comp["id"], p0["id"])
     await compacted(pool, p0["id"])
     c_leave, (q0, _q1, q2) = await hive(pool)
@@ -788,26 +766,7 @@ async def test_auto_handover_candidates(pool):
     await shrink(pool, c_leave["id"], 2)
     async with pool.connection() as conn:
         got = set(await leadership.leadership_candidates(conn))
-    assert c_comp["id"] in got and c_leave["id"] in got and c_ok["id"] not in got
-
-    # a hive running one agent: the compacted leader stays a candidate, unchanged
-    c_one = await insert_session(pool, spec={"replicas": 1, "max_replicas": 4})
-    s0 = await insert_agent(pool, c_one["id"], ordinal=0, ready=True, wrapper_session_id="s0")
-    await set_agent_status(pool, s0["id"], state="idle")
-    await set_leader(pool, c_one["id"], s0["id"])
-    await compacted(pool, s0["id"])
-    async with pool.connection() as conn:
-        assert c_one["id"] in set(await leadership.leadership_candidates(conn))
-    assert await lpass(pool, c_one["id"]) is None
-    # scaled up: still unchanged while the peer is not ready, then it takes over
-    await shrink(pool, c_one["id"], 2)
-    s1 = await insert_agent(pool, c_one["id"], ordinal=1, ready=False, wrapper_session_id="s1")
-    await set_agent_status(pool, s1["id"], state="idle")
-    assert await lpass(pool, c_one["id"]) is None
-    await run(pool, "UPDATE agents SET ready = true WHERE id = %s", (s1["id"],))
-    change = await lpass(pool, c_one["id"])
-    assert change is not None
-    assert (change.agent_id, change.reason) == (s1["id"], "compaction")
+    assert c_leave["id"] in got and c_comp["id"] not in got and c_ok["id"] not in got
 
     # an alone session is never a candidate
     c_alone = await insert_session(pool, spec={"replicas": 1, "max_replicas": 1})
@@ -818,20 +777,12 @@ async def test_auto_handover_candidates(pool):
         assert c_alone["id"] not in set(await leadership.leadership_candidates(conn))
 
 
-async def test_compaction_before_lease(pool):
-    c, (a0, a1, a2) = await lease_hive(pool)
-    await compacted(pool, a0["id"])
-    change = await lpass(pool, c["id"])
-    assert change is not None
-    assert (change.epoch, change.reason) == (4, "compaction")
-
-
 async def test_steps_reread_leader_after_change(pool):
-    c, (a0, a1, a2) = await lease_hive(pool)
+    c, (a0, a1, a2) = await hive(pool)
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
     await run(
         pool, "UPDATE session_leaders SET agent_id = %s WHERE session_id = %s", (a2["id"], c["id"])
     )
-    await compacted(pool, a2["id"])  # the leaving leader compacted and outlived its lease
     await shrink(pool, c["id"], 2)
     change = await lpass(pool, c["id"])
     assert change is not None
@@ -839,3 +790,80 @@ async def test_steps_reread_leader_after_change(pool):
     row = await leader_row(pool, c["id"])
     assert (row["epoch"], row["reason"]) == (4, "scale_down")
     assert row["agent_id"] in (a0["id"], a1["id"])
+
+
+# ---------------------------------------------------------------- the true boundary
+
+
+async def age_request(pool, request_id: int, seconds: int) -> None:
+    await run(
+        pool,
+        "UPDATE leadership_requests SET created_at = now() - make_interval(secs => %s)"
+        " WHERE id = %s",
+        (seconds, request_id),
+    )
+
+
+async def test_agent_handover_waits_mid_turn(pool):
+    c, (a0, a1, _) = await hive(pool)
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
+    await status(pool, a0["id"], "busy", 10)
+    rid = await request(pool, c["id"], "handover", a0["id"], a1["id"], "context full", 3)
+    assert await lpass(pool, c["id"]) is None
+    assert (await rows(pool, "SELECT status FROM leadership_requests WHERE id = %s", (rid,)))[0][
+        "status"
+    ] == "queued"
+    await status(pool, a0["id"], "idle", 10)
+    change = await lpass(pool, c["id"])
+    assert change is not None and change.agent_id == a1["id"]
+    assert await decided(pool, rid) == ("applied", None)
+
+
+async def test_agent_handover_waits_for_background(pool):
+    c, (a0, a1, _) = await hive(pool)
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
+    await status(pool, a0["id"], "idle", 10, bg=True)
+    rid = await request(pool, c["id"], "handover", a0["id"], a1["id"], "summary text", 3)
+    assert await lpass(pool, c["id"]) is None
+    assert (await rows(pool, "SELECT status FROM leadership_requests WHERE id = %s", (rid,)))[0][
+        "status"
+    ] == "queued"
+    await status(pool, a0["id"], "idle", 10)
+    change = await lpass(pool, c["id"])
+    assert change is not None and change.agent_id == a1["id"]
+    assert change.reason == "handover: summary text"
+
+
+async def test_rollout_handover_ignores_background_when_overdue(pool):
+    c, (a0, a1, _) = await hive(pool)
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
+    await status(pool, a0["id"], "idle", 10, bg=True)
+    fresh = await request(pool, c["id"], "handover", a0["id"], a1["id"], "rollout", 3)
+    assert await lpass(pool, c["id"]) is None
+    await age_request(pool, fresh, 14400 + 60)
+    # overdue only lifts the background wait, never the turn boundary
+    await status(pool, a0["id"], "busy", 10, bg=True)
+    assert await lpass(pool, c["id"]) is None
+    await status(pool, a0["id"], "idle", 10, bg=True)
+    change = await lpass(pool, c["id"])
+    assert change is not None and change.agent_id == a1["id"]
+    assert await decided(pool, fresh) == ("applied", None)
+
+
+async def test_non_rollout_handover_never_overdue(pool):
+    c, (a0, a1, _) = await hive(pool)
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
+    await status(pool, a0["id"], "idle", 10, bg=True)
+    rid = await request(pool, c["id"], "handover", a0["id"], a1["id"], "context", 3)
+    await age_request(pool, rid, 14400 + 60)
+    assert await lpass(pool, c["id"]) is None
+
+
+async def test_user_make_leader_never_waits(pool):
+    c, (a0, a1, _) = await hive(pool)
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
+    await status(pool, a0["id"], "busy", 10, bg=True)
+    rid = await request(pool, c["id"], "user", None, a1["id"], "user", None)
+    change = await lpass(pool, c["id"])
+    assert change is not None and change.agent_id == a1["id"]
+    assert await decided(pool, rid) == ("applied", None)

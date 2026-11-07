@@ -153,15 +153,12 @@ def _settings(monkeypatch: pytest.MonkeyPatch, **env: str) -> Settings:
     return Settings()  # type: ignore[call-arg]
 
 
-def test_lease_and_autoclose_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
-    for ok in (60, 604800):
-        assert SessionSpec(replicas=1, max_replicas=2, leader_lease_seconds=ok)
-    for bad in (59, 604801):
-        assert "leader_lease_seconds" in refused({"max_replicas": 2, "leader_lease_seconds": bad})
-    message = "leader_lease_seconds requires a hive session (max_replicas > 1)"
-    assert message in refused({"leader_lease_seconds": 60})
-    assert message in refused({"replicas": 1, "max_replicas": 1, "leader_lease_seconds": 60})
+def test_spec_refuses_leader_lease_seconds() -> None:
+    with pytest.raises(ValidationError):
+        SessionSpec.model_validate({"max_replicas": 3, "leader_lease_seconds": 600})
 
+
+def test_autoclose_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
     for bad in (0, 2592001):
         assert "autoclose_after_seconds" in refused({"autoclose_after_seconds": bad})
 
@@ -180,7 +177,7 @@ def test_lease_and_autoclose_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_unset_fields_stay_sparse() -> None:
     dumped = SessionSpec().model_dump(exclude_none=True)
-    for key in ("wrapper", "leader_lease_seconds", "autoclose_after_seconds"):
+    for key in ("wrapper", "autoclose_after_seconds"):
         assert key not in dumped
     only = SessionSpec.model_validate({"wrapper": {"max_restarts": 2}})
     assert only.model_dump(exclude_none=True)["wrapper"] == {"max_restarts": 2}

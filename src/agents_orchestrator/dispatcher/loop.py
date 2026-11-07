@@ -49,6 +49,9 @@ class Dispatcher:
         self.verifier = Verifier(pool, settings, self._wrapper)
         self.hive = hive.HiveState()
         self._push_wake = asyncio.Event()
+        self._pass_policy = leadership.PassPolicy(
+            settings.default_auto_compact_pct, settings.rollout_max_defer_seconds
+        )
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -156,7 +159,7 @@ class Dispatcher:
             await conn.commit()
             for session_id in candidates:
                 try:
-                    change = await leadership.leadership_pass(conn, session_id)
+                    change = await leadership.leadership_pass(conn, session_id, self._pass_policy)
                 except Exception:
                     log.exception("leadership pass for session %s failed", session_id)
                     continue

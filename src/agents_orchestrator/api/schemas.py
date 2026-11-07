@@ -399,7 +399,7 @@ class Meta(BaseModel):
 Lane = Literal["idle", "regular", "priority"]
 MessageStatus = Literal["queued", "dispatching", "verifying", "sent", "failed", "cancelled"]
 # an orchestrator-written message; null for every other message
-Notice = Literal["inactivity_reminder", "inactivity_close"]
+Notice = Literal["inactivity_reminder", "inactivity_close", "handover"]
 
 
 class MessageAttachment(BaseModel):
@@ -603,7 +603,7 @@ class HandoverIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     to: str | None = None
-    reason: str = Field(min_length=1, max_length=500)
+    reason: str = Field(min_length=1, max_length=2000)
     epoch: int
 
 
@@ -628,6 +628,8 @@ class ScaleResult(BaseModel):
 
 class LeadershipRequested(BaseModel):
     request_id: int
+    status: Literal["pending"] = "pending"
+    applies: str = "when your turn has ended and your background agents have reported"
 
 
 class ArchiveView(BaseModel):

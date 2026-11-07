@@ -667,3 +667,48 @@ def test_session_reply_window(monkeypatch):
     monkeypatch.setenv("ORCH_SESSION_REPLY_WINDOW_SECONDS", "-1")
     with pytest.raises(SettingsError, match="ORCH_SESSION_REPLY_WINDOW_SECONDS"):
         Settings()
+
+
+def test_handover_transcript_defaults_and_bounds(monkeypatch):
+    s = Settings()
+    assert (s.handover_transcript_bytes, s.handover_output_chars) == (65536, 500)
+    cases = {
+        "ORCH_HANDOVER_TRANSCRIPT_BYTES": (("8192", "1048576"), ("8191", "1048577", "-1")),
+        "ORCH_HANDOVER_OUTPUT_CHARS": (("100", "4000"), ("99", "4001", "0")),
+    }
+    for name, (oks, bads) in cases.items():
+        for bad in bads:
+            monkeypatch.setenv(name, bad)
+            with pytest.raises(SettingsError, match=name):
+                Settings()
+        for ok in oks:
+            monkeypatch.setenv(name, ok)
+            assert getattr(Settings(), name.removeprefix("ORCH_").lower()) == int(ok)
+        monkeypatch.delenv(name)
+
+
+def test_rollout_cap_must_exceed_window(monkeypatch):
+    s = Settings()
+    assert (s.rollout_handover_seconds, s.rollout_max_defer_seconds) == (1800, 14400)
+    cases = {
+        "ORCH_ROLLOUT_HANDOVER_SECONDS": (("0", "1800"), ("-1", "86401")),
+        "ORCH_ROLLOUT_MAX_DEFER_SECONDS": (("600", "86400"), ("599", "86401")),
+    }
+    for name, (oks, bads) in cases.items():
+        for bad in bads:
+            monkeypatch.setenv(name, bad)
+            with pytest.raises(SettingsError, match=name):
+                Settings()
+        for ok in oks:
+            monkeypatch.setenv(name, ok)
+            assert getattr(Settings(), name.removeprefix("ORCH_").lower()) == int(ok)
+        monkeypatch.delenv(name)
+        monkeypatch.setenv("ORCH_ROLLOUT_HANDOVER_SECONDS", "0")  # the cap's floor is 600
+    # the cap must exceed the window: a deferral never ends before the forced handover is due
+    monkeypatch.setenv("ORCH_ROLLOUT_HANDOVER_SECONDS", "3600")
+    for bad in ("600", "3600"):
+        monkeypatch.setenv("ORCH_ROLLOUT_MAX_DEFER_SECONDS", bad)
+        with pytest.raises(SettingsError, match="ORCH_ROLLOUT_MAX_DEFER_SECONDS"):
+            Settings()
+    monkeypatch.setenv("ORCH_ROLLOUT_MAX_DEFER_SECONDS", "3601")
+    assert Settings().rollout_max_defer_seconds == 3601
