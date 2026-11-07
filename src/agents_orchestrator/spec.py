@@ -673,8 +673,8 @@ class SessionSpec(BaseModel):
     auto_compact_pct: int | None = Field(default=None, ge=1, le=100)
     discard_hook_url: str | None = None
     init_scripts: list[str] = []
-    # Jinja template of the first message of a new session (sent by D6); sparse: unset is not
-    # stored or dumped in a preset.
+    # Jinja template of the first message of a new session (queued at create as its own
+    # message, T-63); sparse: unset is not stored or dumped in a preset.
     start_prompt: str | None = None
     any_mcp_sources: list[str] | None = None
     wrapper: WrapperSettings | None = None
