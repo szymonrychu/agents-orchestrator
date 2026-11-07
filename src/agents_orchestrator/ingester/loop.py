@@ -135,6 +135,7 @@ class _AgentStream:
                 last_seq=self.last_seq,
                 waiting=(snap.waiting.reason, snap.waiting.since) if snap.waiting else None,
                 permission_mode=(snap.permission_mode_state, snap.permission_mode_reason),
+                outstanding_subagents=snap.outstanding_subagents,
                 bootstrap=status.bootstrap_from_steps(
                     [st.model_dump(mode="json") for st in snap.bootstrap.steps]
                     if snap.bootstrap
@@ -230,6 +231,10 @@ class _AgentStream:
                 await status.notify_agent_free(conn, ref.session_id, ref.agent_id)
             if change.changed:
                 await status.notify_status(conn, ref.session_id, ref.agent_id)
+            # the wrapper clears its subagent set on a claude restart without a stop event
+            if data.get("restart") and await status.clear_background(conn, ref.agent_id):
+                await status.notify_status(conn, ref.session_id, ref.agent_id)
+                await notify(conn, leadership.CHANNEL, {"session_id": str(ref.session_id)})
             return _Projected(became_idle=change.became_idle)
         if env.type == "session_closed":
             return _Projected(closed=True)  # not projected: `_closed` reads the snapshot
@@ -251,12 +256,19 @@ class _AgentStream:
         elif env.type == "bootstrap_step":
             await status.apply_bootstrap_step(conn, ref.agent_id, data)
             await status.notify_status(conn, ref.session_id, ref.agent_id)
+        elif env.type == "subagent_started" and isinstance(data.get("agent_id"), str):
+            await status.set_background(conn, ref.agent_id, data["agent_id"], env.ts)
+            await status.notify_status(conn, ref.session_id, ref.agent_id)
+        elif env.type == "subagent_stopped" and isinstance(data.get("agent_id"), str):
+            await status.set_background(conn, ref.agent_id, data["agent_id"], None)
+            await status.notify_status(conn, ref.session_id, ref.agent_id)
+            # a leader that was only waiting on its subagents can now be moved
+            await notify(conn, leadership.CHANNEL, {"session_id": str(ref.session_id)})
         elif env.type in _COMPACTION:
-            # every compaction counts (D2), at the time the wrapper reported it (D3), and wakes
-            # the dispatcher's leadership pass for the session (D15)
+            # every compaction counts (D2), at the time the wrapper reported it (D3); it is
+            # an advisory only and never wakes the leadership pass
             await status.set_compaction(conn, ref.agent_id, env.ts)
             await status.notify_status(conn, ref.session_id, ref.agent_id)
-            await notify(conn, leadership.CHANNEL, {"session_id": str(ref.session_id)})
         elif env.type == "turn_started" and data.get("turn_id"):
             turn_id = str(data["turn_id"])
             await status.upsert_turn(

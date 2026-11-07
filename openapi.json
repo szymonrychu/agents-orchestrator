@@ -1557,7 +1557,7 @@
             "type": "integer"
           },
           "reason": {
-            "maxLength": 500,
+            "maxLength": 2000,
             "minLength": 1,
             "title": "Reason",
             "type": "string"
@@ -1788,9 +1788,20 @@
       },
       "LeadershipRequested": {
         "properties": {
+          "applies": {
+            "default": "when your turn has ended and your background agents have reported",
+            "title": "Applies",
+            "type": "string"
+          },
           "request_id": {
             "title": "Request Id",
             "type": "integer"
+          },
+          "status": {
+            "const": "pending",
+            "default": "pending",
+            "title": "Status",
+            "type": "string"
           }
         },
         "required": [
@@ -2380,7 +2391,8 @@
               {
                 "enum": [
                   "inactivity_reminder",
-                  "inactivity_close"
+                  "inactivity_close",
+                  "handover"
                 ],
                 "type": "string"
               },
@@ -3870,19 +3882,6 @@
             ],
             "title": "Kube Namespace Access"
           },
-          "leader_lease_seconds": {
-            "anyOf": [
-              {
-                "maximum": 604800.0,
-                "minimum": 60.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Leader Lease Seconds"
-          },
           "max_attempts": {
             "default": 5,
             "maximum": 10.0,
@@ -4222,19 +4221,6 @@
               }
             ],
             "title": "Kube Namespace Access"
-          },
-          "leader_lease_seconds": {
-            "anyOf": [
-              {
-                "maximum": 604800.0,
-                "minimum": 60.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Leader Lease Seconds"
           },
           "max_attempts": {
             "default": 5,

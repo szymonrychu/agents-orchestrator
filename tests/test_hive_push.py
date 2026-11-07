@@ -244,8 +244,12 @@ async def test_hive_state_threshold_hint(env):
     ):
         _, (a0, a1, _a2) = await env.hive(spec=spec)
         await env.push()
-        hint = f"Hand over leadership instead of compacting above {threshold}% context."
+        hint = (
+            "Leadership is yours until you hand it over; hand over at a natural boundary "
+            f"once your context passes {threshold}%."
+        )
         assert hint in env.notes(a0)[0] and hint in env.notes(a1)[0]
+        assert "instead of compacting" not in env.notes(a0)[0]
 
 
 async def test_hive_state_points_to_pull_tools(env):
@@ -350,14 +354,10 @@ async def test_handover_due_candidates_ranked(env):
     await set_agent_status(env.pool, a6["id"], state="idle", context_pct=1)
     await env.push()
     (text,) = env.notes(a0, DUE)
-    lines = [
-        f"{a['pod_name']} ({a['pod_name']}/{a['wrapper_session_id']}, {state}, {pct}% context)"
-        for a, state, pct in ((a3, "idle", 20), (a2, "idle", 40), (a1, "busy", 10))
-    ]
-    positions = [text.index(line) for line in lines]
-    assert positions == sorted(positions)
+    lines = [a["pod_name"] for a in (a3, a2, a1)]
+    assert "Candidates, best first: " + ", ".join(lines) + "." in text
     for left_out in (a0, a4, a5, a6):  # the leader, an agent itself due, unready, leaving
-        assert f"{left_out['pod_name']} (" not in text.split("Candidates", 1)[1]
+        assert left_out["pod_name"] not in text.split("Candidates", 1)[1]
 
 
 async def test_handover_due_resend_rules(env):
@@ -434,22 +434,69 @@ async def test_handover_due_protocol_text(env):
     assert "Your context is 90% of a limit that compacts at 95%" in text
     assert "hand leadership over before that" in text
     assert "no ready successor" not in text
-    assert "mcp__ccw__send_message(to=<address from the list>, notify_when_idle=true)" in text
-    assert '"ready"' in text and "<peer-idle-notice>" in text and "<peer-delivery-failed>" in text
-    assert 'orchestrator_leadership_handover(to=<pod_name>, epoch=1, reason="context")' in text
-    assert f"agent-1/{a1['wrapper_session_id']}" in text
+    assert "Finish the step you are in, then call orchestrator_leadership_handover(" in text
+    assert "to=<pod_name>, epoch=1, reason=<state summary of at most 2000 characters" in text
+    assert "It applies when your turn has ended and your background agents have reported" in text
+    assert "the successor receives your transcript. Do not brief it over ccw." in text
+    assert a1["wrapper_session_id"] not in text
     assert text.count("\n") <= 8
 
 
-async def test_handover_due_without_peers(env):
-    c, (a0, a1, a2) = await env.hive(spec={"peers": False})
+async def test_due_text_has_no_ccw_protocol(env):
+    for spec in ({}, {"peers": False}):
+        _, (a0, _a1, _a2) = await env.hive(spec=spec)
+        await set_agent_status(env.pool, a0["id"], state="idle", context_pct=90)
+        await env.push()
+        (text,) = env.notes(a0, DUE)
+        assert "mcp__ccw__send_message" not in text and '"ready"' not in text
+        assert "notify_when_idle" not in text and "peer-idle-notice" not in text
+
+
+async def test_due_text_summary_2000(env):
+    _, (a0, _a1, _a2) = await env.hive()
     await set_agent_status(env.pool, a0["id"], state="idle", context_pct=90)
     await env.push()
     (text,) = env.notes(a0, DUE)
-    assert "orchestrator_leadership_handover" in text and "reason" in text and "500" in text
-    assert "epoch=1" in text
-    assert "ccw" not in text and "send_message" not in text and "notify_when_idle" not in text
-    assert a1["wrapper_session_id"] not in text  # no addresses without a conversation
+    assert "2000 characters" in text and "500" not in text
+    for part in ("the user's goal", "what is done", "what is in flight", "next steps"):
+        assert part in text
+    assert "open questions, locks and branches" in text
+
+
+FIRM = (
+    "You will compact soon and keep leading with a summary; "
+    "hand over now unless the work is about to finish."
+)
+
+
+async def test_firm_note_at_compact_minus_5(env):
+    # compact 50: threshold 35, firm from 45
+    _, (a0, _a1, _a2) = await env.hive(spec={"auto_compact_pct": 50})
+    await set_agent_status(env.pool, a0["id"], state="idle", context_pct=36)
+    await env.push()
+    (soft,) = env.notes(a0, DUE)
+    assert FIRM not in soft and "orchestrator_leadership_handover" in soft
+
+    _, (b0, _b1, _b2) = await env.hive(spec={"auto_compact_pct": 50})
+    await set_agent_status(env.pool, b0["id"], state="idle", context_pct=46)
+    await env.push()
+    (firm,) = env.notes(b0, DUE)
+    assert FIRM in firm
+    assert firm.index(FIRM) < firm.index("Finish the step you are in")
+
+
+async def test_firm_crossing_resends(env):
+    # compact 49: firm from 44; 43 and 44 share the 5% bucket 8, so only the level flips
+    _, (a0, _a1, _a2) = await env.hive(spec={"auto_compact_pct": 49})
+    await set_agent_status(env.pool, a0["id"], state="idle", context_pct=43)
+    await env.push()
+    assert len(env.notes(a0, DUE)) == 1 and FIRM not in env.notes(a0, DUE)[-1]
+    await set_agent_status(env.pool, a0["id"], state="idle", context_pct=44)  # same bucket
+    await env.push()
+    assert len(env.notes(a0, DUE)) == 2 and FIRM in env.notes(a0, DUE)[-1]
+    await set_agent_status(env.pool, a0["id"], state="idle", context_pct=44.5)
+    await env.push()
+    assert len(env.notes(a0, DUE)) == 2
 
 
 async def test_handover_due_runs_when_hive_state_unchanged(env):
@@ -467,6 +514,73 @@ async def test_handover_due_runs_when_hive_state_unchanged(env):
     await env.run("UPDATE agents SET url = %s WHERE id = %s", (env.fake.base_url, a0["id"]))
     assert await env.push() == 1
     assert len(env.notes(a0, DUE)) == 2
+
+
+# ---------------------------------------------------------------- rollout_due
+
+ROLLOUT = "rollout_due"
+
+
+async def set_rollout(env, session_id, revision="r1", leader_since: str | None = "t") -> None:
+    rollout = {"revision": revision, "since": "t", "leader_since": leader_since}
+    await env.run(
+        "UPDATE sessions SET status = %s WHERE id = %s",
+        (json.dumps({"rollout": rollout}), session_id),
+    )
+
+
+async def test_rollout_due_sent_once_per_epoch_and_revision(env):
+    c, (a0, a1, a2) = await env.hive()
+    await env.push()
+    assert env.notes(a0, ROLLOUT) == []
+    await set_rollout(env, c["id"])
+    assert await env.push() == 1
+    (text,) = env.notes(a0, ROLLOUT)
+    assert text == hive.render_rollout_due(1, env.settings.rollout_handover_seconds)
+    assert text.startswith("<rollout-due>") and text.endswith("</rollout-due>")
+    assert "epoch=1" in text and "After 30 minutes" in text
+    assert env.notes(a1, ROLLOUT) == [] and env.notes(a2, ROLLOUT) == []
+    sent = [n for n in env.fake.notes[a0["wrapper_session_id"]] if n["key"] == ROLLOUT]
+    assert sent[0]["source"] == "orchestrator"
+    assert await env.push() == 0  # once, not once per tick
+
+    await set_rollout(env, c["id"], revision="r2")  # a newer revision is a new note
+    assert await env.push() == 1
+    assert len(env.notes(a0, ROLLOUT)) == 2
+
+    await env.run(  # a new epoch is a new note
+        "UPDATE session_leaders SET agent_id = %s, epoch = epoch + 1 WHERE session_id = %s",
+        (a1["id"], c["id"]),
+    )
+    await env.push()
+    assert len(env.notes(a1, ROLLOUT)) == 1
+    assert "epoch=2" in env.notes(a1, ROLLOUT)[0]
+
+
+async def test_no_rollout_note_without_leader_since(env):
+    c, (a0, a1, a2) = await env.hive()
+    await set_rollout(env, c["id"], leader_since=None)
+    await env.push()
+    assert all(env.notes(a, ROLLOUT) == [] for a in (a0, a1, a2))
+    await set_rollout(env, c["id"])
+    await env.push()
+    assert len(env.notes(a0, ROLLOUT)) == 1
+    await env.run("UPDATE sessions SET status = '{}' WHERE id = %s", (c["id"],))
+    await env.push()
+    await set_rollout(env, c["id"])  # the window closed and reopened: told again
+    await env.push()
+    assert len(env.notes(a0, ROLLOUT)) == 2
+
+
+async def test_rollout_note_retried_after_failure(env):
+    c, (a0, a1, a2) = await env.hive()
+    await env.push()
+    await set_rollout(env, c["id"])
+    await env.run("UPDATE agents SET url = 'http://127.0.0.1:1' WHERE id = %s", (a0["id"],))
+    assert await env.push() == 0
+    await env.run("UPDATE agents SET url = %s WHERE id = %s", (env.fake.base_url, a0["id"]))
+    assert await env.push() == 1
+    assert len(env.notes(a0, ROLLOUT)) == 1
 
 
 # ---------------------------------------------------------------- leadership_request
@@ -718,8 +832,8 @@ async def test_leadership_pass_is_committed_before_the_push_wake(env, monkeypatc
     seen: list[tuple[str, bool]] = []
     real_pass = leadership.leadership_pass
 
-    async def spy(conn, session_id):
-        change = await real_pass(conn, session_id)
+    async def spy(conn, session_id, policy):
+        change = await real_pass(conn, session_id, policy)
         (row,) = await env.rows("SELECT status FROM leadership_requests WHERE id = %s", (rid,))
         seen.append((row["status"], dispatcher._push_wake.is_set()))
         return change

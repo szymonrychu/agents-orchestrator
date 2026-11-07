@@ -203,6 +203,7 @@ class _Session:
     context: dict[str, Any] | None = None
     current_turn_id: str | None = None
     waiting: dict[str, Any] | None = None
+    outstanding_subagents: int = 0
     bootstrap_steps: list[dict[str, Any]] = field(default_factory=list)
     permission_mode_state: str | None = None
     permission_mode_reason: str | None = None
@@ -228,7 +229,7 @@ class _Session:
             "last_activity_at": _now(),
             "idle_since": self.idle_since if self.state == "ready" else None,
             "turns_completed": self.turns_completed,
-            "outstanding_subagents": 0,
+            "outstanding_subagents": self.outstanding_subagents,
             "current_turn_id": self.current_turn_id,
             "stall_suspected_since": None,
             "restarts": 0,
@@ -466,6 +467,10 @@ class FakeWrapper:
         self._session(session_id).waiting = (
             None if reason is None else {"reason": reason, "since": since or _now()}
         )
+
+    def set_outstanding_subagents(self, count: int, session_id: str | None = None) -> None:
+        """Set the snapshot `outstanding_subagents` (wrapper 0.10.0)."""
+        self._session(session_id).outstanding_subagents = count
 
     def set_snapshot_permission_mode(
         self, state: str | None, reason: str | None = None, session_id: str | None = None

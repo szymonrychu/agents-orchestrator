@@ -20,7 +20,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from agents_orchestrator.db.eligibility import ELIGIBLE, HANDOVER_TRIGGER
+from agents_orchestrator.db.eligibility import ELIGIBLE, HANDOVER_TRIGGER, NOTICE_PENDING
 from agents_orchestrator.db.pool import notify
 
 COMMAND_KINDS = frozenset({"interrupt", "compact", "restart", "rebootstrap"})
@@ -440,14 +440,16 @@ async def _target_gone(
     return row is None or row["gone_at"] is not None
 
 
-# A leader whose handover is pending (it compacted in its term, or its pod is leaving) while an
+# Untargeted messages are held while a leader's handover is pending (its pod is leaving) and an
 # agent that could take over exists: the pass's pick predicate (`ELIGIBLE`), so the hold never
-# outlives a possible move. Outside the subquery `a` is the leader's agent, `l` its row and `c`
-# the session (the trigger's aliases); inside it `a` is the candidate peer.
+# outlives a possible move; or while the new leader's handover notice is not queued yet
+# (`NOTICE_PENDING`, bounded to 60 s). Outside the subquery `a` is the leader's agent, `l` its
+# row and `c` the session (the trigger's aliases); inside it `a` is the candidate peer.
 _HANDOVER_PENDING = f"""
-SELECT {HANDOVER_TRIGGER}
-       AND EXISTS (SELECT 1 FROM agents a WHERE a.session_id = l.session_id AND {ELIGIBLE}
-                   AND a.id <> l.agent_id) AS pending
+SELECT ({HANDOVER_TRIGGER}
+        AND EXISTS (SELECT 1 FROM agents a WHERE a.session_id = l.session_id AND {ELIGIBLE}
+                    AND a.id <> l.agent_id))
+       OR {NOTICE_PENDING} AS pending
 FROM session_leaders l
 JOIN agents a ON a.id = l.agent_id
 JOIN sessions c ON c.id = l.session_id
@@ -465,8 +467,32 @@ def _lane_class(lane: str) -> str:
     return "idle" if lane == "idle" else "live"
 
 
+async def _claim_notice(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Claim | None:
+    """The oldest queued handover notice of the session, ahead of its other messages."""
+    row = await _one(
+        conn,
+        "SELECT id, target_agent_id, lane FROM messages"
+        " WHERE session_id = %s AND status = 'queued' AND notice = 'handover'"
+        " AND (not_before IS NULL OR not_before <= now()) ORDER BY id LIMIT 1",
+        (session_id,),
+    )
+    if row is None or row["target_agent_id"] is None:
+        return None
+    if await _target_gone(conn, session_id, row["target_agent_id"]):
+        return None  # the scan fails it as target_gone
+    if not await _lock_queued(conn, row["id"]):
+        return None
+    pick = await _pick_agent(conn, session_id, row["target_agent_id"], row["lane"])
+    return await _dispatch(conn, row["id"], pick) if pick is not None else None
+
+
 async def _claim_in_session(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Claim | None:
-    """Scan one session's queued messages in id order; the caller holds the session lock."""
+    """Claim a queued handover notice, else scan the queued messages in id order.
+
+    The caller holds the session lock.
+    """
+    if (notice := await _claim_notice(conn, session_id)) is not None:
+        return notice
     leader = await _one(
         conn, "SELECT agent_id FROM session_leaders WHERE session_id = %s", (session_id,)
     )

@@ -29,7 +29,6 @@ CONFIG = {
     "replicas": 2,
     "max_replicas": 3,
     "wrapper": WRAPPER,
-    "leader_lease_seconds": 600,
     "autoclose_after_seconds": 3600,
 }
 
@@ -49,7 +48,6 @@ def unset(value):
 
 def assert_config(spec: dict) -> None:
     assert unset(spec["wrapper"]) == WRAPPER
-    assert spec["leader_lease_seconds"] == 600
     assert spec["autoclose_after_seconds"] == 3600
 
 
@@ -79,7 +77,7 @@ BAD = [
         {"wrapper": {"hooks": {"onNope": [{"type": "command", "run": "x"}]}}},
         "wrapper.hooks.onNope",
     ),
-    ({"replicas": 1, "leader_lease_seconds": 600}, "leader_lease_seconds"),
+    ({"max_replicas": 3, "leader_lease_seconds": 600}, "leader_lease_seconds"),
     ({"autoclose_after_seconds": 60}, "autoclose_after_seconds"),
 ]
 
@@ -99,7 +97,7 @@ async def test_config_fields_refused_with_named_errors(pool, dsn, spec, field):
         assert field in r.json()["error"]["message"]
 
 
-async def test_session_view_lease_and_autoclose_fields(pool, dsn):
+async def test_session_view_leader_and_autoclose_fields(pool, dsn):
     plain = await insert_session(pool, spec={"replicas": 1})
     timed = await insert_session(
         pool, spec={"replicas": 2, "max_replicas": 2, "autoclose_after_seconds": 3600}
@@ -108,7 +106,7 @@ async def test_session_view_lease_and_autoclose_fields(pool, dsn):
     async with pool.connection() as conn:
         await conn.execute(
             "INSERT INTO session_leaders (session_id, agent_id, epoch, since, reason)"
-            " VALUES (%s, %s, 4, now() - interval '1 hour', 'lease_expired')",
+            " VALUES (%s, %s, 4, now() - interval '1 hour', 'compaction')",
             (timed["id"], a0["id"]),
         )
         cur = await conn.execute(
@@ -125,4 +123,4 @@ async def test_session_view_lease_and_autoclose_fields(pool, dsn):
             seconds=3600
         )
         assert datetime.fromisoformat(view["leader_since"]) == since
-        assert view["leader_reason"] == "lease_expired"
+        assert view["leader_reason"] == "compaction"

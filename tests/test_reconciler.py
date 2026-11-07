@@ -394,6 +394,23 @@ async def test_scale_down_drain_deadline(env):
     assert "drain" not in (await env.get(c.id)).status
 
 
+async def test_drain_waits_for_background(env):
+    # a draining agent whose background subagent still runs is held like a busy one
+    c, agents = await scaled_down(env, start=3, target=1)
+    started = datetime.now(UTC).isoformat()
+    await set_agent_status(
+        env.pool, agents[2].id, state="idle", background_subagents={"s1": started}
+    )
+    await env.rec.reconcile_once()
+    assert sts_replicas(env) == 3
+    assert (await env.get(c.id)).status["drain"]["waiting"] == [2]
+
+    await set_agent_status(env.pool, agents[2].id, state="idle")  # the subagent reported
+    await env.rec.reconcile_once()
+    assert sts_replicas(env) == 1
+    assert "drain" not in (await env.get(c.id)).status
+
+
 async def _lead(env, session_id, agent_id) -> None:
     """Write the leader row the way the dispatcher does (the reconciler only reads it)."""
     async with env.pool.connection() as conn:

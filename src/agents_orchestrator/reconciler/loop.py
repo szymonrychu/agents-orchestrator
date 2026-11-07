@@ -619,7 +619,8 @@ class Reconciler:
         """(ordinal, busy) of each agent at or above `replicas` that is not gone (D3).
 
         Busy: its `agent_status.state` is `busy`, a message dispatched to it is still
-        `dispatching` or `verifying`, or it is the session's current leader (D8: its pod is
+        `dispatching` or `verifying`, a background subagent of it is still running (`BUSY`),
+        or it is the session's current leader (D8: its pod is
         held until the leader row names a staying agent; the drain deadline bounds the hold).
         """
         async with self.pool.connection() as conn:
