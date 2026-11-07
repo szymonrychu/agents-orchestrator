@@ -3338,13 +3338,18 @@ TARGET_NAMESPACE = "e2e-target"  # created by scripts/e2e.sh, allowlisted in e2e
 
 
 def can_i(verb: str, resource: str, namespace: str, sa: str) -> str:
-    """`kubectl auth can-i` as the session ServiceAccount; stdout is "yes" or "no"."""
+    """`kubectl auth can-i` as the session ServiceAccount; stdout is "yes" or "no".
+
+    `resource` may name a subresource ("pods/portforward"): can-i reads TYPE/NAME as a resource
+    name, so the subresource goes in --subresource instead."""
+    resource, _, subresource = resource.partition("/")
     proc = run(
         "kubectl",
         "auth",
         "can-i",
         verb,
         resource,
+        f"--subresource={subresource}",
         "-n",
         namespace,
         f"--as={sa}",
