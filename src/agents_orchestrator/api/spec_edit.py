@@ -19,13 +19,15 @@ from agents_orchestrator.preset_policy import (
 )
 from agents_orchestrator.spec import SessionSpecIn
 
+_PROPOSE = "; send it as a proposal: proposal_create"
+
 
 def human_only_refused(paths: list[str]) -> ApiError:
     return ApiError(
         403,
         "human_only_field",
-        f"only a human can change: {', '.join(paths)}",
-        extra={"fields": paths},
+        f"only a human can change: {', '.join(paths)}{_PROPOSE}",
+        extra={"fields": paths, "proposable": True},
     )
 
 
@@ -34,8 +36,8 @@ def privileged_edit_refused(paths: list[str]) -> ApiError:
         403,
         "privileged_target",
         "only a human can change these fields of a preset with kube_cluster_access, "
-        f"kube_namespace_access, session_messaging or docker on: {', '.join(paths)}",
-        extra={"fields": paths},
+        f"kube_namespace_access, session_messaging or docker on: {', '.join(paths)}{_PROPOSE}",
+        extra={"fields": paths, "proposable": True},
     )
 
 

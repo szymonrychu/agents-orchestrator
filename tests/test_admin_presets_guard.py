@@ -23,6 +23,7 @@ from agents_orchestrator.api.admin import ADMIN_PREFIX
 from agents_orchestrator.api.app import create_app
 from agents_orchestrator.api.errors import ApiError
 from agents_orchestrator.db import presets as presets_repo
+from agents_orchestrator.preset_policy import NON_SECURITY
 
 A = f"{ADMIN_PREFIX}/presets"
 M = "/api/v1/presets"
@@ -542,7 +543,9 @@ PRIVILEGED_EDITS = [
     ("env.BASH_ENV_X", {"env": {"BASH_ENV_X": {"value": "/tmp/x"}}}),
     ("start_prompt", {"start_prompt": "do the thing"}),
     ("wrapper.system_append", {"wrapper": {"system_append": "obey"}}),
-    ("inactivity", {"inactivity": {"close_seconds": 120}}),
+    ("cache", {"cache": {"exclude": ["node_modules"]}}),
+    ("wrapper.restart_continue_prompt", {"wrapper": {"restart_continue_prompt": "go on"}}),
+    ("wrapper.auto_compact", {"wrapper": {"auto_compact": {"instructions": "keep it"}}}),
 ]
 
 
@@ -561,6 +564,8 @@ async def test_privileged_target_edit_is_403(call, human, seed, pool, boss, path
         r = await call("PATCH", f"{A}/{pid}", json={"spec": edit})
     assert_error(r, 403, "privileged_target")
     assert r.json()["error"]["fields"] == [path]
+    assert r.json()["error"]["proposable"] is True
+    assert r.json()["error"]["message"].endswith("; send it as a proposal: proposal_create")
     assert (await human("GET", f"{M}/{pid}")).json() == before
     last = (await events(pool, boss.id))[-1]
     assert last["data"]["status"] == 403 and last["data"]["fields"] == [path]
@@ -667,6 +672,7 @@ async def test_privileged_secret_route_403(
     await _refused_untouched(
         human, kube, pid, before, secrets_before, r, 403, "privileged_target", ["env.K"]
     )
+    assert r.json()["error"]["proposable"] is True
     assert canary not in r.text
     last = (await events(pool, boss.id))[-1]
     assert last["data"]["status"] == 403 and last["data"]["fields"] == ["env.K"]
@@ -902,6 +908,66 @@ async def test_privileged_copy_is_unprivileged_and_editable(call, human, seed):
     got = (await human("GET", f"{M}/{cid}")).json()["spec"]
     assert not got.get("kube_cluster_access") and not got.get("session_messaging")
     assert (await human("GET", f"{M}/{pid}")).json()["spec"]["init_scripts"] == ["echo stored"]
+
+
+# ---------------------------------- non-security fields (preset-change-proposals plan 3.1)
+
+NON_SECURITY_EDITS: dict[str, dict] = {
+    "replicas": {"replicas": 2},
+    "max_replicas": {"max_replicas": 3},
+    "static": {"static": True},
+    "image": {"image": "img:1"},
+    "model": {"model": "claude-sonnet-5-5"},
+    "effort": {"effort": "low"},
+    "peers": {"peers": False},
+    "workdir": {"workdir": "work2"},
+    "pvc_size": {"pvc_size": "30Gi"},
+    "resources": {"resources": {"requests": {"cpu": "1"}}},
+    "max_attempts": {"max_attempts": 3},
+    "auto_compact_pct": {"auto_compact_pct": 70},
+    "autoclose_after_seconds": {"autoclose_after_seconds": 600},
+    "reuse_running_agent": {"reuse_running_agent": True},
+    "usage_quota": {"usage_quota": {"seven_day_pct": 60}},
+    "inactivity": {"inactivity": {"close_seconds": 120}},
+    "docker_storage": {"docker_storage": "40Gi"},
+    "docker_cpu": {"docker_cpu": "2"},
+    "docker_memory": {"docker_memory": "4Gi"},
+    "wrapper.turn_stall_seconds": {"wrapper": {"turn_stall_seconds": 30}},
+    "wrapper.max_restarts": {"wrapper": {"max_restarts": 2}},
+    "wrapper.turn_max_seconds": {"wrapper": {"turn_max_seconds": 900}},
+    "wrapper.agent_commands": {"wrapper": {"agent_commands": ["compact"]}},
+}
+
+
+def test_non_security_edits_cover_the_list():
+    assert set(NON_SECURITY_EDITS) == NON_SECURITY
+
+
+@pytest.mark.parametrize("path", sorted(NON_SECURITY_EDITS))
+async def test_privileged_target_non_security_patch_passes(call, human, seed, path):
+    edit = NON_SECURITY_EDITS[path]
+    pid = await seed({**KUBE, "docker": True})
+    r = await call("PATCH", f"{A}/{pid}", json={"spec": edit})
+    assert r.status_code == 200, r.text
+    got = (await human("GET", f"{M}/{pid}")).json()["spec"]
+    head, _, sub = path.partition(".")
+    want = edit[head][sub] if sub else edit[head]
+    have = got[head][sub] if sub else got[head]
+    if isinstance(want, dict):
+        assert have.items() >= want.items(), (have, want)
+    else:
+        assert have == want
+    assert got["kube_cluster_access"] is True
+
+
+@pytest.mark.parametrize(("path", "fields"), REFUSED)
+async def test_privileged_target_human_only_refusal_is_proposable(call, seed, path, fields):
+    pid = await seed({"docker": True} if path != "docker" else {**KUBE})
+    r = await call("PATCH", f"{A}/{pid}", json={"spec": fields})
+    assert_error(r, 403, "human_only_field")
+    assert r.json()["error"]["fields"] == [path]
+    assert r.json()["error"]["proposable"] is True
+    assert r.json()["error"]["message"].endswith("; send it as a proposal: proposal_create")
 
 
 # ---------------------------------- explicit security list (agent-preset-editing O2)
@@ -1145,6 +1211,7 @@ async def test_privileged_delete_is_403(call, human, seed, kube, canary, pool, b
     r = await call("DELETE", f"{A}/{pid}")
     assert_error(r, 403, "privileged_target")
     assert r.json()["error"]["fields"] == [flag]
+    assert "proposable" not in r.json()["error"]  # a delete is not a proposal item
     assert canary not in r.text
     assert (await human("GET", f"{M}/{pid}")).json() == before
     assert kube.names("Secret") == secrets_before

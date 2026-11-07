@@ -1,7 +1,10 @@
 import pytest
 
 from agents_orchestrator.preset_policy import (
+    HUMAN_ONLY_PATHS,
+    NON_SECURITY,
     changed_paths,
+    classify,
     fixed_changes,
     human_only_changes,
     merge_patch,
@@ -9,6 +12,7 @@ from agents_orchestrator.preset_policy import (
     strip_grants,
     tighten_changes,
 )
+from agents_orchestrator.spec import SessionSpec, WrapperSettings
 
 
 @pytest.mark.parametrize("field", ["kube_cluster_access", "session_messaging", "docker"])
@@ -359,3 +363,86 @@ def test_tighten_does_not_mutate():
     tighten(stored, new)
     assert stored == {"usage_quota": {"five_hour_pct": 50}}
     assert new == {"usage_quota": {"five_hour_pct": 80}}
+
+
+# ---------------------------------- classification (preset-change-proposals plan 3.1)
+
+# Plan 3.1 row 2, pinned here so a new spec field fails until it is classified.
+# leader_lease_seconds: T-54 removes it; until then it stays security (fail closed, ruling F2).
+SECURITY = frozenset(
+    {
+        "init_scripts",
+        "start_prompt",
+        "env",
+        "any_mcp_config",
+        "any_mcp_sources",
+        "cache",
+        "leader_lease_seconds",
+        "wrapper.hooks",
+        "wrapper.mcp_servers",
+        "wrapper.plugins",
+        "wrapper.system_append",
+        "wrapper.restart_continue_prompt",
+        "wrapper.auto_compact",
+    }
+)
+
+
+def _spec_paths() -> set[str]:
+    top = set(SessionSpec.model_fields) - {"wrapper"}
+    return top | {f"wrapper.{f}" for f in WrapperSettings.model_fields}
+
+
+def test_every_spec_field_is_classified_exactly_once():
+    lists = (NON_SECURITY, SECURITY, HUMAN_ONLY_PATHS)
+    for path in sorted(_spec_paths()):
+        assert sum(path in group for group in lists) == 1, path
+    assert _spec_paths() == NON_SECURITY | SECURITY | HUMAN_ONLY_PATHS
+
+
+def test_columns_are_not_spec_paths():
+    assert not {"name", "labels", "project"} & (NON_SECURITY | HUMAN_ONLY_PATHS)
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("model", (False, False)),
+        ("usage_quota", (False, False)),
+        ("wrapper.turn_max_seconds", (False, False)),
+        ("env.FOO", (True, False)),
+        ("wrapper.hooks", (True, False)),
+        ("wrapper.not_a_field", (True, False)),
+        ("not_a_field", (True, False)),
+        ("init_scripts", (True, False)),
+        ("kube_cluster_access", (True, True)),
+        ("kube_namespace_access", (True, True)),
+        ("session_messaging", (True, True)),
+        ("docker", (True, True)),
+        ("discard_hook_url", (True, True)),
+        ("wrapper.permission_mode", (True, True)),
+        ("wrapper.permissions", (True, True)),
+    ],
+)
+def test_classify(path, expected):
+    assert classify([path]) == {path: expected}
+
+
+def test_classify_many_and_empty():
+    assert classify([]) == {}
+    assert classify(["model", "env.A"]) == {"model": (False, False), "env.A": (True, False)}
+
+
+def test_privileged_target_allows_non_security():
+    from agents_orchestrator.preset_policy import privileged_target_changes as ptc
+
+    stored = {"kube_cluster_access": True}
+    new = {
+        **stored,
+        "model": "opus",
+        "peers": False,
+        "inactivity": {"close_seconds": 60},
+        "wrapper": {"turn_max_seconds": 600, "agent_commands": {}},
+    }
+    assert ptc(stored, new) == []
+    assert ptc(stored, {**new, "cache": {"key": "x"}}) == ["cache"]

@@ -38,6 +38,8 @@ def test_guard_not_privileged_still_refuses_grant_turned_on():
         guard_agent_edit({}, {"kube_cluster_access": True}, [], request, privileged=False)
     assert caught.value.status == 403
     assert caught.value.code == "human_only_field"
+    assert caught.value.extra == {"fields": ["kube_cluster_access"], "proposable": True}
+    assert caught.value.message.endswith("; send it as a proposal: proposal_create")
     assert request.state.preset_fields == ["kube_cluster_access"]
 
 
@@ -47,7 +49,16 @@ def test_guard_privileged_refuses_a_prompt_change_on_a_privileged_base():
     with pytest.raises(ApiError) as caught:
         guard_agent_edit(base, {**base, "start_prompt": "b"}, [], request, privileged=True)
     assert caught.value.code == "privileged_target"
+    assert caught.value.extra == {"fields": ["start_prompt"], "proposable": True}
+    assert caught.value.message.endswith("; send it as a proposal: proposal_create")
     assert request.state.preset_fields == ["start_prompt"]
+
+
+def test_guard_privileged_passes_a_non_security_change_on_a_privileged_base():
+    base = {"kube_cluster_access": True, "model": "a"}
+    request = make_request()
+    guard_agent_edit(base, {**base, "model": "b", "peers": False}, [], request, privileged=True)
+    assert not hasattr(request.state, "preset_fields")
 
 
 def test_guard_privileged_refuses_a_secret_value_name():

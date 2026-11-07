@@ -42,15 +42,40 @@ PRIVILEGED: tuple[str, ...] = (
     "session_messaging",
     "docker",
 )
-HUMAN_ONLY: tuple[str, ...] = (
-    "kube_cluster_access",
-    "kube_namespace_access",
-    "session_messaging",
-    "docker",
-    "discard_hook_url",
-    "wrapper.permission_mode",
-    "wrapper.permissions.allow",
-    "wrapper.permissions.deny",
+# The human-only fields in the `changed_paths` spelling (one level under `wrapper`): marked
+# `grant` in a review; `human_only_changes` reports `wrapper.permissions` as `.allow`/`.deny`.
+HUMAN_ONLY_PATHS: frozenset[str] = frozenset(
+    {*GRANTS, "wrapper.permission_mode", "wrapper.permissions"}
+)
+
+# Spec paths an agent may change directly on a privileged target (preset-change-proposals plan
+# 3.1): sizes, timers, budgets and choices bounded by deploy-time allowlists and caps; nothing
+# executes new code or text in the granted pod. Anything else is security (fail closed). The
+# columns (name, labels, project) are not spec paths and are not classified here.
+NON_SECURITY: frozenset[str] = frozenset(
+    {
+        "replicas",
+        "max_replicas",
+        "static",
+        "model",
+        "effort",
+        "image",
+        "peers",
+        "workdir",
+        "pvc_size",
+        "resources",
+        "max_attempts",
+        "auto_compact_pct",
+        "autoclose_after_seconds",
+        "reuse_running_agent",
+        "usage_quota",
+        "inactivity",
+        *DOCKER_SIZES,
+        "wrapper.turn_stall_seconds",
+        "wrapper.max_restarts",
+        "wrapper.turn_max_seconds",
+        "wrapper.agent_commands",
+    }
 )
 
 # Fields of a live session that a spec edit may not change.
@@ -90,6 +115,13 @@ def _grant_grows(stored: Any, new: Any) -> bool:
     """True when `new` holds a namespace or a tier of a namespace that `stored` lacks."""
     old = _dict(stored)
     return any(not _entries(tiers) <= _entries(old.get(ns)) for ns, tiers in _dict(new).items())
+
+
+def classify(paths: Iterable[str]) -> dict[str, tuple[bool, bool]]:
+    """Each spec path (as `changed_paths` spells it) to (security, grant). Fail closed: a path
+    not in `NON_SECURITY` is security (every `env.*`, any unknown name or `wrapper.*`); grant
+    is a human-only path."""
+    return {p: (p not in NON_SECURITY, p in HUMAN_ONLY_PATHS) for p in paths}
 
 
 def privileged(spec: dict[str, Any]) -> list[str]:
@@ -134,9 +166,9 @@ def privileged_target_changes(
 ) -> list[str]:
     """The changed spec paths an agent may not touch on a stored preset that is privileged.
 
-    Empty when the stored preset has no privileged flag on. Otherwise only `usage_quota` and
-    the human-only fields (which `human_only_changes` already limits to toward safe) may
-    change; name and labels are not spec paths. The stored preset counts, so turning a flag
+    Empty when the stored preset has no privileged flag on. Otherwise only the `NON_SECURITY`
+    paths and the human-only fields (which `human_only_changes` already limits to toward safe)
+    may change; name and labels are not spec paths. The stored preset counts, so turning a flag
     off together with another edit is refused. `secret_values` names the protected variables
     the call gives a value: each is refused as `env.<NAME>`, because a new value would swap a
     credential the granted pod runs with. A stored protected entry resent unchanged (or
@@ -146,8 +178,7 @@ def privileged_target_changes(
     protected = {
         f"env.{n}" for n, e in _dict(stored.get("env")).items() if _dict(e).get("protected")
     }
-    allowed = {"usage_quota", *GRANTS, *DOCKER_SIZES, *protected}
-    allowed |= {"wrapper.permission_mode", "wrapper.permissions"}
+    allowed = NON_SECURITY | HUMAN_ONLY_PATHS | protected
     refused = {p for p in changed_paths(stored, new) if p not in allowed}
     return sorted(refused | {f"env.{n}" for n in secret_values})
 
