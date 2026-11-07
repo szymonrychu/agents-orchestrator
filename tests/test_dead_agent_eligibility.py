@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from factories import insert_agent, insert_session, set_agent_status
 from test_leadership_pass import (
-    compacted,
     decided,
     free_ago,
     hive,
@@ -16,7 +15,7 @@ from test_leadership_pass import (
     shrink,
 )
 from test_queue_leader_routing import _agent as queue_agent
-from test_queue_leader_routing import _claim, _compacted, _enqueue, _lead
+from test_queue_leader_routing import _claim, _enqueue, _lead
 from test_sessions_repo import _make_leader, _refused, _scalable
 
 from agents_orchestrator.db import leadership, sessions
@@ -84,15 +83,6 @@ async def test_dead_agent_never_handover_target(pool):
     none = await request(pool, c["id"], "handover", a0["id"], None, "full", 3)
     assert await lpass(pool, c["id"]) is None
     assert await decided(pool, none) == ("rejected", "no_peers")
-
-    # compaction
-    c, (a0, a1, a2) = await hive(pool)
-    await set_leader(pool, c["id"], a0["id"], epoch=3)
-    await dead_and_busy(pool, a1["id"], a2["id"])
-    await compacted(pool, a0["id"])
-    change = await lpass(pool, c["id"])
-    assert change is not None
-    assert (change.agent_id, change.reason) == (a2["id"], "compaction")
 
     # scale-down: the leader leaves, the staying dead agent is skipped for the staying live one
     c, (a0, a1, a2) = await hive(pool)
@@ -200,11 +190,10 @@ async def test_dead_leader_replaced_after_grace(pool):
 
 
 async def test_claim_hold_ignores_dead_peer(pool):
-    c = await insert_session(pool, spec={"replicas": 2, "max_replicas": 4})
-    leader = await queue_agent(pool, c["id"], free_ago=1, ordinal=0)
-    await queue_agent(pool, c["id"], free_ago=100, ordinal=1, state="dead")
+    c = await insert_session(pool, spec={"replicas": 1, "max_replicas": 4})
+    await queue_agent(pool, c["id"], free_ago=100, ordinal=0, state="dead")
+    leader = await queue_agent(pool, c["id"], free_ago=1, ordinal=1)
     await _lead(pool, c["id"], leader["id"])
-    await _compacted(pool, leader["id"])
     await _enqueue(pool, c["id"], "u")
     claim = await _claim(pool)
     assert claim is not None

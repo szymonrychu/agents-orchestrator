@@ -1,4 +1,4 @@
-"""A running Dispatcher hands a compacted or leaving leader over on a NOTIFY, never on the poll."""
+"""A running Dispatcher hands a leaving leader over on a NOTIFY, never on the poll."""
 
 from __future__ import annotations
 
@@ -103,9 +103,9 @@ async def finish(stop, task) -> None:
     await asyncio.wait_for(task, 5)
 
 
-async def test_idle_compaction_moves_without_poll(env):
+async def test_idle_compaction_does_not_move(env):
     leader = await env.agent(0)
-    peer = await env.agent(1, free_ago=100)
+    await env.agent(1, free_ago=100)
     await env.lead(leader["id"])
     stop, task = await running(env)
     try:
@@ -114,15 +114,11 @@ async def test_idle_compaction_moves_without_poll(env):
         )
         async with env.pool.connection() as conn:
             await notify(conn, leadership.CHANNEL, {"session_id": str(env.cid)})
-
-        async def moved() -> bool:
-            return (await env.leader())["agent_id"] == peer["id"]
-
-        await env.wait_for(moved, "leadership moved to the peer")
+        await asyncio.sleep(1.0)
     finally:
         await finish(stop, task)
     row = await env.leader()
-    assert (row["epoch"], row["reason"]) == (2, "compaction")
+    assert (row["agent_id"], row["epoch"]) == (leader["id"], 1)
 
 
 async def test_scale_down_moves_without_poll(env):
@@ -147,9 +143,9 @@ async def test_scale_down_moves_without_poll(env):
     assert (row["epoch"], row["reason"]) == (2, "scale_down")
 
 
-async def test_compacted_leader_never_takes_next_message(env):
+async def test_compacted_leader_takes_next_message(env):
     leader = await env.agent(0, state="busy")
-    peer = await env.agent(1, free_ago=100)
+    await env.agent(1, free_ago=100)
     await env.lead(leader["id"])
     await env.exec(
         "UPDATE agent_status SET compaction_at = now() WHERE agent_id=%s", (leader["id"],)
@@ -158,7 +154,7 @@ async def test_compacted_leader_never_takes_next_message(env):
     stop, task = await running(env)
     try:
         status = (await env.rows("SELECT status FROM messages WHERE id=%s", (message["id"],)))[0]
-        assert status["status"] == "queued"  # the busy compacted leader keeps leading, holds
+        assert status["status"] == "queued"  # the leader is busy
         assert (await env.leader())["agent_id"] == leader["id"]
         # what the ingester does when the turn ends
         await env.exec(
@@ -176,5 +172,5 @@ async def test_compacted_leader_never_takes_next_message(env):
     finally:
         await finish(stop, task)
     row = (await env.rows("SELECT agent_id FROM messages WHERE id=%s", (message["id"],)))[0]
-    assert row["agent_id"] == peer["id"]
-    assert (await env.leader())["reason"] == "compaction"
+    assert row["agent_id"] == leader["id"]
+    assert (await env.leader())["agent_id"] == leader["id"]

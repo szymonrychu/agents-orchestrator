@@ -19,7 +19,7 @@ def test_fragments_compose_from_each_other() -> None:
     assert eligibility.STAYS in eligibility.READY_STAYS
     assert eligibility.READY_STAYS in eligibility.ELIGIBLE
     assert eligibility.LEAVING in eligibility.HANDOVER_TRIGGER
-    assert eligibility.COMPACTED in eligibility.HANDOVER_TRIGGER
+    assert not hasattr(eligibility, "COMPACTED")
 
 
 def test_call_sites_embed_the_shared_fragments() -> None:

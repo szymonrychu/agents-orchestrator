@@ -1,8 +1,8 @@
 """Leadership queue and the leadership pass (D7, D19, D21, D27).
 
 Besides elections, queued requests and the lost-leader fallback, the pass hands a leader over
-by itself in two cases, always on for hives: its pod is about to be removed by a scale-down
-(`scale_down`, at once) and it compacted (`compaction`, at its turn boundary). A queued
+by itself when its pod is about to be removed by a scale-down (`scale_down`, at once). A
+compaction is only an advisory: a compacted leader keeps leading. A queued
 `rollout` handover is likewise applied only at the leader's turn boundary; mid-turn it stays
 queued. Every pick is restricted to agents that stay (`ordinal < spec.replicas`). A dead
 agent (`agent_status.state`) never leads: it is not eligible, and a leader whose agent is dead
@@ -27,7 +27,6 @@ import psycopg
 from psycopg.rows import dict_row
 
 from agents_orchestrator.db.eligibility import (
-    COMPACTED,
     DEAD,
     ELIGIBLE,
     HANDOVER_TRIGGER,
@@ -98,7 +97,7 @@ _HIVE = "coalesce(c.spec->>'max_replicas', c.spec->>'replicas')::int > 1"
 
 # Hive sessions whose leadership needs a pass: queued requests, no leader row while an agent
 # could lead, a leader that is gone, not ready or dead, an unready mark to clear,
-# a leader that compacted in its term, or a leader whose ordinal a scale-down removes.
+# or a leader whose ordinal a scale-down removes.
 _CANDIDATES = f"""
 SELECT c.id FROM sessions c
 LEFT JOIN session_leaders l ON l.session_id = c.id
@@ -163,8 +162,7 @@ async def _leader(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> dict 
         "   < now() - make_interval(secs => %s) AS grace_over,"
         " a.ready, a.gone_at IS NOT NULL AS gone,"
         f" {DEAD} AS dead,"
-        f" {LEAVING} AS leaving,"
-        f" {COMPACTED} AS compacted"
+        f" {LEAVING} AS leaving"
         " FROM session_leaders l JOIN agents a ON a.id = l.agent_id"
         " JOIN sessions c ON c.id = l.session_id"
         " WHERE l.session_id = %s FOR UPDATE OF l",
@@ -281,7 +279,7 @@ def _mid_turn_rollout(req: dict, leader: dict | None) -> bool:
 async def leadership_pass(
     conn: psycopg.AsyncConnection, session_id: uuid.UUID
 ) -> LeaderChange | None:
-    """Elect, apply queued requests, hand over (scale-down, lost, compaction): one lock.
+    """Elect, apply queued requests, hand over (scale-down, lost): one lock.
 
     Returns the last change of this pass, or None when nothing changed, the session is not a
     hive, or another dispatcher holds the session's claim lock (the pass is skipped).
@@ -315,8 +313,8 @@ async def leadership_pass(
                 leader = await _leader(conn, session_id)
 
         # 2. Queued requests in id order, each re-checked against the leader as it is now. A
-        # `rollout` handover from the current leader waits for its turn boundary, like the
-        # compaction handover: while the leader is mid-turn it stays queued for a later pass.
+        # `rollout` handover from the current leader waits for its turn boundary: while the
+        # leader is mid-turn it stays queued for a later pass.
         for req in await _all(
             conn,
             "SELECT id, kind, from_agent_id, to_agent_id, reason, epoch"
@@ -364,19 +362,4 @@ async def leadership_pass(
                     (session_id,),
                 )
 
-        # 5. Compaction: a leader that compacted in its term (`compaction_at` after `since`)
-        # hands over at its turn boundary, never mid-turn. With no eligible
-        # agent the leader stays and the move is retried for the rest of its term; any leader
-        # change starts a clean term.
-        if (
-            leader is not None
-            and leader["compacted"]
-            and leader["ready"]
-            and not leader["gone"]
-            and leader["at_boundary"]
-        ):
-            picked = await _free_longest(conn, session_id, leader["agent_id"])
-            if picked is not None:
-                change = await _set_leader(conn, session_id, picked, "compaction")
-                leader = await _leader(conn, session_id)
         return change

@@ -440,7 +440,7 @@ async def _target_gone(
     return row is None or row["gone_at"] is not None
 
 
-# A leader whose handover is pending (it compacted in its term, or its pod is leaving) while an
+# A leader whose handover is pending (its pod is leaving) while an
 # agent that could take over exists: the pass's pick predicate (`ELIGIBLE`), so the hold never
 # outlives a possible move. Outside the subquery `a` is the leader's agent, `l` its row and `c`
 # the session (the trigger's aliases); inside it `a` is the candidate peer.

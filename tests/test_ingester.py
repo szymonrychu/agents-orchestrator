@@ -533,8 +533,7 @@ async def test_compacting_sets_compaction_at(harness, pool, listener) -> None:
     assert [r["type"] for r in await events_rows(pool, h.agent_id)][-1] == "compacting"
     want = {"session_id": str(h.session_id), "agent_id": str(h.agent_id)}
     await wait_until(lambda: want in listener.on("status"))
-    await wait_until(lambda: listener.on(LEADERSHIP_CHANNEL))
-    assert listener.on(LEADERSHIP_CHANNEL) == [{"session_id": str(h.session_id)}]
+    assert listener.on(LEADERSHIP_CHANNEL) == []  # an advisory only: no leadership wake
 
 
 async def test_compacted_moves_compaction_at(harness, pool, listener) -> None:
@@ -550,8 +549,9 @@ async def test_compacted_moves_compaction_at(harness, pool, listener) -> None:
     h.emit_at("compacted", T2, {"trigger": "manual"})
     await h.stored_through(h.last_fake_seq())
     assert await compaction_at(pool, h.agent_id) == datetime.fromisoformat(T2)
-    await wait_until(lambda: listener.on(LEADERSHIP_CHANNEL))
-    assert listener.on(LEADERSHIP_CHANNEL) == [{"session_id": str(h.session_id)}]
+    want = {"session_id": str(h.session_id), "agent_id": str(h.agent_id)}
+    await wait_until(lambda: want in listener.on("status"))
+    assert listener.on(LEADERSHIP_CHANNEL) == []
 
     # no other event type writes it, whatever its time
     later = "2026-10-20T12:00:00.000+00:00"

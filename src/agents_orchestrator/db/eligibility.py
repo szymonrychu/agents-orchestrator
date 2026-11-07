@@ -29,12 +29,8 @@ DEAD = "EXISTS (SELECT 1 FROM agent_status ds WHERE ds.agent_id = a.id AND ds.st
 READY_STAYS = f"a.ready AND a.gone_at IS NULL AND NOT {DEAD} AND {STAYS}"
 ELIGIBLE = f"{READY_STAYS} AND a.wrapper_session_id IS NOT NULL"
 
-# The handover trigger: the leader compacted in its term, or its pod is leaving. Aliases: `l`
-# the `session_leaders` row, `a` the leader's agent, `c` the session. `LEAVING` is the ordinal
-# test alone (the pass reads it as a column); the trigger also requires the agent not gone.
+# The handover trigger: the leader's pod is leaving. Aliases: `l` the `session_leaders` row, `a`
+# the leader's agent, `c` the session. `LEAVING` is the ordinal test alone (the pass reads it as
+# a column); the trigger also requires the agent not gone.
 LEAVING = f"a.ordinal >= {REPLICAS}"
-COMPACTED = (
-    "coalesce((SELECT s.compaction_at > l.since FROM agent_status s"
-    " WHERE s.agent_id = l.agent_id), false)"
-)
-HANDOVER_TRIGGER = f"({COMPACTED} OR (a.gone_at IS NULL AND {LEAVING}))"
+HANDOVER_TRIGGER = f"(a.gone_at IS NULL AND {LEAVING})"
