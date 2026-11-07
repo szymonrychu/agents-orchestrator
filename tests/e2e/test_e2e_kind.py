@@ -316,6 +316,8 @@ ALONE_SESSION_TOOLS = [
     "todo_set",
     "todo_update",
     "session_labels_set",
+    "session_get",
+    "session_patch",
     "self_close",
 ]
 

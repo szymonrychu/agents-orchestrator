@@ -1,4 +1,7 @@
-"""O6: every /agent/v1/admin route sits behind require_agent and the superleader gate (D3, D10)."""
+"""O6: every /agent/v1/admin route sits behind require_agent and a gate (D3, D10): the
+superleader gate, or for the two session spec routes (GET and PATCH /sessions/{slug}) the
+session editor gate, which admits a superleader on any slug and any other session's leader on
+its own slug only."""
 
 from __future__ import annotations
 
@@ -10,18 +13,36 @@ from test_api_agent import client_for, headers, make_settings
 from test_api_sessions import assert_error
 
 from agents_orchestrator.api import admin
-from agents_orchestrator.api.admin import ADMIN_PREFIX, require_superleader
+from agents_orchestrator.api.admin import (
+    ADMIN_PREFIX,
+    require_session_editor,
+    require_superleader,
+)
 from agents_orchestrator.api.app import create_app
 
 GET_PRESETS = f"{ADMIN_PREFIX}/presets"
 
 
+GATES = {id(admin.router): require_superleader, id(admin.session_router): require_session_editor}
+EDITOR_ROUTES = {
+    ("GET", f"{ADMIN_PREFIX}/sessions/{{slug}}"),
+    ("PATCH", f"{ADMIN_PREFIX}/sessions/{{slug}}"),
+}
+
+
 def admin_routes(app):
-    """The admin router's routes, checked against what the app really serves (its OpenAPI
-    paths), because FastAPI keeps included routers lazy in `app.routes`."""
-    routes = list(admin.router.routes)
-    served = {p for p in app.openapi()["paths"] if p.startswith(ADMIN_PREFIX)}
-    assert served == {r.path for r in routes}
+    """(router, route) of both admin routers, checked against what the app really serves (its
+    OpenAPI operations), because FastAPI keeps included routers lazy in `app.routes`."""
+    routes = [(r, route) for r in (admin.router, admin.session_router) for route in r.routes]
+    served = {
+        (method.upper(), path)
+        for path, ops in app.openapi()["paths"].items()
+        if path.startswith(ADMIN_PREFIX)
+        for method in ops
+    }
+    assert served == {
+        (m, route.path) for _, route in routes for m in route.methods - {"HEAD", "OPTIONS"}
+    }
     return routes
 
 
@@ -39,13 +60,37 @@ async def mark_trigger(pool, session_id, service="agents-webhook"):
         )
 
 
-async def test_every_admin_route_carries_the_gate(pool, dsn):
+async def test_every_admin_route_carries_its_gate(pool, dsn):
+    """Each route carries exactly the gate of its router: the session editor gate on the two
+    session spec routes, the superleader gate on every other."""
     app = create_app(make_settings(dsn), pool)
     routes = admin_routes(app)
     assert len(routes) >= 7
-    for route in routes:
+    editor = set()
+    for router, route in routes:
         calls = [d.call for d in route.dependant.dependencies]
-        assert require_superleader in calls, route.path
+        gate = GATES[id(router)]
+        other = ({require_superleader, require_session_editor} - {gate}).pop()
+        assert gate in calls and other not in calls, route.path
+        if gate is require_session_editor:
+            editor.update((m, route.path) for m in route.methods - {"HEAD", "OPTIONS"})
+    assert editor == EDITOR_ROUTES
+
+
+async def test_editor_gate_is_per_route_and_slug_stays_a_path_parameter(pool, dsn):
+    """The editor gate reads `slug`: it sits on the routes that have {slug}, never on the router,
+    so a route added without one cannot turn it into a required query parameter."""
+    assert admin.session_router.dependencies == []
+    for route in admin.session_router.routes:
+        assert "{slug}" in route.path, route.path
+    app = create_app(make_settings(dsn), pool)
+    for path, ops in app.openapi()["paths"].items():
+        if not path.startswith(ADMIN_PREFIX):
+            continue
+        for method, op in ops.items():
+            where = {p["name"]: p["in"] for p in op.get("parameters", [])}
+            assert where.get("slug", "path") == "path", (method, path)
+            assert ("slug" in where) == ("{slug}" in path), (method, path)
 
 
 async def test_gate_table_over_all_admin_routes(pool, dsn):
@@ -54,7 +99,7 @@ async def test_gate_table_over_all_admin_routes(pool, dsn):
     trigger = await alone(pool, "g-trigger", superleader=True)
     await mark_trigger(pool, trigger.id)
     boss = await alone(pool, "g-boss", superleader=True)
-    for route in admin_routes(app):
+    for _, route in admin_routes(app):
         for method in route.methods - {"HEAD", "OPTIONS"}:
             path = concrete(route.path)
             async with client_for(app, plain.leader_ip) as http:

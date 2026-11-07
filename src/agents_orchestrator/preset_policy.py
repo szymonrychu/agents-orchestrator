@@ -15,6 +15,9 @@ and false equal:
 - env.<NAME> of a stored protected variable: may not be removed or unprotected
   (decision 7 b); adding a protected variable and setting its value stay allowed.
 
+A live session adds two rules of its own: `fixed_changes` (fields that cannot change on a
+running session) and `tighten_changes` (limits a regular leader may only lower).
+
 All functions work on JSON dicts as stored (model_dump(mode="json",
 exclude_unset=True)) and never mutate their inputs. The main port never calls
 them: only the agent-facing admin routes do.
@@ -48,6 +51,27 @@ HUMAN_ONLY: tuple[str, ...] = (
     "wrapper.permission_mode",
     "wrapper.permissions.allow",
     "wrapper.permissions.deny",
+)
+
+# Fields of a live session that a spec edit may not change.
+SESSION_FIXED: tuple[str, ...] = (
+    "replicas",
+    "max_replicas",
+    "static",
+    "workdir",
+    "pvc_size",
+    "cache",
+)
+_FIXED_DEFAULTS: dict[str, Any] = {"replicas": 1, "static": False, "workdir": "workdir"}
+
+# Limits a regular leader may only tighten on its own session: (block, key).
+_QUOTA_PATHS: tuple[tuple[str, str], ...] = (
+    ("usage_quota", "five_hour_pct"),
+    ("usage_quota", "seven_day_pct"),
+)
+_INACTIVITY_PATHS: tuple[tuple[str, str], ...] = (
+    ("inactivity", "reminder_seconds"),
+    ("inactivity", "close_seconds"),
 )
 
 _DEFAULT_PERMISSION_MODE = "bypassPermissions"
@@ -126,6 +150,61 @@ def privileged_target_changes(
     allowed |= {"wrapper.permission_mode", "wrapper.permissions"}
     refused = {p for p in changed_paths(stored, new) if p not in allowed}
     return sorted(refused | {f"env.{n}" for n in secret_values})
+
+
+def _fixed_value(spec: dict[str, Any], field: str) -> Any:
+    """The effective value of a fixed field: a missing or null key reads as its default, and
+    `max_replicas` unset means `replicas`."""
+    if field == "max_replicas":
+        value = spec.get("max_replicas")
+        return value if value is not None else _fixed_value(spec, "replicas")
+    value = spec.get(field)
+    return value if value is not None else _FIXED_DEFAULTS.get(field)
+
+
+def fixed_changes(stored: dict[str, Any], new: dict[str, Any]) -> list[str]:
+    """The `SESSION_FIXED` fields whose effective value differs between two session specs
+    (sorted). Absent, null and the default are equal; `max_replicas` absent equals
+    `replicas`; a key present on one side only counts unless both normalise equal."""
+    return sorted(f for f in SESSION_FIXED if _fixed_value(stored, f) != _fixed_value(new, f))
+
+
+def _effective(
+    spec: dict[str, Any], block: str, key: str, default: int, *, off_is_zero: bool
+) -> float:
+    value = _dict(spec.get(block)).get(key)
+    if value is None:
+        value = default
+    # Inactivity: 0 is off, which is the loosest limit; a quota has no such value.
+    return float("inf") if off_is_zero and value == 0 else value
+
+
+def tighten_changes(
+    stored: dict[str, Any],
+    new: dict[str, Any],
+    *,
+    quota_default: int,
+    reminder_default: int,
+    close_default: int,
+) -> list[str]:
+    """The limit paths whose effective value got looser from `stored` to `new` (sorted):
+    `usage_quota.five_hour_pct` and `.seven_day_pct` (unset is `quota_default`, higher is
+    looser) and `inactivity.reminder_seconds` and `.close_seconds` (unset is the default, 0 is
+    off and so infinite, longer is looser). Lowering, or keeping, a limit is never reported."""
+    defaults = {
+        "five_hour_pct": quota_default,
+        "seven_day_pct": quota_default,
+        "reminder_seconds": reminder_default,
+        "close_seconds": close_default,
+    }
+    out: list[str] = []
+    for block, key in (*_QUOTA_PATHS, *_INACTIVITY_PATHS):
+        off_is_zero = block == "inactivity"
+        old_v = _effective(stored, block, key, defaults[key], off_is_zero=off_is_zero)
+        new_v = _effective(new, block, key, defaults[key], off_is_zero=off_is_zero)
+        if new_v > old_v:
+            out.append(f"{block}.{key}")
+    return sorted(out)
 
 
 def strip_grants(spec: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:

@@ -4369,6 +4369,22 @@
         "title": "SessionSpecIn",
         "type": "object"
       },
+      "SessionSpecPatch": {
+        "additionalProperties": false,
+        "description": "Agent edit of a live session: `spec` is an RFC 7396 merge patch of the stored spec.",
+        "properties": {
+          "spec": {
+            "additionalProperties": true,
+            "title": "Spec",
+            "type": "object"
+          }
+        },
+        "required": [
+          "spec"
+        ],
+        "title": "SessionSpecPatch",
+        "type": "object"
+      },
       "SessionSummary": {
         "properties": {
           "attention_agents": {
@@ -7969,6 +7985,7 @@
         ]
       },
       "get": {
+        "description": "A superleader reads its own or a manageable session; any other leader its own.",
         "operationId": "get_session_agent_v1_admin_sessions__slug__get",
         "parameters": [
           {
@@ -8036,6 +8053,89 @@
           }
         },
         "summary": "Get Session",
+        "tags": [
+          "admin"
+        ]
+      },
+      "patch": {
+        "description": "RFC 7396 merge patch of a live session's spec: a superleader on its own or a manageable\nsession, any other leader on its own. The source preset is never written.",
+        "operationId": "patch_session_agent_v1_admin_sessions__slug__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionSpecPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Session",
         "tags": [
           "admin"
         ]

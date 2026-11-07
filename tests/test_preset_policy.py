@@ -2,10 +2,12 @@ import pytest
 
 from agents_orchestrator.preset_policy import (
     changed_paths,
+    fixed_changes,
     human_only_changes,
     merge_patch,
     privileged,
     strip_grants,
+    tighten_changes,
 )
 
 
@@ -215,3 +217,145 @@ def test_namespace_grant_is_privileged_and_stripped():
     assert privileged({NS: {"media": ["read"]}}) == [NS]
     out, removed = strip_grants({NS: {"media": ["read"]}, "replicas": 1})
     assert out == {"replicas": 1} and removed == [NS]
+
+
+@pytest.mark.parametrize(
+    "field, old, new",
+    [
+        ("replicas", 1, 3),
+        ("max_replicas", 3, 5),
+        ("static", False, True),
+        ("workdir", "a", "b"),
+        ("pvc_size", "1Gi", "2Gi"),
+        ("cache", {"save_key": "a"}, {"save_key": "b"}),
+    ],
+)
+def test_fixed_changes_names_each_field(field, old, new):
+    base = {"replicas": 3, "max_replicas": 5}
+    assert fixed_changes({**base, field: old}, {**base, field: new}) == [field]
+
+
+def test_fixed_changes_unchanged_is_empty():
+    spec = {"replicas": 2, "max_replicas": 4, "workdir": "w", "pvc_size": "1Gi", "cache": {}}
+    assert fixed_changes(spec, dict(spec)) == []
+    assert fixed_changes({}, {}) == []
+
+
+def test_fixed_changes_ignores_other_fields():
+    assert fixed_changes({"start_prompt": "a"}, {"start_prompt": "b", "model": "m"}) == []
+
+
+def test_fixed_changes_sorted():
+    assert fixed_changes({}, {"workdir": "w", "pvc_size": "1Gi", "cache": {"save_key": "a"}}) == [
+        "cache",
+        "pvc_size",
+        "workdir",
+    ]
+
+
+def test_fixed_changes_replicas_moves_the_unset_max_with_it():
+    assert fixed_changes({}, {"replicas": 2}) == ["max_replicas", "replicas"]
+    assert fixed_changes({"max_replicas": 2}, {"replicas": 2, "max_replicas": 2}) == ["replicas"]
+
+
+def test_fixed_changes_max_replicas_absent_equals_replicas():
+    assert fixed_changes({"replicas": 2}, {"replicas": 2, "max_replicas": 2}) == []
+    assert fixed_changes({"replicas": 2, "max_replicas": 2}, {"replicas": 2}) == []
+    assert fixed_changes({"replicas": 2}, {"replicas": 2, "max_replicas": 3}) == ["max_replicas"]
+    assert fixed_changes({"replicas": 2, "max_replicas": 3}, {"replicas": 2}) == ["max_replicas"]
+
+
+def test_fixed_changes_absent_versus_set():
+    assert fixed_changes({}, {"pvc_size": "1Gi"}) == ["pvc_size"]
+    assert fixed_changes({"pvc_size": "1Gi"}, {}) == ["pvc_size"]
+    assert fixed_changes({}, {"static": True}) == ["static"]
+    assert fixed_changes({"workdir": "w"}, {}) == ["workdir"]
+
+
+def test_fixed_changes_defaults_equal_absent():
+    assert fixed_changes({}, {"replicas": 1, "static": False, "workdir": "workdir"}) == []
+    assert fixed_changes({"replicas": 1, "static": False}, {}) == []
+
+
+def test_fixed_changes_null_equals_absent():
+    assert fixed_changes({}, {"cache": None, "pvc_size": None}) == []
+    assert fixed_changes({"cache": None}, {}) == []
+    assert fixed_changes({"cache": {"save_key": "a"}}, {"cache": None}) == ["cache"]
+
+
+DEFAULTS = {"quota_default": 100, "reminder_default": 0, "close_default": 0}
+
+
+def tighten(stored, new, **defaults):
+    return tighten_changes(stored, new, **{**DEFAULTS, **defaults})
+
+
+@pytest.mark.parametrize("metric", ["five_hour_pct", "seven_day_pct"])
+def test_tighten_quota(metric):
+    path = f"usage_quota.{metric}"
+
+    def q(v):
+        return {"usage_quota": {metric: v}}
+
+    assert tighten(q(50), q(80)) == [path]  # up is looser
+    assert tighten(q(80), q(50)) == []  # down is tighter
+    assert tighten(q(50), q(50)) == []
+    assert tighten(q(50), {}) == [path]  # removed: back to the default 100
+    assert tighten(q(50), {"usage_quota": {}}) == [path]
+    assert tighten(q(50), q(None)) == [path]
+    assert tighten({}, q(60)) == []  # unset stored is the default; below it is tighter
+    assert tighten({}, q(100)) == []  # equal to the default
+    assert tighten(q(100), {}) == []
+    assert tighten({}, q(70), quota_default=60) == [path]  # above a lower default
+    assert tighten(q(30), {}, quota_default=40) == [path]
+    assert tighten(q(30), {}, quota_default=20) == []  # the default is tighter than the stored
+
+
+def test_tighten_quota_metrics_are_independent():
+    stored = {"usage_quota": {"five_hour_pct": 50, "seven_day_pct": 50}}
+    new = {"usage_quota": {"five_hour_pct": 60, "seven_day_pct": 40}}
+    assert tighten(stored, new) == ["usage_quota.five_hour_pct"]
+    new = {"usage_quota": {"five_hour_pct": 60, "seven_day_pct": 70}}
+    assert tighten(stored, new) == ["usage_quota.five_hour_pct", "usage_quota.seven_day_pct"]
+
+
+@pytest.mark.parametrize("key", ["reminder_seconds", "close_seconds"])
+def test_tighten_inactivity(key):
+    path = f"inactivity.{key}"
+
+    def i(v):
+        return {"inactivity": {key: v}}
+
+    assert tighten(i(3600), i(0)) == [path]  # 0 is off, infinite: looser
+    assert tighten(i(0), i(3600)) == []  # on from off: tighter
+    assert tighten(i(3600), i(7200)) == [path]  # longer is looser
+    assert tighten(i(7200), i(3600)) == []  # shorter is tighter
+    assert tighten(i(3600), i(3600)) == []
+    assert tighten(i(3600), {}) == [path]  # unset with default 0 is off
+    assert tighten({}, i(3600)) == []
+    assert tighten({}, {}) == []
+    assert tighten(i(0), {}) == []
+    assert tighten(i(3600), {}, reminder_default=900, close_default=900) == []
+    assert tighten(i(600), {}, reminder_default=900, close_default=900) == [path]
+
+
+def test_tighten_inactivity_keys_are_independent():
+    stored = {"inactivity": {"reminder_seconds": 600, "close_seconds": 3600}}
+    new = {"inactivity": {"reminder_seconds": 300, "close_seconds": 0}}
+    assert tighten(stored, new) == ["inactivity.close_seconds"]
+
+
+def test_tighten_ignores_other_fields_and_null_blocks():
+    assert tighten({"start_prompt": "a"}, {"start_prompt": "b"}) == []
+    assert tighten({"usage_quota": None}, {"usage_quota": None, "inactivity": None}) == []
+    assert tighten({"usage_quota": {"five_hour_pct": 50}}, {"usage_quota": None}) == [
+        "usage_quota.five_hour_pct"
+    ]
+
+
+def test_tighten_does_not_mutate():
+    stored = {"usage_quota": {"five_hour_pct": 50}}
+    new = {"usage_quota": {"five_hour_pct": 80}}
+    tighten(stored, new)
+    assert stored == {"usage_quota": {"five_hour_pct": 50}}
+    assert new == {"usage_quota": {"five_hour_pct": 80}}

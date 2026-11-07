@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 import httpx2
 import pytest
 import pytest_asyncio
+import yaml
 from factories import (
     insert_agent,
     insert_check,
@@ -36,7 +37,7 @@ from agents_orchestrator.k8s.kube import (
     LightkubeApi,
 )
 from agents_orchestrator.k8s.labels import MANAGED_BY_LABEL, SESSION_LABEL, session_labels
-from agents_orchestrator.k8s.render import render_session
+from agents_orchestrator.k8s.render import HASH_ANNOTATION, render_session
 from agents_orchestrator.reconciler import Reconciler
 from agents_orchestrator.settings import Settings, SettingsError
 from agents_orchestrator.spec import SessionSpec
@@ -1134,3 +1135,89 @@ async def test_reconcile_pass_releases_a_held_note_once_the_replacement_is_up(en
     )
     await env.rec.reconcile_once()
     assert not await held()
+
+
+# ------------------------------------------------------------ a live spec patch reaches the pods
+
+GRAFANA_OLD = ["x", "mcp-grafana@0.1.0", "--", "-t"]
+GRAFANA_NEW = ["x", "mcp-grafana@0.2.0", "--", "-t", "--disable-write"]
+
+
+def _grafana(args: list[str]) -> dict:
+    return {
+        "wrapper": {"mcp_servers": {"grafana": {"type": "stdio", "command": "mise", "args": args}}}
+    }
+
+
+async def _patch_args(env: Env, session: sessions.Session, args: list[str]) -> bool:
+    """The write the session PATCH ends in: replace_spec on the stored dump with the grafana
+    server args replaced, no recheck."""
+    (row,) = await env.rows("SELECT spec FROM sessions WHERE id = %s", (session.id,))
+    stored = row["spec"]
+    spec = copy.deepcopy(stored)
+    spec["wrapper"]["mcp_servers"]["grafana"]["args"] = args
+
+    async def recheck(locked) -> None:
+        return None
+
+    async with env.pool.connection() as conn:
+        _, written = await sessions.replace_spec(
+            conn, session.id, stored, SessionSpec.model_validate(spec), recheck
+        )
+    return written
+
+
+def _rendered(env: Env, session: sessions.Session) -> list[dict]:
+    return render_session(session, env.settings, tokens_for(env.settings, session.id))
+
+
+def _hash_and_args(objs: list[dict]) -> tuple[str, list[str]]:
+    by_kind = {o["kind"]: o for o in objs}
+    annotations = by_kind["StatefulSet"]["spec"]["template"]["metadata"]["annotations"]
+    cfg = yaml.safe_load(by_kind["ConfigMap"]["data"]["config.yaml"])
+    return annotations[HASH_ANNOTATION], cfg["claude"]["mcp_servers"]["grafana"]["args"]
+
+
+async def test_spec_patch_changes_rendered_config_and_hash(env):
+    """A session before and after the use-case patch renders a config.yaml with the new MCP
+    server args and a different config-hash annotation (the Replacer rolls on that hash)."""
+    c = await env.session("alpha", replicas=1, **_grafana(GRAFANA_OLD))
+    old_hash, old_args = _hash_and_args(_rendered(env, c))
+    assert old_args == GRAFANA_OLD
+
+    assert await _patch_args(env, c, GRAFANA_NEW)
+
+    patched = await env.get(c.id)
+    assert patched.generation == c.generation + 1
+    new_hash, new_args = _hash_and_args(_rendered(env, patched))
+    assert new_args == GRAFANA_NEW
+    assert new_hash != old_hash
+
+
+async def test_spec_patch_is_applied_once_by_reconcile(env):
+    """One reconcile pass after the patch applies the ConfigMap and the StatefulSet with the new
+    annotation; a second pass applies nothing."""
+    c = await env.session("alpha", replicas=1, **_grafana(GRAFANA_OLD))
+    await env.rec.reconcile_once()
+    old_hash, _ = _hash_and_args(_rendered(env, c))
+    sts = await env.kube.get_object("StatefulSet", "agents", "agent-alpha")
+    assert sts["spec"]["template"]["metadata"]["annotations"][HASH_ANNOTATION] == old_hash
+
+    assert await _patch_args(env, c, GRAFANA_NEW)
+    env.kube.reset_records()
+    await env.rec.reconcile_once()
+
+    patched = await env.get(c.id)
+    assert patched.observed_generation == patched.generation == c.generation + 1
+    new_hash, new_args = _hash_and_args(_rendered(env, patched))
+    kinds = {a.kind: a.obj for a in env.kube.applied()}
+    assert set(kinds) == {"ConfigMap", "StatefulSet"}
+    sts_applied = kinds["StatefulSet"]["spec"]["template"]["metadata"]["annotations"]
+    assert sts_applied[HASH_ANNOTATION] == new_hash != old_hash
+    cfg = yaml.safe_load(kinds["ConfigMap"]["data"]["config.yaml"])
+    assert cfg["claude"]["mcp_servers"]["grafana"]["args"] == new_args == GRAFANA_NEW
+
+    env.kube.reset_records()
+    await env.rec.reconcile_once()
+    assert env.kube.applied() == []
+    assert env.kube.deletes == []
