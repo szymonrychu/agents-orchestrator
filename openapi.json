@@ -2392,7 +2392,8 @@
                 "enum": [
                   "inactivity_reminder",
                   "inactivity_close",
-                  "handover"
+                  "handover",
+                  "proposal"
                 ],
                 "type": "string"
               },

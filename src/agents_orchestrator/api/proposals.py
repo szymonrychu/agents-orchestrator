@@ -1,8 +1,9 @@
-"""Change proposals service (preset-change-proposals 3.4): create, revise, withdraw and read.
+"""Change proposals service (preset-change-proposals 3.4, 3.5): create, revise, withdraw, read
+and the human review that applies the approved items.
 
-Stage A handles `kind: "preset"` only; the routes and gates live in `proposal_routes`, the human
-review and apply come later. A proposal is never applied here and never runs the agent guards
-(human-only, privileged): it may carry any path, security, grant or not, for a human to decide.
+Stage A handles `kind: "preset"` only; the routes and gates live in `proposal_routes`. A proposal
+never runs the agent guards (human-only, privileged): it may carry any path, security, grant or
+not, for a human to decide; only `review` (a human) writes the target.
 
 A protected value arrives as a `SecretStr` in `secrets` and goes only into a staged Secret's
 `stringData` (`stage_secret`); no row, view, error, log line or audit entry ever holds it. The
@@ -11,16 +12,19 @@ staged Secrets are written before the transaction commits and deleted again when
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
+import psycopg
 from fastapi import Request
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 from agents_orchestrator.api import admin, schemas, secret_store, session_spec
 from agents_orchestrator.api import presets as presets_api
@@ -28,10 +32,12 @@ from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.spec_edit import merged_spec_in, note_fields
 from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.db import proposals as repo
+from agents_orchestrator.db.queue import SessionBeingDeleted, enqueue_message
 from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.preset_policy import changed_paths, classify
 from agents_orchestrator.secret_view import EnvMeta, redact_spec_dict
 from agents_orchestrator.settings import Settings
+from agents_orchestrator.spec import SessionSpecIn
 
 log = logging.getLogger(__name__)
 
@@ -394,3 +400,286 @@ async def list_views(
         raise ApiError(422, "invalid_request", f"status must be one of: {', '.join(STATUSES)}")
     found = await repo.list_for(conn, proposer_session=proposer, statuses=statuses, limit=limit)
     return [await _view(conn, p) for p in found]
+
+
+# ---------------------------------------------------------------- review (plan 3.5)
+
+_DECISION = {"approve": "approved", "rework": "rework", "deny": "denied"}
+_REVIEWABLE = ("open", "stale")  # a stale proposal takes a rework or deny submit only
+
+Decisions = dict[str, tuple[str, str | None]]
+
+
+@dataclass
+class _Done:
+    """What a review transaction leaves for after its commit: the error to answer (a refusal
+    whose state change must stick), the proposals whose staged values go, the preset to `gc`."""
+
+    error: ApiError | None = None
+    release: list[repo.Proposal] = field(default_factory=list)
+    gc: uuid.UUID | None = None
+
+
+def _stale_error() -> ApiError:
+    return ApiError(
+        409,
+        "proposal_stale",
+        "the preset changed since this revision was based; only rework or deny remain",
+        extra={"fields": []},
+    )
+
+
+def _head(p: repo.Proposal) -> str:
+    return f"Proposal P-{p.id} r{p.revision} ({p.kind} {p.target_name})"
+
+
+def _entry(item: repo.Item, note: str | None) -> str:
+    """A path for a notice: secret items say only that a value is set or changed."""
+    label = f"{item.path} (value {item.secret})" if item.secret else item.path
+    return f"{label}: {note}" if note else label
+
+
+def _reviewed_text(p: repo.Proposal, decisions: Decisions) -> str:
+    """The proposer's notice for a review submit (D1): paths, verdicts and notes, never a value."""
+    by: dict[str, list[str]] = {"approved": [], "rework": [], "denied": []}
+    for item in p.revisions[0].items:
+        decision, note = decisions[item.path]
+        by[decision].append(_entry(item, note))
+    if by["rework"]:
+        parts = ["; ".join(by["rework"])]
+        if by["approved"]:
+            parts.append("approved as proposed: " + ", ".join(by["approved"]))
+        if by["denied"]:
+            parts.append("denied: " + ", ".join(by["denied"]))
+        return f"{_head(p)} needs rework: {'; '.join(parts)}; revise with proposal_revise {p.id}."
+    parts = []
+    if by["approved"]:
+        parts.append("applied " + ", ".join(by["approved"]))
+    if by["denied"]:
+        parts.append("denied " + ", ".join(by["denied"]))
+    return f"{_head(p)} was reviewed: {'; '.join(parts)}. Details: proposal_get {p.id}."
+
+
+_CLOSED_TEXT = {
+    "stale": "is stale: the preset changed since this revision was based; nothing was applied."
+    " Revise it against the current preset with proposal_revise {id}.",
+    "expired": "expired before it was reviewed; nothing was applied."
+    " File it again with proposal_create if it is still needed.",
+    "target_gone": "was closed: the preset no longer exists; nothing was applied.",
+}
+
+
+async def _notify(conn, p: repo.Proposal, text: str) -> None:
+    """Queue the proposer's notice in the caller's transaction (it exists iff that commits). A
+    proposer session being deleted, or already purged, gets none; the outcome is still recorded."""
+    try:
+        await enqueue_message(conn, p.proposer_session, text, lane="regular", notice="proposal")
+    except (SessionBeingDeleted, psycopg.errors.ForeignKeyViolation):
+        log.info("proposal %d: proposer session gone, no notice", p.id)
+
+
+async def _close(conn, p: repo.Proposal, to: str, error: ApiError) -> _Done:
+    """Mark the proposal `to` (stale, expired, target_gone), notify, and answer `error` once the
+    transaction committed; its staged values are released after the commit."""
+    await repo.transition(conn, p.id, from_states=repo.ACTIVE, to=to, outcome=to)
+    await _notify(conn, p, f"{_head(p)} {_CLOSED_TEXT[to].format(id=p.id)}")
+    return _Done(error=error, release=[p])
+
+
+def _decisions(current: repo.Revision, body: schemas.ReviewIn) -> Decisions:
+    """The body decides every item of the revision exactly once; a rework carries a note."""
+    paths = [i.path for i in body.items]
+    expected = {i.path for i in current.items}
+    if len(set(paths)) != len(paths):
+        raise ApiError(422, "invalid_request", "each item may be decided only once")
+    missing, unknown = sorted(expected - set(paths)), sorted(set(paths) - expected)
+    if missing or unknown:
+        detail = [f"undecided: {', '.join(missing)}"] if missing else []
+        detail += [f"not an item of this revision: {', '.join(unknown)}"] if unknown else []
+        raise ApiError(422, "invalid_request", "; ".join(detail))
+    reworked = sorted(
+        i.path for i in body.items if i.decision == "rework" and not (i.note or "").strip()
+    )
+    if reworked:
+        raise ApiError(422, "invalid_request", f"rework needs a note: {', '.join(reworked)}")
+    return {i.path: (_DECISION[i.decision], i.note) for i in body.items}
+
+
+def _put(spec: dict[str, Any], path: str, value: Any) -> None:
+    """Set the value at a `changed_paths` path (None removes it), as `_at` reads it."""
+    head, _, sub = path.partition(".")
+    if not sub:
+        if value is None:
+            spec.pop(head, None)
+        else:
+            spec[head] = value
+        return
+    inner = dict(spec.get(head) or {})
+    if value is None:
+        inner.pop(sub, None)
+    else:
+        inner[sub] = value
+    spec[head] = inner
+
+
+def _pydantic_text(exc: ValidationError) -> str:
+    """`loc` and `msg` only: never the input."""
+    return "; ".join(
+        f"{'.'.join(str(x) for x in e['loc'])}: {e['msg']}" if e["loc"] else e["msg"]
+        for e in exc.errors()
+    )
+
+
+async def _apply(
+    request: Request,
+    conn,
+    settings: Settings,
+    preset: presets_repo.Preset,
+    p: repo.Proposal,
+    decisions: Decisions,
+) -> bool:
+    """Write the approved items onto the locked stored spec (step 5-6); True when the secret store
+    was touched (the caller runs `gc` after the commit).
+
+    The name, labels and manageable flag (and any other column) are passed through unchanged
+    (F8): items are spec paths only. No agent guard runs: a human approved. Approved staged values
+    are promoted here, in the same transaction as the preset write: `promote_staged` is a database
+    change only (the Secret was written when it was staged), so the new version goes live exactly
+    when the preset write commits, and a rollback leaves the reservation staged for a retry."""
+    current = p.revisions[0]
+    approved = [i for i in current.items if decisions[i.path][0] == "approved"]
+    stored = copy.deepcopy(preset.spec)
+    for item in approved:
+        _put(stored, item.path, item.after)
+    try:
+        spec_in = SessionSpecIn.model_validate(stored)
+    except ValidationError as exc:
+        raise ApiError(422, "invalid_spec", _pydantic_text(exc)) from None
+    spec, _ = spec_in.split()  # no values: an item `after` is a redacted declaration
+    try:
+        new = await presets_api.validated_spec(spec, settings, preset.spec, preset.id)
+    except ApiError as exc:
+        raise ApiError(422, "invalid_spec", exc.message) from None
+    await presets_repo.update(
+        conn, preset.id, preset.name, new, expected_updated_at=preset.updated_at
+    )
+    promoted = sorted(i.path.removeprefix("env.") for i in approved if i.secret)
+    if not promoted and not await secret_store.has_rows(conn, preset.id):
+        return False
+    for name in promoted:  # one lock order across concurrent writers
+        await secret_store.promote_staged(
+            conn, preset.id, name, proposal_id=p.id, revision=current.revision
+        )
+    declared = sorted(n for n, e in new.get("env", {}).items() if e.get("protected"))
+    await secret_store.sync_declared(
+        conn, secret_store.kube_of(request), settings.namespace, preset.id, declared, collect=False
+    )
+    return True
+
+
+async def _stale_others(conn, p: repo.Proposal) -> list[repo.Proposal]:
+    """The apply changed the target: every other open proposal on it is stale (step 7). Rows
+    another transaction holds are skipped: that review, revise or withdraw sees the new target
+    once this commits (the review its fingerprint mismatch, the revise a new base)."""
+    out = []
+    for other_id in await repo.active_on_target(conn, p.kind, p.target_id, exclude=p.id, lock=True):
+        try:
+            await repo.transition(
+                conn, other_id, from_states=("open",), to="stale", outcome="stale"
+            )
+        except repo.NotInState:
+            continue  # rework or stale already: re-based on its next revision anyway
+        other = await repo.lock(conn, other_id)
+        assert other is not None
+        await _notify(conn, other, f"{_head(other)} {_CLOSED_TEXT['stale'].format(id=other.id)}")
+        out.append(other)
+    return out
+
+
+async def _review_locked(
+    request: Request, conn, settings: Settings, proposal_id: int, body: schemas.ReviewIn
+) -> _Done:
+    """Plan 3.5 steps 1-8 inside the caller's transaction. A raised error rolls everything back;
+    a returned `_Done.error` is answered after the state change it made commits."""
+    p = await repo.lock(conn, proposal_id)
+    if p is None:
+        raise not_found("proposal")
+    if p.status not in _REVIEWABLE:
+        raise _not_open()
+    if p.expires_at <= datetime.now(UTC):
+        return await _close(conn, p, "expired", ApiError(409, "proposal_expired", "expired"))
+    if body.revision != p.revision:
+        raise ApiError(
+            409, "revision_changed", f"revision {p.revision} is the one under review now"
+        )
+    current = p.revisions[0]  # `lock` loads the current revision only
+    decisions = _decisions(current, body)
+    verdicts = {d for d, _ in decisions.values()}
+    if p.status == "stale" and "approved" in verdicts:
+        raise ApiError(
+            422, "invalid_request", "a stale proposal takes only rework or deny; revise it first"
+        )
+    if p.kind != "preset":
+        raise _unsupported(p.kind)
+    preset = await presets_repo.get_for_update(conn, uuid.UUID(p.target_id))
+    if preset is None:
+        return await _close(
+            conn, p, "target_gone", ApiError(409, "target_gone", "the preset no longer exists")
+        )
+    if p.status == "open":
+        versions = {n: m.version for n, m in (await _metas(conn, preset.id)).items()}
+        if fingerprint_preset(preset, versions) != current.fingerprint:
+            return await _close(conn, p, "stale", _stale_error())
+    done = _Done(release=[p])
+    if "rework" in verdicts:
+        to = "rework"
+    elif "approved" in verdicts:
+        to = "applied"
+        try:
+            async with conn.transaction():  # a stale staged value undoes the write, not the mark
+                touched = await _apply(request, conn, settings, preset, p, decisions)
+        except secret_store.StagedStale:
+            return await _close(conn, p, "stale", _stale_error())
+        done.gc = preset.id if touched else None
+    else:
+        to = "denied"
+    await repo.record_review(conn, p.id, p.revision, decisions, statuses=_REVIEWABLE)
+    await repo.transition(conn, p.id, from_states=_REVIEWABLE, to=to, outcome=to)
+    if to == "applied":
+        done.release += await _stale_others(conn, p)
+    await _notify(conn, p, _reviewed_text(p, decisions))
+    return done
+
+
+async def _after_commit(request: Request, conn, settings: Settings, done: _Done) -> None:
+    """Best effort (step 9): release the staged values of every proposal this review closed or
+    made stale, then collect the preset's old versions; the sweeper retries what fails here.
+
+    Its own transaction: the pooled connection is not autocommit, so without it the row deletes
+    would roll back with the connection when the review answers an error (stale, expired)."""
+    held = [p for p in done.release if any(i.secret for i in p.revisions[0].items)]
+    if not held and done.gc is None:
+        return
+    try:
+        kube = secret_store.kube_of(request)
+        async with conn.transaction():
+            for p in held:
+                await secret_store.release(conn, kube, settings.namespace, proposal_id=p.id)
+            if done.gc is not None:
+                await secret_store.gc(conn, kube, settings.namespace, preset_id=done.gc)
+    except Exception as exc:  # the review committed; never turn it into an error
+        log.warning("proposal cleanup after review failed: %s", type(exc).__name__)
+
+
+async def review(
+    request: Request, conn, settings: Settings, proposal_id: int, body: schemas.ReviewIn
+) -> schemas.ProposalView:
+    """The human review of the current revision (plan 3.5): a rework request records verdicts
+    only; a final submit applies the approved items all or nothing on an unchanged target (Q6 B,
+    Q14 A) or closes the proposal denied. Every outcome notifies the proposer."""
+    async with conn.transaction():
+        done = await _review_locked(request, conn, settings, proposal_id, body)
+    await _after_commit(request, conn, settings, done)
+    if done.error is not None:
+        raise done.error
+    return await get_view(conn, settings, proposal_id, proposer=None)

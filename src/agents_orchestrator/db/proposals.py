@@ -253,20 +253,23 @@ async def record_review(
     proposal_id: int,
     revision: int,
     decisions: dict[str, tuple[str, str | None]],
+    *,
+    statuses: Sequence[str] = ("open",),
 ) -> None:
     """Write each path's (decision, note) on that revision only and stamp its reviewed_at.
 
-    The proposal must be open and `revision` its current one, else NotInState. A path that is not
-    an item of the revision raises UnknownItem and writes nothing. No decisions is a no-op.
+    The proposal must be in `statuses` (a stale one takes a rework or deny submit) and
+    `revision` its current one, else NotInState. A path that is not an item of the revision
+    raises UnknownItem and writes nothing. No decisions is a no-op.
     """
     if not decisions:
         return
     async with conn.transaction():
         guard = await _one(
             conn,
-            "SELECT id FROM change_proposals WHERE id = %s AND status = 'open' AND revision = %s"
+            "SELECT id FROM change_proposals WHERE id = %s AND status = ANY(%s) AND revision = %s"
             " FOR UPDATE",
-            (proposal_id, revision),
+            (proposal_id, list(statuses), revision),
         )
         if guard is None:
             raise NotInState(proposal_id)
@@ -403,12 +406,22 @@ async def by_client_key(
 
 
 async def active_on_target(
-    conn: psycopg.AsyncConnection, kind: str, target_id: str, exclude: int | None = None
+    conn: psycopg.AsyncConnection,
+    kind: str,
+    target_id: str,
+    exclude: int | None = None,
+    *,
+    lock: bool = False,
 ) -> list[int]:
+    """Active proposals on the target. With `lock`, the rows are locked FOR UPDATE SKIP LOCKED
+    in the caller's transaction: a row another transaction holds (a concurrent review, revise or
+    withdraw) is skipped, never waited on, so a caller already holding the target row cannot
+    deadlock with one that locked the proposal first and waits for the target."""
+    tail = " FOR UPDATE SKIP LOCKED" if lock else ""
     rows = await _all(
         conn,
         "SELECT id FROM change_proposals WHERE kind = %s AND target_id = %s"
-        " AND status = ANY(%s) AND id IS DISTINCT FROM %s ORDER BY id",
+        f" AND status = ANY(%s) AND id IS DISTINCT FROM %s ORDER BY id{tail}",
         (kind, target_id, list(ACTIVE), exclude),
     )
     return [r["id"] for r in rows]

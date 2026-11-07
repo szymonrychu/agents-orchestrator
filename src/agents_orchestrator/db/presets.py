@@ -101,6 +101,12 @@ async def get_for_share(conn: psycopg.AsyncConnection, preset_id: uuid.UUID) -> 
     return rows[0] if rows else None
 
 
+async def get_for_update(conn: psycopg.AsyncConnection, preset_id: uuid.UUID) -> Preset | None:
+    """The row locked FOR UPDATE until the caller's transaction ends (a proposal apply)."""
+    rows = await _fetch(conn, "SELECT * FROM presets WHERE id = %s FOR UPDATE", (preset_id,))
+    return rows[0] if rows else None
+
+
 async def create(
     conn: psycopg.AsyncConnection,
     name: str,

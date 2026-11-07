@@ -145,6 +145,23 @@ class ProposalRevise(BaseModel):
     reason: str | None = Field(default=None, min_length=1, max_length=4000)
 
 
+class ReviewItemIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    decision: Literal["approve", "rework", "deny"]
+    note: str | None = Field(default=None, max_length=4000)
+
+
+class ReviewIn(BaseModel):
+    """A human review of the proposal's current revision: one decision per item (plan 3.4)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    revision: int
+    items: list[ReviewItemIn]
+
+
 class ProposalItemView(BaseModel):
     path: str
     before: Any
@@ -462,7 +479,7 @@ class Meta(BaseModel):
 Lane = Literal["idle", "regular", "priority"]
 MessageStatus = Literal["queued", "dispatching", "verifying", "sent", "failed", "cancelled"]
 # an orchestrator-written message; null for every other message
-Notice = Literal["inactivity_reminder", "inactivity_close", "handover"]
+Notice = Literal["inactivity_reminder", "inactivity_close", "handover", "proposal"]
 
 
 class MessageAttachment(BaseModel):
