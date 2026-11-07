@@ -35,7 +35,7 @@ async def boss(pool):
 @pytest.fixture
 def app(pool, dsn):
     settings = make_settings(dsn).model_copy(
-        update={"kube_access_service_account": "kube-sa", "docker_image": "docker:27-dind"}
+        update={"kube_cluster_access_enabled": True, "docker_image": "docker:27-dind"}
     )
     return create_app(settings, pool, kube=FakeKube(namespace="agents"))
 

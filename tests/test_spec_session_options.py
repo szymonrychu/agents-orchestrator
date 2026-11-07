@@ -17,7 +17,7 @@ from agents_orchestrator.spec import SessionSpec, SpecInvalid, validate_spec
 C = "/api/v1/sessions"
 P = "/api/v1/presets"
 OPTIONS = ("session_messaging", "kube_cluster_access")
-GATE = "Kubernetes access is not configured (ORCH_KUBE_ACCESS_SERVICE_ACCOUNT is unset)"
+GATE = "Kubernetes cluster access is not configured (ORCH_KUBE_CLUSTER_ACCESS_ENABLED is unset)"
 
 
 def app_client(pool, dsn, **kw):
@@ -39,7 +39,7 @@ async def test_options_sparse_and_strict(pool, dsn):
         assert SessionSpec.model_validate({option: False}).model_dump(exclude_none=True)[
             option
         ] is (False)
-    async with app_client(pool, dsn, kube_access_service_account="sa") as http:
+    async with app_client(pool, dsn, kube_cluster_access_enabled=True) as http:
         for option in OPTIONS:
             for bad in ("yes", "true", 1, 0, 2.0):
                 r = await http.post(C, json={"slug": "bad", "spec": {option: bad}})
@@ -76,7 +76,7 @@ async def test_options_sparse_and_strict(pool, dsn):
 
 
 async def test_preset_carries_options_to_session(pool, dsn):
-    async with app_client(pool, dsn, kube_access_service_account="sa") as http:
+    async with app_client(pool, dsn, kube_cluster_access_enabled=True) as http:
         spec = {"replicas": 2, "session_messaging": True, "kube_cluster_access": True}
         made = await http.post(P, json={"name": "both", "spec": spec})
         assert made.status_code == 201, made.text
@@ -97,7 +97,7 @@ async def test_preset_carries_options_to_session(pool, dsn):
 
 async def test_kube_access_gated_by_setting(pool, dsn):
     off = make_settings(dsn)
-    on = make_settings(dsn, kube_access_service_account="sa")
+    on = make_settings(dsn, kube_cluster_access_enabled=True)
     spec = SessionSpec(kube_cluster_access=True)
     with pytest.raises(SpecInvalid) as e:
         validate_spec(spec, off)
@@ -155,7 +155,7 @@ async def test_meta_kube_cluster_access_available(pool, dsn):
         assert (await http.get("/api/v1/meta")).json()["kube_cluster_access"] == {
             "available": False
         }
-    async with app_client(pool, dsn, kube_access_service_account="orch-kube-access") as http:
+    async with app_client(pool, dsn, kube_cluster_access_enabled=True) as http:
         assert (await http.get("/api/v1/meta")).json()["kube_cluster_access"] == {"available": True}
         assert "kube_access" not in (await http.get("/api/v1/meta")).json()
 
@@ -191,21 +191,21 @@ BOUNDED = (
 
 def test_new_settings_defaults_and_bounds(monkeypatch):
     s = Settings(database_url="postgresql://x/y")
-    assert s.kube_access_service_account == ""
-    assert s.kube_access_available is False
+    assert s.kube_cluster_access_enabled is False
+    assert s.kube_cluster_access_available is False
     assert s.agent_service_account == "default"
     assert s.session_message_rate_per_minute == 10
     assert s.session_message_queued_max == 20
     assert s.session_message_max_hops == 8
     assert s.session_message_pair_max_per_hour == 30
 
-    monkeypatch.setenv("ORCH_KUBE_ACCESS_SERVICE_ACCOUNT", "orch-kube-access")
+    monkeypatch.setenv("ORCH_KUBE_CLUSTER_ACCESS_ENABLED", "true")
     monkeypatch.setenv("ORCH_AGENT_SERVICE_ACCOUNT", "orch-agent")
     for name in BOUNDED:
         monkeypatch.setenv(f"ORCH_{name.upper()}", "1")
     s = Settings(database_url="postgresql://x/y")
-    assert s.kube_access_service_account == "orch-kube-access"
-    assert s.kube_access_available is True
+    assert s.kube_cluster_access_enabled is True
+    assert s.kube_cluster_access_available is True
     assert s.agent_service_account == "orch-agent"
     for name in BOUNDED:
         assert getattr(s, name) == 1

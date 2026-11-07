@@ -254,7 +254,9 @@ class Settings(BaseSettings):
     cache_s3_api_access_key_id: str = ""
     cache_s3_api_secret_access_key: str = Field(default="", repr=False)
 
-    kube_access_service_account: str = ""
+    # Cluster-wide Kubernetes access (spec.kube_cluster_access): each granted session gets its own
+    # ServiceAccount bound to cluster-admin, so the setting is a plain switch.
+    kube_cluster_access_enabled: bool = False
     # Namespace-scoped Kubernetes access (spec.kube_namespace_access): the allowlisted
     # namespaces, the enabled tiers (subset of KUBE_TIERS) and the prefix of the custom
     # ClusterRoles of the port-forward and exec tiers (required when either tier is enabled).
@@ -814,8 +816,8 @@ class Settings(BaseSettings):
         return bool(self.agent_usage_url)
 
     @property
-    def kube_access_available(self) -> bool:
-        return bool(self.kube_access_service_account)
+    def kube_cluster_access_available(self) -> bool:
+        return self.kube_cluster_access_enabled
 
     @property
     def kube_namespace_access_available(self) -> bool:

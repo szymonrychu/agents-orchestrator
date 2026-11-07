@@ -688,7 +688,7 @@ class SessionSpec(BaseModel):
     # session's leader may message it. Sparse: unset is not stored or dumped in a preset.
     session_messaging: bool | None = Field(default=None, strict=True)
     # Full read-write Kubernetes access in every namespace for the agent pods; refused until
-    # ORCH_KUBE_ACCESS_SERVICE_ACCOUNT is set. Sparse: unset is not stored or dumped in a preset.
+    # ORCH_KUBE_CLUSTER_ACCESS_ENABLED is set. Sparse: unset is not stored or dumped in a preset.
     kube_cluster_access: bool | None = Field(default=None, strict=True)
     # Allowlisted namespace -> access tiers for the agent pods; each namespace must be in
     # ORCH_KUBE_NAMESPACE_ACCESS_NAMESPACES and each tier in ORCH_KUBE_NAMESPACE_ACCESS_TIERS.
@@ -1041,11 +1041,12 @@ def validate_spec(spec: SessionSpec, settings: Settings, stored: SessionSpec | N
         errors.append("workspace cache is not configured (ORCH_CACHE_S3_BUCKET is unset)")
     if (
         spec.kube_cluster_access
-        and not settings.kube_access_available
+        and not settings.kube_cluster_access_available
         and (stored is None or spec.kube_cluster_access != stored.kube_cluster_access)
     ):
         errors.append(
-            "Kubernetes access is not configured (ORCH_KUBE_ACCESS_SERVICE_ACCOUNT is unset)"
+            "Kubernetes cluster access is not configured"
+            " (ORCH_KUBE_CLUSTER_ACCESS_ENABLED is unset)"
         )
     if spec.kube_namespace_access and (
         stored is None or spec.kube_namespace_access != stored.kube_namespace_access

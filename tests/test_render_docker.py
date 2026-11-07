@@ -208,7 +208,9 @@ def test_image_pull_secret_still_first_key() -> None:
 
 
 def passthrough(session_kw: dict[str, Any]) -> list[str]:
-    objs = render.render_session(make_session(**session_kw), settings(), TOKENS)
+    objs = render.render_session(
+        make_session(**session_kw), settings(kube_cluster_access_enabled=True), TOKENS
+    )
     (cm,) = (o for o in objs if o["kind"] == "ConfigMap")
     return yaml.safe_load(cm["data"]["config.yaml"])["claude"]["passthrough_env"]
 

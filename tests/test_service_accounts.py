@@ -35,15 +35,17 @@ def make_settings(**over: Any) -> Settings:
         "cache_s3_access_key_id": "TESTIDEXAMPLEACCESSKEY",
         "cache_s3_secret_access_key": "s3cr3t-example-secret-access-key",
         "cache_image": "harbor.example/containers/agents-orchestrator:abc1234",
-        "kube_access_service_account": "orch-kube-access",
     }
     base.update(over)
     return Settings(**base)
 
 
-def make_session(**spec: Any) -> Session:
+SESSION_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
+
+
+def make_session(session_id: uuid.UUID = SESSION_ID, **spec: Any) -> Session:
     return Session(
-        id=uuid.UUID("11111111-1111-1111-1111-111111111111"),
+        id=session_id,
         slug="alpha",
         spec=SessionSpec.model_validate(
             {

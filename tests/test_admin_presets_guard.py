@@ -46,7 +46,7 @@ def canary():
 def settings(dsn):
     return make_settings(dsn).model_copy(
         update={
-            "kube_access_service_account": "kube-sa",
+            "kube_cluster_access_enabled": True,
             "docker_image": "docker:27-dind",
             "kube_namespace_access_namespaces": ["media"],
             "kube_namespace_access_tiers": ["read"],
