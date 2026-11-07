@@ -1,5 +1,5 @@
-"""Autoclose sweeper: closes due, inactive and closing sessions through the discard path, and
-reminds quiet ones (hive-inactivity-limits)."""
+"""Autoclose sweeper: delivers handover notices (voluntary-handover), closes due, inactive and
+closing sessions through the discard path, and reminds quiet ones (hive-inactivity-limits)."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from agents_orchestrator import inactivity
 from agents_orchestrator.api import sessions as sessions_api
-from agents_orchestrator.db import sessions
+from agents_orchestrator.db import handover, sessions
 from agents_orchestrator.settings import Settings
 
 log = logging.getLogger(__name__)
@@ -22,9 +22,10 @@ AUTOCLOSE_POLL_SECONDS = 10
 
 
 async def sweep(pool: AsyncConnectionPool, settings: Settings) -> None:
-    """Each poll until cancelled, in order: close due sessions, release inactivity closes an
-    inbound message answered, discard inactivity closes past their deadline, request inactivity
-    closes, send reminders, discard idle closing sessions. Each step runs on its own connection
+    """Each poll until cancelled, in order: deliver handover notices to new leaders, close due
+    sessions, release inactivity closes an inbound message answered, discard inactivity closes
+    past their deadline, request inactivity closes, send reminders, discard idle closing
+    sessions. Each step runs on its own connection
     and a step that fails is logged and skipped: the other steps still run, and the failed one
     is retried next poll. The limits are passed on every poll, so they apply to running
     sessions."""
@@ -34,6 +35,14 @@ async def sweep(pool: AsyncConnectionPool, settings: Settings) -> None:
             log.info("autoclose: session %s is due, discarding", session_id)
 
     steps: list[tuple[str, Callable[[AsyncConnection], Awaitable[object]]]] = [
+        (
+            "deliver_handover",
+            lambda conn: handover.deliver_handover(
+                conn,
+                budget_bytes=settings.handover_transcript_bytes,
+                output_chars=settings.handover_output_chars,
+            ),
+        ),
         ("close_expired", close_expired),
         ("release_inactive_close", sessions.release_inactive_close),
         ("close_overdue", sessions.close_overdue),

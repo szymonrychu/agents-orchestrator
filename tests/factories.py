@@ -109,6 +109,7 @@ async def set_agent_status(
     context_pct: float | None = None,
     last_seq: int | None = None,
     peers: list | dict | None = None,
+    background_subagents: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Upsert agent_status. free_since defaults to now() when omitted; pass None for NULL."""
     free_expr = "now()" if free_since is _UNSET else "%s"
@@ -126,6 +127,7 @@ async def set_agent_status(
         context_pct,
         last_seq,
         Jsonb(peers if peers is not None else []),
+        Jsonb(background_subagents if background_subagents is not None else {}),
     ]
     cols = (
         "wrapper_idle_since=EXCLUDED.wrapper_idle_since, state=EXCLUDED.state,"
@@ -133,13 +135,14 @@ async def set_agent_status(
         " context_used_tokens=EXCLUDED.context_used_tokens,"
         " context_window_tokens=EXCLUDED.context_window_tokens,"
         " context_pct=EXCLUDED.context_pct, last_seq=EXCLUDED.last_seq,"
-        " peers=EXCLUDED.peers, updated_at=now()"
+        " peers=EXCLUDED.peers, background_subagents=EXCLUDED.background_subagents,"
+        " updated_at=now()"
     )
     return await _one(
         pool,
         "INSERT INTO agent_status (agent_id, wrapper_idle_since, state, free_since,"
         " current_turn_id, context_used_tokens, context_window_tokens, context_pct, last_seq,"
-        f" peers) VALUES (%s,%s,%s,{free_expr},%s,%s,%s,%s,%s,%s)"
+        f" peers, background_subagents) VALUES (%s,%s,%s,{free_expr},%s,%s,%s,%s,%s,%s,%s)"
         f" ON CONFLICT (agent_id) DO UPDATE SET {cols} RETURNING *",
         tuple(params),
     )

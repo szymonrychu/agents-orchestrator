@@ -89,7 +89,7 @@ async def test_handover_prechecks(pool, dsn):
     assert (r.status_code, r.json()["error"]["code"]) == (404, "not_found")
     r = await post_handover(dsn, pool, c, reason="")
     assert r.status_code == 422
-    r = await post_handover(dsn, pool, c, reason="x" * 501)
+    r = await post_handover(dsn, pool, c, reason="x" * 2001)
     assert r.status_code == 422
     # no leader row at all
     c2, _, _ = await hive(pool, leader=None)
@@ -144,3 +144,19 @@ async def test_current_leader(pool):
     with pytest.raises(psycopg.errors.CheckViolation):
         async with pool.connection() as conn:
             await leadership.insert_request(conn, c["id"], "bogus", None, None, "r", None)
+
+
+async def test_handover_answer_pending(pool, dsn):
+    c, _, _ = await hive(pool)
+    r = await post_handover(dsn, pool, c)
+    assert r.status_code == 202, r.text
+    body = r.json()
+    assert body["status"] == "pending"
+    assert body["applies"] == "when your turn has ended and your background agents have reported"
+    assert isinstance(body["request_id"], int)
+
+
+async def test_handover_reason_2000_ok_2001_rejected(pool, dsn):
+    c, _, _ = await hive(pool)
+    assert (await post_handover(dsn, pool, c, reason="x" * 2000)).status_code == 202
+    assert (await post_handover(dsn, pool, c, reason="x" * 2001)).status_code == 422

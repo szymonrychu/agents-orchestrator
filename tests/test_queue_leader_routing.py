@@ -153,22 +153,19 @@ async def _compacted(pool, agent_id) -> None:
     )
 
 
-async def test_compacted_leader_holds_untargeted(pool):
+async def test_compaction_does_not_hold_untargeted(pool):
     c = await insert_session(pool, spec={"replicas": 2, "max_replicas": 4})
     leader = await _agent(pool, c["id"], free_ago=1, ordinal=0)
-    member = await _agent(pool, c["id"], free_ago=100, ordinal=1)
+    await _agent(pool, c["id"], free_ago=100, ordinal=1)
     await _lead(pool, c["id"], leader["id"])
     await _compacted(pool, leader["id"])
     untargeted = await _enqueue(pool, c["id"], "u")
-    targeted = await _enqueue(pool, c["id"], "t", target=member["id"])
     claim = await _claim(pool)
     assert claim is not None
-    assert (claim.message_id, claim.agent_id) == (targeted, member["id"])
-    assert await _claim(pool) is None
-    assert await _status(pool, untargeted) == "queued"
+    assert (claim.message_id, claim.agent_id) == (untargeted, leader["id"])
 
 
-async def test_leaving_leader_holds_untargeted(pool):
+async def test_leaving_leader_still_holds(pool):
     c = await insert_session(pool, spec={"replicas": 1, "max_replicas": 4})
     stays = await _agent(pool, c["id"], free_ago=100, ordinal=0)
     leader = await _agent(pool, c["id"], free_ago=1, ordinal=1)
@@ -195,17 +192,68 @@ async def test_compacted_leader_without_peer_keeps_leading(pool):
     assert claim.agent_id == leader["id"]
 
 
-async def test_compaction_before_the_term_does_not_hold(pool):
-    c = await insert_session(pool, spec={"replicas": 2, "max_replicas": 4})
-    leader = await _agent(pool, c["id"], free_ago=1, ordinal=0)
-    await _agent(pool, c["id"], free_ago=100, ordinal=1)
-    await _lead(pool, c["id"], leader["id"])
+async def _changed(pool, session_id, leader_id, previous_id, *, since_ago: float = 0.0) -> None:
+    """A leader change at epoch 2 whose handover notice is not queued yet."""
+    await _lead(pool, session_id, leader_id, epoch=2)
     await _exec(
         pool,
-        "UPDATE agent_status SET compaction_at = now() - interval '5 seconds' WHERE agent_id=%s",
-        (leader["id"],),
+        "UPDATE session_leaders SET previous_agent_id = %s,"
+        " since = now() - make_interval(secs => %s) WHERE session_id = %s",
+        (previous_id, since_ago, session_id),
     )
-    await _enqueue(pool, c["id"], "u")
+
+
+async def _notice(pool, session_id, target) -> int:
+    async with pool.connection() as conn:
+        return await q.enqueue_message(
+            conn, session_id, "notice", target, lane="regular", notice="handover"
+        )
+
+
+async def test_untargeted_held_until_notice_queued(pool):
+    c = await insert_session(pool)
+    old = await _agent(pool, c["id"], free_ago=100, ordinal=0)
+    leader = await _agent(pool, c["id"], free_ago=1, ordinal=1)
+    await _changed(pool, c["id"], leader["id"], old["id"])
+    untargeted = await _enqueue(pool, c["id"], "u")
+    assert await _claim(pool) is None
+    assert await _status(pool, untargeted) == "queued"
+    await _exec(pool, "UPDATE sessions SET handover_notice_epoch = 2 WHERE id=%s", (c["id"],))
     claim = await _claim(pool)
     assert claim is not None
-    assert claim.agent_id == leader["id"]
+    assert (claim.message_id, claim.agent_id) == (untargeted, leader["id"])
+
+
+async def test_notice_claimed_before_older_user_message(pool):
+    c = await insert_session(pool)
+    old = await _agent(pool, c["id"], free_ago=100, ordinal=0)
+    leader = await _agent(pool, c["id"], free_ago=1, ordinal=1)
+    await _changed(pool, c["id"], leader["id"], old["id"])
+    user = await _enqueue(pool, c["id"], "u")
+    notice = await _notice(pool, c["id"], leader["id"])
+    await _exec(pool, "UPDATE sessions SET handover_notice_epoch = 2 WHERE id=%s", (c["id"],))
+    claim = await _claim(pool)
+    assert claim is not None
+    assert (claim.message_id, claim.agent_id) == (notice, leader["id"])
+    assert await _status(pool, user) == "queued"
+
+
+async def test_notice_hold_expires_after_60s(pool):
+    c = await insert_session(pool)
+    old = await _agent(pool, c["id"], free_ago=100, ordinal=0)
+    leader = await _agent(pool, c["id"], free_ago=1, ordinal=1)
+    await _changed(pool, c["id"], leader["id"], old["id"], since_ago=61)
+    untargeted = await _enqueue(pool, c["id"], "u")
+    claim = await _claim(pool)
+    assert claim is not None
+    assert (claim.message_id, claim.agent_id) == (untargeted, leader["id"])
+
+
+async def test_initial_leader_not_held(pool):
+    c = await insert_session(pool)
+    leader = await _agent(pool, c["id"], free_ago=1, ordinal=0)
+    await _lead(pool, c["id"], leader["id"], epoch=2)
+    untargeted = await _enqueue(pool, c["id"], "u")
+    claim = await _claim(pool)
+    assert claim is not None
+    assert (claim.message_id, claim.agent_id) == (untargeted, leader["id"])

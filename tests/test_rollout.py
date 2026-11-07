@@ -22,6 +22,7 @@ from psycopg.types.json import Jsonb
 
 from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import leadership, sessions
+from agents_orchestrator.db.eligibility import BACKGROUND_BUSY
 from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.k8s.kube import KubeError
 from agents_orchestrator.k8s.render import HASH_ANNOTATION, render_session
@@ -119,6 +120,12 @@ class Env:
 @pytest_asyncio.fixture
 async def env(pool, dsn) -> Env:
     return Env(pool, dsn)
+
+
+@pytest_asyncio.fixture
+async def eager(pool, dsn) -> Env:
+    """No leader window: the rollout handover is queued on the first tick it may be."""
+    return Env(pool, dsn, rollout_handover_seconds=0)
 
 
 async def lead(env: Env, session_id, agent_id) -> None:
@@ -532,7 +539,8 @@ async def test_busy_outdated_pod_kept_across_ticks(pool, dsn):
     assert env2.uid(1) == uid2 and env2.pod_revision(1) == old2
 
 
-async def test_leader_rolled_last_after_handover(env):
+async def test_leader_rolled_last_after_handover(eager):
+    env = eager
     c, agents, _ = await rolling(env, replicas=3)
     await lead(env, c.id, agents[0].id)
     await env.tick()
@@ -573,7 +581,8 @@ async def test_leader_rolled_last_after_handover(env):
     assert rows == [{"agent_id": change.agent_id}]
 
 
-async def test_rollout_handover_waits_for_an_idle_leader(env):
+async def test_rollout_handover_waits_for_an_idle_leader(eager):
+    env = eager
     # like the lease and compaction handovers: leadership never moves mid-turn for a rollout
     c, agents, _ = await rolling(env, replicas=2)
     await lead(env, c.id, agents[0].id)
@@ -602,7 +611,8 @@ async def test_rollout_handover_waits_for_an_idle_leader(env):
     assert env.pod_deletes() == ["agent-alpha-1"]
 
 
-async def test_queued_rollout_handover_applied_at_the_leaders_turn_boundary(env):
+async def test_queued_rollout_handover_applied_at_the_leaders_turn_boundary(eager):
+    env = eager
     # queued while the leader was idle, then the leader claims a message before the pass: the
     # request stays queued until the turn ends, so leadership never moves mid-turn
     c, agents, _ = await rolling(env, replicas=2)
@@ -643,7 +653,8 @@ async def test_queued_rollout_handover_applied_at_the_leaders_turn_boundary(env)
     assert env.pod_deletes() == ["agent-alpha-1", "agent-alpha-0"]
 
 
-async def test_leader_held_without_idle_eligible_member(env):
+async def test_leader_held_without_idle_eligible_member(eager):
+    env = eager
     c, agents, _ = await rolling(env, replicas=2)
     await lead(env, c.id, agents[0].id)
     await env.tick()
@@ -694,11 +705,14 @@ async def test_status_exposes_pending_roll(env):
     await set_agent_status(env.pool, agents[2].id, state="busy")
     await env.tick()
     new = env.revision()
-    assert await env.rollout(c.id) == {
+    first = await env.rollout(c.id)
+    since = first.pop("since")
+    assert first == {
         "revision": new,
         "pending": [0, 1, 2],
         "waiting": [2],
         "leader_pending": False,
+        "leader_since": None,
     }
     env.ready(0)
     await env.tick()
@@ -710,6 +724,8 @@ async def test_status_exposes_pending_roll(env):
         "pending": [2],
         "waiting": [2],
         "leader_pending": False,
+        "since": since,
+        "leader_since": None,
     }
     await set_agent_status(env.pool, agents[2].id, state="idle")
     await env.tick()
@@ -722,7 +738,11 @@ def test_drain_and_rollout_share_busy_predicate():
     from agents_orchestrator.reconciler import loop, rollout
 
     assert rollout.BUSY in loop._DRAINING
-    assert rollout.BUSY in rollout._AGENTS
+    assert f"({rollout.TURN_BUSY}) OR {BACKGROUND_BUSY}" == rollout.BUSY
+    # the replacer reads the turn and the background part apart: background work stops holding
+    # a member once the rollout is older than the cap, a turn never does
+    for query in (rollout._AGENTS, rollout._HELD):
+        assert rollout.TURN_BUSY in query and BACKGROUND_BUSY in query
     assert rollout.LEADS in loop._DRAINING
     assert rollout.LEADS in rollout._AGENTS
     # spelled once: neither module respells the in-flight message test
@@ -759,3 +779,130 @@ async def test_permission_mode_edit_rolls_idle_pods_and_waits_for_busy(env):
     await set_agent_status(env.pool, agents[0].id, state="idle")
     await env.tick()
     assert env.pod_deletes() == ["agent-alpha-1", "agent-alpha-0"]
+
+
+# ---------------------------------------------------------------- background work and the window
+
+
+def _running() -> dict[str, str]:
+    """A background subagent started just now (the ingester's `background_subagents`)."""
+    return {"sub-1": datetime.now(UTC).isoformat()}
+
+
+async def _age(env: Env, session_id, key: str, seconds: float) -> None:
+    """Move `status.rollout.<key>` `seconds` into the past (the database clock)."""
+    await env.execute(
+        "UPDATE sessions SET status = jsonb_set(status, ARRAY['rollout', %s],"
+        " to_jsonb((now() - make_interval(secs => %s))::text)) WHERE id = %s",
+        (key, seconds, session_id),
+    )
+
+
+async def test_member_with_background_not_rolled(env):
+    c, agents, _ = await rolling(env, replicas=2)
+    await set_agent_status(env.pool, agents[0].id, state="idle", background_subagents=_running())
+    await env.tick()
+    assert env.pod_deletes() == ["agent-alpha-1"]
+    env.ready(1)
+    await env.tick(3)
+    assert env.pod_deletes() == ["agent-alpha-1"]
+    rollout = await env.rollout(c.id)
+    assert rollout is not None and (rollout["pending"], rollout["waiting"]) == ([0], [0])
+
+    await set_agent_status(env.pool, agents[0].id, state="idle")  # the subagent reported
+    await env.tick()
+    assert env.pod_deletes() == ["agent-alpha-1", "agent-alpha-0"]
+
+
+async def test_member_background_ignored_after_cap(env):
+    # a background stop that never arrives must not block a rollout forever
+    c, agents, _ = await rolling(env, replicas=2)
+    await set_agent_status(env.pool, agents[0].id, state="idle", background_subagents=_running())
+    await env.tick()
+    env.ready(1)
+    await env.tick()
+    assert env.pod_deletes() == ["agent-alpha-1"]
+    await _age(env, c.id, "since", env.settings.rollout_max_defer_seconds - 60)
+    await env.tick()
+    assert env.pod_deletes() == ["agent-alpha-1"]  # not yet
+
+    await _age(env, c.id, "since", env.settings.rollout_max_defer_seconds + 1)
+    await env.tick()
+    assert env.pod_deletes() == ["agent-alpha-1", "agent-alpha-0"]
+
+    # a turn holds the member past the cap all the same
+    c2, agents2, _ = await rolling(env, replicas=2, slug="bravo")
+    await set_agent_status(env.pool, agents2[0].id, state="busy")
+    await env.tick()
+    env.ready(1)
+    await _age(env, c2.id, "since", env.settings.rollout_max_defer_seconds + 1)
+    await env.tick(2)
+    assert env.pod_deletes() == ["agent-bravo-1"]
+
+
+async def test_leader_window_before_forced_handover(env):
+    assert env.settings.rollout_handover_seconds == 1800
+    c, agents, _ = await rolling(env, replicas=2)
+    await lead(env, c.id, agents[0].id)
+    await env.tick()
+    assert env.pod_deletes() == ["agent-alpha-1"]
+    env.ready(1)
+    await env.tick(3)  # only the leader is pending: its window opens, nothing is forced
+    assert await env.handovers(c.id) == []
+    assert (await env.rollout(c.id))["leader_since"] is not None
+
+    await _age(env, c.id, "leader_since", 1800 - 60)
+    await env.tick()
+    assert await env.handovers(c.id) == []
+
+    await _age(env, c.id, "leader_since", 1800 + 1)
+    await env.tick(3)  # queued once
+    assert [(r["reason"], r["status"]) for r in await env.handovers(c.id)] == [
+        ("rollout", "queued")
+    ]
+    assert env.pod_deletes() == ["agent-alpha-1"]
+
+
+async def test_status_carries_since_and_leader_since(env):
+    c, agents, _ = await rolling(env, replicas=2)
+    await lead(env, c.id, agents[0].id)
+    await env.tick()
+    first = await env.rollout(c.id)
+    assert first is not None and first["since"] and first["leader_since"] is None
+    revision = first["revision"]
+    env.ready(1)
+    await env.tick()
+    second = await env.rollout(c.id)
+    assert second["since"] == first["since"]  # carried while the revision matches
+    leader_since = second["leader_since"]
+    assert leader_since is not None and leader_since >= first["since"]
+    await env.tick(2)
+    third = await env.rollout(c.id)
+    assert (third["since"], third["leader_since"]) == (first["since"], leader_since)
+
+    # a newer template: a new revision starts its own clocks
+    await env.update(c.id, replicas=2, max_replicas=2, env={"ROLL": {"value": "3"}})
+    await env.tick()
+    fourth = await env.rollout(c.id)
+    assert fourth["revision"] != revision
+    assert fourth["since"] > first["since"] and fourth["leader_since"] is None
+
+
+async def test_voluntary_move_in_window_rolls_old_leader_as_member(env):
+    c, agents, _ = await rolling(env, replicas=2)
+    await lead(env, c.id, agents[0].id)
+    await env.tick()
+    env.ready(1)
+    await env.tick()
+    assert env.pod_deletes() == ["agent-alpha-1"]
+    assert (await env.rollout(c.id))["leader_pending"] is True
+
+    # the leader hands over on its own inside the window (the dispatcher writes the row)
+    await env.execute(
+        "UPDATE session_leaders SET agent_id = %s, epoch = epoch + 1,"
+        " reason = 'handover: voluntary' WHERE session_id = %s",
+        (agents[1].id, c.id),
+    )
+    await env.tick()
+    assert env.pod_deletes() == ["agent-alpha-1", "agent-alpha-0"]
+    assert await env.handovers(c.id) == []  # no forced handover was needed

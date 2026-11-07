@@ -43,6 +43,9 @@ env:
   ORCH_RECONCILE_POLL_SECONDS: "3"
   # the autoclose e2e uses the smallest accepted window (the production default is higher)
   ORCH_AUTOCLOSE_MIN_SECONDS: "30"
+  # the image-roll e2e pins the forced rollout handover; the fake claude never hands over on
+  # its own, so the voluntary window is off (the production default is 1800 s)
+  ORCH_ROLLOUT_HANDOVER_SECONDS: "0"
   ORCH_LOG_LEVEL: INFO
 
 # Service port (other microservices): the e2e pod presents the fixed, non-secret token

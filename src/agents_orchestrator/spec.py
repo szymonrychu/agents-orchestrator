@@ -678,7 +678,6 @@ class SessionSpec(BaseModel):
     start_prompt: str | None = None
     any_mcp_sources: list[str] | None = None
     wrapper: WrapperSettings | None = None
-    leader_lease_seconds: int | None = Field(default=None, ge=60, le=604800)
     autoclose_after_seconds: int | None = Field(default=None, ge=1, le=2592000)
     # Read only by trigger services (agents-webhook, agents-schedule): send a new event to
     # the session still running for it. The orchestrator never acts on it, so a session a
@@ -719,12 +718,6 @@ class SessionSpec(BaseModel):
             raise ValueError(f"replicas {self.replicas} exceeds max_replicas {self.max_replicas}")
         if self.static and self.max_replicas != self.replicas:
             raise ValueError("static requires max_replicas to equal replicas")
-        return self
-
-    @model_validator(mode="after")
-    def _lease_needs_hive(self) -> SessionSpec:
-        if self.leader_lease_seconds is not None and not self.hive:
-            raise ValueError("leader_lease_seconds requires a hive session (max_replicas > 1)")
         return self
 
     @model_validator(mode="after")
