@@ -237,30 +237,6 @@ async def enqueue_message(
         return row["id"]
 
 
-_FIRST_MESSAGE_LOCK_NAMESPACE = 0x6F726332  # "orc2"
-
-
-async def start_prompt_pending(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> bool:
-    """True when no live message carries the session's start prompt; call inside a transaction.
-
-    A carrier that failed or was cancelled no longer counts, so the next user message takes the
-    prompt over; peer messages never carry it. The transaction-level advisory lock makes two
-    concurrent posts agree: the second waits for the first to commit and then sees its row.
-    """
-    await conn.execute(
-        "SELECT pg_advisory_xact_lock(%s, hashtext(%s::text))",
-        (_FIRST_MESSAGE_LOCK_NAMESPACE, session_id),
-    )
-    row = await _one(
-        conn,
-        "SELECT NOT EXISTS (SELECT 1 FROM messages WHERE session_id = %s"
-        " AND carries_start_prompt AND status NOT IN ('failed', 'cancelled')) AS pending",
-        (session_id,),
-    )
-    assert row is not None
-    return row["pending"]
-
-
 async def _count(conn: psycopg.AsyncConnection, query: str, params: Any) -> int:
     row = await _one(conn, query, params)
     assert row is not None
@@ -486,12 +462,30 @@ async def _claim_notice(conn: psycopg.AsyncConnection, session_id: uuid.UUID) ->
     return await _dispatch(conn, row["id"], pick) if pick is not None else None
 
 
+async def _start_prompt_gate(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> dict | None:
+    """The session's live start prompt message (queued, dispatching or verifying), if any.
+
+    While it exists nothing else of the session is claimed (T-63): the start prompt is turn 1.
+    """
+    return await _one(
+        conn,
+        "SELECT id, status FROM messages WHERE session_id = %s AND carries_start_prompt"
+        " AND status IN ('queued', 'dispatching', 'verifying') ORDER BY id LIMIT 1",
+        (session_id,),
+    )
+
+
 async def _claim_in_session(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Claim | None:
-    """Claim a queued handover notice, else scan the queued messages in id order.
+    """Claim the pending start prompt alone, else a queued handover notice, else scan the queued
+    messages in id order.
 
     The caller holds the session lock.
     """
-    if (notice := await _claim_notice(conn, session_id)) is not None:
+    gate = await _start_prompt_gate(conn, session_id)
+    if gate is not None and gate["status"] != "queued":
+        return None  # in flight: everything else waits until it is sent, failed or cancelled
+    only = gate["id"] if gate is not None else None
+    if only is None and (notice := await _claim_notice(conn, session_id)) is not None:
         return notice
     leader = await _one(
         conn, "SELECT agent_id FROM session_leaders WHERE session_id = %s", (session_id,)
@@ -511,8 +505,8 @@ async def _claim_in_session(conn: psycopg.AsyncConnection, session_id: uuid.UUID
             "SELECT id, target_agent_id, lane,"
             " (not_before IS NOT NULL AND not_before > now()) AS waiting"
             " FROM messages WHERE session_id = %s AND status = 'queued' AND id > %s"
-            " ORDER BY id LIMIT %s",
-            (session_id, after, _SCAN_BATCH),
+            " AND (%s::bigint IS NULL OR id = %s) ORDER BY id LIMIT %s",
+            (session_id, after, only, only, _SCAN_BATCH),
         )
         if not rows:
             return None
