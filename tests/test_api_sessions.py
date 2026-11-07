@@ -104,13 +104,19 @@ async def test_patch_session_retired_405(http):
     assert not [
         path
         for path, methods in _walk_routes(http._transport.app)  # type: ignore[attr-defined]
-        if path.startswith("/api/v1") and "PATCH" in methods and not path.endswith("/labels")
+        if path.startswith("/api/v1")
+        and "PATCH" in methods
+        and not path.endswith("/labels")
+        and not path.startswith("/api/v1/projects/")
     ]
     spec = (await http.get("/api/v1/openapi.json")).json()
     assert not [
         p
         for p, ops in spec["paths"].items()
-        if p.startswith("/api/v1") and "patch" in ops and not p.endswith("/labels")
+        if p.startswith("/api/v1")
+        and "patch" in ops
+        and not p.endswith("/labels")
+        and not p.startswith("/api/v1/projects/")
     ]
 
 

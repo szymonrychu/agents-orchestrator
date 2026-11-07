@@ -110,6 +110,34 @@ class CopyPreset(BaseModel):
     name: str | None = None
 
 
+class ProjectIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    slug: str
+    name: str
+    description: str = ""
+
+
+class ProjectPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = None
+    description: str | None = None
+    archived: bool | None = None
+
+
+class ProjectView(BaseModel):
+    slug: str
+    name: str
+    description: str
+    archived: bool
+    created_at: datetime
+    updated_at: datetime
+    # None on the service port, which does not read counts
+    presets: int | None = None
+    sessions: int | None = None
+
+
 class PresetView(BaseModel):
     id: uuid.UUID
     name: str

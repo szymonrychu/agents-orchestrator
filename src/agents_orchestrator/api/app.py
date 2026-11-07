@@ -24,6 +24,7 @@ from agents_orchestrator.api import (
     forward,
     messages,
     presets,
+    projects,
     secret_store,
     session_labels,
     sessions,
@@ -116,6 +117,7 @@ def create_app(
     app.include_router(tasks.router)
     app.include_router(session_labels.router)
     app.include_router(presets.router)
+    app.include_router(projects.router)
     app.include_router(templates.router)
     app.include_router(archives.router)
     app.include_router(messages.router)
