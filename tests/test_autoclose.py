@@ -14,7 +14,7 @@ from factories import insert_session
 from agents_orchestrator import inactivity
 from agents_orchestrator.api import autoclose
 from agents_orchestrator.api.app import create_app
-from agents_orchestrator.db import sessions
+from agents_orchestrator.db import handover, sessions
 from agents_orchestrator.settings import Settings
 
 
@@ -96,19 +96,20 @@ async def test_sweeper_runs_in_api_lifespan(dsn, pool, monkeypatch):
 
 
 async def test_sweep_step_order(monkeypatch, pool):
-    """One poll runs the steps in this order: expired, released, overdue, closed, reminded,
-    discarded idle."""
+    """One poll runs the steps in this order: handover delivered, expired, released, overdue,
+    closed, reminded, discarded idle."""
     monkeypatch.setattr(autoclose, "AUTOCLOSE_POLL_SECONDS", 0.05)
     calls: list[str] = []
 
     def record(name):
-        async def step(conn, *args):
+        async def step(conn, *args, **kwargs):
             calls.append(name)
             return []
 
         return step
 
     names = [
+        "deliver_handover",
         "close_expired",
         "release_inactive_close",
         "close_overdue",
@@ -116,7 +117,8 @@ async def test_sweep_step_order(monkeypatch, pool):
         "remind_inactive",
         "discard_idle",
     ]
-    for name in names:
+    monkeypatch.setattr(handover, "deliver_handover", record("deliver_handover"))
+    for name in names[1:]:
         monkeypatch.setattr(sessions, name, record(name))
     task = asyncio.create_task(autoclose.sweep(pool, Settings(database_url="x", agent_image="i")))
     for _ in range(100):
@@ -183,6 +185,7 @@ async def test_sweeper_sends_inactivity_notices(dsn, pool, monkeypatch):
 @pytest.mark.parametrize(
     "broken",
     [
+        "deliver_handover",
         "close_expired",
         "release_inactive_close",
         "close_overdue",
@@ -197,7 +200,7 @@ async def test_failing_step_does_not_skip_the_others(monkeypatch, pool, caplog, 
     calls: list[str] = []
 
     def step(name):
-        async def run(conn, *args):
+        async def run(conn, *args, **kwargs):
             calls.append(name)
             if name == broken:
                 raise RuntimeError(f"{name} is broken")
@@ -206,6 +209,7 @@ async def test_failing_step_does_not_skip_the_others(monkeypatch, pool, caplog, 
         return run
 
     names = [
+        "deliver_handover",
         "close_expired",
         "release_inactive_close",
         "close_overdue",
@@ -213,7 +217,8 @@ async def test_failing_step_does_not_skip_the_others(monkeypatch, pool, caplog, 
         "remind_inactive",
         "discard_idle",
     ]
-    for name in names:
+    monkeypatch.setattr(handover, "deliver_handover", step("deliver_handover"))
+    for name in names[1:]:
         monkeypatch.setattr(sessions, name, step(name))
     caplog.set_level(logging.ERROR, logger=autoclose.__name__)
     task = asyncio.create_task(autoclose.sweep(pool, Settings(database_url="x", agent_image="i")))

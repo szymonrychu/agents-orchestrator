@@ -189,6 +189,10 @@ class Settings(BaseSettings):
     inactivity_close_seconds: int = 0
     #: Seconds the leader has to hand off after the hard-limit notice; 0 means no window.
     inactivity_handoff_seconds: int = Field(default=300, ge=0, le=3600)
+    #: Size budget of the predecessor's rendered transcript attached to a handover notice (the
+    #: oldest lines are dropped first), and the cap on each tool output in it.
+    handover_transcript_bytes: int = Field(default=65536, ge=8192, le=1048576)
+    handover_output_chars: int = Field(default=500, ge=100, le=4000)
 
     wrapper_send_timeout_seconds: float = 15
     #: Rendered into every wrapper as `sessions.interrupt_settle_seconds`; the priority lane's

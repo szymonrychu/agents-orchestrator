@@ -667,3 +667,21 @@ def test_session_reply_window(monkeypatch):
     monkeypatch.setenv("ORCH_SESSION_REPLY_WINDOW_SECONDS", "-1")
     with pytest.raises(SettingsError, match="ORCH_SESSION_REPLY_WINDOW_SECONDS"):
         Settings()
+
+
+def test_handover_transcript_defaults_and_bounds(monkeypatch):
+    s = Settings()
+    assert (s.handover_transcript_bytes, s.handover_output_chars) == (65536, 500)
+    cases = {
+        "ORCH_HANDOVER_TRANSCRIPT_BYTES": (("8192", "1048576"), ("8191", "1048577", "-1")),
+        "ORCH_HANDOVER_OUTPUT_CHARS": (("100", "4000"), ("99", "4001", "0")),
+    }
+    for name, (oks, bads) in cases.items():
+        for bad in bads:
+            monkeypatch.setenv(name, bad)
+            with pytest.raises(SettingsError, match=name):
+                Settings()
+        for ok in oks:
+            monkeypatch.setenv(name, ok)
+            assert getattr(Settings(), name.removeprefix("ORCH_").lower()) == int(ok)
+        monkeypatch.delenv(name)

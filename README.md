@@ -74,6 +74,8 @@ Every process reads `ORCH_*` variables (the contract `agents-orchestrator-settin
 | `ORCH_INACTIVITY_REMINDER_SECONDS` | `0` | api | quiet time (no user-visible update) after which the leader gets one reminder; 0 (off) or 60 to 2592000, below `ORCH_INACTIVITY_CLOSE_SECONDS` when both are on; a session's `spec.inactivity.reminder_seconds` overrides it |
 | `ORCH_INACTIVITY_CLOSE_SECONDS` | `0` | api | quiet time after which the orchestrator requests the close of the session; 0 (off) or 60 to 2592000; a session's `spec.inactivity.close_seconds` overrides it; a preset whose own `reminder_seconds` is no longer below the effective close limit is refused at session creation, so run `orch presets-check` after changing either setting |
 | `ORCH_INACTIVITY_HANDOFF_SECONDS` | `300` | api | seconds (0 to 3600) the leader has to hand off after the inactivity close notice |
+| `ORCH_HANDOVER_TRANSCRIPT_BYTES` | `65536` | api | bytes (8192 to 1048576) of the predecessor's rendered transcript attached to a handover notice; the oldest lines are dropped first |
+| `ORCH_HANDOVER_OUTPUT_CHARS` | `500` | api | characters (100 to 4000) kept of each tool output in the handover transcript |
 | `ORCH_WRAPPER_SEND_TIMEOUT_SECONDS` | `15` | dispatcher, ingester | wrapper send timeout; at most half of dispatching_stale_seconds |
 | `ORCH_WRAPPER_INTERRUPT_SETTLE_SECONDS` | `20` | reconciler, dispatcher | rendered into every wrapper as `sessions.interrupt_settle_seconds`; the priority send timeout is `ORCH_WRAPPER_SEND_TIMEOUT_SECONDS + 3 * this + 14` s (89 s by default) |
 | `ORCH_DISPATCHING_STALE_SECONDS` | `60` | dispatcher, ingester | dispatching row stale cutoff |
