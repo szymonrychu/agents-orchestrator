@@ -1,7 +1,8 @@
 """The Kubernetes calls the reconciler makes, behind one protocol (D6, D9, D26).
 
 Objects travel as plain Kubernetes JSON dicts, the shape `render_session` produces. Every call
-names its namespace explicitly. The production Role grants Secrets only create, patch and
+names its namespace explicitly; the empty namespace means cluster scope, used for the kinds in
+`CLUSTER_SCOPED`. The production Role grants Secrets only create, patch and
 delete, so `get_object` and `list_objects` are never called for Secrets: a Secret is applied
 and deleted by its deterministic name.
 
@@ -28,7 +29,9 @@ from lightkube.resources.core_v1 import (
     Pod,
     Secret,
     Service,
+    ServiceAccount,
 )
+from lightkube.resources.rbac_authorization_v1 import ClusterRoleBinding, RoleBinding
 from lightkube.types import PatchType
 
 from agents_orchestrator.k8s.labels import MANAGED_BY, MANAGED_BY_LABEL, SESSION_LABEL
@@ -47,7 +50,22 @@ RESOURCES: dict[str, Any] = {
     "Secret": Secret,
     "Pod": Pod,
     "Job": Job,
+    "ServiceAccount": ServiceAccount,
+    "RoleBinding": RoleBinding,
+    "ClusterRoleBinding": ClusterRoleBinding,
 }
+
+# Kinds that have no namespace: the KubeApi namespace argument is "" and lightkube gets None.
+CLUSTER_SCOPED: frozenset[str] = frozenset({"ClusterRoleBinding"})
+
+
+def obj_namespace(obj: Mapping[str, Any]) -> str:
+    """The object's metadata.namespace, or "" for a cluster-scoped object."""
+    return (obj.get("metadata") or {}).get("namespace") or ""
+
+
+def _ns(kind: str, namespace: str) -> str | None:
+    return None if kind in CLUSTER_SCOPED else namespace
 
 
 class KubeError(Exception):
@@ -153,7 +171,7 @@ class LightkubeApi:
         res = _resource(kind)
         try:
             with _mapped():
-                out = await self.client.get(res, name, namespace=namespace)
+                out = await self.client.get(res, name, namespace=_ns(kind, namespace))
         except NotFound:
             return None
         return out.to_dict()
@@ -164,7 +182,7 @@ class LightkubeApi:
             return [
                 o.to_dict()
                 async for o in self.client.list(
-                    res, namespace=namespace, labels=dict(selector) or None
+                    res, namespace=_ns(kind, namespace), labels=dict(selector) or None
                 )
             ]
 
@@ -175,7 +193,7 @@ class LightkubeApi:
                 res,
                 name,
                 patch,
-                namespace=namespace,
+                namespace=_ns(kind, namespace),
                 patch_type=PatchType.MERGE,
                 field_manager=FIELD_MANAGER,
             )
@@ -187,7 +205,7 @@ class LightkubeApi:
             with _mapped():
                 # a Job deleted without a propagation policy would orphan its pods
                 cascade = CascadeType.BACKGROUND if kind == "Job" else None
-                await self.client.delete(res, name, namespace=namespace, cascade=cascade)
+                await self.client.delete(res, name, namespace=_ns(kind, namespace), cascade=cascade)
         except NotFound:
             return False
         return True
