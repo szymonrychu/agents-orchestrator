@@ -3120,8 +3120,11 @@ START_PROMPT = "slow start prompt marker: report when done"  # a 4 s turn: overt
 def test_start_prompt_is_turn_one_before_a_message_sent_right_after_create(
     api: httpx.Client, superleader: dict[str, Any]
 ) -> None:
-    """T-63: the preset start prompt is queued at create as the session's first message; a
-    session message sent right after create, before the pod is ready, is turn 2."""
+    """T-63: the preset start prompt is queued at create as the session's first message and
+    opens the session's first turn; a session message sent right after create, before the pod
+    is ready, is delivered after it. The message is on the regular lane, which the wrapper
+    types into a running turn (D2), so it rides in turn 1 after the prompt or is a later turn:
+    either way it never precedes the prompt and never shares its text."""
     spec = {"replicas": 1, "static": True, "env": FAKE_TURN_ENV, "start_prompt": START_PROMPT}
     resp = api.post("/presets", json={"name": "E2E start prompt order", "spec": spec})
     assert resp.status_code == 201, resp.text
@@ -3156,7 +3159,14 @@ def test_start_prompt_is_turn_one_before_a_message_sent_right_after_create(
             return datetime.fromisoformat(value)
 
         assert at(first, "dispatched_at") < at(second, "dispatched_at"), (first, second)
-        assert at(first, "turn", "started_at") < at(second, "turn", "started_at"), (first, second)
+        events = sorted((e for page in all_events(api, cid) for e in page), key=lambda e: e["id"])
+        turns = [e["turn_id"] for e in events if e["type"] == "turn_started" and e["turn_id"]]
+        assert turns and turns[0] == first["turn_id"], (turns, first)  # the prompt is turn 1
+        if second["turn_id"] != first["turn_id"]:  # not typed into turn 1: a later turn
+            assert at(first, "turn", "completed_at") <= at(second, "turn", "started_at"), (
+                first,
+                second,
+            )
         assert second["text"] == "peer first", second  # never prefixed with the start prompt
         rows = sorted(api.get(f"/sessions/{cid}/messages").json(), key=lambda m: m["id"])
         texts = [m["text"] for m in rows]
