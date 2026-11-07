@@ -33,7 +33,11 @@ DENY = ["Bash(rm:*)"]
 @pytest.fixture
 def settings(dsn):
     return make_settings(dsn).model_copy(
-        update={"kube_access_service_account": "kube-sa", "docker_image": "docker:27-dind"}
+        update={
+            "docker_image": "docker:27-dind",
+            "kube_namespace_access_namespaces": ["media", "games"],
+            "kube_namespace_access_tiers": ["read", "exec"],
+        }
     )
 
 
@@ -143,12 +147,12 @@ async def _managed(pool, settings, slug: str, extra: dict, **kw) -> tuple[Sess, 
 
 @pytest.mark.parametrize("superleader", [False, True])
 async def test_own_privileged_session_replaces_mcp_args(pool, settings, superleader):
-    """The use case: a kube_access, auto-mode session's leader edits its own MCP server args.
+    """The use case: a kube_cluster_access, auto-mode session's leader edits its own MCP args.
     Arrays replace, the rest of the server entry is kept, generation bumps once, the source
     preset is untouched, and a stored protected variable is resent unchanged."""
     me = await alone(pool, "svc-own", superleader=superleader)
     extra = {
-        "kube_access": True,
+        "kube_cluster_access": True,
         "wrapper": {"permission_mode": "auto", "mcp_servers": {"grafana": GRAFANA}},
         "env": {"K": {"protected": True}},
     }
@@ -169,7 +173,7 @@ async def test_own_privileged_session_replaces_mcp_args(pool, settings, superlea
 
     server = view.spec.wrapper.mcp_servers["grafana"]
     assert (server.type, server.command, server.args) == ("stdio", "mise", NEW_ARGS)
-    assert view.spec.kube_access is True and view.spec.wrapper.permission_mode == "auto"
+    assert view.spec.kube_cluster_access is True and view.spec.wrapper.permission_mode == "auto"
     assert view.generation == before["generation"] + 1
     after = await _row(pool, me.id)
     assert after["generation"] == before["generation"] + 1
@@ -218,7 +222,18 @@ async def test_empty_patch_is_a_no_op(pool, settings):
 # ---------------------------------------------------------------- human-only fields
 
 HUMAN_ONLY = [
-    ("kube_access", {}, {"kube_access": True}),
+    ("kube_cluster_access", {}, {"kube_cluster_access": True}),
+    ("kube_namespace_access", {}, {"kube_namespace_access": {"media": ["read"]}}),
+    (
+        "kube_namespace_access",
+        {"kube_namespace_access": {"media": ["read"]}},
+        {"kube_namespace_access": {"media": ["read", "exec"]}},
+    ),
+    (
+        "kube_namespace_access",
+        {"kube_namespace_access": {"media": ["read"]}},
+        {"kube_namespace_access": {"media": ["read"], "games": ["read"]}},
+    ),
     ("session_messaging", {}, {"session_messaging": True}),
     ("docker", {}, {"docker": True}),
     ("discard_hook_url", {}, {"discard_hook_url": "https://h.example/hook"}),
@@ -255,8 +270,13 @@ async def test_human_only_field_refused(pool, settings, boss, own, path, stored,
 
 
 TOWARD_SAFE = [
-    ({"kube_access": True}, {"kube_access": False}),
+    ({"kube_cluster_access": True}, {"kube_cluster_access": False}),
     ({"docker": True}, {"docker": None}),
+    (
+        {"kube_namespace_access": {"media": ["read", "exec"], "games": ["read"]}},
+        {"kube_namespace_access": {"media": ["read"]}},
+    ),
+    ({"kube_namespace_access": {"media": ["read"]}}, {"kube_namespace_access": None}),
     ({}, {"wrapper": {"permission_mode": "auto"}}),
     (
         {"wrapper": {"permissions": {"deny": DENY}}},
@@ -285,7 +305,7 @@ async def test_toward_safe_passes(pool, settings, boss, own, stored, patch):
 
 # ---------------------------------------------------------------- privileged target
 
-FLAGS = ["kube_access", "session_messaging", "docker"]
+FLAGS = ["kube_cluster_access", "session_messaging", "docker"]
 
 
 @pytest.mark.parametrize("flag", FLAGS)
@@ -511,7 +531,8 @@ async def test_race_grant_turned_on_refuses_foreign_edit(pool, settings, boss, m
     async def grant():
         await _exec(
             pool,
-            "UPDATE sessions SET spec = spec || '{\"kube_access\": true}'::jsonb WHERE id = %s",
+            "UPDATE sessions SET spec = spec || '{\"kube_cluster_access\": true}'::jsonb "
+            "WHERE id = %s",
             (target.id,),
         )
 
@@ -520,7 +541,7 @@ async def test_race_grant_turned_on_refuses_foreign_edit(pool, settings, boss, m
         pool, settings, target, boss, {"peers": False}, 403, "privileged_target", ["peers"]
     )
     assert len(calls) == 1  # SpecChanged, then the re-read refuses before any lock
-    assert (await _row(pool, target.id))["spec"]["kube_access"] is True
+    assert (await _row(pool, target.id))["spec"]["kube_cluster_access"] is True
 
 
 async def test_race_manageable_turned_off_404(pool, settings, boss, monkeypatch):

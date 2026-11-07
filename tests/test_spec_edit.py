@@ -26,7 +26,7 @@ def test_note_fields_sorts_paths():
 
 
 def test_guard_not_privileged_passes_mcp_edit_on_kube_access_base():
-    base = {"kube_access": True, "start_prompt": "a"}
+    base = {"kube_cluster_access": True, "start_prompt": "a"}
     request = make_request()
     guard_agent_edit(base, {**base, "start_prompt": "b"}, [], request, privileged=False)
     assert not hasattr(request.state, "preset_fields")
@@ -35,14 +35,14 @@ def test_guard_not_privileged_passes_mcp_edit_on_kube_access_base():
 def test_guard_not_privileged_still_refuses_grant_turned_on():
     request = make_request()
     with pytest.raises(ApiError) as caught:
-        guard_agent_edit({}, {"kube_access": True}, [], request, privileged=False)
+        guard_agent_edit({}, {"kube_cluster_access": True}, [], request, privileged=False)
     assert caught.value.status == 403
     assert caught.value.code == "human_only_field"
-    assert request.state.preset_fields == ["kube_access"]
+    assert request.state.preset_fields == ["kube_cluster_access"]
 
 
 def test_guard_privileged_refuses_a_prompt_change_on_a_privileged_base():
-    base = {"kube_access": True, "start_prompt": "a"}
+    base = {"kube_cluster_access": True, "start_prompt": "a"}
     request = make_request()
     with pytest.raises(ApiError) as caught:
         guard_agent_edit(base, {**base, "start_prompt": "b"}, [], request, privileged=True)
@@ -51,7 +51,7 @@ def test_guard_privileged_refuses_a_prompt_change_on_a_privileged_base():
 
 
 def test_guard_privileged_refuses_a_secret_value_name():
-    base = {"kube_access": True, "env": {"K": {"protected": True}}}
+    base = {"kube_cluster_access": True, "env": {"K": {"protected": True}}}
     with pytest.raises(ApiError) as caught:
         guard_agent_edit(base, base, ["K"], None, privileged=True)
     assert caught.value.code == "privileged_target"
@@ -63,7 +63,7 @@ def test_guard_without_request_still_raises():
 
 
 def test_guard_human_only_runs_before_privileged():
-    base = {"kube_access": True}
+    base = {"kube_cluster_access": True}
     with pytest.raises(ApiError) as caught:
         guard_agent_edit(
             base, {**base, "docker": True, "start_prompt": "x"}, [], None, privileged=True

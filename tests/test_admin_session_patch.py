@@ -23,9 +23,7 @@ PEERS_OFF = {"spec": {"peers": False}}
 
 @pytest.fixture
 def settings(dsn):
-    return make_settings(dsn).model_copy(
-        update={"kube_access_service_account": "kube-sa", "docker_image": "docker:27-dind"}
-    )
+    return make_settings(dsn).model_copy(update={"docker_image": "docker:27-dind"})
 
 
 @pytest.fixture
