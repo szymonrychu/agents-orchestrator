@@ -516,6 +516,73 @@ async def test_handover_due_runs_when_hive_state_unchanged(env):
     assert len(env.notes(a0, DUE)) == 2
 
 
+# ---------------------------------------------------------------- rollout_due
+
+ROLLOUT = "rollout_due"
+
+
+async def set_rollout(env, session_id, revision="r1", leader_since: str | None = "t") -> None:
+    rollout = {"revision": revision, "since": "t", "leader_since": leader_since}
+    await env.run(
+        "UPDATE sessions SET status = %s WHERE id = %s",
+        (json.dumps({"rollout": rollout}), session_id),
+    )
+
+
+async def test_rollout_due_sent_once_per_epoch_and_revision(env):
+    c, (a0, a1, a2) = await env.hive()
+    await env.push()
+    assert env.notes(a0, ROLLOUT) == []
+    await set_rollout(env, c["id"])
+    assert await env.push() == 1
+    (text,) = env.notes(a0, ROLLOUT)
+    assert text == hive.render_rollout_due(1, env.settings.rollout_handover_seconds)
+    assert text.startswith("<rollout-due>") and text.endswith("</rollout-due>")
+    assert "epoch=1" in text and "After 30 minutes" in text
+    assert env.notes(a1, ROLLOUT) == [] and env.notes(a2, ROLLOUT) == []
+    sent = [n for n in env.fake.notes[a0["wrapper_session_id"]] if n["key"] == ROLLOUT]
+    assert sent[0]["source"] == "orchestrator"
+    assert await env.push() == 0  # once, not once per tick
+
+    await set_rollout(env, c["id"], revision="r2")  # a newer revision is a new note
+    assert await env.push() == 1
+    assert len(env.notes(a0, ROLLOUT)) == 2
+
+    await env.run(  # a new epoch is a new note
+        "UPDATE session_leaders SET agent_id = %s, epoch = epoch + 1 WHERE session_id = %s",
+        (a1["id"], c["id"]),
+    )
+    await env.push()
+    assert len(env.notes(a1, ROLLOUT)) == 1
+    assert "epoch=2" in env.notes(a1, ROLLOUT)[0]
+
+
+async def test_no_rollout_note_without_leader_since(env):
+    c, (a0, a1, a2) = await env.hive()
+    await set_rollout(env, c["id"], leader_since=None)
+    await env.push()
+    assert all(env.notes(a, ROLLOUT) == [] for a in (a0, a1, a2))
+    await set_rollout(env, c["id"])
+    await env.push()
+    assert len(env.notes(a0, ROLLOUT)) == 1
+    await env.run("UPDATE sessions SET status = '{}' WHERE id = %s", (c["id"],))
+    await env.push()
+    await set_rollout(env, c["id"])  # the window closed and reopened: told again
+    await env.push()
+    assert len(env.notes(a0, ROLLOUT)) == 2
+
+
+async def test_rollout_note_retried_after_failure(env):
+    c, (a0, a1, a2) = await env.hive()
+    await env.push()
+    await set_rollout(env, c["id"])
+    await env.run("UPDATE agents SET url = 'http://127.0.0.1:1' WHERE id = %s", (a0["id"],))
+    assert await env.push() == 0
+    await env.run("UPDATE agents SET url = %s WHERE id = %s", (env.fake.base_url, a0["id"]))
+    assert await env.push() == 1
+    assert len(env.notes(a0, ROLLOUT)) == 1
+
+
 # ---------------------------------------------------------------- leadership_request
 
 OUTCOME = "leadership_request"

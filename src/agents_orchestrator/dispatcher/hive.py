@@ -22,6 +22,10 @@ at compact - 5; the successor gets the leader's transcript, so there is no brief
 is evaluated on every push tick, outside the hash and claim path above, and remembered per
 session in `HiveState`.
 
+The leader's keyed `rollout_due` note (voluntary handover 3.7) tells it a rollout waits on it: sent
+once per (leader, epoch, revision) while the reconciler's `status.rollout.leader_since` is set,
+retried on the next tick when the push fails, forgotten once the window closes.
+
 The other keyed note is the requester's `leadership_request` outcome (hive-decoupling D6): each
 `handover` request an agent made that the dispatcher decided (applied or rejected) within the
 last OUTCOME_WINDOW_SECONDS is reported once per request id and process to the agent that made
@@ -59,6 +63,7 @@ PUSH_INTERVAL_SECONDS = 10
 PUSH_TIMEOUT_SECONDS = 3
 STATE_KEY = "hive_state"
 DUE_KEY = "handover_due"
+ROLLOUT_KEY = "rollout_due"
 OUTCOME_KEY = "leadership_request"
 OUTCOME_WINDOW_SECONDS = 300
 BUCKET_PCT = 5
@@ -83,17 +88,21 @@ ORDER BY {SUCCESSOR_ORDER}
 # candidate identity).
 DueKey = tuple[uuid.UUID, int, int, bool, tuple[tuple[str, str], ...]]
 
+# What the dispatcher last told a leader about a rollout: (leader agent id, epoch, revision).
+RolloutKey = tuple[uuid.UUID, int, str]
+
 FIRM_MARGIN_PCT = 5
 
 
 @dataclass
 class HiveState:
-    """In-memory push state of one dispatcher: the throttle clock, the last `handover_due` key
-    and the `leadership_request` outcomes already sent (request ids, pruned to the window) per
-    session. A restart re-sends each of them at most once more."""
+    """In-memory push state of one dispatcher: the throttle clock, the last `handover_due` and
+    `rollout_due` keys and the `leadership_request` outcomes already sent (request ids, pruned to
+    the window) per session. A restart re-sends each of them at most once more."""
 
     last_tick: dict[uuid.UUID, float] = field(default_factory=dict)
     due_sent: dict[uuid.UUID, DueKey] = field(default_factory=dict)
+    rollout_sent: dict[uuid.UUID, RolloutKey] = field(default_factory=dict)
     outcome_sent: dict[uuid.UUID, set[int]] = field(default_factory=dict)
 
 
@@ -210,6 +219,17 @@ def render_handover_due(
     return "\n".join(lines)
 
 
+def render_rollout_due(epoch: int, window_seconds: int) -> str:
+    """The `<rollout-due>` text block pushed to the leader under the key `rollout_due`."""
+    return (
+        "<rollout-due>A new version of this hive is deployed and your pod is the last on the "
+        "old one. Hand leadership over at your next natural boundary with "
+        f"orchestrator_leadership_handover(epoch={epoch}, reason=<state summary>). "
+        f"After {round(window_seconds / 60)} minutes the orchestrator moves it at your next "
+        "turn boundary once your background agents have reported.</rollout-due>"
+    )
+
+
 def render_outcome(outcome: dict[str, Any], leader: str, epoch: int) -> str:
     """The `leadership_request` note: an applied request names the leader as of now."""
     head = f"handover request {outcome['id']}"
@@ -246,6 +266,8 @@ class _Plan:
     outcomes: list[dict[str, Any]]
     # ELIGIBLE successors, best first; None while the leader is below the threshold
     candidates: list[dict[str, Any]] | None = None
+    # the reconciler's status.rollout while only the leader's pod is left (leader_since set)
+    rollout: dict[str, Any] | None = None
 
     @property
     def receivers(self) -> list[dict[str, Any]]:
@@ -299,6 +321,7 @@ async def _read(
         )
         outcomes = await cur.fetchall()
     typed = SessionSpec.model_validate(spec)
+    rollout = (session.get("status") or {}).get("rollout") or {}
     return _Plan(
         session_id=cid,
         slug=session["slug"],
@@ -314,6 +337,7 @@ async def _read(
         scalable=typed.scalable,
         outcomes=outcomes,
         candidates=candidates,
+        rollout=rollout if rollout.get("leader_since") else None,
     )
 
 
@@ -388,6 +412,32 @@ async def _push_due(plan: _Plan, state: HiveState, client_factory: ClientFactory
     outcome = await _note(client, leader["wrapper_session_id"], text, DUE_KEY)
     if outcome != "failed":
         state.due_sent[plan.session_id] = key
+    return int(outcome == "ok")
+
+
+async def _push_rollout(
+    plan: _Plan, state: HiveState, settings: Settings, client_factory: ClientFactory
+) -> int:
+    """Tell the leader a rollout waits on it, once per (leader, epoch, revision).
+
+    Runs on every tick while `status.rollout.leader_since` is set; when it is not (or there is
+    no leader to tell) the key is forgotten. A failed push is not remembered: the next tick
+    retries it.
+    """
+    if plan.rollout is None:
+        state.rollout_sent.pop(plan.session_id, None)
+        return 0
+    leader = next((m for m in plan.receivers if m["pod_name"] == plan.leader), None)
+    if leader is None:
+        return 0
+    key: RolloutKey = (plan.leader_id, plan.epoch, str(plan.rollout.get("revision")))
+    if state.rollout_sent.get(plan.session_id) == key:
+        return 0
+    text = render_rollout_due(plan.epoch, settings.rollout_handover_seconds)
+    client = client_factory(plan.session_id, leader["url"])
+    outcome = await _note(client, leader["wrapper_session_id"], text, ROLLOUT_KEY)
+    if outcome != "failed":
+        state.rollout_sent[plan.session_id] = key
     return int(outcome == "ok")
 
 
@@ -487,6 +537,7 @@ async def _push_session(
         await _release(pool, plan, current, failed, all_ok=not failed)
         sent = sum(outcome == "ok" for outcome in outcomes)
     sent += await _push_due(plan, state, client_factory)
+    sent += await _push_rollout(plan, state, settings, client_factory)
     return sent + await _push_outcomes(plan, state, client_factory)
 
 

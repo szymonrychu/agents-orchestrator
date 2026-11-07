@@ -160,10 +160,10 @@ async def leadership_candidates(conn: psycopg.AsyncConnection) -> list[uuid.UUID
 
 
 async def hive_sessions(conn: psycopg.AsyncConnection) -> list[dict]:
-    """Active hive sessions that have a leader row: id, slug, spec (the push loop's set)."""
+    """Active hive sessions that have a leader row: id, slug, spec, status (the push loop's set)."""
     return await _all(
         conn,
-        "SELECT c.id, c.slug, c.spec FROM sessions c"
+        "SELECT c.id, c.slug, c.spec, c.status FROM sessions c"
         " JOIN session_leaders l ON l.session_id = c.id"
         f" WHERE c.desired = 'active' AND {_HIVE} ORDER BY c.id",
     )
