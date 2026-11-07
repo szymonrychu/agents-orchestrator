@@ -173,6 +173,7 @@ async def test_guard_refusal_is_audited_with_fields(app, pool, settings):
     r = await call(app, me, "PATCH", me.slug, json={"spec": {"usage_quota": None}})
     assert_error(r, 403, "human_only_field")
     assert r.json()["error"]["fields"] == ["usage_quota.five_hour_pct"]
+    assert r.json()["error"]["proposable"] is True  # the leader's tighten rule (Q3 A, F8)
     assert await _row(pool, me.id) == before
     rows = await audits(pool, me.id)
     assert [(a["status"], a["fields"]) for a in rows] == [(403, ["usage_quota.five_hour_pct"])]
@@ -186,6 +187,7 @@ async def test_fixed_field_refusal_is_audited_with_fields(app, pool, settings):
     )
     assert_error(r, 422, "session_fixed_field")
     assert r.json()["error"]["fields"] == ["pvc_size", "workdir"]
+    assert "proposable" not in r.json()["error"]  # a fixed field is never a proposal item
     rows = await audits(pool, me.id)
     assert [(a["status"], a["fields"]) for a in rows] == [(422, ["pvc_size", "workdir"])]
 

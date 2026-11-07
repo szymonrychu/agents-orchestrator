@@ -172,7 +172,8 @@ def _sent_secrets(body: schemas.PresetIn) -> list[str]:
 
 
 # What each non-relay admin route hides from the superleader: "preset" and "session" routes
-# answer 404 for a target outside its remit, "list" and "create" are filtered or forced.
+# answer 404 for a target outside its remit, "list" and "create" are filtered or forced,
+# "proposal" routes see only the caller's own proposals on targets it may manage (404 otherwise).
 ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("GET", f"{ADMIN_PREFIX}/presets"): "list",
     ("POST", f"{ADMIN_PREFIX}/presets"): "create",
@@ -190,6 +191,11 @@ ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/agents/{{pod}}/restart"): "session",
     ("GET", f"{ADMIN_PREFIX}/commands/{{command_id}}"): "none",
     ("GET", f"{ADMIN_PREFIX}/usage"): "none",
+    ("POST", f"{ADMIN_PREFIX}/proposals"): "proposal",
+    ("GET", f"{ADMIN_PREFIX}/proposals"): "proposal",
+    ("GET", f"{ADMIN_PREFIX}/proposals/{{proposal_id}}"): "proposal",
+    ("POST", f"{ADMIN_PREFIX}/proposals/{{proposal_id}}/revise"): "proposal",
+    ("POST", f"{ADMIN_PREFIX}/proposals/{{proposal_id}}/withdraw"): "proposal",
 }
 
 

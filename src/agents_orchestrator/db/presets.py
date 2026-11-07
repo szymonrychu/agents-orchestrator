@@ -170,6 +170,11 @@ async def manageable_ids(conn: psycopg.AsyncConnection) -> set[uuid.UUID]:
     return {r[0] for r in await cur.fetchall()}
 
 
+async def unmanageable_ids(conn: psycopg.AsyncConnection) -> set[uuid.UUID]:
+    cur = await conn.execute("SELECT id FROM presets WHERE NOT superleader_manageable")
+    return {r[0] for r in await cur.fetchall()}
+
+
 async def delete(
     conn: psycopg.AsyncConnection,
     preset_id: uuid.UUID,

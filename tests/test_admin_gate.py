@@ -1,7 +1,7 @@
 """O6: every /agent/v1/admin route sits behind require_agent and a gate (D3, D10): the
 superleader gate, or for the two session spec routes (GET and PATCH /sessions/{slug}) the
 session editor gate, which admits a superleader on any slug and any other session's leader on
-its own slug only."""
+its own slug only; the proposal routes carry the proposer gate (superleaders only in stage A)."""
 
 from __future__ import annotations
 
@@ -12,28 +12,41 @@ from test_agent_session_messaging import alone, hive
 from test_api_agent import client_for, headers, make_settings
 from test_api_sessions import assert_error
 
-from agents_orchestrator.api import admin
+from agents_orchestrator.api import admin, proposal_routes
 from agents_orchestrator.api.admin import (
     ADMIN_PREFIX,
     require_session_editor,
     require_superleader,
 )
 from agents_orchestrator.api.app import create_app
+from agents_orchestrator.api.proposal_routes import require_proposer
 
 GET_PRESETS = f"{ADMIN_PREFIX}/presets"
 
 
-GATES = {id(admin.router): require_superleader, id(admin.session_router): require_session_editor}
+GATES = {
+    id(admin.router): require_superleader,
+    id(admin.session_router): require_session_editor,
+    id(proposal_routes.proposal_router): require_proposer,
+}
+ROUTERS = (admin.router, admin.session_router, proposal_routes.proposal_router)
 EDITOR_ROUTES = {
     ("GET", f"{ADMIN_PREFIX}/sessions/{{slug}}"),
     ("PATCH", f"{ADMIN_PREFIX}/sessions/{{slug}}"),
 }
+PROPOSER_ROUTES = {
+    ("POST", f"{ADMIN_PREFIX}/proposals"),
+    ("GET", f"{ADMIN_PREFIX}/proposals"),
+    ("GET", f"{ADMIN_PREFIX}/proposals/{{proposal_id}}"),
+    ("POST", f"{ADMIN_PREFIX}/proposals/{{proposal_id}}/revise"),
+    ("POST", f"{ADMIN_PREFIX}/proposals/{{proposal_id}}/withdraw"),
+}
 
 
 def admin_routes(app):
-    """(router, route) of both admin routers, checked against what the app really serves (its
-    OpenAPI operations), because FastAPI keeps included routers lazy in `app.routes`."""
-    routes = [(r, route) for r in (admin.router, admin.session_router) for route in r.routes]
+    """(router, route) of every admin-prefix router, checked against what the app really serves
+    (its OpenAPI operations), because FastAPI keeps included routers lazy in `app.routes`."""
+    routes = [(r, route) for r in ROUTERS for route in r.routes]
     served = {
         (method.upper(), path)
         for path, ops in app.openapi()["paths"].items()
@@ -62,7 +75,8 @@ async def mark_trigger(pool, session_id, service="agents-webhook"):
 
 async def test_every_admin_route_carries_its_gate(pool, dsn):
     """Each route carries exactly the gate of its router: the session editor gate on the two
-    session spec routes, the superleader gate on every other."""
+    session spec routes, the proposer gate on the proposal routes, the superleader gate on every
+    other."""
     app = create_app(make_settings(dsn), pool)
     routes = admin_routes(app)
     assert len(routes) >= 7
@@ -70,11 +84,18 @@ async def test_every_admin_route_carries_its_gate(pool, dsn):
     for router, route in routes:
         calls = [d.call for d in route.dependant.dependencies]
         gate = GATES[id(router)]
-        other = ({require_superleader, require_session_editor} - {gate}).pop()
-        assert gate in calls and other not in calls, route.path
+        others = set(GATES.values()) - {gate}
+        assert gate in calls and not others & set(calls), route.path
         if gate is require_session_editor:
             editor.update((m, route.path) for m in route.methods - {"HEAD", "OPTIONS"})
     assert editor == EDITOR_ROUTES
+    proposer = {
+        (m, route.path)
+        for router, route in routes
+        if router is proposal_routes.proposal_router
+        for m in route.methods
+    }
+    assert proposer == PROPOSER_ROUTES
 
 
 async def test_editor_gate_is_per_route_and_slug_stays_a_path_parameter(pool, dsn):

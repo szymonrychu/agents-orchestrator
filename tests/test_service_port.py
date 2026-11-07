@@ -166,6 +166,10 @@ async def test_route_allowlist(app, pool):
             ("HEAD", "/api/v1/meta"),
             ("GET", "/api/v1/sessions/"),
             ("GET", "/api/v1/meta/extra"),
+            # change proposals are the human's (main port) only
+            ("GET", "/api/v1/proposals"),
+            ("GET", "/api/v1/proposals/1"),
+            ("POST", "/api/v1/proposals/1/review"),
         ]:
             r = await c.request(method, path, json={} if method in ("PUT", "POST") else None)
             assert r.status_code == 403, (method, path, r.status_code)

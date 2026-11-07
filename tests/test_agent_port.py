@@ -8,9 +8,12 @@ import socket
 import httpx
 import pytest
 from fastapi import FastAPI
+from test_api_agent import client_for as agent_client
+from test_api_agent import make_settings
 
 from agents_orchestrator import cli
 from agents_orchestrator.api.allowlist import PortGate, SourceAllowlist
+from agents_orchestrator.api.app import create_app
 from agents_orchestrator.settings import Settings
 
 DB = "postgresql://u:p@h/db"
@@ -79,6 +82,22 @@ def test_agent_port_serves_only_agent_paths():
     assert health.status_code == 200
     assert other.status_code == 404
     assert other.json()["error"]["code"] == "not_found"
+
+
+async def test_proposal_main_routes_are_not_on_the_agent_port(pool, dsn):
+    """The human's proposal routes exist on the main port and answer 404 on the agent port."""
+    app = create_app(make_settings(dsn), pool)
+    served = app.openapi()["paths"]
+    for method, path in [
+        ("GET", "/api/v1/proposals"),
+        ("GET", "/api/v1/proposals/{proposal_id}"),
+        ("POST", "/api/v1/proposals/{proposal_id}/review"),
+    ]:
+        assert method.lower() in served[path], path
+        async with agent_client(app) as http:
+            r = await http.request(method, path.replace("{proposal_id}", "1"), json={})
+        assert r.status_code == 404, (method, path)
+        assert r.json()["error"]["code"] == "not_found"
 
 
 def test_main_port_unchanged():

@@ -885,6 +885,18 @@ Optional body `{"name": "<name>"}`. Creates a new, non-default preset holding th
 
 Sets the value of one protected variable of a preset: body `{"value": "<text>"}` (1 byte to 1 MiB, extra fields rejected). `{preset}` is the preset id or its name; `{name}` must be a variable the preset declares with `protected: true` (422 `invalid_request` otherwise, also for an invalid name). Each call writes a new immutable Kubernetes Secret version; sessions created before keep the version they were created with until they are discarded. Response 200 is metadata only: `{"name", "set": true, "version", "updated_at"}`; the value is never returned, logged or echoed in an error. Errors: 404 `not_found`, 413 `secret_too_large`, 422 `invalid_request`, 502 `secret_store_failed` (a generic message, nothing of the Kubernetes error). Main port only.
 
+### `GET /api/v1/proposals`
+
+Lists every session's change proposals, newest first, each with its current revision only. Query `status` (`active` = open, rework or stale, the default; `open`; `closed`; `all`) and `limit` (1 to 200, default 50). Response 200, a list of proposal views. Errors: 422 `invalid_request` (unknown status). Main port only (the agent port answers 404, the service port 403).
+
+### `GET /api/v1/proposals/{proposal_id}`
+
+One proposal with every revision: items with redacted `before` and `after`, `security`, `grant`, `secret` (`set` or `changed`, never a value), verdicts and notes, and `stale` (a read-only check of the live target). Errors: 404 `not_found`. Main port only.
+
+### `POST /api/v1/proposals/{proposal_id}/review`
+
+The human review of the current revision: body `{"revision": <n>, "items": [{"path", "decision": "approve" | "rework" | "deny", "note"?}]}`, one decision per item, a note on every rework. Any rework requests a new revision and applies nothing; otherwise the approved items are applied all or nothing on an unchanged target and the proposal is `applied` (or `denied` when none is approved). The proposer is notified. Response 200 with the view. Errors: 404 `not_found`, 409 `not_open`, `proposal_expired`, `revision_changed`, `target_gone`, `proposal_stale`, 422 `invalid_request`, `invalid_spec`, 502 `secret_store_failed`. Main port only: no agent route and no MCP tool reaches it.
+
 ### `POST /api/v1/templates/preview`
 
 Renders a Jinja2 template for an editor against a fixed sample context. Body `{"template": "<text>", "surface": "web_chat_start" | "preset_text" | "init_script" | "archive_name", "context": {...}}`; `context` is optional and replaces the sample's top-level keys. Response 200 `{rendered, error, variables}`: `rendered` is the text (null on error), `error` is `{line, message}` or null, `variables` the sorted names the template reads. A template error (syntax, undefined variable, over the 16 KiB limit) is a 200 with `error` set. Errors: 422 `invalid_request` (unknown surface).
