@@ -76,6 +76,8 @@ Every process reads `ORCH_*` variables (the contract `agents-orchestrator-settin
 | `ORCH_INACTIVITY_HANDOFF_SECONDS` | `300` | api | seconds (0 to 3600) the leader has to hand off after the inactivity close notice |
 | `ORCH_HANDOVER_TRANSCRIPT_BYTES` | `65536` | api | bytes (8192 to 1048576) of the predecessor's rendered transcript attached to a handover notice; the oldest lines are dropped first |
 | `ORCH_HANDOVER_OUTPUT_CHARS` | `500` | api | characters (100 to 4000) kept of each tool output in the handover transcript |
+| `ORCH_ROLLOUT_HANDOVER_SECONDS` | `1800` | reconciler | seconds (0 to 86400) the leader has, once only its pod is outdated, to hand over on its own before the reconciler queues the forced `rollout` handover |
+| `ORCH_ROLLOUT_MAX_DEFER_SECONDS` | `14400` | reconciler, dispatcher | seconds (600 to 86400, above `ORCH_ROLLOUT_HANDOVER_SECONDS`) after which background subagents stop holding a rollout: a member's pod rolls once the rollout is this old, a forced `rollout` handover once it is queued this long (never mid-turn) |
 | `ORCH_WRAPPER_SEND_TIMEOUT_SECONDS` | `15` | dispatcher, ingester | wrapper send timeout; at most half of dispatching_stale_seconds |
 | `ORCH_WRAPPER_INTERRUPT_SETTLE_SECONDS` | `20` | reconciler, dispatcher | rendered into every wrapper as `sessions.interrupt_settle_seconds`; the priority send timeout is `ORCH_WRAPPER_SEND_TIMEOUT_SECONDS + 3 * this + 14` s (89 s by default) |
 | `ORCH_DISPATCHING_STALE_SECONDS` | `60` | dispatcher, ingester | dispatching row stale cutoff |
