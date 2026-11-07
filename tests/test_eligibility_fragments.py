@@ -28,7 +28,9 @@ def test_fragments_compose_from_each_other() -> None:
 def test_call_sites_embed_the_shared_fragments() -> None:
     assert eligibility.ELIGIBLE in leadership._CANDIDATES
     assert eligibility.HANDOVER_TRIGGER in leadership._CANDIDATES
-    assert eligibility.ELIGIBLE in leadership._FREE_LONGEST
+    assert eligibility.ELIGIBLE in leadership._SUCCESSOR
+    assert eligibility.SUCCESSOR_ORDER in leadership._SUCCESSOR
+    assert eligibility.SUCCESSOR_ORDER in hive._CANDIDATES
     assert eligibility.ELIGIBLE in hive._CANDIDATES
     assert eligibility.HANDOVER_TRIGGER in queue._HANDOVER_PENDING
     assert eligibility.ELIGIBLE in queue._HANDOVER_PENDING

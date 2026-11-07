@@ -718,8 +718,8 @@ async def test_leadership_pass_is_committed_before_the_push_wake(env, monkeypatc
     seen: list[tuple[str, bool]] = []
     real_pass = leadership.leadership_pass
 
-    async def spy(conn, session_id):
-        change = await real_pass(conn, session_id)
+    async def spy(conn, session_id, policy):
+        change = await real_pass(conn, session_id, policy)
         (row,) = await env.rows("SELECT status FROM leadership_requests WHERE id = %s", (rid,))
         seen.append((row["status"], dispatcher._push_wake.is_set()))
         return change

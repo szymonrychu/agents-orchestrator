@@ -32,6 +32,8 @@ from agents_orchestrator.db.eligibility import (
     HANDOVER_TRIGGER,
     LEAVING,
     READY_STAYS,
+    SUCCESSOR_ORDER,
+    THRESHOLD,
 )
 from agents_orchestrator.db.pool import notify
 from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE
@@ -91,6 +93,19 @@ class LeaderChange:
     agent_id: uuid.UUID
     epoch: int
     reason: str
+    previous_agent_id: uuid.UUID | None
+
+
+@dataclass(frozen=True)
+class PassPolicy:
+    """The settings the pass reads: the pods' default compaction point (the successor
+    threshold of a spec without `auto_compact_pct`) and the rollout deferral cap."""
+
+    default_auto_compact_pct: int = 95
+    rollout_max_defer_seconds: int = 14400
+
+
+DEFAULT_POLICY = PassPolicy()
 
 
 _HIVE = "coalesce(c.spec->>'max_replicas', c.spec->>'replicas')::int > 1"
@@ -113,12 +128,15 @@ WHERE c.desired = 'active' AND {_HIVE} AND (
 ORDER BY c.id
 """
 
-# The ready agent free the longest (the _PICK order, free_since asc then id), idle agents
-# first, so a hive whose other members are all busy still gets a leader.
-_FREE_LONGEST = f"""
+# The successor (eligibility.SUCCESSOR_ORDER) for every pick that names nobody: agents below
+# the handover threshold first, so a forced pick falls back to the lowest context above it only
+# when every peer is there. Any idle state is acceptable: a hive whose other members are all
+# busy still gets a leader.
+_SUCCESSOR = f"""
 SELECT a.id FROM agents a LEFT JOIN agent_status s ON s.agent_id = a.id
-WHERE a.session_id = %s AND {ELIGIBLE} AND a.id <> %s
-ORDER BY (s.state = 'idle') IS NOT TRUE, s.free_since ASC NULLS LAST, a.id
+JOIN sessions c ON c.id = a.session_id
+WHERE a.session_id = %(session)s AND {ELIGIBLE} AND a.id <> %(other)s
+ORDER BY coalesce(s.context_pct, 0) >= {THRESHOLD}, {SUCCESSOR_ORDER}
 LIMIT 1
 """
 
@@ -170,10 +188,21 @@ async def _leader(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> dict 
     )
 
 
-async def _free_longest(
-    conn: psycopg.AsyncConnection, session_id: uuid.UUID, other_than: uuid.UUID
+async def _successor(
+    conn: psycopg.AsyncConnection,
+    session_id: uuid.UUID,
+    other_than: uuid.UUID,
+    policy: PassPolicy,
 ) -> uuid.UUID | None:
-    row = await _one(conn, _FREE_LONGEST, (session_id, other_than))
+    row = await _one(
+        conn,
+        _SUCCESSOR,
+        {
+            "session": session_id,
+            "other": other_than,
+            "compact": policy.default_auto_compact_pct,
+        },
+    )
     return row["id"] if row else None
 
 
@@ -195,23 +224,25 @@ async def _set_leader(
     session_id: uuid.UUID,
     agent_id: uuid.UUID,
     reason: str,
+    previous: uuid.UUID | None,
 ) -> LeaderChange:
     """Insert the first leader row (epoch 1) or move the existing one to `epoch + 1`.
 
+    `previous` is the leader being replaced (None for `initial`), kept in `previous_agent_id`.
     Every change NOTIFYs `leader_changed`.
     """
     row = await _one(
         conn,
-        "INSERT INTO session_leaders (session_id, agent_id, epoch, since, reason)"
-        " VALUES (%(c)s, %(a)s, 1, now(), %(r)s)"
+        "INSERT INTO session_leaders (session_id, agent_id, epoch, since, reason,"
+        " previous_agent_id) VALUES (%(c)s, %(a)s, 1, now(), %(r)s, %(p)s)"
         " ON CONFLICT (session_id) DO UPDATE SET agent_id = EXCLUDED.agent_id,"
         "  epoch = session_leaders.epoch + 1, since = now(), reason = EXCLUDED.reason,"
-        "  unready_since = NULL"
+        "  unready_since = NULL, previous_agent_id = EXCLUDED.previous_agent_id"
         " RETURNING epoch",
-        {"c": session_id, "a": agent_id, "r": reason},
+        {"c": session_id, "a": agent_id, "r": reason, "p": previous},
     )
     assert row is not None
-    change = LeaderChange(session_id, agent_id, row["epoch"], reason)
+    change = LeaderChange(session_id, agent_id, row["epoch"], reason, previous)
     await notify(
         conn,
         LEADER_CHANGED_CHANNEL,
@@ -238,7 +269,11 @@ async def _decide(
 
 
 async def _judge(
-    conn: psycopg.AsyncConnection, session_id: uuid.UUID, req: dict, leader: dict | None
+    conn: psycopg.AsyncConnection,
+    session_id: uuid.UUID,
+    req: dict,
+    leader: dict | None,
+    policy: PassPolicy,
 ) -> tuple[str | None, uuid.UUID | None, str]:
     """(reject reason or None, new leader or None for no change, change reason)."""
     current = leader["agent_id"] if leader else None
@@ -258,7 +293,7 @@ async def _judge(
         if target == current or not await _target_ready(conn, session_id, target):
             return "target_not_ready", None, ""
         return None, target, reason
-    picked = await _free_longest(conn, session_id, current)
+    picked = await _successor(conn, session_id, current, policy)
     if picked is None:
         return "no_peers", None, ""
     return None, picked, reason
@@ -277,7 +312,7 @@ def _mid_turn_rollout(req: dict, leader: dict | None) -> bool:
 
 
 async def leadership_pass(
-    conn: psycopg.AsyncConnection, session_id: uuid.UUID
+    conn: psycopg.AsyncConnection, session_id: uuid.UUID, policy: PassPolicy = DEFAULT_POLICY
 ) -> LeaderChange | None:
     """Elect, apply queued requests, hand over (scale-down, lost): one lock.
 
@@ -309,7 +344,7 @@ async def leadership_pass(
                 (session_id,),
             )
             if first is not None:
-                change = await _set_leader(conn, session_id, first["id"], "initial")
+                change = await _set_leader(conn, session_id, first["id"], "initial", None)
                 leader = await _leader(conn, session_id)
 
         # 2. Queued requests in id order, each re-checked against the leader as it is now. A
@@ -324,22 +359,25 @@ async def leadership_pass(
         ):
             if _mid_turn_rollout(req, leader):
                 continue
-            reject, target, reason = await _judge(conn, session_id, req, leader)
+            reject, target, reason = await _judge(conn, session_id, req, leader, policy)
             if not await _decide(conn, req["id"], reject):
                 continue
             if target is not None:
-                change = await _set_leader(conn, session_id, target, reason)
+                previous = leader["agent_id"] if leader else None
+                change = await _set_leader(conn, session_id, target, reason, previous)
                 leader = await _leader(conn, session_id)
 
         # 3. Scale-down: a leader whose ordinal a scale-down removes moves at once (no turn
-        # boundary: a leaving agent is already out of routing), to the staying agent free the
-        # longest. A leaving leader the reconciler already marked unready but not gone is
+        # boundary: a leaving agent is already out of routing), to the successor among the
+        # staying agents. A leaving leader the reconciler already marked unready but not gone is
         # handled here, before step 4 can see it, so its reason is `scale_down`. With no
         # staying agent the leader stays and the next pass retries.
         if leader is not None and leader["leaving"] and not leader["gone"]:
-            picked = await _free_longest(conn, session_id, leader["agent_id"])
+            picked = await _successor(conn, session_id, leader["agent_id"], policy)
             if picked is not None:
-                change = await _set_leader(conn, session_id, picked, "scale_down")
+                change = await _set_leader(
+                    conn, session_id, picked, "scale_down", leader["agent_id"]
+                )
                 leader = await _leader(conn, session_id)
 
         # 4. Lost leader: gone, or not ready or dead past the grace (unready_since set on first
@@ -352,9 +390,11 @@ async def leadership_pass(
                         (session_id,),
                     )
             elif leader["gone"] or leader["grace_over"]:
-                picked = await _free_longest(conn, session_id, leader["agent_id"])
+                picked = await _successor(conn, session_id, leader["agent_id"], policy)
                 if picked is not None:
-                    change = await _set_leader(conn, session_id, picked, "leader_lost")
+                    change = await _set_leader(
+                        conn, session_id, picked, "leader_lost", leader["agent_id"]
+                    )
                     leader = await _leader(conn, session_id)
             elif leader["unready_since"] is None:
                 await conn.execute(

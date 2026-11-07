@@ -174,3 +174,36 @@ async def test_compacted_leader_takes_next_message(env):
     row = (await env.rows("SELECT agent_id FROM messages WHERE id=%s", (message["id"],)))[0]
     assert row["agent_id"] == leader["id"]
     assert (await env.leader())["agent_id"] == leader["id"]
+
+
+async def test_dispatcher_passes_the_compaction_policy(env):
+    # The default compaction point 95 puts the threshold at 80: the busy agent at 40 is below it
+    # and wins over the idle one at 85. ORCH_DEFAULT_AUTO_COMPACT_PCT 50 puts it at 35: both are
+    # above it, so the idle one wins.
+    idle_high = await env.agent(0)
+    busy_low = await env.agent(1, state="busy")
+    leader = await env.agent(2)
+    await env.exec("UPDATE agent_status SET context_pct = 85 WHERE agent_id=%s", (idle_high["id"],))
+    await env.exec("UPDATE agent_status SET context_pct = 40 WHERE agent_id=%s", (busy_low["id"],))
+    await env.lead(leader["id"])
+    await env.exec(
+        "UPDATE sessions SET spec = jsonb_set(spec, '{replicas}', '2') WHERE id=%s", (env.cid,)
+    )
+    for compact, expected in ((95, busy_low), (50, idle_high)):
+        await env.exec(
+            "UPDATE session_leaders SET agent_id = %s WHERE session_id = %s",
+            (leader["id"], env.cid),
+        )
+        settings = Settings(
+            database_url=env.dsn,
+            master_key=KEY,
+            dispatch_poll_seconds=60,
+            default_auto_compact_pct=compact,
+        )
+        d = Dispatcher(env.pool, settings)
+        try:
+            await d.drain()
+        finally:
+            await d.aclose()
+        row = await env.leader()
+        assert (row["agent_id"], row["reason"]) == (expected["id"], "scale_down"), compact

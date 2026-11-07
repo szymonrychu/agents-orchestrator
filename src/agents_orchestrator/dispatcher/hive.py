@@ -43,7 +43,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from agents_orchestrator.db import leadership
-from agents_orchestrator.db.eligibility import ELIGIBLE
+from agents_orchestrator.db.eligibility import ELIGIBLE, HANDOVER_MARGIN_PCT, SUCCESSOR_ORDER
 from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE
 from agents_orchestrator.dispatcher import feed
 from agents_orchestrator.settings import Settings
@@ -59,7 +59,6 @@ STATE_KEY = "hive_state"
 DUE_KEY = "handover_due"
 OUTCOME_KEY = "leadership_request"
 OUTCOME_WINDOW_SECONDS = 300
-HANDOVER_MARGIN_PCT = 15
 BUCKET_PCT = 5
 PULL_SENTENCE = (
     "Call orchestrator_me for live state and context, orchestrator_activity for what peers did."
@@ -68,13 +67,14 @@ PULL_SENTENCE = (
 ClientFactory = Callable[[uuid.UUID, str], WrapperClient]
 
 # Who could take over from a leader that is due: ELIGIBLE agents other than the leader that are
-# themselves below the threshold (a due candidate would hand leadership straight back), idle
-# before busy, lowest context first (unknown last), then ordinal. Params: session, leader, limit.
+# themselves below the threshold (a due candidate would hand leadership straight back), in the
+# leadership pass's successor order (eligibility.SUCCESSOR_ORDER), so the first one is the agent
+# the pass picks for an untargeted handover. Params: session, leader, threshold.
 _CANDIDATES = f"""
 SELECT a.pod_name, a.wrapper_session_id, coalesce(s.state, 'unknown') AS state, s.context_pct
 FROM agents a LEFT JOIN agent_status s ON s.agent_id = a.id
 WHERE a.session_id = %s AND a.id <> %s AND {ELIGIBLE} AND coalesce(s.context_pct, 0) < %s
-ORDER BY (s.state = 'idle') IS NOT TRUE, s.context_pct ASC NULLS LAST, a.ordinal
+ORDER BY {SUCCESSOR_ORDER}
 """
 
 # What the dispatcher last told a leader: (leader agent id, epoch, 5% bucket, candidate identity).

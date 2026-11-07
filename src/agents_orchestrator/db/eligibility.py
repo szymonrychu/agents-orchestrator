@@ -45,3 +45,22 @@ BACKGROUND_BUSY = (
     f" > now() - make_interval(secs => {BACKGROUND_STALE_SECONDS}))"
     " FROM jsonb_each_text(s.background_subagents) b), false)"
 )
+
+# One successor rule (voluntary-handover 3.2), shared by every pick of the leadership pass and
+# the leader's `handover_due` candidate list, so a moved leader is always the agent the note
+# would have named and nobody hands leadership straight back. Among ELIGIBLE agents: not
+# background-busy first, idle first, lowest `context_pct` (unknown last), then ordinal.
+# Aliases `a` (agents) and `s` (LEFT JOINed agent_status).
+SUCCESSOR_ORDER = (
+    f"({BACKGROUND_BUSY}), (s.state = 'idle') IS NOT TRUE, s.context_pct ASC NULLS LAST, a.ordinal"
+)
+
+# Context % above which a leader should hand over instead of compacting: the effective compaction
+# point (the spec's `auto_compact_pct`, else `%(compact)s`, ORCH_DEFAULT_AUTO_COMPACT_PCT) less
+# HANDOVER_MARGIN_PCT, at least 1. Alias `c` (sessions). `dispatcher/hive.handover_threshold` is
+# the same formula in Python.
+HANDOVER_MARGIN_PCT = 15
+THRESHOLD = (
+    "greatest(coalesce((c.spec->>'auto_compact_pct')::int, %(compact)s)"
+    f" - {HANDOVER_MARGIN_PCT}, 1)"
+)
