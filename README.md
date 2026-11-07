@@ -109,6 +109,7 @@ Every process reads `ORCH_*` variables (the contract `agents-orchestrator-settin
 | `ORCH_SESSION_MESSAGE_RATE_PER_MINUTE` | `10` | api | cross-session messages one sender session may send in the last 60 s (at least 1); above it a send is refused 429 `rate_limited` |
 | `ORCH_SESSION_MESSAGE_QUEUED_MAX` | `20` | api | queued cross-session messages one target session may hold (at least 1); above it a send is refused 409 `target_queue_full` |
 | `ORCH_SESSION_MESSAGE_MAX_HOPS` | `8` | api | longest chain of cross-session messages each sent in the turn that delivered the previous one (at least 1); above it a send is refused 409 `hop_limit` |
+| `ORCH_SESSION_REPLY_WINDOW_SECONDS` | `86400` | api | how long after session B messaged session A, A may message B back although neither is a superleader (reply right; 0 turns it off); the usual limits still apply |
 | `ORCH_SESSION_MESSAGE_PAIR_MAX_PER_HOUR` | `30` | api | cross-session messages one pair of sessions may exchange, both directions, in the last hour (at least 1); above it a send is refused 429 `pair_budget` |
 | `ORCH_CHAT_URL` | empty | api | http or https base URL of the chat upstream (the matrix connector's agent listener); the chat relay calls `{ORCH_CHAT_URL}/chat/v1/...`. No query or fragment. Set together with `ORCH_CHAT_TOKEN` or neither; empty answers every `/agent/v1/chat/*` call 503 `chat_unconfigured` |
 | `ORCH_CHAT_TOKEN` | empty | api | bearer token the chat relay presents to the chat upstream (`Authorization: Bearer`); secret, never in a repr, a log line or an error body. Set together with `ORCH_CHAT_URL` or neither, else a settings error naming both |
@@ -1288,7 +1289,7 @@ Served only on the agent port. Backs the plugin tool `orchestrator_self_close`.
 
 ### Cross-session messaging
 
-A superleader session is one whose spec has `session_messaging` true. Its leader lists and messages the leader of every other open session; the leader of any other session, alone sessions included, lists and messages only the superleader sessions. A send needs a superleader on at least one end (two superleaders may message each other), and every session can receive. A message is an async mailbox entry: it is queued untargeted in the target session, so whoever leads there at claim time gets it as a turn framed with the sender session's slug (see "Session messages" under Delivery and retries); a reply is a send back to that slug. Backs the plugin tools `orchestrator_sessions_list` and `orchestrator_session_send`.
+A superleader session is one whose spec has `session_messaging` true. Its leader lists and messages the leader of every other open session; the leader of any other session, alone sessions included, lists and messages only the superleader sessions. A send needs a superleader on at least one end (two superleaders may message each other), or the reply right: a session may message back a session that messaged it within `ORCH_SESSION_REPLY_WINDOW_SECONDS` (24 h by default), whatever the status of that message. The right runs one way only (an answer needs a question) and is not listed by `GET /agent/v1/sessions`. Every session can receive. A message is an async mailbox entry: it is queued untargeted in the target session, so whoever leads there at claim time gets it as a turn framed with the sender session's slug (see "Session messages" under Delivery and retries); a reply is a send back to that slug. Backs the plugin tools `orchestrator_sessions_list` and `orchestrator_session_send`.
 
 #### `GET /agent/v1/sessions`
 
@@ -1301,7 +1302,7 @@ Queues a message to the session named `slug`. Body `{"text"}`, 1 to 16000 charac
 - 403 `not_leader`: the caller is not its session's current leader (the only agent of an alone session counts as leader);
 - 404 `not_found`: no session has that slug;
 - 422 `self_send`: the slug is the caller's own session;
-- 403 `target_not_superleader`: neither the caller's session nor the target is a superleader;
+- 403 `target_not_superleader`: neither the caller's session nor the target is a superleader, and the target has not messaged the caller's session within `ORCH_SESSION_REPLY_WINDOW_SECONDS` (the message names the window in hours; with the window 0 it is the plain superleader text);
 - 409 `session_deleting`: the target is being discarded;
 - 409 `hop_limit`: the new hop exceeds `ORCH_SESSION_MESSAGE_MAX_HOPS` (8). The hop is computed by the server: when the caller's current turn (`agent_status.current_turn_id`) delivered a message that has a sender, it is that message's hop plus one, else 1. It stops a ping-pong whose replies are sent in the turn that delivered the previous message;
 - 429 `rate_limited`: the caller's session sent `ORCH_SESSION_MESSAGE_RATE_PER_MINUTE` (10) or more messages in the last 60 s, any status;
