@@ -58,6 +58,26 @@ async def release(pool, kube, *, proposal_id=7, revision=None) -> list[str]:
         return await store.release(conn, kube, NS, proposal_id=proposal_id, revision=revision)
 
 
+async def lock_waiter(pool, backend_pid: int | None = None) -> None:
+    """Return once a backend of this database (`backend_pid`, or any) waits on an advisory lock."""
+
+    async def poll() -> None:
+        async with pool.connection() as conn:
+            while True:
+                cur = await conn.execute(
+                    "SELECT 1 FROM pg_locks l JOIN pg_database d ON d.oid = l.database"
+                    " WHERE d.datname = current_database() AND l.locktype = 'advisory'"
+                    " AND NOT l.granted AND (%s::int IS NULL OR l.pid = %s)",
+                    (backend_pid, backend_pid),
+                )
+                if await cur.fetchone() is not None:
+                    return
+                await conn.rollback()
+                await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(poll(), timeout=10)
+
+
 async def test_stage_writes_the_next_version_with_the_value_only_in_string_data(pool, kube, canary):
     pid = await make_preset(pool)
     await put(pool, kube, pid, "TOK", canary + "live")
@@ -270,7 +290,7 @@ async def test_concurrent_stage_and_set_never_share_a_version(pool, kube, canary
             )
             # the stage still holds the variable's lock: a concurrent set must wait for it
             writer = asyncio.create_task(put(pool, kube, pid, "TOK", canary))
-            await asyncio.sleep(0.3)
+            await lock_waiter(pool)
             assert not writer.done()
         meta = await writer
     assert staged == store.secret_name(pid, "TOK", 2)
@@ -281,3 +301,32 @@ async def test_concurrent_stage_and_set_never_share_a_version(pool, kube, canary
     )
     versions = [int(r.rsplit("-v", 1)[1]) for r in results[:3]] + [m.version for m in results[3:]]
     assert len(set(versions)) == len(versions)
+
+
+async def test_release_racing_a_promote_keeps_the_promoted_secret(pool, kube, canary):
+    pid = await make_preset(pool)
+    staged = await stage(pool, kube, pid, "TOK", canary)
+    async with pool.connection() as promoter, pool.connection() as releaser:
+        async with promoter.transaction():
+            assert await store.promote_staged(promoter, pid, "TOK", proposal_id=7, revision=1) == 1
+            # release reads the still staged row, then waits for the variable's lock
+            releasing = asyncio.create_task(store.release(releaser, kube, NS, proposal_id=7))
+            await lock_waiter(pool, releaser.info.backend_pid)
+        assert await releasing == []
+    assert staged in secret_objects(kube)  # the now live version survives
+    async with pool.connection() as conn:
+        assert [m.version for m in await store.list_secrets(conn, pid)] == [1]
+    assert await reservations(pool, pid) == []
+
+
+async def test_release_racing_a_bind_keeps_the_bound_secret(pool, kube, canary):
+    pid = await make_preset(pool)
+    staged = await stage(pool, kube, pid, "TOK", canary)
+    async with pool.connection() as binder, pool.connection() as releaser:
+        async with binder.transaction():
+            assert await store.bind_staged(binder, pid, "TOK", proposal_id=7, revision=1) == staged
+            releasing = asyncio.create_task(store.release(releaser, kube, NS, proposal_id=7))
+            await lock_waiter(pool, releaser.info.backend_pid)
+        assert await releasing == []
+    assert staged in secret_objects(kube)  # the session-bound version survives
+    assert await reservations(pool, pid) == [("TOK", 1, 7, 1, "bound")]

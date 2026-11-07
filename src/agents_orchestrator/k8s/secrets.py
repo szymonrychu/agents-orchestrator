@@ -480,15 +480,27 @@ async def bind_staged(
 async def _drop_reservation(
     conn: psycopg.AsyncConnection, kube: KubeApi, namespace: str, row: tuple, state: str
 ) -> str | None:
-    """Delete the reserved Secret, then its row (still in `state`); None when the delete failed.
+    """Delete the reserved Secret, then its row (still in `state`); None when nothing was dropped.
 
-    The Secret goes first, so a stage cannot reuse the number for a Secret this then deletes. A
-    Secret already gone is fine.
+    The row was read before the lock, so it is read again under it: a concurrent promote or bind
+    may have made the version live or bound, and a bound version may be named by a session again;
+    then the Secret is kept. The Secret goes first, so a stage cannot reuse the number for a
+    Secret this then deletes. A Secret already gone is fine; a failed delete keeps the row.
     """
     preset_id, name, version, proposal_id = row
     full = secret_name(preset_id, name, version)
     async with conn.transaction():
         await _lock(conn, preset_id, name)
+        cur = await conn.execute(
+            "SELECT 1 FROM change_proposal_secrets WHERE preset_id = %s AND name = %s"
+            " AND version = %s AND proposal_id = %s AND state = %s",
+            (preset_id, name, version, proposal_id, state),
+        )
+        if await cur.fetchone() is None or (
+            state == "bound" and full in await _session_referenced(conn)
+        ):
+            log.info("reserved secret kept, changed meanwhile: %s v%d", name, version)
+            return None
         try:
             await kube.delete("Secret", namespace, full)
         except KubeError as exc:

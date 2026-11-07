@@ -231,7 +231,17 @@ async def stage(pool, kube, preset_id, name, value, *, proposal_id=7, revision=1
         )
 
 
-async def test_set_during_a_reservation_takes_the_version_above_it(pool, kube, canary):
+@pytest.fixture
+def logged_canary(canary, caplog):
+    """The canary, checked absent from every log record once the test ends."""
+    caplog.set_level(logging.DEBUG)
+    yield canary
+    assert canary not in caplog.text
+    assert not any(canary in str(r.args) or canary in r.getMessage() for r in caplog.records)
+
+
+async def test_set_during_a_reservation_takes_the_version_above_it(pool, kube, logged_canary):
+    canary = logged_canary
     pid = await make_preset(pool)
     await put(pool, kube, pid, "TOK", canary)
     staged = await stage(pool, kube, pid, "TOK", canary + "s")
@@ -242,7 +252,8 @@ async def test_set_during_a_reservation_takes_the_version_above_it(pool, kube, c
     assert set(secret_objects(kube)) == {staged, store.secret_name(pid, "TOK", 3)}
 
 
-async def test_gc_after_a_rotation_keeps_staged_and_bound_versions(pool, kube, canary):
+async def test_gc_after_a_rotation_keeps_staged_and_bound_versions(pool, kube, logged_canary):
+    canary = logged_canary
     pid = await make_preset(pool)
     await put(pool, kube, pid, "TOK", canary)
     v2 = await stage(pool, kube, pid, "TOK", canary, proposal_id=7)
