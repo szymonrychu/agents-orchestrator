@@ -158,6 +158,7 @@ async def test_route_allowlist(app, pool):
             ("POST", f"/api/v1/agents/{uuid.uuid4()}/restart"),
             ("POST", f"/api/v1/sessions/{cl['id']}/scale"),
             ("GET", f"/api/v1/sessions/{cl['id']}/agents"),
+            ("PATCH", f"/api/v1/sessions/{cl['id']}/project"),
             ("GET", f"/api/v1/sessions/{cl['id']}/events/stream"),
             ("GET", "/api/v1/openapi.json"),
             ("GET", "/api/v1/docs"),
@@ -171,7 +172,9 @@ async def test_route_allowlist(app, pool):
             ("GET", "/api/v1/proposals/1"),
             ("POST", "/api/v1/proposals/1/review"),
         ]:
-            r = await c.request(method, path, json={} if method in ("PUT", "POST") else None)
+            r = await c.request(
+                method, path, json={} if method in ("PUT", "POST", "PATCH") else None
+            )
             assert r.status_code == 403, (method, path, r.status_code)
             if method != "HEAD":
                 assert_error(r, 403, "forbidden")
@@ -633,3 +636,59 @@ async def test_service_port_allows_project_gets_only(app):
         ]:
             r = await c.request(method, path, json={} if method != "GET" else None)
             assert_error(r, 403, "forbidden")
+
+
+async def _main_project(app, slug: str) -> None:
+    async with client(app, 8000, peer=INSIDE, token=None) as c:
+        r = await c.post("/api/v1/projects", json={"slug": slug, "name": slug.title()})
+        assert r.status_code == 201, r.text
+
+
+async def test_service_create_with_project(app):
+    await _main_project(app, "alpha")
+    async with client(app, 8002) as c:
+        r = await c.post(
+            "/api/v1/sessions",
+            json={"preset_id": DEFAULT_ID, "slug": "tr-1", "project": "alpha"},
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["project"] == "alpha"
+        assert_error(
+            await c.post(
+                "/api/v1/sessions",
+                json={"preset_id": DEFAULT_ID, "slug": "tr-2", "project": "nope"},
+            ),
+            422,
+            "unknown_project",
+        )
+        # the recovery read of agents-common create_session: an exact slug filter
+        r = await c.get("/api/v1/sessions", params={"slug": "tr-1"})
+        assert r.status_code == 200, r.text
+        assert [(s["slug"], s["project"]) for s in r.json()] == [("tr-1", "alpha")]
+
+
+async def test_trigger_create_without_project_gets_preset_project(app):
+    await _main_project(app, "alpha")
+    async with client(app, 8000, peer=INSIDE, token=None) as c:
+        r = await c.post("/api/v1/presets", json={"name": "triggered", "project": "alpha"})
+        assert r.status_code == 201, r.text
+        pid = r.json()["id"]
+    async with client(app, 8002) as c:
+        r = await c.post("/api/v1/sessions", json={"preset_id": pid})
+        assert r.status_code == 201, r.text
+        assert r.json()["project"] == "alpha"
+        assert r.json()["created_by_service"] == "agents-webhook"
+
+
+async def test_service_list_presets_passes_project_filter(app):
+    """The gate matches the path only: `?project=` reaches the route as on the main port."""
+    await _main_project(app, "alpha")
+    async with client(app, 8000, peer=INSIDE, token=None) as c:
+        await c.post("/api/v1/presets", json={"name": "a1", "project": "alpha"})
+    async with client(app, 8002) as c:
+        r = await c.get("/api/v1/presets", params={"project": "alpha"})
+        assert r.status_code == 200, r.text
+        assert [p["name"] for p in r.json()] == ["a1"]
+        assert_error(
+            await c.get("/api/v1/presets", params={"project": "nope"}), 422, "unknown_project"
+        )

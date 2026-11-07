@@ -12,7 +12,7 @@ from pydantic import SecretStr, ValidationError
 
 from agents_orchestrator.api import schemas, secret_store
 from agents_orchestrator.api.errors import ApiError, not_found, project_error
-from agents_orchestrator.api.sessions import Cfg, Pool, check_spec
+from agents_orchestrator.api.sessions import Cfg, Pool, check_spec, hold_project
 from agents_orchestrator.api.spec_edit import (
     guard_agent_edit,
     human_only_refused,
@@ -112,17 +112,6 @@ def check_secret_size(value: SecretStr) -> None:
         raise ApiError(413, "secret_too_large", f"a secret holds at most {SECRET_MAX_BYTES} bytes")
 
 
-async def _hold_project(conn, slug: str) -> None:
-    """The project a preset is saved into must exist and be active (422 `unknown_project`,
-    `project_archived`). The row is held FOR SHARE until the caller's transaction ends, so it
-    cannot be archived, nor a project secret be written under the privileged-project rule,
-    while the save is in flight."""
-    try:
-        await projects.require_active(conn, slug, lock="share")
-    except (projects.UnknownProject, projects.ProjectArchived) as exc:
-        raise project_error(exc) from None
-
-
 def _refuse_column_moves(request: Request, stored: repo.Preset, new: dict[str, Any]) -> None:
     """403 `human_only_field` when an agent edit changes a human-only column (`project`). The
     stored row is the one the save compares `updated_at` against, so a concurrent move by the
@@ -155,7 +144,7 @@ async def _save(
 ) -> tuple[repo.Preset, list[secret_store.SecretMeta]]:
     """Save the preset row and its secrets as one step; a failure leaves the old state.
 
-    The preset's `project` is checked and held first (`_hold_project`). The row save, the new
+    The preset's `project` is checked and held first (`hold_project`). The row save, the new
     Secret versions and the retirement of dropped variables share one transaction. The new
     versions are written to Kubernetes before it commits, so when anything fails the transaction
     rolls back and the versions written so far are deleted. The previous versions are collected
@@ -166,7 +155,7 @@ async def _save(
     kube = None
     try:
         async with conn.transaction():
-            await _hold_project(conn, project)
+            await hold_project(conn, project)
             preset = await save()
             if values or await secret_store.has_rows(conn, preset.id):
                 kube = secret_store.kube_of(request)
@@ -509,7 +498,7 @@ async def copy(
         name = explicit if explicit is not None else _copy_name(source.name, taken)
         try:
             async with conn.transaction():
-                await _hold_project(conn, project)
+                await hold_project(conn, project)
                 created = await repo.create(
                     conn, name, spec, source.superleader_manageable, source.labels, project
                 )

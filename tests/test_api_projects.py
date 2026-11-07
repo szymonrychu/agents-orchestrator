@@ -109,3 +109,31 @@ def test_project_error_mapping(exc, status, code):
 def test_project_error_rejects_other_exceptions():
     with pytest.raises(TypeError):
         project_error(ValueError("x"))
+
+
+async def test_list_counts_presets_and_active_sessions(http, pool):
+    await http.post("/api/v1/projects", json={"slug": "busy", "name": "Busy"})
+    for name in ("p1", "p2"):
+        r = await http.post("/api/v1/presets", json={"name": name, "project": "busy"})
+        assert r.status_code == 201, r.text
+    for slug in ("s1", "s2", "s3"):
+        r = await http.post("/api/v1/sessions", json={"slug": slug, "spec": {}, "project": "busy"})
+        assert r.status_code == 201, r.text
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE sessions SET desired = 'deleting' WHERE slug = 's3'")
+    rows = {p["slug"]: p for p in (await http.get("/api/v1/projects")).json()}
+    assert (rows["busy"]["presets"], rows["busy"]["sessions"]) == (2, 2)
+    assert (rows["default"]["presets"], rows["default"]["sessions"]) == (1, 0)
+
+
+async def test_unknown_project_error_body(http):
+    r = await http.post("/api/v1/sessions", json={"slug": "x", "spec": {}, "project": "nope"})
+    assert r.status_code == 422
+    assert r.json() == {
+        "error": {"code": "unknown_project", "message": "project nope does not exist"}
+    }
+    r = await http.get("/api/v1/sessions", params={"project": "nope"})
+    assert r.status_code == 422
+    assert r.json() == {
+        "error": {"code": "unknown_project", "message": "project nope does not exist"}
+    }

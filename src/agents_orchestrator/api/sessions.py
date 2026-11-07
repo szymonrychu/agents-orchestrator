@@ -6,7 +6,7 @@ import hmac
 import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Literal
 
 from agents_common.templating import TemplateError
 from fastapi import APIRouter, Depends, Query, Request
@@ -16,13 +16,13 @@ from pydantic import ValidationError
 
 from agents_orchestrator import inactivity, rendering
 from agents_orchestrator.api import schemas, secret_store, usage_gate
-from agents_orchestrator.api.errors import ApiError, not_found
+from agents_orchestrator.api.errors import ApiError, not_found, project_error
 from agents_orchestrator.api.service_auth import calling_service
 from agents_orchestrator.api.usage_gate import UsageSource
 from agents_orchestrator.cache.keys import ArchiveNameError
 from agents_orchestrator.cache.save_rule import save_skip
 from agents_orchestrator.db import agents as agents_repo
-from agents_orchestrator.db import leadership, presets, queue, views
+from agents_orchestrator.db import leadership, presets, projects, queue, views
 from agents_orchestrator.db import sessions as repo
 from agents_orchestrator.labels import normalize_labels
 from agents_orchestrator.secret_view import redact_spec, session_metas
@@ -165,6 +165,7 @@ def _view(session: repo.Session, agg: dict | None, settings: Settings) -> schema
         created_by_service=session.created_by_service,
         created_by_session=session.created_by_session,
         labels=session.labels,
+        project=session.project,
     )
 
 
@@ -245,6 +246,18 @@ def check_spec(
     return fill_resource_defaults(spec, settings)
 
 
+async def hold_project(conn, slug: str) -> None:
+    """The project a new preset or session is placed into must exist and be active (422
+    `unknown_project`, `project_archived`). The row is held FOR SHARE until the caller's
+    transaction ends, so it cannot be archived, nor a project secret be written under the
+    privileged-project rule, while the save is in flight. Lock order: the project row is always
+    taken before the preset or session row."""
+    try:
+        await projects.require_active(conn, slug, lock="share")
+    except (projects.UnknownProject, projects.ProjectArchived) as exc:
+        raise project_error(exc) from None
+
+
 @router.get("/meta", response_model=schemas.Meta)
 async def meta(settings: Cfg) -> schemas.Meta:
     hook = settings.discard_hook()
@@ -305,15 +318,31 @@ async def meta(settings: Cfg) -> schemas.Meta:
 
 @router.get("/sessions", response_model=list[schemas.SessionView])
 async def list_sessions(
-    pool: Pool, settings: Cfg, label: Annotated[list[str] | None, Query()] = None
+    pool: Pool,
+    settings: Cfg,
+    label: Annotated[list[str] | None, Query()] = None,
+    project: str | None = None,
+    superleaders: Literal["include"] | None = None,
+    slug: str | None = None,
 ) -> list[schemas.SessionView]:
-    """All sessions; `label` (repeatable) keeps live sessions that carry any of the labels."""
+    """All sessions. `label` (repeatable) keeps live sessions that carry any of the labels;
+    `project` keeps that project's sessions (422 `unknown_project`; an archived one still
+    lists), and with `superleaders=include` every superleader session is added; `slug` is an
+    exact match. The filters combine."""
     try:
         wanted = normalize_labels(label) if label else None
     except ValueError as exc:
         raise ApiError(422, "invalid_request", str(exc)) from None
     async with pool.connection() as conn:
-        found = await repo.list_sessions(conn, wanted)
+        if project is not None and await projects.get_project(conn, project) is None:
+            raise project_error(projects.UnknownProject(project))
+        found = await repo.list_sessions(
+            conn,
+            labels=wanted,
+            project=project,
+            slug=slug,
+            superleaders=superleaders == "include",
+        )
         aggs = await views.session_aggregates(conn)
     return [_view(c, aggs.get(c.id), settings) for c in found]
 
@@ -365,16 +394,25 @@ async def create(
             if body.preset_id is None:
                 if spec.protected_env:
                     raise _secret_unset(spec.protected_env)
+                project = body.project or projects.DEFAULT
+                await hold_project(conn, project)
                 session = await _insert(
                     conn,
                     body.slug,
                     spec,
                     created_by_service=creator,
                     created_by_session=created_by_session,
+                    project=project,
                 )
             else:
                 session = await _create_from_preset(
-                    conn, body.preset_id, body.slug, settings, creator, created_by_session
+                    conn,
+                    body.preset_id,
+                    body.slug,
+                    settings,
+                    creator,
+                    created_by_session,
+                    project=body.project,
                 )
             usage_gate.check(
                 windows, session.spec.usage_quota, settings.usage_quota_default, datetime.now(UTC)
@@ -472,6 +510,40 @@ async def _insert(conn, slug: str, spec: SessionSpec, **provenance) -> repo.Sess
         raise ApiError(409, "conflict", f"session {slug!r} already exists") from None
 
 
+_PLACE_ATTEMPTS = 3
+
+
+def _visible(preset: presets.Preset | None, created_by_session: uuid.UUID | None) -> bool:
+    """A superleader (admin create) sees only manageable presets; any other is as missing."""
+    return preset is not None and (created_by_session is None or preset.superleader_manageable)
+
+
+async def _placed_preset(
+    conn,
+    preset_id: uuid.UUID,
+    project: str | None,
+    created_by_session: uuid.UUID | None,
+) -> tuple[presets.Preset, str]:
+    """The preset (held FOR SHARE) and the project the session goes into (held FOR SHARE and
+    active), locked in the epic's order: project row first, then the preset row. Without a
+    body `project` the preset's own project is read unlocked first and confirmed under the
+    preset lock; a preset moved meanwhile is read again."""
+    for _ in range(_PLACE_ATTEMPTS):
+        target = project
+        if target is None:
+            peek = await presets.get(conn, preset_id)
+            if peek is None or not _visible(peek, created_by_session):
+                raise not_found("preset")
+            target = peek.project
+        await hold_project(conn, target)
+        preset = await presets.get_for_share(conn, preset_id)
+        if preset is None or not _visible(preset, created_by_session):
+            raise not_found("preset")
+        if project is not None or preset.project == target:
+            return preset, target
+    raise ApiError(409, "conflict", "the preset moved to another project meanwhile; retry")
+
+
 async def _create_from_preset(
     conn,
     preset_id: uuid.UUID,
@@ -479,11 +551,12 @@ async def _create_from_preset(
     settings: Settings,
     created_by_service: str | None = None,
     created_by_session: uuid.UUID | None = None,
+    *,
+    project: str | None = None,
 ) -> repo.Session:
-    """Snapshot the preset's spec, filled and validated against the current settings."""
-    preset = await presets.get_for_share(conn, preset_id)
-    if preset is None or (created_by_session is not None and not preset.superleader_manageable):
-        raise not_found("preset")
+    """Snapshot the preset's spec, filled and validated against the current settings. The
+    session goes into `project`, else the preset's project (`_placed_preset`)."""
+    preset, project = await _placed_preset(conn, preset_id, project, created_by_session)
     raw = dict(preset.spec)
     raw.setdefault("replicas", settings.default_replicas)
     try:
@@ -512,6 +585,7 @@ async def _create_from_preset(
         "secret_versions": versions,
         "created_by_session": created_by_session,
         "labels": preset.labels,
+        "project": project,
     }
     if slug is not None:
         return await _insert(conn, slug, spec, **provenance)
@@ -762,6 +836,27 @@ async def patch_labels(
             session = await repo.set_labels(conn, session_id, body.labels)
         except repo.SessionNotFound:
             raise not_found("session") from None
+        return await one_view(conn, session, settings)
+
+
+@router.patch("/sessions/{session_id}/project", response_model=schemas.SessionView)
+async def patch_project(
+    session_id: uuid.UUID, body: schemas.SessionProjectIn, pool: Pool, settings: Cfg
+) -> schemas.SessionView:
+    """Move a live session to another project. Scope is read live per request, so the move
+    takes effect at once. A move is a new placement: the target must exist and be active (422
+    `unknown_project`, `project_archived`); its row is locked before the session row."""
+    async with pool.connection() as conn:
+        async with conn.transaction():
+            await hold_project(conn, body.project)
+            try:
+                session = await repo.set_project(conn, session_id, body.project)
+            except repo.SessionNotFound:
+                raise not_found("session") from None
+            except repo.SessionBeingDeleted:
+                raise ApiError(
+                    409, "session_deleting", "the session is already being discarded"
+                ) from None
         return await one_view(conn, session, settings)
 
 

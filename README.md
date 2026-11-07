@@ -859,7 +859,7 @@ Versioning: `/api/v1` is additive only. New routes, new optional request fields 
 
 Documented exception, 2026-10-23: `PATCH /api/v1/sessions/{session_id}` was removed (it now answers 405), and `POST /api/v1/sessions` requires exactly one of `spec` and `preset_id`. Why: a live spec edit rolled every agent pod of a running session; sessions now snapshot their preset at create and the spec is fixed from then on. To change it, discard the session and schedule again from a preset.
 
-In-place fields (amends the exception above): `spec.replicas` and `spec.init_scripts` change in place with no generation bump and no pod roll; `spec.wrapper.permission_mode` (2026-11-01) also changes in place through `PUT /api/v1/sessions/{session_id}/permission-mode`, but it is rendered into the pod config, so a changed value bumps the generation and the config hash rolls the pods through the normal rollout (idle pods restart, busy ones wait for the turn to end). PATCH on the session stays 405 (only `PATCH /api/v1/sessions/{session_id}/labels` exists). The agent-port route `PATCH /agent/v1/admin/sessions/{slug}` (see Admin session spec edit) edits the rest of a live session's spec for an agent; it is not on the main port.
+In-place fields (amends the exception above): `spec.replicas` and `spec.init_scripts` change in place with no generation bump and no pod roll; `spec.wrapper.permission_mode` (2026-11-01) also changes in place through `PUT /api/v1/sessions/{session_id}/permission-mode`, but it is rendered into the pod config, so a changed value bumps the generation and the config hash rolls the pods through the normal rollout (idle pods restart, busy ones wait for the turn to end). PATCH on the session stays 405 (only `PATCH /api/v1/sessions/{session_id}/labels` and `PATCH /api/v1/sessions/{session_id}/project` exist). The agent-port route `PATCH /agent/v1/admin/sessions/{slug}` (see Admin session spec edit) edits the rest of a live session's spec for an agent; it is not on the main port.
 
 Documented exception, 2026-10-25: the orchestrator's unit is a session. Every `/api/v1/clusters...` route became `/api/v1/sessions...` (path parameter `session_id`), every `cluster_id` field became `session_id`, the schemas `SessionSpec`, `SessionSummary`, `SessionView` and `CreateSession`, `caps.max_sessions`, the error codes `session_deleting`, `static_session` and `session_limit`, and the SSE events `session_status` and `session_removed`. There is no alias: the old routes answer 404. Why: one word for one thing across the API, the UI and the database (tables `sessions` and `session_leaders`, migration `0005`).
 
@@ -961,7 +961,7 @@ Body `{"keys": ["<full object key>", ...]}` (1 to 1000 keys, extra fields reject
 
 ### `GET /api/v1/sessions`
 
-All sessions as a list of session views. Optional repeatable `label` query parameter (each value normalised like a label, 422 `invalid_request` when invalid): only live sessions (`desired` `active`, so not one being deleted) that carry at least one of the given labels are returned. Response 200.
+All sessions as a list of session views. Optional repeatable `label` query parameter (each value normalised like a label, 422 `invalid_request` when invalid): only live sessions (`desired` `active`, so not one being deleted) that carry at least one of the given labels are returned. Optional `project` keeps the sessions of that project (an archived project still lists; an unknown one is 422 `unknown_project`); with `superleaders=include` every superleader session (`spec.session_messaging`) is added whatever its project (the flag changes nothing without `project`; any other value is 422 `invalid_request`). Optional `slug` is an exact match (agents-common's create recovery reads it). The filters combine. Response 200.
 
 ### `POST /api/v1/sessions`
 
@@ -972,7 +972,7 @@ Schedules a session. The body holds exactly one of `spec` and `preset_id`, else 
 
 Start prompt: when the spec has `start_prompt`, the create renders it (the `web_chat_start` context) and queues it as the session's first message in the same transaction; an empty render queues nothing and a render failure is 422 `invalid_request` (`start_prompt: ...`) with nothing created. Until that message is `sent`, `failed` or `cancelled`, the dispatcher delivers no other message of the session, whatever its lane, target or sender, so the start prompt is always turn 1. Posted messages are never prefixed with it.
 
-The session's `labels` are a snapshot of the preset's labels at creation (`[]` for a raw-spec session); editing the preset later never changes them. Response 201 with the session view. Errors: 422 `invalid_request` (bad slug, both or neither of `spec` and `preset_id`, `spec` without `slug`, image outside `ORCH_AGENT_IMAGES`, reserved env key, replicas or PVC size above the caps, invalid `any_mcp_config`, an invalid preset), 404 `not_found` (unknown preset), 409 `conflict` (slug exists, or no free generated slug), 409 `session_limit`, 409 `usage_quota` (the account's Claude usage is at or above the resolved spec's quota; nothing is stored, see Usage gate), 403 `forbidden`.
+Optional `project` (both forms) places the session in that project. Without it a preset session goes into the preset's project and a raw-spec session into `default`; a preset is a template usable in any project. The project must exist and be active: 422 `unknown_project`, 422 `project_archived`. The project row is held (FOR SHARE) until the insert commits, locked before the preset row, so it cannot be archived meanwhile. The session view carries `project`. The session's `labels` are a snapshot of the preset's labels at creation (`[]` for a raw-spec session); editing the preset later never changes them. Response 201 with the session view. Errors: 422 `invalid_request` (bad slug, both or neither of `spec` and `preset_id`, `spec` without `slug`, image outside `ORCH_AGENT_IMAGES`, reserved env key, replicas or PVC size above the caps, invalid `any_mcp_config`, an invalid preset), 404 `not_found` (unknown preset), 409 `conflict` (slug exists, or no free generated slug), 409 `session_limit`, 409 `usage_quota` (the account's Claude usage is at or above the resolved spec's quota; nothing is stored, see Usage gate), 403 `forbidden`.
 
 ### `GET /api/v1/sessions/{session_id}`
 
@@ -1009,6 +1009,10 @@ Replaces the session's init scripts. Body `{"scripts": ["<shell script>", ...]}`
 ### `PATCH /api/v1/sessions/{session_id}/labels`
 
 Replaces the session's labels. Body `{"labels": ["<label>", ...]}` (extra fields rejected). A label is trimmed and lowercased, 1 to 40 characters of `a-z`, `0-9`, `-`, `_`, `.`, `:`; the list is deduplicated keeping the first-seen order and holds at most 20 labels, else 422 `invalid_request`. Labels are not part of the spec: no generation bump, no pod roll. Response 200 with the session view (`labels`). Errors: 404 `not_found`, 422 `invalid_request`.
+
+### `PATCH /api/v1/sessions/{session_id}/project`
+
+Moves a live session to another project (main port only). Body `{"project": "<slug>"}` (extra fields rejected). The project is a column, not a spec field: no generation bump, no pod roll, and project scope is read live per request, so the move takes effect at once. A move is a new placement, so the target must exist and be active. Response 200 with the session view. Errors: 404 `not_found`, 409 `session_deleting`, 422 `unknown_project`, 422 `project_archived`, 422 `invalid_request`.
 
 ### `PUT /api/v1/sessions/{session_id}/permission-mode`
 
