@@ -75,6 +75,7 @@ def test_fresh_database_gets_all_tables(empty_dsn):
         "0030",
         "0031",
         "0032",
+        "0036",
     ]  # fmt: skip
 
 
@@ -118,6 +119,7 @@ def test_presets_migration_on_existing_sessions(empty_dsn, tmp_path):
         "0030",
         "0031",
         "0032",
+        "0036",
     ]
     with psycopg.connect(empty_dsn) as c:
         row = c.execute(
@@ -141,7 +143,7 @@ def test_superleader_manageable_defaults_false_on_existing_rows(empty_dsn, tmp_p
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         c.execute("INSERT INTO presets (id, name, spec) VALUES (gen_random_uuid(), 'old', '{}')")
     assert run_migrations(empty_dsn) == [
-        "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032",
+        "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0036",
     ]  # fmt: skip
     with psycopg.connect(empty_dsn) as c:
         rows = c.execute("SELECT superleader_manageable FROM presets").fetchall()
@@ -605,6 +607,7 @@ def test_0005_renames_clusters_to_sessions(empty_dsn, tmp_path):
         "0030",
         "0031",
         "0032",
+        "0036",
     ]  # fmt: skip
     with psycopg.connect(empty_dsn) as c:
         assert c.execute(
@@ -852,6 +855,7 @@ def test_escape_template_tokens_migration(empty_dsn, tmp_path):
         "0030",
         "0031",
         "0032",
+        "0036",
     ]  # fmt: skip
     with psycopg.connect(empty_dsn) as c:
         stored = [
@@ -913,6 +917,7 @@ def test_escape_template_tokens_migration_never_aborts_at_the_limit(empty_dsn, t
         "0030",
         "0031",
         "0032",
+        "0036",
     ]  # fmt: skip
     with psycopg.connect(empty_dsn) as c:
         got = c.execute("SELECT spec FROM sessions WHERE slug='big'").fetchone()[0]
@@ -967,6 +972,7 @@ def test_cache_keys_migration_splits_the_single_key(empty_dsn, tmp_path):
         "0030",
         "0031",
         "0032",
+        "0036",
     ]
     expected = {
         "keyed": {
@@ -1024,6 +1030,7 @@ def test_self_restart_migration_adds_nullable_column_idempotently(empty_dsn, tmp
         "0030",
         "0031",
         "0032",
+        "0036",
     ]
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         assert c.execute("SELECT last_self_restart_at FROM sessions").fetchall() == [(None,)]
@@ -1054,6 +1061,7 @@ def test_preset_secrets_migration_adds_table_and_snapshot_column(empty_dsn, tmp_
         "0030",
         "0031",
         "0032",
+        "0036",
     ]
     assert _columns(empty_dsn, "preset_secrets") == {
         "preset_id", "name", "version", "swept", "retired_at", "updated_at",
@@ -1100,6 +1108,7 @@ def test_env_entries_migration_wraps_plaintext_values(empty_dsn, tmp_path):
         "0030",
         "0031",
         "0032",
+        "0036",
     ]  # fmt: skip
 
     def stored():
@@ -1142,6 +1151,7 @@ def test_created_by_session_migration_adds_nullable_column_idempotently(empty_ds
         "0030",
         "0031",
         "0032",
+        "0036",
     ]
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         assert c.execute("SELECT created_by_session FROM sessions").fetchall() == [(None,)]
@@ -1155,7 +1165,7 @@ def test_command_issuer_migration_adds_nullable_columns_idempotently(empty_dsn, 
             shutil.copy(path, tmp_path)
     run_migrations(empty_dsn, tmp_path)
     assert run_migrations(empty_dsn) == [
-        "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032",
+        "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0036",
     ]  # fmt: skip
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         c.execute((MIGRATIONS_DIR / "0022_command_issuer.sql").read_text())  # second run: no-op
@@ -1169,7 +1179,7 @@ def test_permission_mode_state_migration_adds_nullable_columns_idempotently(empt
             shutil.copy(path, tmp_path)
     run_migrations(empty_dsn, tmp_path)
     assert run_migrations(empty_dsn) == [
-        "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032",
+        "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0036",
     ]  # fmt: skip
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         c.execute(
@@ -1381,7 +1391,7 @@ def test_kube_cluster_access_migration_renames_field_idempotently(empty_dsn, tmp
                 "INSERT INTO presets (id, name, spec) VALUES (gen_random_uuid(), %s, %s)",
                 (name, Jsonb(spec)),
             )
-    assert run_migrations(empty_dsn) == ["0032"]
+    assert run_migrations(empty_dsn) == ["0032", "0036"]
 
     def specs():
         with psycopg.connect(empty_dsn, autocommit=True) as c:
@@ -1401,3 +1411,20 @@ def test_kube_cluster_access_migration_renames_field_idempotently(empty_dsn, tmp
             (MIGRATIONS_DIR / "0032_kube_cluster_access.sql").read_text()
         )  # second run: no-op
     assert specs() == (sessions, presets)
+
+
+def test_chat_relay_migration_adds_columns_and_index_idempotently(empty_dsn, tmp_path):
+    for path in MIGRATIONS_DIR.glob("*.sql"):
+        if path.name < "0036":
+            shutil.copy(path, tmp_path)
+    run_migrations(empty_dsn, tmp_path)
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        c.execute("INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), 'old', '{}')")
+    assert run_migrations(empty_dsn) == ["0036"]
+    assert run_migrations(empty_dsn) == []
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        c.execute((MIGRATIONS_DIR / "0036_chat_relay.sql").read_text())  # second run: no-op
+        assert c.execute(
+            "SELECT 1 FROM pg_indexes WHERE indexname = 'messages_sender_receiver_created'"
+        ).fetchall() == [(1,)]
+    assert {"chat_relay_send", "chat_relay_room"} <= _columns(empty_dsn, "messages")
