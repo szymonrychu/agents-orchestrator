@@ -929,7 +929,6 @@ NON_SECURITY_EDITS: dict[str, dict] = {
     "reuse_running_agent": {"reuse_running_agent": True},
     "usage_quota": {"usage_quota": {"seven_day_pct": 60}},
     "inactivity": {"inactivity": {"close_seconds": 120}},
-    "leader_lease_seconds": {"leader_lease_seconds": 600, "max_replicas": 2},
     "docker_storage": {"docker_storage": "40Gi"},
     "docker_cpu": {"docker_cpu": "2"},
     "docker_memory": {"docker_memory": "4Gi"},
