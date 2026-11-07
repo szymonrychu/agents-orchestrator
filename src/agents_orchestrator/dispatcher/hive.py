@@ -17,8 +17,10 @@ busy/idle flip or a context change pushes nothing. Members pull live state with
 
 The one exception is the leader's keyed `handover_due` note (hive-decoupling D4): a leader whose
 `agent_status.context_pct` is at or above the handover threshold is told, once per leader, epoch,
-5% bucket and candidate list, to hand leadership over, to whom and how. It is evaluated on every
-push tick, outside the hash and claim path above, and remembered per session in `HiveState`.
+5% bucket, level and candidate list, to hand leadership over and to whom. The level turns firm
+at compact - 5; the successor gets the leader's transcript, so there is no briefing protocol. It
+is evaluated on every push tick, outside the hash and claim path above, and remembered per
+session in `HiveState`.
 
 The other keyed note is the requester's `leadership_request` outcome (hive-decoupling D6): each
 `handover` request an agent made that the dispatcher decided (applied or rejected) within the
@@ -77,8 +79,11 @@ WHERE a.session_id = %s AND a.id <> %s AND {ELIGIBLE} AND coalesce(s.context_pct
 ORDER BY {SUCCESSOR_ORDER}
 """
 
-# What the dispatcher last told a leader: (leader agent id, epoch, 5% bucket, candidate identity).
-DueKey = tuple[uuid.UUID, int, int, tuple[tuple[str, str], ...]]
+# What the dispatcher last told a leader: (leader agent id, epoch, 5% bucket, firm level,
+# candidate identity).
+DueKey = tuple[uuid.UUID, int, int, bool, tuple[tuple[str, str], ...]]
+
+FIRM_MARGIN_PCT = 5
 
 
 @dataclass
@@ -154,7 +159,10 @@ def render_hive_state(payload: dict[str, Any], slug: str, threshold: int) -> str
         f"(epoch {payload['epoch']}). Members: {', '.join(members)}."
         + (" The hive is static: agents are not added or removed." if payload["static"] else ""),
     ]
-    lines.append(f"Hand over leadership instead of compacting above {threshold}% context.")
+    lines.append(
+        "Leadership is yours until you hand it over; hand over at a natural boundary "
+        f"once your context passes {threshold}%."
+    )
     lines.append(PULL_SENTENCE)
     lines.append("</hive-state>")
     return "\n".join(lines)
@@ -166,15 +174,14 @@ def render_handover_due(
     epoch: int,
     candidates: list[dict[str, Any]],
     *,
-    peers: bool,
+    firm: bool,
     scalable: bool,
 ) -> str:
     """The `<handover-due>` text block pushed to the leader under the key `handover_due`.
 
-    With `peers` it carries each candidate's ccw address and the brief-then-handover protocol
-    (D5); without, the leader hands over with a reason that summarises the state (D7).
+    The leader hands over with a summary as the reason; the successor receives the transcript, so
+    no briefing happens over ccw. `firm` adds the note that compaction is near.
     """
-    clean = feed._clean
     lines = [
         "<handover-due>",
         f"Your context is {round(context_pct)}% of a limit that compacts at {compact}%; "
@@ -183,37 +190,21 @@ def render_handover_due(
     if not candidates:
         hint = "; scale up with orchestrator_scale" if scalable else ""
         lines.append(f"Candidates: none - no ready successor; keep leading{hint}.")
-    elif peers:
-        listed = []
-        for c in candidates:
-            name = clean(c["pod_name"])
-            parts = [f"{name}/{clean(c['wrapper_session_id'])}", clean(c["state"])]
-            if c["context_pct"] is not None:
-                parts.append(f"{round(c['context_pct'])}% context")
-            listed.append(f"{name} ({', '.join(parts)})")
-        lines.append(f"Candidates, best first: {'; '.join(listed)}.")
     else:
-        names = ", ".join(clean(c["pod_name"]) for c in candidates)
+        names = ", ".join(feed._clean(c["pod_name"]) for c in candidates)
         lines.append(f"Candidates, best first: {names}.")
-    if candidates and peers:
-        lines += [
-            "1. Finish the step you are in; reassign or release your locks.",
-            "2. Send the first candidate a brief with "
-            "mcp__ccw__send_message(to=<address from the list>, notify_when_idle=true): the "
-            "user's goal, what is done, what is in flight, open questions to the user, pending "
-            "user messages, locks and branches; then end your turn. The candidate may ask back "
-            'and replies "ready" (or "no" and why).',
-            "3. In the turn carrying the reply or the <peer-idle-notice>, call "
-            f'orchestrator_leadership_handover(to=<pod_name>, epoch={epoch}, reason="context"). '
-            "With no reply within one further user turn, hand over anyway; a "
-            "<peer-delivery-failed> or a send error means the next candidate.",
-        ]
-    elif candidates:
+        if firm:
+            lines.append(
+                "You will compact soon and keep leading with a summary; "
+                "hand over now unless the work is about to finish."
+            )
         lines.append(
-            f"Call orchestrator_leadership_handover(to=<pod_name>, epoch={epoch}, "
-            "reason=<summary>) now, with a reason of at most 500 characters that summarises "
-            "the state: the user's goal, what is done, what is in flight, open questions to "
-            "the user, pending user messages, locks and branches."
+            "Finish the step you are in, then call "
+            f"orchestrator_leadership_handover(to=<pod_name>, epoch={epoch}, "
+            "reason=<state summary of at most 2000 characters: the user's goal, what is done, "
+            "what is in flight, next steps, open questions, locks and branches>). "
+            "It applies when your turn has ended and your background agents have reported; "
+            "the successor receives your transcript. Do not brief it over ccw."
         )
     lines.append("</handover-due>")
     return "\n".join(lines)
@@ -250,7 +241,6 @@ class _Plan:
     hashes: dict[str, str]  # per agent, the state hash it last accepted
     members: list[dict[str, Any]]
     compact_pct: int
-    peers: bool
     scalable: bool
     # handover requests decided within OUTCOME_WINDOW_SECONDS that an agent made, by id
     outcomes: list[dict[str, Any]]
@@ -321,7 +311,6 @@ async def _read(
         hashes=_load_hashes(leader["state_hash"]),
         members=members,
         compact_pct=compact_pct(spec.get("auto_compact_pct"), settings),
-        peers=typed.peers,
         scalable=typed.scalable,
         outcomes=outcomes,
         candidates=candidates,
@@ -388,11 +377,12 @@ async def _push_due(plan: _Plan, state: HiveState, client_factory: ClientFactory
         return 0
     identity = tuple((c["pod_name"], c["wrapper_session_id"]) for c in plan.candidates)
     pct = leader["context_pct"]
-    key: DueKey = (plan.leader_id, plan.epoch, int(pct // BUCKET_PCT), identity)
+    firm = pct >= plan.compact_pct - FIRM_MARGIN_PCT
+    key: DueKey = (plan.leader_id, plan.epoch, int(pct // BUCKET_PCT), firm, identity)
     if state.due_sent.get(plan.session_id) == key:
         return 0
     text = render_handover_due(
-        pct, plan.compact_pct, plan.epoch, plan.candidates, peers=plan.peers, scalable=plan.scalable
+        pct, plan.compact_pct, plan.epoch, plan.candidates, firm=firm, scalable=plan.scalable
     )
     client = client_factory(plan.session_id, leader["url"])
     outcome = await _note(client, leader["wrapper_session_id"], text, DUE_KEY)
