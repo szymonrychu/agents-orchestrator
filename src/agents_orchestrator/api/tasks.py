@@ -31,6 +31,7 @@ from agents_orchestrator.api import forward as forward_core
 from agents_orchestrator.api.agent import Caller, _session
 from agents_orchestrator.api.errors import ApiError
 from agents_orchestrator.api.sessions import Cfg, Pool
+from agents_orchestrator.settings import Settings
 
 router = APIRouter(prefix="/agent/v1/tasks", tags=["agent"])
 
@@ -88,6 +89,18 @@ _RESPONSES: dict[int | str, dict[str, Any]] = {
 }
 
 
+def taskboard_target(settings: Settings) -> forward_core.Target:
+    """The taskboard upstream; callers check `settings.taskboard_available` first."""
+    return forward_core.Target(
+        "taskboard relay",
+        settings.taskboard_url.rstrip("/") + UPSTREAM_PREFIX,
+        settings.taskboard_token,
+        STATE_ATTR,
+        "taskboard_unavailable",
+        TIMEOUT_SECONDS,
+    )
+
+
 async def _relay(request: Request, agent: Caller, pool: Pool, settings: Cfg, path: str) -> Response:
     if not _ALLOWED.fullmatch(path):
         raise ApiError(404, "not_found", "no such taskboard path")
@@ -102,16 +115,15 @@ async def _relay(request: Request, agent: Caller, pool: Pool, settings: Cfg, pat
             return Response(empty, 200, media_type="application/json")
         query = _expand_mine(request.scope.get("query_string", b"").decode("latin-1"), own.labels)
     body = None if request.method == "GET" else await forward_core.capped_body(request)
-    target = forward_core.Target(
-        "taskboard relay",
-        settings.taskboard_url.rstrip("/") + UPSTREAM_PREFIX,
-        settings.taskboard_token,
-        STATE_ATTR,
-        "taskboard_unavailable",
-        TIMEOUT_SECONDS,
-    )
     status, content = await forward_core.forward(
-        request, target, request.method, "/tasks" + path, body, str(own.id), own.slug, query=query
+        request,
+        taskboard_target(settings),
+        request.method,
+        "/tasks" + path,
+        body,
+        str(own.id),
+        own.slug,
+        query=query,
     )
     if request.method in _WRITES:
         await forward_core.touch_on_success(pool, own.id, status)

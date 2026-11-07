@@ -17,6 +17,7 @@ import httpx
 import pytest
 from fakes import fake_upstream as fu
 from fakes.fake_kube import FakeKube
+from fakes.fake_taskboard import FakeTaskboard
 from psycopg.types.json import Jsonb
 from test_agent_session_messaging import alone
 from test_api_agent import KEY, client_for, headers, make_settings
@@ -54,7 +55,7 @@ class Hosts(httpx.AsyncBaseTransport):
 
 def make_app(dsn, pool, **overrides):
     tokens = {n: f"{n}-" + stdlib_secrets.token_hex(16) for n in HOSTS}
-    values = {}
+    values = {"taskboard_url": "http://taskboard.test", "taskboard_token": "tb-secret-token"}
     for name in HOSTS:
         values[f"{name}_url"] = HOSTS[name]
         values[f"{name}_token"] = tokens[name]
@@ -66,6 +67,9 @@ def make_app(dsn, pool, **overrides):
     app = create_app(settings, pool, kube=kube)
     hosts = Hosts(fakes)
     app.state.admin_http = httpx.AsyncClient(transport=hosts)
+    board = FakeTaskboard(settings.taskboard_token)
+    app.state.taskboard_http = httpx.AsyncClient(transport=httpx.MockTransport(board.handler))
+    app.state.fake_taskboard = board
     return app, fakes, kube, hosts, tokens
 
 
@@ -187,6 +191,7 @@ SEEDED = {
     ("GET", "/schedules/api/v1/runs/{run_id}"),
     ("GET", "/chat/v1/admin/rooms"),
     ("GET", "/chat/v1/admin/rules"),
+    ("GET", "/chat/v1/admin/rooms/{room_id}"),
     ("GET", "/history/v1/sessions"),
     ("GET", "/history/v1/sessions/{session_id}"),
 }
@@ -244,6 +249,8 @@ async def test_every_route_round_trips_the_documented_answer(rig, name):
             body = fu.sample(DOCS[name], _body_schema(fake, key))
             if isinstance(body, dict) and "preset_id" in body:
                 body["preset_id"] = rig.vis
+            if isinstance(body, dict) and "task_key" in body:  # the sampler skips patterns
+                body["task_key"] = "T-1"
             if isinstance(body, dict) and "list" in body:  # a chat rule: room 7 is visible
                 body.update(list="allow", kind="room", value="7")
         r = await rig.call(method, relay_url(name, template), json=body)
@@ -456,7 +463,6 @@ def ids(response, field: str = "id") -> set[str]:
         ("webhook", "/events", "id"),
         ("schedule", "/schedules", "id"),
         ("schedule", "/runs", "id"),
-        ("connector", "/rooms", "room_id"),
     ],
 )
 async def test_lists_filtered(rig, service, template, field):
@@ -464,7 +470,7 @@ async def test_lists_filtered(rig, service, template, field):
     assert r.status_code == 200
     # object 10 (endpoint, schedule, room) sits on the visible privileged preset: listed,
     # not writable
-    seen = (7, 10) if template in ("/endpoints", "/schedules", "/rooms") else (7,)
+    seen = (7, 10) if template in ("/endpoints", "/schedules") else (7,)
     assert ids(r, field) == {str(ident(service, n)) for n in seen}
 
 
@@ -557,13 +563,24 @@ async def test_unguarded_routes_unchanged(rig):
         assert rig.fakes[service].answers[key] is not None
 
 
-async def test_null_preset_room_hidden(rig):
+async def test_all_rooms_listed_whatever_preset(rig):
+    """Q1 = A (matrix-integration): rooms on a visible, hidden, privileged or no preset are all
+    listed, answered unchanged."""
     r = await rig.call("GET", relay_url("connector", "/rooms"))
-    assert "9" not in ids(r, "room_id")
-    body = _body_for(rig, "connector", "PUT", "/rooms/{room_id}/settings", rig.vis)
-    url = relay_url("connector", "/rooms/{room_id}/settings", 9)
-    assert_error(await rig.call("PUT", url, json=body), 404, "not_found")
-    assert not _sent(rig, "connector", "PUT", "/rooms/{room_id}/settings", 9)
+    assert r.status_code == 200
+    assert ids(r, "room_id") == {"7", "8", "9", "10"}
+
+
+@pytest.mark.parametrize("n", [7, 8, 9, 10])
+async def test_room_settings_any_preset_forwarded(rig, n):
+    """A stored hidden or null preset no longer blocks a settings change, and neither does a
+    hidden or null preset in the body."""
+    template = "/rooms/{room_id}/settings"
+    for preset in (rig.vis, rig.hid, None):
+        body = _body_for(rig, "connector", "PUT", template, preset)
+        r = await rig.call("PUT", relay_url("connector", template, n), json=body)
+        assert r.status_code == 200, r.text
+    assert _sent(rig, "connector", "PUT", template, n)
 
 
 # ------------------------------------------------------------------------------ the history
@@ -667,6 +684,8 @@ async def test_history_query_string_passed(rig):
 
 
 # ------------------------------------------------------------------------- privileged targets
+# A superleader starts sessions from privileged presets (regression fix), so it may also point
+# trigger objects at them; the preset only has to be manageable (404 otherwise).
 
 PRIVILEGED_WRITES = [
     ("webhook", "POST", "/endpoints"),
@@ -678,49 +697,39 @@ PRIVILEGED_WRITES = [
     ("schedule", "PUT", "/schedules/{schedule_id}"),
     ("schedule", "POST", "/schedules/{schedule_id}/run"),
     ("connector", "PUT", "/rooms/{room_id}/settings"),
-    ("connector", "POST", "/rules"),
-    ("connector", "DELETE", "/rules/{rule_id}"),
 ]
 PRIV_BODY = [r for r in PRIVILEGED_WRITES if r in BODY]
 PRIV_STORED = [r for r in PRIVILEGED_WRITES if r in STORED]
 
 
-def test_privileged_guard_rows_are_exactly_the_epic_list():
-    assert {k for k, g in admin_relay.GUARDS.items() if g.privileged} == set(PRIVILEGED_WRITES)
-
-
-async def _last_admin_call(rig) -> dict:
-    async with rig.pool.connection() as conn:
-        cur = await conn.execute(
-            "SELECT data FROM events WHERE session_id = %s AND type = 'admin_call'"
-            " ORDER BY id DESC LIMIT 1",
-            (rig.boss.id,),
-        )
-        return (await cur.fetchone())[0]
-
-
 @pytest.mark.parametrize(("service", "method", "template"), PRIV_BODY)
-async def test_relay_body_privileged_target_403(rig, service, method, template):
+async def test_relay_body_privileged_target_forwarded(rig, service, method, template):
     body = _body_for(rig, service, method, template, rig.priv)
     r = await rig.call(method, relay_url(service, template), json=body)
-    assert_error(r, 403, "privileged_target")
-    assert r.json()["error"]["fields"] == ["kube_access"]
-    assert not _sent(rig, service, method, template)
-    event = await _last_admin_call(rig)
-    assert event["status"] == 403
-    assert event["fields"] == ["kube_access"]
+    assert r.status_code == _success(service, method, template), r.text
+    assert _sent(rig, service, method, template)
 
 
-@pytest.mark.parametrize(("service", "method", "template"), PRIV_STORED)
-@pytest.mark.parametrize("with_preset", [False, True])
-async def test_relay_stored_privileged_target_403(rig, service, method, template, with_preset):
+# The upstream requires `preset_id` on a schedule or room replace, so a body without one is a
+# valid request only on the other routes.
+PRIV_STORED_CASES = [
+    (*route, with_preset)
+    for route in PRIV_STORED
+    for with_preset in (True, False)
+    if with_preset or route[1] != "PUT"
+]
+
+
+@pytest.mark.parametrize(("service", "method", "template", "with_preset"), PRIV_STORED_CASES)
+async def test_relay_stored_privileged_target_forwarded(
+    rig, service, method, template, with_preset
+):
     body = _body_for(rig, service, method, template, rig.vis)
     if body is not None and not with_preset:
         body.pop("preset_id")
     r = await rig.call(method, relay_url(service, template, 10), json=body)
-    assert_error(r, 403, "privileged_target")
-    assert r.json()["error"]["fields"] == ["kube_access"]
-    assert not _sent(rig, service, method, template, 10)
+    assert r.status_code == _success(service, method, template), r.text
+    assert _sent(rig, service, method, template, 10)
 
 
 @pytest.mark.parametrize(("service", "method", "template"), PRIV_STORED)
@@ -765,8 +774,8 @@ async def test_relay_is_agent_port_only(rig):
 
 # ------------------------------------------------------------------------- chat routing rules
 # An allow rule, or the removal of a deny rule, lets inbound chats start sessions from the
-# room's preset; the superleader may widen routing only to a room on a preset it manages that
-# has no privileged flag. Rooms (seeded): 7 visible, 8 hidden, 9 no preset, 10 privileged.
+# room's preset; the superleader may widen routing only to one listed room (any preset, Q1 = A).
+# Rooms (seeded): 7 visible, 8 hidden, 9 no preset, 10 privileged.
 
 RULES = ("connector", "POST", "/rules")
 RULE_DELETE = ("connector", "DELETE", "/rules/{rule_id}")
@@ -776,26 +785,16 @@ def _rule(list_: str, kind: str, value: str) -> dict:
     return {"list": list_, "kind": kind, "value": value, "note": None}
 
 
-@pytest.mark.parametrize("n", [7])
-async def test_rule_allow_visible_room_forwarded(rig, n):
-    r = await rig.call("POST", relay_url(*RULES[::2]), json=_rule("allow", "room", str(n)))
+@pytest.mark.parametrize("room", ["7", "8", "9", "10"])
+async def test_rule_allow_any_listed_room_forwarded(rig, room):
+    """Q1 = A: a room only has to be listed, whatever its preset (hidden, none, privileged)."""
+    r = await rig.call("POST", relay_url(*RULES[::2]), json=_rule("allow", "room", room))
     assert r.status_code == 201, r.text
     assert _sent(rig, *RULES)
 
 
-async def test_rule_allow_privileged_room_403(rig):
-    r = await rig.call("POST", relay_url(*RULES[::2]), json=_rule("allow", "room", "10"))
-    assert_error(r, 403, "privileged_target")
-    assert r.json()["error"]["fields"] == ["kube_access"]
-    assert not _sent(rig, *RULES)
-    event = await _last_admin_call(rig)
-    assert event["status"] == 403 and event["fields"] == ["kube_access"]
-
-
-@pytest.mark.parametrize("room", ["8", "9", "404"])
-async def test_rule_allow_hidden_room_404(rig, room):
-    """Hidden preset, no preset (the connector's default preset, unknown here) or no such room."""
-    r = await rig.call("POST", relay_url(*RULES[::2]), json=_rule("allow", "room", room))
+async def test_rule_allow_unknown_room_404(rig):
+    r = await rig.call("POST", relay_url(*RULES[::2]), json=_rule("allow", "room", "404"))
     assert_error(r, 404, "not_found")
     assert not _sent(rig, *RULES)
 
@@ -822,10 +821,10 @@ async def test_rule_allow_beyond_one_room_403(rig, body, canary="canary-rule-val
     assert not _sent(rig, *RULES)
 
 
-@pytest.mark.parametrize("body", [_rule("ALLOW", "room", "10"), {"kind": "room", "value": "10"}])
+@pytest.mark.parametrize("body", [_rule("ALLOW", "room", "404"), {"kind": "room", "value": "404"}])
 async def test_rule_list_other_than_deny_is_checked_as_allow(rig, body):
     r = await rig.call("POST", relay_url(*RULES[::2]), json=body)
-    assert_error(r, 403, "privileged_target")
+    assert_error(r, 404, "not_found")
     assert not _sent(rig, *RULES)
 
 
@@ -851,7 +850,7 @@ def _seed_rules(rig) -> None:
     )
 
 
-@pytest.mark.parametrize("n", [1, 3])
+@pytest.mark.parametrize("n", [1, 3, 5])
 async def test_rule_delete_allow_or_safe_deny_forwarded(rig, n):
     _seed_rules(rig)
     r = await rig.call("DELETE", relay_url(*RULE_DELETE[::2], n))
@@ -859,12 +858,11 @@ async def test_rule_delete_allow_or_safe_deny_forwarded(rig, n):
     assert _sent(rig, *RULE_DELETE, n)
 
 
-async def test_rule_delete_deny_of_privileged_room_403(rig):
+async def test_rule_delete_deny_of_privileged_room_forwarded(rig):
     _seed_rules(rig)
     r = await rig.call("DELETE", relay_url(*RULE_DELETE[::2], 2))
-    assert_error(r, 403, "privileged_target")
-    assert r.json()["error"]["fields"] == ["kube_access"]
-    assert not _sent(rig, *RULE_DELETE, 2)
+    assert r.status_code == 204, r.text
+    assert _sent(rig, *RULE_DELETE, 2)
 
 
 async def test_rule_delete_deny_beyond_one_room_403(rig):
@@ -875,9 +873,59 @@ async def test_rule_delete_deny_beyond_one_room_403(rig):
     assert not _sent(rig, *RULE_DELETE, 4)
 
 
-@pytest.mark.parametrize("n", [5, 99])
-async def test_rule_delete_hidden_room_or_unknown_rule_404(rig, n):
+async def test_rule_delete_unknown_rule_404(rig, n=99):
     _seed_rules(rig)
     r = await rig.call("DELETE", relay_url(*RULE_DELETE[::2], n))
     assert_error(r, 404, "not_found")
     assert not _sent(rig, *RULE_DELETE, n)
+
+
+# ------------------------------------------------------------------ chat rooms, users, requests
+# matrix-integration O2: the new connector admin routes are relayed 1:1 and unguarded.
+
+
+async def test_room_detail_forwarded(rig):
+    r = await rig.call("GET", relay_url("connector", "/rooms/{room_id}", 9))
+    assert r.status_code == 200, r.text
+    assert any(c.path == "/chat/v1/admin/rooms/9" for c in rig.fakes["connector"].calls)
+
+
+async def test_room_detail_not_found_passes_through(rig):
+    missing = (404, {"error": {"code": "not_found", "message": "no such room"}})
+    key = ("GET", "/chat/v1/admin/rooms/{room_id}")
+    rig.fakes["connector"].document(key, 404)
+    rig.fakes["connector"].answers[key] = missing
+    r = await rig.call("GET", relay_url("connector", "/rooms/{room_id}", 404))
+    assert_error(r, 404, "not_found")
+
+
+async def test_users_query_forwarded(rig):
+    r = await rig.call("GET", ADMIN_PREFIX + "/chats/users?q=jane&limit=5")
+    assert r.status_code == 200, r.text
+    (call,) = rig.fakes["connector"].calls
+    assert call.path == "/chat/v1/admin/users" and call.query == "q=jane&limit=5"
+    assert call.headers["authorization"] == f"Bearer {rig.tokens['connector']}"
+
+
+async def test_allow_forwarded(rig):
+    body = {"preset_id": rig.vis, "trigger": "mention", "agents_may_initiate": True}
+    r = await rig.call("POST", relay_url("connector", "/rooms/{room_id}/allow", 9), json=body)
+    assert r.status_code == 200, r.text
+    (call,) = rig.fakes["connector"].calls
+    assert call.path == "/chat/v1/admin/rooms/9/allow" and call.json() == body
+    assert call.headers["x-orch-slug"] == "rel-boss"
+
+
+async def test_allow_hidden_preset_forwarded_too(rig):
+    """Q1 = A: no preset check on a room allow either; the connector validates the preset."""
+    r = await rig.call(
+        "POST", relay_url("connector", "/rooms/{room_id}/allow", 8), json={"preset_id": rig.hid}
+    )
+    assert r.status_code == 200, r.text
+
+
+async def test_room_request_get_forwarded(rig):
+    r = await rig.call("GET", ADMIN_PREFIX + "/chats/room-requests/5")
+    assert r.status_code == 200, r.text
+    (call,) = rig.fakes["connector"].calls
+    assert call.path == "/chat/v1/admin/room-requests/5"

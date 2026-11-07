@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
@@ -24,7 +25,6 @@ from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import leadership, presets, views
 from agents_orchestrator.db import sessions as repo
 from agents_orchestrator.labels import normalize_labels
-from agents_orchestrator.preset_policy import privileged
 from agents_orchestrator.secret_view import redact_spec, session_metas
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import (
@@ -43,6 +43,7 @@ from agents_orchestrator.spec import (
     validate_slug,
     validate_spec,
 )
+from agents_orchestrator.tokens import tokens_for
 
 
 def get_settings(request: Request) -> Settings:
@@ -430,16 +431,6 @@ async def _insert(conn, slug: str, spec: SessionSpec, **provenance) -> repo.Sess
         raise ApiError(409, "conflict", f"session {slug!r} already exists") from None
 
 
-def privileged_refused(flags: list[str]) -> ApiError:
-    """403 for a superleader starting or targeting a preset with a privileged flag on."""
-    return ApiError(
-        403,
-        "privileged_target",
-        f"only a human can start or target a session from a preset with: {', '.join(flags)}",
-        extra={"fields": flags},
-    )
-
-
 async def _create_from_preset(
     conn,
     preset_id: uuid.UUID,
@@ -452,8 +443,6 @@ async def _create_from_preset(
     preset = await presets.get_for_share(conn, preset_id)
     if preset is None or (created_by_session is not None and not preset.superleader_manageable):
         raise not_found("preset")
-    if created_by_session is not None and (flags := privileged(preset.spec)):
-        raise privileged_refused(flags)
     raw = dict(preset.spec)
     raw.setdefault("replicas", settings.default_replicas)
     try:
@@ -515,12 +504,58 @@ async def get_session(
         return await one_view(conn, session, settings)
 
 
-async def discard(conn, session_id: uuid.UUID, settings: Settings) -> schemas.SessionView:
+@router.post(
+    "/sessions/{session_id}/agent-token/verify",
+    response_model=schemas.AgentTokenVerified,
+    summary="Check an agent token of a live session the calling service created",
+)
+async def verify_agent_token(
+    session_id: uuid.UUID,
+    body: schemas.AgentTokenIn,
+    request: Request,
+    pool: Pool,
+    settings: Cfg,
+) -> schemas.AgentTokenVerified:
+    """Service port only. 200 when `token` is the agent token of this session, the session is
+    active and the calling service created it; every other case (also the main port) answers
+    the same 404 `not_found`, so the answer never says which part was wrong."""
+    service = calling_service(request)
+    if service is None:
+        raise not_found("session")
+    async with pool.connection() as conn:
+        session = await repo.get(conn, session_id)
+    expected = tokens_for(settings, session_id).agent
+    presented = body.token.get_secret_value()
+    matches = hmac.compare_digest(presented.encode(), expected.encode())
+    if (
+        session is None
+        or session.created_by_service != service
+        or session.desired != "active"
+        or not matches
+    ):
+        raise not_found("session")
+    return schemas.AgentTokenVerified(session_id=session_id)
+
+
+async def discard(
+    conn, session_id: uuid.UUID, settings: Settings, *, force: bool = False
+) -> schemas.SessionView:
     try:
-        session = await repo.request_delete(conn, session_id)
+        session = await repo.request_delete(conn, session_id, force=force)
     except repo.SessionNotFound:
         raise not_found("session") from None
     return await one_view(conn, session, settings)
+
+
+# Documents the flag; `force_flag` reads it strictly (only `true` or `false`, no other parameter).
+Force = Annotated[
+    bool,
+    Query(
+        description="Abandon the session's owed pre-discard hooks (reason `forced`) so the"
+        " discard finishes without them, also for a session already deleting; the workspace"
+        " PVC is kept as the backup. Refused on the service port."
+    ),
+]
 
 
 @router.delete("/sessions/{session_id}", status_code=202, response_model=schemas.SessionView)
@@ -529,21 +564,39 @@ async def discard_session(
     request: Request,
     pool: Pool,
     settings: Cfg,
+    force: Force = False,
 ) -> schemas.SessionView:
     """Discard the session. On the service port a service may discard only a session it created
-    itself; any other session answers 404 `not_found`, like an unknown one."""
-    if request.query_params:
-        raise ApiError(
-            422, "invalid_request", "discard takes no parameters; it always deletes everything"
-        )
+    itself; any other session answers 404 `not_found`, like an unknown one. `?force=true` (main
+    port only) abandons the owed pre-discard hooks, also of a session already deleting."""
     service = calling_service(request)
+    force = force_flag(request, allowed=service is None)
     async with pool.connection() as conn:
         if service is not None:
             # created_by_service never changes after insert, so check-then-discard needs no lock.
             session = await repo.get(conn, session_id)
             if session is None or session.created_by_service != service:
                 raise not_found("session")
-        return await discard(conn, session_id, settings)
+        return await discard(conn, session_id, settings, force=force)
+
+
+def force_flag(request: Request, *, allowed: bool = True) -> bool:
+    """The discard's only query parameter, `force` (`true` or `false`); anything else is 422."""
+    params = request.query_params
+    extra = set(params) - {"force"}
+    if extra or not allowed and params:
+        raise ApiError(
+            422,
+            "invalid_request",
+            "discard takes only the force parameter (main and admin ports); it always deletes"
+            " everything",
+        )
+    value = params.getlist("force")
+    if not value:
+        return False
+    if len(value) > 1 or value[0] not in ("true", "false"):
+        raise ApiError(422, "invalid_request", "force must be true or false")
+    return value[0] == "true"
 
 
 @router.delete("/sessions/{session_id}/close", response_model=schemas.SessionView)

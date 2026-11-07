@@ -74,6 +74,14 @@ class FakeUpstream:
         validator = Draft202012Validator(rooted, format_checker=FormatChecker())
         return [e.message for e in validator.iter_errors(body)]
 
+    def document(self, key: tuple[str, str], status: int) -> None:
+        """Accept `status` as an answer of `key` the vendored document leaves out (FastAPI lists
+        only 2xx and 422 unless the route declares more); the error body stays the shared shape."""
+        ref = {"$ref": "#/components/schemas/ErrorBody"}
+        self._ops[key]["responses"].setdefault(
+            str(status), {"content": {"application/json": {"schema": ref}}}
+        )
+
     def request_errors(self, key: tuple[str, str], body: Any) -> list[str]:
         content = self._ops[key].get("requestBody", {}).get("content", {})
         schema = content.get("application/json", {}).get("schema")

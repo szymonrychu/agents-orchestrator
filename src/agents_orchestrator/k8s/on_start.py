@@ -56,8 +56,10 @@ ADMIN_TOOLS = [
     "schedules_list", "schedule_get", "schedule_create", "schedule_update", "schedule_delete",
     "schedule_run", "schedule_runs", "schedule_runs_all", "schedule_run_get",
     "schedule_preview", "chat_admin_rooms", "chat_room_settings", "chat_rules",
-    "chat_rule_add", "chat_rule_delete", "secret_set", "history_search", "history_get",
-    "history_records",
+    "chat_rule_add", "chat_rule_delete",
+    "chat_admin_room", "chat_users", "chat_room_allow", "chat_open", "chat_open_status",
+    "chat_open_confirm", "secret_set", "history_search", "history_get",
+    "history_records", "usage_get",
 ]  # fmt: skip
 
 

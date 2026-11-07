@@ -75,6 +75,18 @@ class SessionLabelsIn(BaseModel):
         return normalize_labels(value)
 
 
+class AgentTokenIn(BaseModel):
+    """An agent token a service was handed by one of its sessions' agents, to be checked."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    token: SecretStr = Field(min_length=1, max_length=512)
+
+
+class AgentTokenVerified(BaseModel):
+    session_id: uuid.UUID
+
+
 class SecretIn(BaseModel):
     """The new value of one protected variable; it is never echoed."""
 
@@ -333,6 +345,25 @@ class MetaPermissionMode(BaseModel):
 class MetaUsage(BaseModel):
     configured: bool
     quota_default_pct: int
+
+
+class UsageWindowView(BaseModel):
+    utilization_pct: float
+    resets_at: datetime
+    stale: bool
+    observed_at: datetime | None
+    source: str | None
+
+
+class UsageView(BaseModel):
+    """The account's usage windows as the usage gate reads them (read-only)."""
+
+    configured: bool
+    available: bool
+    source: str
+    updated_at: datetime | None
+    five_hour: UsageWindowView | None
+    seven_day: UsageWindowView | None
 
 
 class MetaInactivity(BaseModel):

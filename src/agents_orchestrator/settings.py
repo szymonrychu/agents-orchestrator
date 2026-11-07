@@ -212,6 +212,9 @@ class Settings(BaseSettings):
     discard_hook_read_timeout_seconds: float = Field(default=30, gt=0, le=300)
     # hook time one reconcile pass may spend; spent, later deleting sessions wait for the next pass
     discard_hook_pass_budget_seconds: float = Field(default=60, gt=0, le=600)
+    # an owed hook still failing this long after its first failure is abandoned and the discard
+    # goes on (the workspace PVC is kept); 30 min rides out a restart or short outage (T-26)
+    discard_hook_give_up_seconds: float = Field(default=1800, gt=0, le=7 * 86400)
     discard_quiesce_timeout_seconds: float = 120
     discard_drain_seconds: float = 5
     scale_drain_seconds: float = 900

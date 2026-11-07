@@ -174,6 +174,39 @@
         "title": "AgentContext",
         "type": "object"
       },
+      "AgentTokenIn": {
+        "additionalProperties": false,
+        "description": "An agent token a service was handed by one of its sessions' agents, to be checked.",
+        "properties": {
+          "token": {
+            "format": "password",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Token",
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "title": "AgentTokenIn",
+        "type": "object"
+      },
+      "AgentTokenVerified": {
+        "properties": {
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "title": "AgentTokenVerified",
+        "type": "object"
+      },
       "AgentView": {
         "properties": {
           "attention": {
@@ -4931,6 +4964,114 @@
         "title": "UsageQuota",
         "type": "object"
       },
+      "UsageView": {
+        "description": "The account's usage windows as the usage gate reads them (read-only).",
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "configured": {
+            "title": "Configured",
+            "type": "boolean"
+          },
+          "five_hour": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageWindowView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "seven_day": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageWindowView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "configured",
+          "available",
+          "source",
+          "updated_at",
+          "five_hour",
+          "seven_day"
+        ],
+        "title": "UsageView",
+        "type": "object"
+      },
+      "UsageWindowView": {
+        "properties": {
+          "observed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed At"
+          },
+          "resets_at": {
+            "format": "date-time",
+            "title": "Resets At",
+            "type": "string"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "stale": {
+            "title": "Stale",
+            "type": "boolean"
+          },
+          "utilization_pct": {
+            "title": "Utilization Pct",
+            "type": "number"
+          }
+        },
+        "required": [
+          "utilization_pct",
+          "resets_at",
+          "stale",
+          "observed_at",
+          "source"
+        ],
+        "title": "UsageWindowView",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -5464,6 +5605,199 @@
         ]
       }
     },
+    "/agent/v1/admin/chats/room-requests": {
+      "post": {
+        "operationId": "admin_connector_post_room_requests",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "POST connector /room-requests",
+        "tags": [
+          "admin",
+          "admin"
+        ]
+      }
+    },
+    "/agent/v1/admin/chats/room-requests/{request_id}": {
+      "get": {
+        "operationId": "admin_connector_get_room_requests_request_id",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "GET connector /room-requests/{request_id}",
+        "tags": [
+          "admin",
+          "admin"
+        ]
+      }
+    },
+    "/agent/v1/admin/chats/room-requests/{request_id}/confirm": {
+      "post": {
+        "description": "Confirm or reject a room request from the answer to its attached decision.",
+        "operationId": "admin_connector_post_room_requests_request_id_confirm",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          },
+          "202": {
+            "description": "No decision existed; it was asked and attached"
+          },
+          "409": {
+            "description": "not_pending, or decision_open (the user has not answered yet)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "POST connector /room-requests/{request_id}/confirm",
+        "tags": [
+          "admin",
+          "admin"
+        ]
+      }
+    },
     "/agent/v1/admin/chats/rooms": {
       "get": {
         "operationId": "admin_connector_get_rooms",
@@ -5517,6 +5851,124 @@
           }
         },
         "summary": "GET connector /rooms",
+        "tags": [
+          "admin",
+          "admin"
+        ]
+      }
+    },
+    "/agent/v1/admin/chats/rooms/{room_id}": {
+      "get": {
+        "operationId": "admin_connector_get_rooms_room_id",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "GET connector /rooms/{room_id}",
+        "tags": [
+          "admin",
+          "admin"
+        ]
+      }
+    },
+    "/agent/v1/admin/chats/rooms/{room_id}/allow": {
+      "post": {
+        "operationId": "admin_connector_post_rooms_room_id_allow",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "POST connector /rooms/{room_id}/allow",
         "tags": [
           "admin",
           "admin"
@@ -5751,6 +6203,65 @@
           }
         },
         "summary": "DELETE connector /rules/{rule_id}",
+        "tags": [
+          "admin",
+          "admin"
+        ]
+      }
+    },
+    "/agent/v1/admin/chats/users": {
+      "get": {
+        "operationId": "admin_connector_get_users",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "GET connector /users",
         "tags": [
           "admin",
           "admin"
@@ -7308,6 +7819,7 @@
     },
     "/agent/v1/admin/sessions/{slug}": {
       "delete": {
+        "description": "`?force=true` abandons the target's owed pre-discard hooks, also when it is already\ndeleting (a discard stuck on a hook receiver that is down).",
         "operationId": "discard_session_agent_v1_admin_sessions__slug__delete",
         "parameters": [
           {
@@ -7317,6 +7829,18 @@
             "schema": {
               "title": "Slug",
               "type": "string"
+            }
+          },
+          {
+            "description": "Abandon the session's owed pre-discard hooks (reason `forced`) so the discard finishes without them, also for a session already deleting; the workspace PVC is kept as the backup. Refused on the service port.",
+            "in": "query",
+            "name": "force",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Abandon the session's owed pre-discard hooks (reason `forced`) so the discard finishes without them, also for a session already deleting; the workspace PVC is kept as the backup. Refused on the service port.",
+              "title": "Force",
+              "type": "boolean"
             }
           },
           {
@@ -7690,6 +8214,72 @@
           }
         },
         "summary": "Restart Session",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/agent/v1/admin/usage": {
+      "get": {
+        "description": "The account's five_hour and seven_day windows, read-only, from the same cached\n`UsageSource` the usage gate reads. An unconfigured or unreachable usage service answers\n200 with `available` false and null windows: the gate allows then, and so does this.",
+        "operationId": "get_usage_agent_v1_admin_usage_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Usage",
         "tags": [
           "admin"
         ]
@@ -11411,7 +12001,7 @@
     },
     "/api/v1/sessions/{session_id}": {
       "delete": {
-        "description": "Discard the session. On the service port a service may discard only a session it created\nitself; any other session answers 404 `not_found`, like an unknown one.",
+        "description": "Discard the session. On the service port a service may discard only a session it created\nitself; any other session answers 404 `not_found`, like an unknown one. `?force=true` (main\nport only) abandons the owed pre-discard hooks, also of a session already deleting.",
         "operationId": "discard_session_api_v1_sessions__session_id__delete",
         "parameters": [
           {
@@ -11422,6 +12012,18 @@
               "format": "uuid",
               "title": "Session Id",
               "type": "string"
+            }
+          },
+          {
+            "description": "Abandon the session's owed pre-discard hooks (reason `forced`) so the discard finishes without them, also for a session already deleting; the workspace PVC is kept as the backup. Refused on the service port.",
+            "in": "query",
+            "name": "force",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Abandon the session's owed pre-discard hooks (reason `forced`) so the discard finishes without them, also for a session already deleting; the workspace PVC is kept as the backup. Refused on the service port.",
+              "title": "Force",
+              "type": "boolean"
             }
           }
         ],
@@ -11486,6 +12088,57 @@
           }
         },
         "summary": "Get Session"
+      }
+    },
+    "/api/v1/sessions/{session_id}/agent-token/verify": {
+      "post": {
+        "description": "Service port only. 200 when `token` is the agent token of this session, the session is\nactive and the calling service created it; every other case (also the main port) answers\nthe same 404 `not_found`, so the answer never says which part was wrong.",
+        "operationId": "verify_agent_token_api_v1_sessions__session_id__agent_token_verify_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentTokenIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentTokenVerified"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Check an agent token of a live session the calling service created"
       }
     },
     "/api/v1/sessions/{session_id}/agents": {

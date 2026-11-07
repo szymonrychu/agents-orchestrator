@@ -164,11 +164,6 @@ async def manageable_ids(conn: psycopg.AsyncConnection) -> set[uuid.UUID]:
     return {r[0] for r in await cur.fetchall()}
 
 
-async def manageable_specs(conn: psycopg.AsyncConnection) -> dict[uuid.UUID, dict[str, Any]]:
-    cur = await conn.execute("SELECT id, spec FROM presets WHERE superleader_manageable")
-    return {r[0]: r[1] for r in await cur.fetchall()}
-
-
 async def delete(
     conn: psycopg.AsyncConnection,
     preset_id: uuid.UUID,

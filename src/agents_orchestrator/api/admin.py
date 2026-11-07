@@ -189,6 +189,7 @@ ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/restart"): "session",
     ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/agents/{{pod}}/restart"): "session",
     ("GET", f"{ADMIN_PREFIX}/commands/{{command_id}}"): "none",
+    ("GET", f"{ADMIN_PREFIX}/usage"): "none",
 }
 
 
@@ -335,26 +336,24 @@ async def create_session(
     """Same body and rules as the main port, usage gate included; the caller's session is
     recorded as the creator and `created_by_service` stays empty."""
     _, caller = caller_of(request)
-    try:
-        return await sessions_api.create(
-            pool, settings, body, created_by_session=caller.id, usage=usage
-        )
-    except ApiError as exc:
-        if exc.code == "privileged_target":
-            request.state.preset_fields = exc.extra["fields"]
-        raise
+    return await sessions_api.create(
+        pool, settings, body, created_by_session=caller.id, usage=usage
+    )
 
 
 @router.delete("/sessions/{slug}", status_code=202, response_model=schemas.SessionView)
 async def discard_session(
-    slug: str, request: Request, pool: Pool, settings: Cfg
+    slug: str, request: Request, pool: Pool, settings: Cfg, force: sessions_api.Force = False
 ) -> schemas.SessionView:
+    """`?force=true` abandons the target's owed pre-discard hooks, also when it is already
+    deleting (a discard stuck on a hook receiver that is down)."""
     _, caller = caller_of(request)
+    force = sessions_api.force_flag(request)
     async with pool.connection() as conn:
         target = await _target(conn, slug, caller)
         if target.id == caller.id:
             raise ApiError(422, "own_session", "a session cannot discard itself")
-        return await sessions_api.discard(conn, target.id, settings)
+        return await sessions_api.discard(conn, target.id, settings, force=force)
 
 
 # ---------------------------------------------------------------- restart (O8)
@@ -447,3 +446,38 @@ async def get_command(command_id: int, request: Request, pool: Pool) -> schemas.
     _, caller = caller_of(request)
     async with pool.connection() as conn:
         return await messages_api.command_view(conn, command_id, caller.id)
+
+
+# ---------------------------------------------------------------- usage
+
+
+@router.get("/usage", response_model=schemas.UsageView)
+async def get_usage(usage: Usage) -> schemas.UsageView:
+    """The account's five_hour and seven_day windows, read-only, from the same cached
+    `UsageSource` the usage gate reads. An unconfigured or unreachable usage service answers
+    200 with `available` false and null windows: the gate allows then, and so does this."""
+    windows = await usage.current() if usage is not None else None
+    windows = windows or {}
+
+    def view(metric: str) -> schemas.UsageWindowView | None:
+        w = windows.get(metric)
+        if w is None:
+            return None
+        return schemas.UsageWindowView(
+            utilization_pct=w.percent,
+            resets_at=w.resets_at,
+            stale=w.stale,
+            observed_at=w.observed_at,
+            source=w.source,
+        )
+
+    five, seven = view("five_hour"), view("seven_day")
+    seen = [w.observed_at for w in (five, seven) if w is not None and w.observed_at]
+    return schemas.UsageView(
+        configured=usage is not None,
+        available=bool(windows),
+        source="agents-usage",
+        updated_at=max(seen, default=None),
+        five_hour=five,
+        seven_day=seven,
+    )
