@@ -107,6 +107,7 @@ class FakeKube:
     graceful_pod_deletes: bool = False  # a deleted pod stays terminating until finish_termination
     rbac_namespaces: frozenset[str] = frozenset()  # namespaces where RoleBindings are allowed
     cluster_rbac: bool = False  # ClusterRoleBindings are allowed
+    serviceaccounts: bool = False  # ServiceAccounts are allowed (chart: either kube access on)
     bindable: frozenset[str] = frozenset()  # role names a binding may reference
     objects: dict[tuple[str, str, str], dict[str, Any]] = field(default_factory=dict)
     applies: list[Apply] = field(default_factory=list)
@@ -276,6 +277,8 @@ class FakeKube:
             return namespace in self.rbac_namespaces
         if kind == "ClusterRoleBinding":
             return namespace == "" and self.cluster_rbac
+        if kind == "ServiceAccount":
+            return namespace == self.namespace and self.serviceaccounts
         return namespace == self.namespace
 
     def _check_escalation(self, obj: dict[str, Any]) -> None:

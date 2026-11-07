@@ -44,7 +44,11 @@ def settings(**over: Any) -> Settings:
 
 
 def kube(**over: Any) -> FakeKube:
-    base: dict[str, Any] = {"rbac_namespaces": frozenset({"media", "games"}), "bindable": ROLES}
+    base: dict[str, Any] = {
+        "rbac_namespaces": frozenset({"media", "games"}),
+        "bindable": ROLES,
+        "serviceaccounts": True,
+    }
     return FakeKube(namespace="agents", **{**base, **over})
 
 
@@ -91,6 +95,32 @@ async def test_same_binding_name_in_two_namespaces():
     assert ("RoleBinding", "games", f"{sa}-read") not in r._applied
     assert ("RoleBinding", "media", f"{sa}-read") in r._applied
     assert k.applied() == []  # the media binding is unchanged: not applied again
+
+
+@pytest.mark.parametrize(
+    ("over", "scopes"),
+    [
+        ({}, []),
+        ({"kube_cluster_access_enabled": True}, ["agents"]),
+        ({"kube_namespace_access_namespaces": ["media"]}, ["agents"]),
+    ],
+)
+def test_service_account_scope_follows_the_chart_grant(over, scopes):
+    # the chart grants serviceaccounts only `if or kubeClusterAccess.enabled
+    # kubeNamespaceAccess.namespaces` (role.yaml); the reconciler lists them only then
+    s = make_settings(namespace="agents", **over)
+    assert reconciler(FakeKube(namespace="agents"), s)._scopes("ServiceAccount") == scopes
+
+
+async def test_default_settings_make_no_service_account_calls():
+    k = FakeKube(namespace="agents")  # the chart defaults: no serviceaccounts verbs
+    r = reconciler(k, make_settings(namespace="agents"))
+    session = make_session()
+    await r._prune(session.slug, set(), reason="no longer rendered")
+    await r._prune(session.slug, set(), DISCARD_ORDER, reason="discard")
+    assert await r._remaining(session.slug) == []
+    assert k.forbidden == []
+    assert not any(c.kind == "ServiceAccount" for c in k.calls)
 
 
 async def test_prune_skips_unlisted_namespaces():
@@ -223,6 +253,24 @@ async def rbac_env(pool, dsn) -> Env:
     )
     env.rec = Reconciler(pool, env.kube, env.settings, wrapper_factory=None)
     return env
+
+
+async def test_default_settings_converge_reaches_ready_and_discard_purges(pool, dsn):
+    env = Env(pool, dsn)  # chart defaults: no kube access, no serviceaccounts verbs
+    env.kube.pods_ready = True
+    c = await env.session("alpha")
+    await env.rec.reconcile_once()
+    assert env.kube.forbidden == []
+    got = await env.get(c.id)
+    assert got.status.get("error") is None
+    assert got.status["phase"] == "ready"
+
+    await env.delete(c.id)
+    await env.rec.reconcile_once()
+    await env.rec.reconcile_once()
+    assert await env.get(c.id) is None
+    assert env.kube.forbidden == []
+    assert not any(call.kind == "ServiceAccount" for call in env.kube.calls)
 
 
 async def test_converge_namespace_session_creates_sa_and_bindings(rbac_env):

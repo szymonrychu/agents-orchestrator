@@ -879,7 +879,7 @@ class SessionSpec(BaseModel):
         if not v:
             raise ValueError("must name at least one namespace")
         for namespace, tiers in v.items():
-            if not _NAMESPACE_RE.match(namespace):
+            if not _NAMESPACE_RE.fullmatch(namespace):
                 raise ValueError(f"namespace {namespace!r} is not a valid namespace name")
             if not tiers:
                 raise ValueError(f"namespace {namespace!r} needs at least one tier")

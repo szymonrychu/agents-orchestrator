@@ -58,8 +58,13 @@ async def test_cluster_binding_delete_and_get_at_cluster_scope():
     assert await k.list_objects("ClusterRoleBinding", "", {}) == []
 
 
+async def test_serviceaccounts_need_the_grant():
+    with pytest.raises(Forbidden):
+        await FakeKube().list_objects("ServiceAccount", "agents", {})
+
+
 async def test_serviceaccount_only_in_own_namespace():
-    k = FakeKube()
+    k = FakeKube(serviceaccounts=True)
     sa = {
         "apiVersion": "v1",
         "kind": "ServiceAccount",

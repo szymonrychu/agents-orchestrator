@@ -673,13 +673,18 @@ class Reconciler:
     def _scopes(self, kind: str) -> list[str]:
         """The namespaces the reconciler lists `kind` in: RoleBindings in every allowlisted
         namespace, ClusterRoleBindings at cluster scope ("") only while cluster access is
-        enabled, everything else in `settings.namespace`. Its RBAC reaches nowhere else, so a
-        namespace dropped from the allowlist is never called (no 403 loop)."""
+        enabled, ServiceAccounts in `settings.namespace` only while either access is configured
+        (the chart's `serviceaccounts` rule has the same condition), everything else in
+        `settings.namespace`. Its RBAC reaches nowhere else, so nothing is ever listed outside
+        the Role (no 403 loop)."""
         s = self.settings
         if kind == "RoleBinding":
             return list(s.kube_namespace_access_namespaces)
         if kind == "ClusterRoleBinding":
             return [""] if s.kube_cluster_access_enabled else []
+        if kind == "ServiceAccount":
+            granted = s.kube_cluster_access_enabled or s.kube_namespace_access_namespaces
+            return [s.namespace] if granted else []
         return [s.namespace]
 
     async def _foreign(

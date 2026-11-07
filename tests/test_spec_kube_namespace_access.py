@@ -47,6 +47,7 @@ def test_namespace_map_normalised():
         {"Media": ["read"]},
         {"a_b": ["read"]},
         {"x" * 64: ["read"]},
+        {"media\n": ["read"]},
     ],
 )
 def test_namespace_map_refused(bad):
