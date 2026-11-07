@@ -1443,3 +1443,102 @@ def test_chat_relay_migration_adds_columns_and_index_idempotently(empty_dsn, tmp
             "SELECT 1 FROM pg_indexes WHERE indexname = 'messages_sender_receiver_created'"
         ).fetchall() == [(1,)]
     assert {"chat_relay_send", "chat_relay_room"} <= _columns(empty_dsn, "messages")
+
+
+def _before(tmp_path, version: str):
+    for path in MIGRATIONS_DIR.glob("*.sql"):
+        if path.name < version:
+            shutil.copy(path, tmp_path)
+
+
+def test_0035_columns(empty_dsn):
+    run_migrations(empty_dsn)
+    assert run_migrations(empty_dsn) == []
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        c.execute((MIGRATIONS_DIR / "0035_voluntary_handover.sql").read_text())  # also a no-op
+        cols = {
+            (t, name): (nullable, default)
+            for t, name, nullable, default in c.execute(
+                "SELECT table_name, column_name, is_nullable, column_default"
+                " FROM information_schema.columns WHERE column_name IN"
+                " ('background_subagents', 'previous_agent_id', 'handover_notice_epoch')"
+            )
+        }
+        fk = c.execute(
+            "SELECT confdeltype FROM pg_constraint WHERE conrelid = 'session_leaders'::regclass"
+            " AND contype = 'f' AND conkey = ARRAY["
+            " (SELECT attnum FROM pg_attribute WHERE attrelid = 'session_leaders'::regclass"
+            " AND attname = 'previous_agent_id')]"
+        ).fetchone()
+    assert cols[("agent_status", "background_subagents")][0] == "NO"
+    assert "'{}'" in cols[("agent_status", "background_subagents")][1]
+    assert cols[("session_leaders", "previous_agent_id")] == ("YES", None)
+    assert cols[("sessions", "handover_notice_epoch")] == ("NO", "0")
+    assert fk == ("n",)  # ON DELETE SET NULL
+
+
+def test_0035_backfills_notice_epoch(empty_dsn, tmp_path):
+    _before(tmp_path, "0032")
+    run_migrations(empty_dsn, tmp_path)
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        c.execute("INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), 'led', '{}')")
+        c.execute("INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), 'bare', '{}')")
+        c.execute(
+            "INSERT INTO agents (id, session_id, ordinal, pod_name)"
+            " SELECT gen_random_uuid(), id, 0, 'p0' FROM sessions WHERE slug = 'led'"
+        )
+        c.execute(
+            "INSERT INTO session_leaders (session_id, agent_id, epoch, since, reason)"
+            " SELECT s.id, a.id, 7, now(), 'test' FROM sessions s JOIN agents a"
+            " ON a.session_id = s.id WHERE s.slug = 'led'"
+        )
+    assert "0035" in run_migrations(empty_dsn)
+    with psycopg.connect(empty_dsn) as c:
+        rows = c.execute(
+            "SELECT slug, handover_notice_epoch FROM sessions ORDER BY slug"
+        ).fetchall()
+    assert rows == [("bare", 0), ("led", 7)]
+
+
+def test_0035_strips_leader_lease(empty_dsn, tmp_path):
+    _before(tmp_path, "0035")
+    run_migrations(empty_dsn, tmp_path)
+    spec = {"max_replicas": 3, "leader_lease_seconds": 1800}
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        c.execute(
+            "INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), 'old', %s)",
+            (json.dumps(spec),),
+        )
+        c.execute(
+            "INSERT INTO presets (id, name, spec) VALUES (gen_random_uuid(), 'old', %s)",
+            (json.dumps(spec),),
+        )
+    assert run_migrations(empty_dsn) == ["0035", "0036"]
+
+    def read():
+        with psycopg.connect(empty_dsn) as c:
+            return (
+                c.execute("SELECT spec FROM sessions WHERE slug = 'old'").fetchone()[0],
+                c.execute("SELECT spec FROM presets WHERE name = 'old'").fetchone()[0],
+            )
+
+    assert read() == ({"max_replicas": 3}, {"max_replicas": 3})
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        c.execute((MIGRATIONS_DIR / "0035_voluntary_handover.sql").read_text())  # re-run
+    assert read() == ({"max_replicas": 3}, {"max_replicas": 3})
+
+
+def test_0035_notice_kind_handover(empty_dsn):
+    run_migrations(empty_dsn)
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        c.execute("INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), 's', '{}')")
+        c.execute(
+            "INSERT INTO messages (session_id, text, notice)"
+            " SELECT id, 't', 'handover' FROM sessions"
+        )
+        with pytest.raises(psycopg.errors.CheckViolation):
+            c.execute(
+                "INSERT INTO messages (session_id, text, notice)"
+                " SELECT id, 't', 'bogus' FROM sessions"
+            )
+        assert c.execute("SELECT notice FROM messages").fetchall() == [("handover",)]
