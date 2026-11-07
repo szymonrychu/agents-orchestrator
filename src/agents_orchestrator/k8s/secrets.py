@@ -569,6 +569,71 @@ async def collect_bound(conn: psycopg.AsyncConnection, kube: KubeApi, namespace:
     return dropped
 
 
+async def releasable(conn: psycopg.AsyncConnection) -> list[tuple[int, int]]:
+    """(proposal id, revision) of every `staged` reservation that must go: its proposal is no
+    longer `open` (or gone), or its revision is no longer the current one. Neither ever becomes
+    open and current again, so releasing them never races an apply."""
+    cur = await conn.execute(
+        "SELECT DISTINCT s.proposal_id, s.revision FROM change_proposal_secrets s"
+        " LEFT JOIN change_proposals p ON p.id = s.proposal_id"
+        " WHERE s.state = 'staged'"
+        " AND (p.id IS NULL OR p.status <> 'open' OR s.revision <> p.revision)"
+        " ORDER BY s.proposal_id, s.revision"
+    )
+    return [(r[0], r[1]) for r in await cur.fetchall()]
+
+
+ORPHAN_DEPTH = 3  # versions probed above the highest one a row holds
+
+
+async def reap_unreserved(
+    conn: psycopg.AsyncConnection, kube: KubeApi, namespace: str, *, depth: int = ORPHAN_DEPTH
+) -> list[str]:
+    """Delete staged Secrets whose reservation never committed; returns the names deleted.
+
+    A create or revise that rolls back after `stage_secret` wrote its Secret, and could not
+    delete it (or died first), leaves an immutable Secret no row names. The Role cannot list
+    Secrets, so they are found by their deterministic names: for each variable a row or a spec
+    knows, under its lock (a stage in flight holds it until its row commits), the `depth`
+    versions above the highest stored or reserved one are deleted. Under the lock no row names
+    them, so they are neither current, reserved, nor promoted (a promoted Secret keeps its
+    proposal label but is current); a name a session references is skipped all the same. A
+    missing Secret is fine; a failed delete is logged and retried on the next reap.
+    """
+    cur = await conn.execute(
+        "SELECT preset_id, name FROM preset_secrets"
+        " UNION SELECT preset_id, name FROM change_proposal_secrets"
+        " UNION SELECT p.id, e.key FROM presets p, jsonb_each(CASE"
+        " WHEN jsonb_typeof(p.spec->'env') = 'object' THEN p.spec->'env' ELSE '{}'::jsonb END) e"
+        " WHERE e.value->'protected' = 'true'::jsonb"
+        " UNION SELECT c.target_id::uuid, substr(i.path, 5) FROM change_proposal_items i"
+        " JOIN change_proposals c ON c.id = i.proposal_id"
+        " WHERE c.kind = 'preset' AND i.secret IS NOT NULL AND i.path LIKE 'env.%'"
+        " ORDER BY 1, 2"
+    )
+    dropped: list[str] = []
+    for preset_id, name in await cur.fetchall():
+        async with conn.transaction():
+            await _lock(conn, preset_id, name)
+            top = await _next_version(conn, preset_id, name) - 1
+            referenced = await _session_referenced(conn)
+            for version in range(top + 1, top + 1 + depth):
+                full = secret_name(preset_id, name, version)
+                if full in referenced:
+                    continue
+                try:
+                    gone = await kube.delete("Secret", namespace, full)
+                except KubeError as exc:
+                    log.warning(
+                        "orphan secret reap failed: %s v%d (%s)", name, version, type(exc).__name__
+                    )
+                    continue
+                if gone:
+                    log.info("orphan staged secret reaped: %s v%d", name, version)
+                    dropped.append(full)
+    return dropped
+
+
 # ----------------------------------------------------- webhook credentials (superleader-crud D9)
 
 

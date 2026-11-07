@@ -330,3 +330,26 @@ async def test_release_racing_a_bind_keeps_the_bound_secret(pool, kube, canary):
         assert await releasing == []
     assert staged in secret_objects(kube)  # the session-bound version survives
     assert await reservations(pool, pid) == [("TOK", 1, 7, 1, "bound")]
+
+
+async def test_reap_deletes_unreserved_versions_up_to_the_probe_depth(pool, kube, canary):
+    """Orphans of rolled-back stages sit above every row: the `ORPHAN_DEPTH` versions above the
+    highest stored or reserved one are deleted for each known variable, a spec-declared one with
+    no row included; the live and the reserved versions stay."""
+    pid = await make_preset(pool)
+    live = (await put(pool, kube, pid, "TOK", canary)).version
+    staged = await stage(pool, kube, pid, "TOK", canary)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE presets SET spec = %s WHERE id = %s",
+            (Jsonb({"env": {"NEW": {"protected": True}, "PLAIN": {"value": "x"}}}), pid),
+        )
+    top = 2 + store.ORPHAN_DEPTH
+    orphans = [store.secret_name(pid, "TOK", 3), store.secret_name(pid, "TOK", top)]
+    orphans.append(store.secret_name(pid, "NEW", 1))
+    beyond = store.secret_name(pid, "TOK", top + 1)
+    for full in [*orphans, beyond]:
+        await store._write(kube, NS, full, SecretStr(canary), {store.PROPOSAL_LABEL: "9"})
+    async with pool.connection() as conn:
+        assert sorted(await store.reap_unreserved(conn, kube, NS)) == sorted(orphans)
+    assert set(secret_objects(kube)) == {store.secret_name(pid, "TOK", live), staged, beyond}

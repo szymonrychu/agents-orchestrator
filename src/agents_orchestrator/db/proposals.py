@@ -343,10 +343,18 @@ async def _load(
     return [Proposal(**row, revisions=by_proposal.get(row["id"], [])) for row in rows]
 
 
-async def lock(conn: psycopg.AsyncConnection, proposal_id: int) -> Proposal | None:
-    """SELECT ... FOR UPDATE inside the caller's transaction; the current revision only."""
+async def lock(
+    conn: psycopg.AsyncConnection, proposal_id: int, *, skip_locked: bool = False
+) -> Proposal | None:
+    """SELECT ... FOR UPDATE inside the caller's transaction; the current revision only.
+
+    With `skip_locked`, a row another transaction holds reads as None instead of being waited on
+    (the sweeper leaves a proposal under review to that review)."""
+    tail = " SKIP LOCKED" if skip_locked else ""
     rows = await _all(
-        conn, f"SELECT {_COLS} FROM change_proposals WHERE id = %s FOR UPDATE", (proposal_id,)
+        conn,
+        f"SELECT {_COLS} FROM change_proposals WHERE id = %s FOR UPDATE{tail}",
+        (proposal_id,),
     )
     found = await _load(conn, rows, current_only=True)
     return found[0] if found else None
@@ -455,11 +463,23 @@ async def is_expired(conn: psycopg.AsyncConnection, proposal_id: int) -> bool:
     return bool(row and row["gone"])
 
 
-async def due(conn: psycopg.AsyncConnection, now: datetime) -> list[int]:
-    """Active proposals whose expires_at has passed `now`."""
+async def due(conn: psycopg.AsyncConnection, now: datetime | None = None) -> list[int]:
+    """Active proposals whose expires_at has passed `now`, by default the database clock (wall
+    time, as `is_expired` reads it)."""
     rows = await _all(
         conn,
-        "SELECT id FROM change_proposals WHERE status = ANY(%s) AND expires_at <= %s ORDER BY id",
+        "SELECT id FROM change_proposals WHERE status = ANY(%s)"
+        " AND expires_at <= COALESCE(%s::timestamptz, clock_timestamp()) ORDER BY id",
         (list(ACTIVE), now),
+    )
+    return [r["id"] for r in rows]
+
+
+async def ids_in(conn: psycopg.AsyncConnection, kind: str, statuses: Sequence[str]) -> list[int]:
+    """The ids of the proposals of `kind` in `statuses`, oldest first."""
+    rows = await _all(
+        conn,
+        "SELECT id FROM change_proposals WHERE kind = %s AND status = ANY(%s) ORDER BY id",
+        (kind, list(statuses)),
     )
     return [r["id"] for r in rows]

@@ -25,6 +25,7 @@ from agents_orchestrator.api import (
     messages,
     presets,
     proposal_routes,
+    proposal_sweep,
     secret_store,
     session_labels,
     sessions,
@@ -72,12 +73,15 @@ def create_app(
         await listener.start()
         sweeper = asyncio.create_task(autoclose.sweep(app.state.pool, settings), name="autoclose")
         app.state.autoclose_task = sweeper
+        proposal_sweeper = asyncio.create_task(proposal_sweep.sweep(app), name="proposal_sweep")
+        app.state.proposal_sweep_task = proposal_sweeper
         try:
             yield
         finally:
-            sweeper.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await sweeper
+            for task in (sweeper, proposal_sweeper):
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
             await listener.stop()
             await workspace.close_client(app)
             await chat.close_client(app)

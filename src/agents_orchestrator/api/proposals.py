@@ -352,6 +352,12 @@ async def withdraw(
     return await get_view(conn, settings, proposal_id, proposer=caller.id)
 
 
+async def live_fingerprint(conn, preset: presets_repo.Preset) -> str:
+    """`fingerprint_preset` of the preset row as given and its live secret versions now."""
+    versions = {n: m.version for n, m in (await _metas(conn, preset.id)).items()}
+    return fingerprint_preset(preset, versions)
+
+
 async def _stale(conn, proposal: repo.Proposal) -> bool:
     """Read-only (never changes state): the live target differs from the current revision's."""
     if proposal.status not in repo.ACTIVE or proposal.kind != "preset":
@@ -360,8 +366,7 @@ async def _stale(conn, proposal: repo.Proposal) -> bool:
     preset = await presets_repo.get(conn, uuid.UUID(proposal.target_id))
     if preset is None:
         return True
-    versions = {n: m.version for n, m in (await _metas(conn, preset.id)).items()}
-    return fingerprint_preset(preset, versions) != current.fingerprint
+    return await live_fingerprint(conn, preset) != current.fingerprint
 
 
 async def _view(conn, proposal: repo.Proposal) -> schemas.ProposalView:
@@ -488,11 +493,19 @@ async def _notify(conn, p: repo.Proposal, text: str) -> None:
         log.info("proposal %d: proposer session gone, no notice", p.id)
 
 
-async def _close(conn, p: repo.Proposal, to: str, error: ApiError) -> _Done:
-    """Mark the proposal `to` (stale, expired, target_gone), notify, and answer `error` once the
-    transaction committed; its staged values are released after the commit."""
-    await repo.transition(conn, p.id, from_states=repo.ACTIVE, to=to, outcome=to)
+async def mark_closed(
+    conn, p: repo.Proposal, to: str, *, from_states: tuple[str, ...] = repo.ACTIVE
+) -> None:
+    """Move the proposal to `to` (stale, expired, target_gone) and queue the proposer's one-line
+    notice, in the caller's transaction. Status-guarded: NotInState when another writer won."""
+    await repo.transition(conn, p.id, from_states=from_states, to=to, outcome=to)
     await _notify(conn, p, f"{_head(p)} {_CLOSED_TEXT[to].format(id=p.id)}")
+
+
+async def _close(conn, p: repo.Proposal, to: str, error: ApiError) -> _Done:
+    """`mark_closed`, then answer `error` once the transaction committed; its staged values are
+    released after the commit."""
+    await mark_closed(conn, p, to)
     return _Done(error=error, release=[p])
 
 
@@ -593,16 +606,13 @@ async def _stale_others(conn, p: repo.Proposal) -> list[repo.Proposal]:
     once this commits (the review its fingerprint mismatch, the revise a new base)."""
     out = []
     for other_id in await repo.active_on_target(conn, p.kind, p.target_id, exclude=p.id, lock=True):
+        other = await repo.lock(conn, other_id)
+        if other is None:  # locked above, and proposals are never deleted
+            raise RuntimeError(f"proposal {other_id} vanished while locked")
         try:
-            await repo.transition(
-                conn, other_id, from_states=("open",), to="stale", outcome="stale"
-            )
+            await mark_closed(conn, other, "stale", from_states=("open",))
         except repo.NotInState:
             continue  # rework or stale already: re-based on its next revision anyway
-        other = await repo.lock(conn, other_id)
-        if other is None:  # locked above and never deleted by a transition
-            raise RuntimeError(f"proposal {other_id} vanished while locked")
-        await _notify(conn, other, f"{_head(other)} {_CLOSED_TEXT['stale'].format(id=other.id)}")
         out.append(other)
     return out
 
@@ -637,10 +647,8 @@ async def _review_locked(
         return await _close(
             conn, p, "target_gone", ApiError(409, "target_gone", "the preset no longer exists")
         )
-    if p.status == "open":
-        versions = {n: m.version for n, m in (await _metas(conn, preset.id)).items()}
-        if fingerprint_preset(preset, versions) != current.fingerprint:
-            return await _close(conn, p, "stale", _stale_error())
+    if p.status == "open" and await live_fingerprint(conn, preset) != current.fingerprint:
+        return await _close(conn, p, "stale", _stale_error())
     done = _Done(release=[p])
     if "rework" in verdicts:
         to = "rework"
