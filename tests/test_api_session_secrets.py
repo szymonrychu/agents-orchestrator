@@ -47,6 +47,7 @@ async def test_create_refuses_a_protected_variable_with_no_value(pool, dsn):
         r = await http.post(C, json={"preset_id": str(preset.id), "slug": "unset"})
         assert_error(r, 422, "secret_unset")
         assert "API_KEY" in r.json()["error"]["message"]
+        assert r.json()["error"]["fields"] == ["env.API_KEY"]
         assert (await http.get(C)).json() == []
 
 
@@ -54,6 +55,7 @@ async def test_create_without_a_preset_refuses_protected_variables(pool, dsn):
     async with app_client(pool, dsn) as http:
         r = await http.post(C, json={"slug": "raw", "spec": {"env": ENV}})
         assert_error(r, 422, "secret_unset")
+        assert r.json()["error"]["fields"] == ["env.API_KEY"]
 
 
 async def test_create_snapshots_the_current_secret_version(pool, dsn):

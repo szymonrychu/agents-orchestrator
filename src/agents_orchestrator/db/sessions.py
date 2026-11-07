@@ -171,6 +171,16 @@ async def get(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Session |
     return rows[0] if rows else None
 
 
+async def get_stored(
+    conn: psycopg.AsyncConnection, session_id: uuid.UUID
+) -> tuple[Session, dict[str, Any]] | None:
+    """The session and its spec JSONB as stored (the `expected` of `replace_spec`)."""
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute("SELECT * FROM sessions WHERE id = %s", (session_id,))
+        row = await cur.fetchone()
+    return None if row is None else (_from_row(row), row["spec"])
+
+
 async def get_by_slug(conn: psycopg.AsyncConnection, slug: str) -> Session | None:
     rows = await _fetch(conn, "SELECT * FROM sessions WHERE slug = %s", (slug,))
     return rows[0] if rows else None
@@ -318,15 +328,21 @@ async def request_delete(
     return existing
 
 
-async def _lock_active(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Session:
+async def _lock_row(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> dict[str, Any]:
     """Lock the session row FOR UPDATE inside the caller's transaction; the row must exist and
-    be active."""
-    rows = await _fetch(conn, "SELECT * FROM sessions WHERE id = %s FOR UPDATE", (session_id,))
-    if not rows:
+    be active. Returns the row as stored."""
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute("SELECT * FROM sessions WHERE id = %s FOR UPDATE", (session_id,))
+        row = await cur.fetchone()
+    if row is None:
         raise SessionNotFound(str(session_id))
-    if rows[0].desired != "active":
+    if row["desired"] != "active":
         raise SessionBeingDeleted(str(session_id))
-    return rows[0]
+    return row
+
+
+async def _lock_active(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Session:
+    return _from_row(await _lock_row(conn, session_id))
 
 
 CLOSE_KINDS = ("self", "inactivity")
@@ -746,6 +762,53 @@ async def set_permission_mode(
                 preset_written = True
         await _notify(conn, session_id)
     return rows[0], preset_written
+
+
+class SpecChanged(Exception):
+    """The stored spec is no longer the one the caller validated against."""
+
+
+@dataclass(frozen=True)
+class LockedSession:
+    spec: dict[str, Any]  # the stored JSONB, as stored
+    preset_id: uuid.UUID | None
+    secret_versions: dict[str, str]
+
+
+async def replace_spec(
+    conn: psycopg.AsyncConnection,
+    session_id: uuid.UUID,
+    expected: dict[str, Any],
+    spec: SessionSpec,
+    recheck: Callable[[LockedSession], Awaitable[None]],
+) -> tuple[Session, bool]:
+    """Replace the whole session spec in one transaction, under the row lock.
+
+    SessionNotFound when the row is absent, SessionBeingDeleted unless it is active, SpecChanged
+    when the stored JSONB is not `expected` (dict equality, not a parsed model). Then
+    `recheck(locked)` runs on the fresh row; it may raise, and nothing is written then. Lock
+    order is the session row first; `recheck` may then take `presets` FOR SHARE (sessions, then
+    presets, as `set_init_scripts`). A spec that differs from the stored one is written with
+    generation + 1 and NOTIFY session_changed; an equal one writes and notifies nothing.
+    Returns the row and whether it was written.
+    """
+    async with conn.transaction():
+        row = await _lock_row(conn, session_id)
+        if row["spec"] != expected:
+            raise SpecChanged(str(session_id))
+        # decided before the recheck, which gets the stored dict itself
+        dumped = _dump(spec)
+        unchanged = dumped.obj == row["spec"]
+        await recheck(LockedSession(row["spec"], row["preset_id"], row["secret_versions"] or {}))
+        if unchanged:
+            return _from_row(row), False
+        rows = await _fetch(
+            conn,
+            "UPDATE sessions SET spec = %s, generation = generation + 1 WHERE id = %s RETURNING *",
+            (dumped, session_id),
+        )
+        await _notify(conn, session_id)
+    return rows[0], True
 
 
 async def set_replicas(
