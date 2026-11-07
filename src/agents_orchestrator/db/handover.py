@@ -21,7 +21,11 @@ from agents_orchestrator.db.sessions import _sweep_each
 # subagent lifecycle rows, which the renderer needs for "In flight" and the launching prompt.
 # The body starts after the latest `session_cleared` of that wrapper session (Q13: an ex-leader
 # is cleared and keeps its wrapper session, so its pre-clear history is not handed over again);
-# the clear row itself is left out.
+# the clear row itself is left out. A clear counts only when the DB ingested it (`created_at`, the
+# DB clock) at or before the change (`until`, also the DB clock): the clear this very change
+# triggers is ingested after it, whatever the pod clock says. Comparing the clear's own `ts` (pod
+# clock) with `until` would let a lagging pod clock sort that clear before the change and wipe
+# the whole body. Only the clear bound uses the DB clock; the body bound `ts <= until` is kept.
 _TRANSCRIPT_ROWS = """
     WITH ws AS (
         SELECT w.wrapper_session_id FROM events w
@@ -29,7 +33,7 @@ _TRANSCRIPT_ROWS = """
         ORDER BY w.id DESC LIMIT 1),
     cleared AS (
         SELECT coalesce(max(c.id), 0) AS id FROM events c
-        WHERE c.agent_id = %(agent)s AND c.ts <= %(until)s AND c.type = 'session_cleared'
+        WHERE c.agent_id = %(agent)s AND c.created_at <= %(until)s AND c.type = 'session_cleared'
           AND c.wrapper_session_id = (SELECT wrapper_session_id FROM ws))
     SELECT e.id, e.ts, e.type, e.data FROM events e
     WHERE e.agent_id = %(agent)s AND e.ts <= %(until)s
@@ -51,8 +55,8 @@ async def transcript_rows(
     conn: psycopg.AsyncConnection, agent_id: uuid.UUID, until: datetime
 ) -> list[dict[str, Any]]:
     """Events (`id`, `ts`, `type`, `data`) of the agent's latest wrapper session with an event at
-    or before `until`, up to `until`, after that session's latest `session_cleared` at or before
-    `until`, main chain only, ascending id."""
+    or before `until`, up to `until`, after that session's latest `session_cleared` ingested at or
+    before `until` (DB clock), main chain only, ascending id."""
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(_TRANSCRIPT_ROWS, {"agent": agent_id, "until": until})
         return await cur.fetchall()
