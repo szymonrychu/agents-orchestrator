@@ -1,8 +1,10 @@
 """Admin routes of the agent port (`/agent/v1/admin`), for a superleader session (D3, D10).
 
-One gate covers the whole router: `require_superleader` (a live agent of a session with
-`session_messaging` set, whoever created the session). Every call is audited without values
-or bodies (D15): one log line and one `events` row the UI feed shows.
+One gate covers `router`: `require_superleader` (a live agent of a session with
+`session_messaging` set, whoever created the session). `session_router` (GET and PATCH
+`/sessions/{slug}`) carries `require_session_editor` on each route instead, which also admits
+any other session's leader on its own slug. Every admitted call is audited without values or bodies
+(D15): one log line and one `events` row the UI feed shows.
 """
 
 from __future__ import annotations
@@ -21,9 +23,9 @@ from starlette.responses import Response as StarletteResponse
 
 from agents_orchestrator.api import messages as messages_api
 from agents_orchestrator.api import presets as presets_api
-from agents_orchestrator.api import schemas
+from agents_orchestrator.api import schemas, session_spec
 from agents_orchestrator.api import sessions as sessions_api
-from agents_orchestrator.api.agent import Caller
+from agents_orchestrator.api.agent import Caller, _leads
 from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.sessions import Cfg, Pool, Usage
 from agents_orchestrator.db import agents as agents_repo
@@ -39,6 +41,15 @@ ADMIN_PREFIX = "/agent/v1/admin"
 _WRAPPER_SESSION = "admin"  # the events key of audit rows, which no wrapper session uses
 
 
+def _admit(
+    request: Request, agent: agents_repo.Agent, session: sessions_repo.Session
+) -> sessions_repo.Session:
+    """Hand the admitted caller to the route and the audit."""
+    request.state.admin_caller = (agent, session)
+    request.state.admin_secrets = []
+    return session
+
+
 async def require_superleader(request: Request, agent: Caller, pool: Pool) -> sessions_repo.Session:
     """The caller's session; 403 `not_superleader` unless its spec enables `session_messaging`.
     Who created the session does not matter."""
@@ -47,12 +58,30 @@ async def require_superleader(request: Request, agent: Caller, pool: Pool) -> se
     assert session is not None
     if not session.spec.session_messaging:
         raise ApiError(403, "not_superleader", "admin routes need a superleader session")
-    request.state.admin_caller = (agent, session)
-    request.state.admin_secrets = []
-    return session
+    return _admit(request, agent, session)
+
+
+async def require_session_editor(
+    request: Request, agent: Caller, pool: Pool, slug: str
+) -> sessions_repo.Session:
+    """The caller's session. A superleader session passes for any slug (the route resolves the
+    target with _target). Any other session passes only for its own slug (else 403
+    not_superleader, before any lookup, so another slug and an unknown one answer alike) and
+    only for its leader (else 403 not_leader). Sets admin_caller and admin_secrets like
+    require_superleader."""
+    async with pool.connection() as conn:
+        session = await sessions_repo.get(conn, agent.session_id)
+        assert session is not None
+        if not session.spec.session_messaging:
+            if slug != session.slug:
+                raise session_spec.not_superleader()
+            if not await _leads(conn, agent, session):
+                raise session_spec.not_leader()
+    return _admit(request, agent, session)
 
 
 Superleader = Depends(require_superleader)
+SessionEditor = Depends(require_session_editor)
 
 
 def caller_of(request: Request):
@@ -129,6 +158,9 @@ class AdminRoute(APIRoute):
 router = APIRouter(
     prefix=ADMIN_PREFIX, tags=["admin"], route_class=AdminRoute, dependencies=[Superleader]
 )
+# The routes with {slug} carry the editor gate themselves: it reads the path parameter `slug`, so
+# a router-level dependency would make it a required query parameter on any route without one.
+session_router = APIRouter(prefix=ADMIN_PREFIX, tags=["admin"], route_class=AdminRoute)
 
 
 def touched(request: Request, *names: str) -> None:
@@ -151,6 +183,7 @@ ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("POST", f"{ADMIN_PREFIX}/presets/{{ref}}/copy"): "preset",
     ("PUT", f"{ADMIN_PREFIX}/presets/{{ref}}/secrets/{{name}}"): "preset",
     ("GET", f"{ADMIN_PREFIX}/sessions/{{slug}}"): "session",
+    ("PATCH", f"{ADMIN_PREFIX}/sessions/{{slug}}"): "session",
     ("POST", f"{ADMIN_PREFIX}/sessions"): "create",
     ("DELETE", f"{ADMIN_PREFIX}/sessions/{{slug}}"): "session",
     ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/restart"): "session",
@@ -260,13 +293,40 @@ async def _target(conn, slug: str, caller: sessions_repo.Session) -> sessions_re
     return session
 
 
-@router.get("/sessions/{slug}", response_model=schemas.SessionView)
+@session_router.get(
+    "/sessions/{slug}", response_model=schemas.SessionView, dependencies=[SessionEditor]
+)
 async def get_session(
     slug: str, request: Request, pool: Pool, settings: Cfg
 ) -> schemas.SessionView:
+    """A superleader reads its own or a manageable session; any other leader its own."""
     _, caller = caller_of(request)
     async with pool.connection() as conn:
         return await sessions_api.one_view(conn, await _target(conn, slug, caller), settings)
+
+
+@session_router.patch(
+    "/sessions/{slug}", response_model=schemas.SessionView, dependencies=[SessionEditor]
+)
+async def patch_session(
+    slug: str, body: schemas.SessionSpecPatch, request: Request, pool: Pool, settings: Cfg
+) -> schemas.SessionView:
+    """RFC 7396 merge patch of a live session's spec: a superleader on its own or a manageable
+    session, any other leader on its own. The source preset is never written."""
+    agent, caller = caller_of(request)
+    superleader = bool(caller.spec.session_messaging)
+    async with pool.connection() as conn:
+        target = await _target(conn, slug, caller) if superleader else caller
+        return await session_spec.patch(
+            request,
+            conn,
+            settings,
+            target,
+            body,
+            caller=caller,
+            caller_agent=agent,
+            superleader=superleader,
+        )
 
 
 @router.post("/sessions", status_code=201, response_model=schemas.SessionView)

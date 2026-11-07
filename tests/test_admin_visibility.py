@@ -19,6 +19,7 @@ PRESET_BODY = {"name": "hidden", "spec": {}}
 BODIES = {
     ("PUT", "/agent/v1/admin/presets/{ref}"): PRESET_BODY,
     ("PATCH", "/agent/v1/admin/presets/{ref}"): {},
+    ("PATCH", "/agent/v1/admin/sessions/{slug}"): {"spec": {}},
     ("PUT", "/agent/v1/admin/presets/{ref}/secrets/{name}"): {"value": "v"},
 }
 
@@ -27,7 +28,7 @@ def own_routes() -> list[tuple[str, str]]:
     prefixes = tuple(admin.ADMIN_PREFIX + v[0] for v in admin_relay.SERVICES.values())
     return sorted(
         (m, r.path)
-        for r in admin.router.routes
+        for r in [*admin.router.routes, *admin.session_router.routes]
         if not r.path.startswith(prefixes)
         for m in r.methods - {"HEAD", "OPTIONS"}
     )
