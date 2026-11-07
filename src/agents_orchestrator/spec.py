@@ -682,7 +682,7 @@ class SessionSpec(BaseModel):
     session_messaging: bool | None = Field(default=None, strict=True)
     # Full read-write Kubernetes access in every namespace for the agent pods; refused until
     # ORCH_KUBE_ACCESS_SERVICE_ACCOUNT is set. Sparse: unset is not stored or dumped in a preset.
-    kube_access: bool | None = Field(default=None, strict=True)
+    kube_cluster_access: bool | None = Field(default=None, strict=True)
     # Usage ceilings that refuse a session start or scale-up (see api/usage_gate.py). Sparse:
     # unset is not stored or dumped in a preset.
     usage_quota: UsageQuota | None = None
@@ -690,7 +690,8 @@ class SessionSpec(BaseModel):
     # unset is not stored or dumped in a preset.
     inactivity: InactivityLimits | None = None
     # Privileged Docker-in-Docker sidecar (docker build/run, kind); refused until ORCH_DOCKER_IMAGE
-    # is set. The three sizes tune the sidecar and need docker: true. Sparse like kube_access.
+    # is set. The three sizes tune the sidecar and need docker: true. Sparse like
+    # kube_cluster_access.
     docker: bool | None = Field(default=None, strict=True)
     docker_storage: Quantity | None = None
     docker_cpu: Quantity | None = None
@@ -973,9 +974,9 @@ def validate_spec(spec: SessionSpec, settings: Settings, stored: SessionSpec | N
     """Validate a spec.
 
     `stored` stays for the preset PUT: a model, effort or image that has since left the settings
-    lists, and a cache, kube_access or docker whose setting has since been unset, is accepted only
-    when unchanged from the stored preset spec. Scheduling a session passes no `stored` and
-    validates fully.
+    lists, and a cache, kube_cluster_access or docker whose setting has since been unset,
+    is accepted only when unchanged from the stored preset spec. Scheduling a session
+    passes no `stored` and validates fully.
     """
     from any_mcp.config import AnyMcpConfig
     from pydantic import ValidationError
@@ -1010,9 +1011,9 @@ def validate_spec(spec: SessionSpec, settings: Settings, stored: SessionSpec | N
     ):
         errors.append("workspace cache is not configured (ORCH_CACHE_S3_BUCKET is unset)")
     if (
-        spec.kube_access
+        spec.kube_cluster_access
         and not settings.kube_access_available
-        and (stored is None or spec.kube_access != stored.kube_access)
+        and (stored is None or spec.kube_cluster_access != stored.kube_cluster_access)
     ):
         errors.append(
             "Kubernetes access is not configured (ORCH_KUBE_ACCESS_SERVICE_ACCOUNT is unset)"

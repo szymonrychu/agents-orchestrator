@@ -87,7 +87,7 @@ async def rig(pool, dsn):
     )  # fmt: skip
     r.vis = str(await add_preset(pool, True))
     r.hid = str(await add_preset(pool, False))
-    r.priv = str(await add_preset(pool, True, {"kube_access": True}))
+    r.priv = str(await add_preset(pool, True, {"kube_cluster_access": True}))
     seed(r)
 
     async def call(method, path, **kw):
@@ -741,7 +741,7 @@ async def test_relay_safe_preset_still_forwarded(rig, service, method, template)
 
 
 async def test_relay_hidden_privileged_is_404(rig):
-    hidden = str(await add_preset(rig.pool, False, {"kube_access": True}))
+    hidden = str(await add_preset(rig.pool, False, {"kube_cluster_access": True}))
     body = _body_for(rig, "webhook", "POST", "/endpoints", hidden)
     r = await rig.call("POST", relay_url("webhook", "/endpoints"), json=body)
     assert_error(r, 404, "not_found")

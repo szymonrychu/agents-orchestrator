@@ -69,8 +69,8 @@ def agent_identity(settings: Settings) -> dict[str, Any]:
 
 
 def kube_access_granted(spec: SessionSpec, settings: Settings) -> bool:
-    """A kube_access spec gets the privileged identity only while the setting is set (D3)."""
-    return bool(spec.kube_access and settings.kube_access_service_account)
+    """A kube_cluster_access spec gets the privileged identity only while the setting is set."""
+    return bool(spec.kube_cluster_access and settings.kube_access_service_account)
 
 
 DOCKER_SOCKET_DIR = "/var/run/docker"

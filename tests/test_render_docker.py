@@ -225,10 +225,10 @@ def test_docker_host_in_passthrough_iff_docker_rendered() -> None:
 
 
 def test_passthrough_keeps_kube_entries_and_stays_sorted() -> None:
-    both = passthrough({"docker": True, "kube_access": True})
+    both = passthrough({"docker": True, "kube_cluster_access": True})
     assert {"DOCKER_HOST", "KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT"} <= set(both)
     assert both == sorted(both)
-    assert "DOCKER_HOST" not in passthrough({"kube_access": True})
+    assert "DOCKER_HOST" not in passthrough({"kube_cluster_access": True})
 
 
 def test_docker_jobs_stay_docker_free() -> None:

@@ -308,7 +308,7 @@ class MetaCache(BaseModel):
     max_bytes: int
 
 
-class MetaKubeAccess(BaseModel):
+class MetaKubeClusterAccess(BaseModel):
     available: bool
 
 
@@ -373,7 +373,7 @@ class Meta(BaseModel):
     caps: MetaCaps
     discard_hook: Literal["none", "command", "url"]
     cache: MetaCache
-    kube_access: MetaKubeAccess
+    kube_cluster_access: MetaKubeClusterAccess
     docker: MetaDocker
     hook_events: list[MetaHookEvent]
     permission_modes: list[MetaPermissionMode]

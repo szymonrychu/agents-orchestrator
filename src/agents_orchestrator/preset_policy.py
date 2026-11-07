@@ -4,7 +4,7 @@ An agent (the superleader) may change these preset fields only toward safe;
 anything else is refused. Compared against the stored spec, with absent, None
 and false equal:
 
-- kube_access, session_messaging, docker: may be turned off or removed, never on.
+- kube_cluster_access, session_messaging, docker: may be turned off or removed, never on.
 - discard_hook_url: may be removed, never set to a value other than the stored one.
 - wrapper.permission_mode: unset means bypassPermissions; may become "auto",
   never any other change.
@@ -22,12 +22,12 @@ import copy
 from collections.abc import Iterable
 from typing import Any
 
-GRANTS: tuple[str, ...] = ("kube_access", "session_messaging", "docker", "discard_hook_url")
+GRANTS: tuple[str, ...] = ("kube_cluster_access", "session_messaging", "docker", "discard_hook_url")
 DOCKER_SIZES: tuple[str, ...] = ("docker_storage", "docker_cpu", "docker_memory")
 # discard_hook_url is human-only to set but grants no reach to a started session.
-PRIVILEGED: tuple[str, ...] = ("kube_access", "session_messaging", "docker")
+PRIVILEGED: tuple[str, ...] = ("kube_cluster_access", "session_messaging", "docker")
 HUMAN_ONLY: tuple[str, ...] = (
-    "kube_access",
+    "kube_cluster_access",
     "session_messaging",
     "docker",
     "discard_hook_url",

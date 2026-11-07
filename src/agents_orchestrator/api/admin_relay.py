@@ -16,10 +16,10 @@ and clone. Lists are filtered (a non-list answer is 502 `upstream_shape`) and a 
 run of a hidden preset is 404. An object without a preset counts as hidden. Run objects are mapped
 to their preset through one upstream `GET /schedules`.
 
-A preset with `kube_access`, `session_messaging` or `docker` on is a valid target of a relayed
-trigger object (endpoint, schedule, room, rule) as long as the superleader may manage it: the
-superleader starts sessions from such presets, so it may point triggers at them. Editing a
-privileged preset itself stays human-only (`api/presets.py`).
+A preset with `kube_cluster_access`, `session_messaging` or `docker` on is a valid target of a
+relayed trigger object (endpoint, schedule, room, rule) as long as the superleader may
+manage it: the superleader starts sessions from such presets, so it may point triggers at them.
+Editing a privileged preset itself stays human-only (`api/presets.py`).
 
 Chat rooms are the exception (user decision Q1, matrix-integration, 2026-11-04): the superleader
 manages ALL rooms whatever their preset, so the room list, room settings and room rules carry no

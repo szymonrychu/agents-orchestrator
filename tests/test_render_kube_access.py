@@ -1,4 +1,4 @@
-"""A kube_access session's agent pods run as the privileged ServiceAccount (D3, D5)."""
+"""A kube_cluster_access session's agent pods run as the privileged ServiceAccount (D3, D5)."""
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ def jobs_of(session: Any, settings: Any) -> list[dict[str, Any]]:
 
 
 def test_kube_access_pod_identity() -> None:
-    objs = render.render_session(make_session(kube_access=True), make_settings(), TOKENS)
+    objs = render.render_session(make_session(kube_cluster_access=True), make_settings(), TOKENS)
     pod = pod_of(objs)
     assert pod["serviceAccountName"] == PRIVILEGED
     assert pod["automountServiceAccountToken"] is True
@@ -66,7 +66,7 @@ def test_kube_access_pod_identity() -> None:
         {"max_replicas": 3},
         {"static": True, "replicas": 2, "max_replicas": 2},
         {"session_messaging": True},
-        {"kube_access": False},
+        {"kube_cluster_access": False},
         {
             "cache": {
                 "restore_key": "preset-0123456789abcdef",
@@ -88,7 +88,9 @@ def test_only_kube_access_yields_privileged_account(spec: dict[str, Any]) -> Non
 
 def test_kube_access_passthrough_env() -> None:
     settings = make_settings()
-    on = passthrough(render.render_session(make_session(kube_access=True), settings, TOKENS))
+    on = passthrough(
+        render.render_session(make_session(kube_cluster_access=True), settings, TOKENS)
+    )
     off = passthrough(render.render_session(make_session(), settings, TOKENS))
     assert set(on) >= KUBE_ENV
     assert on == sorted(on)
@@ -103,13 +105,13 @@ def test_kube_access_leaves_on_start_unchanged() -> None:
         (cm,) = (o for o in objs if o["kind"] == "ConfigMap")
         return cm["data"]["on-start.sh"]
 
-    assert on_start(kube_access=True) == on_start()
-    assert "kubectl" not in on_start(kube_access=True)
+    assert on_start(kube_cluster_access=True) == on_start()
+    assert "kubectl" not in on_start(kube_cluster_access=True)
 
 
 def test_kube_access_fails_closed_without_setting() -> None:
     settings = make_settings(kube_access_service_account="")
-    objs = render.render_session(make_session(kube_access=True), settings, TOKENS)
+    objs = render.render_session(make_session(kube_cluster_access=True), settings, TOKENS)
     pod = pod_of(objs)
     assert pod["serviceAccountName"] == settings.agent_service_account
     assert pod["automountServiceAccountToken"] is False
@@ -118,7 +120,7 @@ def test_kube_access_fails_closed_without_setting() -> None:
 
 def test_kube_access_jobs_stay_unprivileged() -> None:
     settings = make_settings()
-    for job in jobs_of(make_session(kube_access=True), settings):
+    for job in jobs_of(make_session(kube_cluster_access=True), settings):
         pod = job["spec"]["template"]["spec"]
         assert pod["serviceAccountName"] == settings.agent_service_account
         assert pod["automountServiceAccountToken"] is False

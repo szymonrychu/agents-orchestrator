@@ -28,7 +28,7 @@ A = f"{ADMIN_PREFIX}/presets"
 M = "/api/v1/presets"
 
 REFUSED = [
-    ("kube_access", {"kube_access": True}),
+    ("kube_cluster_access", {"kube_cluster_access": True}),
     ("session_messaging", {"session_messaging": True}),
     ("docker", {"docker": True}),
     ("discard_hook_url", {"discard_hook_url": "https://h.example"}),
@@ -122,7 +122,7 @@ async def test_admin_put_refuses_each_human_only_field(call, human, seed, path, 
 async def test_admin_put_toward_safe_passes(call, seed):
     pid = await seed(
         {
-            "kube_access": True,
+            "kube_cluster_access": True,
             "session_messaging": True,
             "discard_hook_url": "https://h.example",
             "wrapper": {"permissions": {"allow": ["A"], "deny": ["D"]}},
@@ -145,12 +145,12 @@ async def test_admin_put_toward_safe_passes(call, seed):
 
 
 async def test_put_unchanged_grants_passes(call, human, seed):
-    grants = {"kube_access": True, "session_messaging": True}
+    grants = {"kube_cluster_access": True, "session_messaging": True}
     pid = await seed(grants)
     got = (await human("GET", f"{M}/{pid}")).json()
     r = await call("PUT", f"{A}/{pid}", json={"name": "seeded", "spec": got["spec"]})
     assert r.status_code == 200, r.text
-    assert r.json()["spec"]["kube_access"] is True
+    assert r.json()["spec"]["kube_cluster_access"] is True
 
 
 async def _protected_seed(human, seed, canary, spec=None):
@@ -198,7 +198,7 @@ async def test_unprotect_403(call, human, seed, kube, canary, verb):
 
 
 async def test_put_against_changed_row_is_409(pool, settings, seed, monkeypatch):
-    pid = uuid.UUID(await seed({"kube_access": True}))
+    pid = uuid.UUID(await seed({"kube_cluster_access": True}))
     async with pool.connection() as conn:
         real = await presets_repo.get(conn, pid)
     stale = presets_repo.Preset(
@@ -209,7 +209,7 @@ async def test_put_against_changed_row_is_409(pool, settings, seed, monkeypatch)
         return stale
 
     monkeypatch.setattr(presets_repo, "get", fake_get)
-    body = presets_api.schemas.PresetIn(name="seeded", spec={"kube_access": True})
+    body = presets_api.schemas.PresetIn(name="seeded", spec={"kube_cluster_access": True})
     request = type("R", (), {"state": type("S", (), {})()})()
     async with pool.connection() as conn:
         with pytest.raises(ApiError) as exc:
@@ -241,7 +241,7 @@ async def test_preset_hidden_after_the_route_read_is_404(pool, settings, human, 
 
 async def test_main_port_sets_every_human_only_field(human):
     spec = {
-        "kube_access": True,
+        "kube_cluster_access": True,
         "session_messaging": True,
         "docker": True,
         "discard_hook_url": "https://h.example",
@@ -265,7 +265,10 @@ async def test_refusal_has_no_side_effect_and_is_audited(
     r = await call(
         "PUT",
         f"{A}/{pid}",
-        json={"name": "seeded", "spec": {"kube_access": True, "env": {"K": {"protected": True}}}},
+        json={
+            "name": "seeded",
+            "spec": {"kube_cluster_access": True, "env": {"K": {"protected": True}}},
+        },
     )
     assert_error(r, 403, "human_only_field")
     after = (await human("GET", f"{M}/{pid}")).json()
@@ -273,7 +276,7 @@ async def test_refusal_has_no_side_effect_and_is_audited(
     assert kube.names("Secret") == secrets_before
     last = (await events(pool, boss.id))[-1]
     assert last["type"] == "admin_call"
-    assert last["data"]["status"] == 403 and last["data"]["fields"] == ["kube_access"]
+    assert last["data"]["status"] == 403 and last["data"]["fields"] == ["kube_cluster_access"]
 
 
 async def test_audit_fields_on_success(call, seed, pool, boss, canary, caplog):
@@ -297,7 +300,7 @@ async def test_audit_fields_on_success(call, seed, pool, boss, canary, caplog):
 
 
 COPY_SOURCE = {
-    "kube_access": True,
+    "kube_cluster_access": True,
     "session_messaging": True,
     "docker": True,
     "docker_storage": "40Gi",
@@ -307,7 +310,7 @@ COPY_SOURCE = {
     "wrapper": {"permission_mode": "auto", "permissions": {"deny": ["D"]}},
 }
 GRANT_KEYS = (
-    "kube_access",
+    "kube_cluster_access",
     "session_messaging",
     "docker",
     "docker_storage",
@@ -440,13 +443,15 @@ async def test_patch_inactivity_is_an_ordinary_editable_field(call, seed):
 
 
 async def test_patch_toward_safe_passes(call, seed):
-    pid = await seed({"session_messaging": True, "kube_access": True})
+    pid = await seed({"session_messaging": True, "kube_cluster_access": True})
     r = await call(
-        "PATCH", f"{A}/{pid}", json={"spec": {"session_messaging": None, "kube_access": False}}
+        "PATCH",
+        f"{A}/{pid}",
+        json={"spec": {"session_messaging": None, "kube_cluster_access": False}},
     )
     assert r.status_code == 200, r.text
     assert not r.json()["spec"].get("session_messaging")
-    assert not r.json()["spec"].get("kube_access")
+    assert not r.json()["spec"].get("kube_cluster_access")
 
 
 @pytest.mark.parametrize("spec", [{"replicas": 99}, {"image": "not-allowed:1"}])
@@ -501,9 +506,9 @@ async def test_patch_disjoint_concurrent(call, human, seed):
 
 # ---------------------------------- privileged stored preset (T-4 Q1, leader rulings I-2, P-R3)
 
-KUBE = {"kube_access": True}
+KUBE = {"kube_cluster_access": True}
 FLAGS = [
-    ("kube_access", {"kube_access": True}),
+    ("kube_cluster_access", {"kube_cluster_access": True}),
     ("session_messaging", {"session_messaging": True}),
     ("docker", {"docker": True}),
 ]
@@ -580,7 +585,7 @@ async def test_privileged_target_usage_quota_name_labels_pass(call, human, seed,
     assert r.status_code == 200, r.text
     got = (await human("GET", f"{M}/{pid}")).json()
     assert got["name"] == "renamed" and got["labels"] == ["x-label"]
-    assert got["spec"]["usage_quota"]["five_hour_pct"] == 40 and got["spec"]["kube_access"]
+    assert got["spec"]["usage_quota"]["five_hour_pct"] == 40 and got["spec"]["kube_cluster_access"]
 
 
 async def test_privileged_target_turn_off_with_prompt_change_is_403(call, human, seed):
@@ -588,16 +593,16 @@ async def test_privileged_target_turn_off_with_prompt_change_is_403(call, human,
     r = await _put_spec(call, pid, {"start_prompt": "p"})
     assert_error(r, 403, "privileged_target")
     assert r.json()["error"]["fields"] == ["start_prompt"]
-    assert (await human("GET", f"{M}/{pid}")).json()["spec"]["kube_access"] is True
+    assert (await human("GET", f"{M}/{pid}")).json()["spec"]["kube_cluster_access"] is True
 
 
 async def test_privileged_target_turn_off_alone_passes(call, human, seed):
     pid = await seed({**KUBE, "docker": True, "docker_storage": "40Gi"})
     r = await _put_spec(call, pid, {})
     assert r.status_code == 200, r.text
-    assert not (await human("GET", f"{M}/{pid}")).json()["spec"].get("kube_access")
+    assert not (await human("GET", f"{M}/{pid}")).json()["spec"].get("kube_cluster_access")
     pid = await seed({**KUBE}, name="second")
-    r = await call("PATCH", f"{A}/{pid}", json={"spec": {"kube_access": None}})
+    r = await call("PATCH", f"{A}/{pid}", json={"spec": {"kube_cluster_access": None}})
     assert r.status_code == 200, r.text
 
 
@@ -664,7 +669,7 @@ async def test_privileged_secret_route_403(
 async def test_secret_route_grant_flipped_between_check_and_write_403(
     call, human, seed, kube, canary, pool, boss, monkeypatch
 ):
-    """TOCTOU: a human turns kube_access on after the route read the preset but before the
+    """TOCTOU: a human turns kube_cluster_access on after the route read the preset but before the
     Secret write. The write re-reads the row under lock and refuses: 403, no Secret version."""
     pid, _ = await _protected_seed(human, seed, canary)
     secrets_before = kube.names("Secret")
@@ -678,7 +683,8 @@ async def test_secret_route_grant_flipped_between_check_and_write_403(
             return found
         async with pool.connection() as other:
             await other.execute(
-                "UPDATE presets SET spec = spec || '{\"kube_access\": true}'::jsonb WHERE id = %s",
+                "UPDATE presets SET spec = spec || '{\"kube_cluster_access\": true}'::jsonb"
+                " WHERE id = %s",
                 (uuid.UUID(pid),),
             )
         return found
@@ -887,7 +893,7 @@ async def test_privileged_copy_is_unprivileged_and_editable(call, human, seed):
     r = await call("PATCH", f"{A}/{cid}", json={"spec": {"init_scripts": ["echo copy"]}})
     assert r.status_code == 200, r.text
     got = (await human("GET", f"{M}/{cid}")).json()["spec"]
-    assert not got.get("kube_access") and not got.get("session_messaging")
+    assert not got.get("kube_cluster_access") and not got.get("session_messaging")
     assert (await human("GET", f"{M}/{pid}")).json()["spec"]["init_scripts"] == ["echo stored"]
 
 
@@ -900,7 +906,7 @@ GUARDED_PRESET_WRITES: dict[tuple[str, str], str] = {
     ("POST", f"{A}/{{ref}}/copy"): "strip",
     ("PUT", f"{A}/{{ref}}/secrets/{{name}}"): "secret",
 }
-GRANT_FIELDS = ("kube_access", "session_messaging")
+GRANT_FIELDS = ("kube_cluster_access", "session_messaging")
 QUOTA = {"usage_quota": {"five_hour_pct": 80}}
 
 
@@ -967,7 +973,7 @@ async def test_grant_refused_on_every_admin_preset_write(call, human, seed, kube
     kind = GUARDED_PRESET_WRITES[route]
     secrets_before = kube.names("Secret")
     if kind == "strip":
-        pid = await seed({"kube_access": True, "session_messaging": True})
+        pid = await seed({"kube_cluster_access": True, "session_messaging": True})
         r = await call(method, path.format(ref=pid), json={"name": "stripped"})
         assert r.status_code == 201, r.text
         assert not [k for k in GRANT_FIELDS if k in r.json()["spec"]]
@@ -998,17 +1004,17 @@ async def test_grant_refused_on_every_admin_preset_write(call, human, seed, kube
 
 
 async def test_patch_cannot_regrant_after_human_turns_off(call, human, seed, pool, settings):
-    pid = await seed({"kube_access": True})
+    pid = await seed({"kube_cluster_access": True})
     read = await call("GET", f"{A}/{pid}")
-    assert read.status_code == 200 and read.json()["spec"]["kube_access"] is True
+    assert read.status_code == 200 and read.json()["spec"]["kube_cluster_access"] is True
     async with pool.connection() as conn:
         stale = await presets_repo.get(conn, uuid.UUID(pid))
     r = await human("PUT", f"{M}/{pid}", json={"name": "seeded", "spec": {}})
     assert r.status_code == 200, r.text
-    regrant = {"spec": {"kube_access": True, **QUOTA}}
+    regrant = {"spec": {"kube_cluster_access": True, **QUOTA}}
     r = await call("PATCH", f"{A}/{pid}", json=regrant)
     assert_error(r, 403, "human_only_field")
-    assert r.json()["error"]["fields"] == ["kube_access"]
+    assert r.json()["error"]["fields"] == ["kube_cluster_access"]
 
     # the patch read the row before the human turned the grant off: the guard passes on the
     # stale row, the compare-and-swap fails, and the retry re-reads and refuses
@@ -1028,16 +1034,16 @@ async def test_patch_cannot_regrant_after_human_turns_off(call, human, seed, poo
     assert (exc.value.status, exc.value.code) == (403, "human_only_field")
     assert len(reads) == 2
     got = (await human("GET", f"{M}/{pid}")).json()["spec"]
-    assert not got.get("kube_access") and "usage_quota" not in got
+    assert not got.get("kube_cluster_access") and "usage_quota" not in got
 
 
 async def test_patch_unrelated_field_on_granted_preset_passes(call, human, seed):
-    pid = await seed({"kube_access": True, "session_messaging": True})
+    pid = await seed({"kube_cluster_access": True, "session_messaging": True})
     quota = {"five_hour_pct": 80, "seven_day_pct": 80}
     r = await call("PATCH", f"{A}/{pid}", json={"spec": {"usage_quota": quota}})
     assert r.status_code == 200, r.text
     got = (await human("GET", f"{M}/{pid}")).json()["spec"]
-    assert got["kube_access"] is True and got["session_messaging"] is True
+    assert got["kube_cluster_access"] is True and got["session_messaging"] is True
     assert got["usage_quota"] == quota
 
 
@@ -1085,7 +1091,7 @@ async def test_canary_never_echoed(call, human, seed, pool, kube, canary, caplog
     assert [a.status_code for a in answers] == [200, 200, 200, 200, 200, 201, 200]
 
     refused = [
-        (403, "human_only_field", {"spec": {"kube_access": True}}),
+        (403, "human_only_field", {"spec": {"kube_cluster_access": True}}),
         (422, "secret_in_spec", {"spec": {"env": {key: {"value": canary + "x"}}}}),
         # the body fails validation before the route: an unknown field next to the value
         (422, "invalid_request", {"spec": {"env": {key: {"value": canary + "y"}}}, "replicas": 99}),
@@ -1141,10 +1147,10 @@ async def test_privileged_delete_is_403(call, human, seed, kube, canary, pool, b
 
 
 async def test_privileged_delete_fields_list_every_flag_on(call, human, seed):
-    pid = await seed({"kube_access": True, "session_messaging": True})
+    pid = await seed({"kube_cluster_access": True, "session_messaging": True})
     r = await call("DELETE", f"{A}/{pid}")
     assert_error(r, 403, "privileged_target")
-    assert r.json()["error"]["fields"] == ["kube_access", "session_messaging"]
+    assert r.json()["error"]["fields"] == ["kube_cluster_access", "session_messaging"]
     assert (await human("GET", f"{M}/{pid}")).status_code == 200
 
 
@@ -1166,7 +1172,7 @@ async def test_non_privileged_delete_unchanged(call, human, seed, kube, canary, 
 
 
 async def test_privileged_turned_off_then_delete_passes(call, human, seed):
-    pid = await seed({"kube_access": True})
+    pid = await seed({"kube_cluster_access": True})
     assert (await call("PUT", f"{A}/{pid}", json={"name": "seeded", "spec": {}})).status_code == 200
     assert (await call("DELETE", f"{A}/{pid}")).status_code == 204
 
@@ -1181,7 +1187,7 @@ async def test_human_delete_of_privileged_unchanged(human, seed, flag, grant):
 async def test_delete_grant_flipped_between_check_and_delete_403(
     call, human, seed, kube, canary, pool, monkeypatch
 ):
-    """TOCTOU: a human turns kube_access on after the route read the preset but before the
+    """TOCTOU: a human turns kube_cluster_access on after the route read the preset but before the
     delete. The delete re-reads the row under lock and refuses: 403, nothing deleted."""
     pid, before = await _protected_seed(human, seed, canary)
     secrets_before = kube.names("Secret")
@@ -1192,7 +1198,8 @@ async def test_delete_grant_flipped_between_check_and_delete_403(
         found = await real(conn, ref)
         async with pool.connection() as other:
             await other.execute(
-                "UPDATE presets SET spec = spec || '{\"kube_access\": true}'::jsonb WHERE id = %s",
+                "UPDATE presets SET spec = spec || '{\"kube_cluster_access\": true}'::jsonb"
+                " WHERE id = %s",
                 (uuid.UUID(pid),),
             )
         return found
@@ -1200,8 +1207,8 @@ async def test_delete_grant_flipped_between_check_and_delete_403(
     monkeypatch.setattr(admin, "_manageable_preset", flip_after_read)
     r = await call("DELETE", f"{A}/{pid}")
     assert_error(r, 403, "privileged_target")
-    assert r.json()["error"]["fields"] == ["kube_access"]
+    assert r.json()["error"]["fields"] == ["kube_cluster_access"]
     assert canary not in r.text
-    assert (await human("GET", f"{M}/{pid}")).json()["spec"]["kube_access"] is True
+    assert (await human("GET", f"{M}/{pid}")).json()["spec"]["kube_cluster_access"] is True
     assert kube.names("Secret") == secrets_before
     assert await _secret_rows(pool, pid) == rows_before
