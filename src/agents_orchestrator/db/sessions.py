@@ -16,6 +16,7 @@ from psycopg.types.json import Jsonb
 from agents_orchestrator.db import leadership
 from agents_orchestrator.db.eligibility import ELIGIBLE
 from agents_orchestrator.db.pool import notify
+from agents_orchestrator.db.projects import UnknownProject
 from agents_orchestrator.db.queue import SessionBeingDeleted, enqueue_message
 from agents_orchestrator.inactivity import NOTICE_CLOSE, NOTICE_REMINDER, close_reason
 from agents_orchestrator.spec import SessionSpec, validate_slug
@@ -81,6 +82,8 @@ class Session:
     close_deadline_at: datetime | None = None
     # set by a forced discard (DELETE ...?force=true): owed pre-discard hooks are abandoned
     discard_forced_at: datetime | None = None
+    # the project it belongs to (projects.slug); moved by set_project, never by a spec change
+    project: str = "default"
 
 
 @dataclass(frozen=True)
@@ -112,6 +115,7 @@ def _from_row(row: dict[str, Any]) -> Session:
         close_kind=row["close_kind"],
         close_deadline_at=row["close_deadline_at"],
         discard_forced_at=row["discard_forced_at"],
+        project=row["project"],
     )
 
 
@@ -241,6 +245,25 @@ async def set_labels(
     )
     if not rows:
         raise SessionNotFound(str(session_id))
+    return rows[0]
+
+
+async def set_project(
+    conn: psycopg.AsyncConnection, session_id: uuid.UUID, project: str
+) -> Session:
+    """Move the session to another project. Not part of the spec: no generation bump and no
+    NOTIFY (nothing in the pod changes; scope is read live per request). Raises
+    SessionNotFound, SessionBeingDeleted, or UnknownProject for a slug with no row."""
+    try:
+        async with conn.transaction():
+            await _lock_row(conn, session_id)
+            rows = await _fetch(
+                conn,
+                "UPDATE sessions SET project = %s WHERE id = %s RETURNING *",
+                (project, session_id),
+            )
+    except psycopg.errors.ForeignKeyViolation:
+        raise UnknownProject(project) from None
     return rows[0]
 
 
