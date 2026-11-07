@@ -258,13 +258,11 @@ async def test_collect_bound_waits_until_no_session_names_it(pool, kube, canary)
             "UPDATE sessions SET secret_versions = %s WHERE id = %s",
             (Jsonb({"TOK": bound}), s["id"]),
         )
-    async with pool.connection() as conn:
-        assert await store.collect_bound(conn, kube, NS) == 0
+    assert await store.collect_bound(pool, kube, NS) == 0
     assert set(secret_objects(kube)) == {bound, staged}
     async with pool.connection() as conn:
         await conn.execute("DELETE FROM sessions WHERE id = %s", (s["id"],))
-    async with pool.connection() as conn:
-        assert await store.collect_bound(conn, kube, NS) == 1
+    assert await store.collect_bound(pool, kube, NS) == 1
     assert set(secret_objects(kube)) == {staged}  # a staged reservation is not collected
     assert await reservations(pool, pid) == [("TOK", 2, 8, 1, "staged")]
 
@@ -275,8 +273,7 @@ async def test_collect_bound_keeps_the_row_when_the_kube_delete_fails(pool, kube
     async with pool.connection() as conn:
         await store.bind_staged(conn, pid, "TOK", proposal_id=7, revision=1)
     kube.fail("Secret", bound, KubeError(f"500 {canary}"), verbs=["delete"])
-    async with pool.connection() as conn:
-        assert await store.collect_bound(conn, kube, NS) == 0
+    assert await store.collect_bound(pool, kube, NS) == 0
     assert await reservations(pool, pid) == [("TOK", 1, 7, 1, "bound")]
 
 
@@ -350,6 +347,5 @@ async def test_reap_deletes_unreserved_versions_up_to_the_probe_depth(pool, kube
     beyond = store.secret_name(pid, "TOK", top + 1)
     for full in [*orphans, beyond]:
         await store._write(kube, NS, full, SecretStr(canary), {store.PROPOSAL_LABEL: "9"})
-    async with pool.connection() as conn:
-        assert sorted(await store.reap_unreserved(conn, kube, NS)) == sorted(orphans)
+    assert sorted(await store.reap_unreserved(pool, kube, NS)) == sorted(orphans)
     assert set(secret_objects(kube)) == {store.secret_name(pid, "TOK", live), staged, beyond}

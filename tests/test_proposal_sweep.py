@@ -191,9 +191,40 @@ async def test_expiry_releases_the_secret_of_a_proposal_on_an_unmanageable_prese
         )
     await _backdate(pool, pid)
     await _sweep(pool, kube, settings)
-    assert await _status(pool, pid) in ("expired", "target_gone")
+    assert await _status(pool, pid) == "expired"  # expire runs before target_gone
     assert staged not in _secrets(kube)
     assert await _reservations(pool, preset.id) == []
+
+
+async def test_a_failed_proposal_unit_leaves_the_others_committed(
+    pool, kube, settings, boss, preset, canary, monkeypatch
+):
+    """Each proposal is its own committed transaction: the first expiry is visible to another
+    connection while the second unit runs, and the second failing leaves the first expired."""
+    first, _ = await _staged(pool, kube, settings, boss, canary)
+    view, _, _ = await _create(pool, kube, settings, boss, patch=MCP_PATCH)
+    second = view.id
+    for pid in (first, second):
+        await _backdate(pool, pid)
+    real = proposal_sweep.proposals.mark_closed
+    seen: dict[int, str] = {}
+
+    async def second_fails(conn, p, to, **kw):
+        if seen:
+            seen[p.id] = await _status(pool, next(iter(seen)))  # read on another connection
+            raise RuntimeError("unit failed")
+        seen[p.id] = ""
+        await real(conn, p, to, **kw)
+
+    monkeypatch.setattr(proposal_sweep.proposals, "mark_closed", second_fails)
+    await _sweep(pool, kube, settings)
+    done, failed = seen
+    assert seen[failed] == "expired"
+    assert await _status(pool, done) == "expired"
+    assert await _status(pool, failed) == "open"
+    monkeypatch.setattr(proposal_sweep.proposals, "mark_closed", real)
+    await _sweep(pool, kube, settings)
+    assert await _status(pool, failed) == "expired"
 
 
 # ---------------------------------------------------------------- stale and target gone
@@ -444,6 +475,64 @@ async def test_reaper_waits_for_a_stage_in_flight(pool, kube, settings, boss, pr
         assert not reaper.done()  # blocked on the variable lock
     await asyncio.wait_for(reaper, timeout=10)
     assert name in _secrets(kube)
+
+
+async def _advisory_held(pool, preset_id, name) -> int:
+    """Granted advisory locks on the variable's key, any session (pg_locks splits the bigint)."""
+    [(count,)] = await _rows(
+        pool,
+        "WITH k AS (SELECT hashtextextended(%s, 0) AS h)"
+        " SELECT count(*) FROM pg_locks l, k WHERE l.locktype = 'advisory' AND l.granted"
+        " AND l.objsubid = 1 AND l.classid = ((k.h >> 32) & 4294967295)::oid"
+        " AND l.objid = (k.h & 4294967295)::oid",
+        (f"{preset_id}/{name}",),
+    )
+    return count
+
+
+async def test_reap_holds_only_the_variable_it_probes(pool, kube, settings, preset, canary):
+    """The reap commits each variable before the next: while it is inside the Kubernetes delete
+    of TOKEN, the lock of ALPHA (probed before it) is released, so a set_secret on ALPHA runs."""
+    async with pool.connection() as conn:
+        await store.set_secret(conn, kube, NS, preset.id, "ALPHA", SecretStr(canary + "-a"))
+    probe = store.secret_name(preset.id, "TOKEN", 2)
+    entered, proceed = asyncio.Event(), asyncio.Event()
+    real_delete = kube.delete
+
+    async def blocking_delete(kind, namespace, name):
+        if name == probe:
+            entered.set()
+            await proceed.wait()
+        return await real_delete(kind, namespace, name)
+
+    kube.delete = blocking_delete
+    reaper = asyncio.create_task(_sweep(pool, kube, settings, reap=True))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=10)
+        assert await _advisory_held(pool, preset.id, "TOKEN") == 1
+        assert await _advisory_held(pool, preset.id, "ALPHA") == 0
+        async with pool.connection() as conn:
+            meta = await asyncio.wait_for(
+                store.set_secret(conn, kube, NS, preset.id, "ALPHA", SecretStr(canary + "-b")),
+                timeout=10,
+            )
+        assert meta.version == 2
+    finally:
+        proceed.set()
+        await asyncio.wait_for(reaper, timeout=10)
+    assert store.secret_name(preset.id, "ALPHA", 2) in _secrets(kube)
+
+
+async def test_a_failed_reap_unit_leaves_the_other_variables_reaped(
+    pool, kube, settings, preset, canary
+):
+    async with pool.connection() as conn:
+        await store.set_secret(conn, kube, NS, preset.id, "ALPHA", SecretStr(canary + "-a"))
+    orphan = store.secret_name(preset.id, "TOKEN", 2)
+    await store._write(kube, NS, orphan, SecretStr(canary), {})
+    kube.fail("Secret", store.secret_name(preset.id, "ALPHA", 2), RuntimeError("boom"))
+    await _sweep(pool, kube, settings, reap=True)
+    assert orphan not in _secrets(kube)
 
 
 # ---------------------------------------------------------------- lifespan (F10)

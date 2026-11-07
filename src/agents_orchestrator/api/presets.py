@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -104,11 +103,11 @@ def store_failed() -> ApiError:
     return ApiError(502, "secret_store_failed", "could not store a protected variable")
 
 
-async def forget(kube, namespace: str, names: list[str]) -> None:
-    """Best effort: delete Secret versions written for a save that did not stick."""
-    for name in names:
-        with contextlib.suppress(Exception):
-            await kube.delete("Secret", namespace, name)
+async def forget(conn, kube, namespace: str, versions: list[tuple[uuid.UUID, str, int]]) -> None:
+    """Best effort: delete the (preset id, name, version) Secrets written for a save that did not
+    stick, never one a concurrent writer has made live since (`forget_unsaved`)."""
+    if versions:
+        await secret_store.forget_unsaved(conn, kube, namespace, versions)
 
 
 async def _save(
@@ -128,7 +127,7 @@ async def _save(
     left as it is.
     """
     declared = sorted(n for n, e in spec.get("env", {}).items() if e.get("protected"))
-    created: list[str] = []
+    created: list[tuple[uuid.UUID, str, int]] = []
     kube = None
     try:
         async with conn.transaction():
@@ -139,18 +138,18 @@ async def _save(
                     meta = await secret_store.set_secret(
                         conn, kube, settings.namespace, preset.id, name, value, collect=False
                     )
-                    created.append(secret_store.secret_name(preset.id, name, meta.version))
+                    created.append((preset.id, name, meta.version))
                 await secret_store.sync_declared(
                     conn, kube, settings.namespace, preset.id, declared, collect=False
                 )
     except secret_store.SecretStoreError as exc:
-        await forget(kube, settings.namespace, created)
+        await forget(conn, kube, settings.namespace, created)
         if isinstance(exc, secret_store.PresetNotFound):
             raise not_found("preset") from None
         raise store_failed() from None
     except BaseException:
         if kube is not None:
-            await forget(kube, settings.namespace, created)
+            await forget(conn, kube, settings.namespace, created)
         raise
     if kube is not None:
         await secret_store.gc(conn, kube, settings.namespace, preset_id=preset.id)

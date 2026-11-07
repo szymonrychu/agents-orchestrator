@@ -27,6 +27,7 @@ from typing import Any
 
 import psycopg
 from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool
 from pydantic import SecretStr
 
 from agents_orchestrator.k8s.kube import KubeApi, KubeError
@@ -69,6 +70,11 @@ class SecretMeta:
 def secret_name(preset_id: uuid.UUID, name: str, version: int) -> str:
     digest = hashlib.sha256(name.encode()).hexdigest()[:6]
     return f"ps-{str(preset_id)[:8]}-{digest}-v{version}"
+
+
+def secret_version(full: str) -> int:
+    """The version a `secret_name` carries."""
+    return int(full.rsplit("-v", 1)[1])
 
 
 def _meta(row: dict) -> SecretMeta:
@@ -521,6 +527,14 @@ async def _drop_reservation(
     return full
 
 
+def _lock_order(row: tuple) -> tuple[str, str, int]:
+    """The order variable locks are taken in, the one `set_secret`, `stage_secret` (called in
+    `sorted()` name order) and `snapshot_versions` use: preset row first when one is locked, then
+    the variables of a preset in Python `sorted()` name order (not the database collation, which
+    may order "TOKEN" and "api_key" differently and so deadlock against them)."""
+    return (str(row[0]), row[1], row[2] if len(row) > 2 else 0)
+
+
 async def release(
     conn: psycopg.AsyncConnection,
     kube: KubeApi,
@@ -535,37 +549,43 @@ async def release(
     """
     cur = await conn.execute(
         "SELECT preset_id, name, version, proposal_id FROM change_proposal_secrets"
-        " WHERE proposal_id = %s AND (%s::int IS NULL OR revision = %s) AND state = 'staged'"
-        " ORDER BY preset_id, name, version",
+        " WHERE proposal_id = %s AND (%s::int IS NULL OR revision = %s) AND state = 'staged'",
         (proposal_id, revision, revision),
     )
     dropped = []
-    for row in await cur.fetchall():
+    for row in sorted(await cur.fetchall(), key=_lock_order):
         full = await _drop_reservation(conn, kube, namespace, row, "staged")
         if full is not None:
             dropped.append(full)
     return dropped
 
 
-async def collect_bound(conn: psycopg.AsyncConnection, kube: KubeApi, namespace: str) -> int:
+async def collect_bound(pool: AsyncConnectionPool, kube: KubeApi, namespace: str) -> int:
     """Drop each `bound` reservation no session names any more, Secret first; returns the count.
 
     The bound rows are read before the session references: a reservation turns bound in the
     transaction that writes the session's reference, so a reference list read after it includes
-    every committed one.
+    every committed one. Each reservation is dropped in its own committed transaction on its own
+    connection (`_drop_reservation` rechecks it under the variable lock), so a lock is held only
+    for that one Secret's delete and a failure leaves the others done.
     """
-    cur = await conn.execute(
-        "SELECT preset_id, name, version, proposal_id FROM change_proposal_secrets"
-        " WHERE state = 'bound' ORDER BY preset_id, name, version"
-    )
-    bound = await cur.fetchall()
-    referenced = await _session_referenced(conn)
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT preset_id, name, version, proposal_id FROM change_proposal_secrets"
+            " WHERE state = 'bound'"
+        )
+        bound = sorted(await cur.fetchall(), key=_lock_order)
+        referenced = await _session_referenced(conn)
     dropped = 0
     for row in bound:
         if secret_name(row[0], row[1], row[2]) in referenced:
             continue
-        if await _drop_reservation(conn, kube, namespace, row, "bound") is not None:
-            dropped += 1
+        try:
+            async with pool.connection() as conn, conn.transaction():
+                if await _drop_reservation(conn, kube, namespace, row, "bound") is not None:
+                    dropped += 1
+        except Exception:
+            log.exception("bound secret collection failed: %s v%d", row[1], row[2])
     return dropped
 
 
@@ -587,7 +607,7 @@ ORPHAN_DEPTH = 3  # versions probed above the highest one a row holds
 
 
 async def reap_unreserved(
-    conn: psycopg.AsyncConnection, kube: KubeApi, namespace: str, *, depth: int = ORPHAN_DEPTH
+    pool: AsyncConnectionPool, kube: KubeApi, namespace: str, *, depth: int = ORPHAN_DEPTH
 ) -> list[str]:
     """Delete staged Secrets whose reservation never committed; returns the names deleted.
 
@@ -599,39 +619,85 @@ async def reap_unreserved(
     them, so they are neither current, reserved, nor promoted (a promoted Secret keeps its
     proposal label but is current); a name a session references is skipped all the same. A
     missing Secret is fine; a failed delete is logged and retried on the next reap.
+
+    Each variable is one committed transaction on its own connection, holding only that
+    variable's lock for its own deletes, so writers and session creates of every other variable
+    never wait on the reap. Variables go in `_lock_order`, one lock at a time and no row lock, so
+    the reap cannot deadlock with `set_secret`, `stage_secret` or `snapshot_versions`.
+
+    The session references are read once, before any lock: a session created later names a
+    version that was current (a stored row) or bound (a reservation row) when it committed, so
+    at or below the top read under the lock, never one of the probed names.
     """
-    cur = await conn.execute(
-        "SELECT preset_id, name FROM preset_secrets"
-        " UNION SELECT preset_id, name FROM change_proposal_secrets"
-        " UNION SELECT p.id, e.key FROM presets p, jsonb_each(CASE"
-        " WHEN jsonb_typeof(p.spec->'env') = 'object' THEN p.spec->'env' ELSE '{}'::jsonb END) e"
-        " WHERE e.value->'protected' = 'true'::jsonb"
-        " UNION SELECT c.target_id::uuid, substr(i.path, 5) FROM change_proposal_items i"
-        " JOIN change_proposals c ON c.id = i.proposal_id"
-        " WHERE c.kind = 'preset' AND i.secret IS NOT NULL AND i.path LIKE 'env.%'"
-        " ORDER BY 1, 2"
-    )
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT preset_id, name FROM preset_secrets"
+            " UNION SELECT preset_id, name FROM change_proposal_secrets"
+            " UNION SELECT p.id, e.key FROM presets p, jsonb_each(CASE"
+            " WHEN jsonb_typeof(p.spec->'env') = 'object' THEN p.spec->'env'"
+            " ELSE '{}'::jsonb END) e"
+            " WHERE e.value->'protected' = 'true'::jsonb"
+            " UNION SELECT c.target_id::uuid, substr(i.path, 5) FROM change_proposal_items i"
+            " JOIN change_proposals c ON c.id = i.proposal_id"
+            " WHERE c.kind = 'preset' AND i.secret IS NOT NULL AND i.path LIKE 'env.%'"
+        )
+        variables = sorted(await cur.fetchall(), key=_lock_order)
+        referenced = await _session_referenced(conn)
     dropped: list[str] = []
-    for preset_id, name in await cur.fetchall():
-        async with conn.transaction():
-            await _lock(conn, preset_id, name)
-            top = await _next_version(conn, preset_id, name) - 1
-            referenced = await _session_referenced(conn)
-            for version in range(top + 1, top + 1 + depth):
-                full = secret_name(preset_id, name, version)
-                if full in referenced:
-                    continue
-                try:
-                    gone = await kube.delete("Secret", namespace, full)
-                except KubeError as exc:
-                    log.warning(
-                        "orphan secret reap failed: %s v%d (%s)", name, version, type(exc).__name__
-                    )
-                    continue
-                if gone:
-                    log.info("orphan staged secret reaped: %s v%d", name, version)
-                    dropped.append(full)
+    for preset_id, name in variables:
+        try:
+            async with pool.connection() as conn, conn.transaction():
+                await _lock(conn, preset_id, name)
+                top = await _next_version(conn, preset_id, name) - 1
+                for version in range(top + 1, top + 1 + depth):
+                    full = secret_name(preset_id, name, version)
+                    if full not in referenced and await _reap_one(kube, namespace, full):
+                        log.info("orphan staged secret reaped: %s v%d", name, version)
+                        dropped.append(full)
+        except Exception:
+            log.exception("orphan secret reap failed for %s", name)
     return dropped
+
+
+async def _reap_one(kube: KubeApi, namespace: str, full: str) -> bool:
+    """Delete one probed name; False when it was missing or the delete failed (logged)."""
+    try:
+        return await kube.delete("Secret", namespace, full)
+    except KubeError as exc:
+        log.warning("orphan secret reap failed: %s (%s)", full, type(exc).__name__)
+        return False
+
+
+async def forget_unsaved(
+    conn: psycopg.AsyncConnection,
+    kube: KubeApi,
+    namespace: str,
+    versions: list[tuple[uuid.UUID, str, int]],
+) -> None:
+    """Delete the Secret versions a write or stage created in a transaction that rolled back.
+
+    The rolled-back row freed its number, so a concurrent `set_secret` or `stage_secret` may
+    have taken it since, rewritten the Secret and committed: then it is live and is kept. Same
+    rule as `_drop_reservation`: under the variable lock (a writer in flight commits first) the
+    Secret is deleted only when its version is above every stored and reserved one (any version
+    at or below them was taken again and belongs to that row) and no session names it. Locks go
+    in `_lock_order`. A failure is logged; the reaper deletes what is left.
+    """
+    for preset_id, name, version in sorted(versions, key=_lock_order):
+        full = secret_name(preset_id, name, version)
+        try:
+            async with conn.transaction():
+                await _lock(conn, preset_id, name)
+                if version < await _next_version(conn, preset_id, name):
+                    log.info("unsaved secret kept, taken again meanwhile: %s v%d", name, version)
+                    continue
+                if full in await _session_referenced(conn):
+                    continue
+                await kube.delete("Secret", namespace, full)
+        except Exception as exc:
+            log.warning(
+                "unsaved secret delete failed: %s v%d (%s)", name, version, type(exc).__name__
+            )
 
 
 # ----------------------------------------------------- webhook credentials (superleader-crud D9)

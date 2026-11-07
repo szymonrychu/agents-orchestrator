@@ -421,6 +421,48 @@ async def test_a_rollback_after_staging_deletes_the_staged_secrets(
     assert await _reservations(pool, preset.id) == []
 
 
+async def test_rollback_cleanup_keeps_a_version_a_concurrent_set_made_live(
+    pool, kube, settings, boss, preset, canary, monkeypatch
+):
+    """Ruling (A4 security): the rolled-back stage of TOKEN v2 freed its number; a concurrent
+    `set_secret` takes v2, rewrites the Secret and commits before the cleanup runs. The cleanup
+    rechecks under the variable lock and keeps the now-live Secret."""
+    real_stage, real_forget = secret_store.stage_secret, proposals.presets_api.forget
+    live_v2 = store.secret_name(preset.id, "TOKEN", 2)
+
+    async def stage_then_fail(*args, **kwargs):
+        if args[4] == "ZED":  # TOKEN (sorted first) is staged, then the transaction fails
+            raise RuntimeError("database went away")
+        return await real_stage(*args, **kwargs)
+
+    async def concurrent_set_then_forget(conn, kube_, namespace, versions):
+        assert versions == [(preset.id, "TOKEN", 2)]
+        async with pool.connection() as other:
+            meta = await store.set_secret(
+                other, kube, NS, preset.id, "TOKEN", SecretStr(canary + "-rotated")
+            )
+        assert meta.version == 2
+        await real_forget(conn, kube_, namespace, versions)
+
+    monkeypatch.setattr(secret_store, "stage_secret", stage_then_fail)
+    monkeypatch.setattr(proposals.presets_api, "forget", concurrent_set_then_forget)
+    with pytest.raises(RuntimeError):
+        await _create(
+            pool,
+            kube,
+            settings,
+            boss,
+            patch={"env": {"ZED": {"protected": True}}},
+            secrets={"TOKEN": SecretStr(canary), "ZED": SecretStr(canary)},
+        )
+    assert live_v2 in _secrets(kube)
+    last = [a.obj for a in kube.applied("Secret") if a.name == live_v2][-1]
+    assert last["stringData"] == {"value": canary + "-rotated"}
+    assert await _rows(
+        pool, "SELECT version FROM preset_secrets WHERE preset_id = %s", (preset.id,)
+    ) == [(2,)]
+
+
 async def test_a_non_superleader_create_is_403(pool, kube, settings, boss, preset):
     with pytest.raises(ApiError) as exc:
         await _create(pool, kube, settings, boss, superleader=False, patch={"replicas": 2})

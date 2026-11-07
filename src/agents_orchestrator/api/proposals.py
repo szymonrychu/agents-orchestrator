@@ -182,34 +182,36 @@ async def _stage(
     secrets: Mapping[str, SecretStr],
     proposal_id: int,
     revision: int,
-    staged: list[str],
+    staged: list[tuple[uuid.UUID, str, int]],
 ) -> None:
-    """Stage each value in the caller's transaction; `staged` collects the Secret names written
+    """Stage each value in the caller's transaction; `staged` collects the versions written
     so far, for the caller to delete when the transaction rolls back."""
     if not secrets:
         return
     kube = secret_store.kube_of(request)
     for name in sorted(secrets):  # one lock order across concurrent proposals
-        staged.append(
-            await secret_store.stage_secret(
-                conn,
-                kube,
-                settings.namespace,
-                preset_id,
-                name,
-                secrets[name],
-                proposal_id=proposal_id,
-                revision=revision,
-            )
+        full = await secret_store.stage_secret(
+            conn,
+            kube,
+            settings.namespace,
+            preset_id,
+            name,
+            secrets[name],
+            proposal_id=proposal_id,
+            revision=revision,
         )
+        staged.append((preset_id, name, secret_store.secret_version(full)))
 
 
-async def _rolled_back(request: Request, settings: Settings, staged: list[str]) -> None:
-    """The transaction did not commit: delete the staged Secrets `release` would never find."""
+async def _rolled_back(
+    request: Request, conn, settings: Settings, staged: list[tuple[uuid.UUID, str, int]]
+) -> None:
+    """The transaction did not commit: delete the staged Secrets `release` would never find
+    (never one a concurrent writer has made live since, `presets.forget`)."""
     if not staged:
         return
     try:
-        await presets_api.forget(secret_store.kube_of(request), settings.namespace, staged)
+        await presets_api.forget(conn, secret_store.kube_of(request), settings.namespace, staged)
     except Exception as exc:  # never mask the error that caused the rollback
         log.error("could not delete %d staged secrets: %s", len(staged), type(exc).__name__)
 
@@ -235,7 +237,7 @@ async def create(
         raise session_spec.not_superleader()
     _check_values(body.secrets)
     target = await admin.manageable_preset(conn, body.target)
-    staged: list[str] = []
+    staged: list[tuple[uuid.UUID, str, int]] = []
     try:
         async with conn.transaction():
             preset = await _locked(conn, target.id)
@@ -266,10 +268,10 @@ async def create(
     except repo.ProposalExists as exc:  # a concurrent replay won the insert; nothing staged
         return await get_view(conn, settings, exc.proposal_id, proposer=caller.id), False
     except secret_store.SecretStoreError:
-        await _rolled_back(request, settings, staged)
+        await _rolled_back(request, conn, settings, staged)
         raise presets_api.store_failed() from None
     except BaseException:
-        await _rolled_back(request, settings, staged)
+        await _rolled_back(request, conn, settings, staged)
         raise
     note_fields(request, [i.path for i in plan.items])
     return await get_view(conn, settings, proposal_id, proposer=caller.id), True
@@ -288,7 +290,7 @@ async def revise(
     revision's staged values are released after the commit (D4)."""
     admin.touched(request, *body.secrets)
     _check_values(body.secrets)
-    staged: list[str] = []
+    staged: list[tuple[uuid.UUID, str, int]] = []
     try:
         async with conn.transaction():
             current = await repo.lock(conn, proposal_id)
@@ -315,10 +317,10 @@ async def revise(
                 request, conn, settings, preset.id, body.secrets, proposal_id, revision, staged
             )
     except secret_store.SecretStoreError:
-        await _rolled_back(request, settings, staged)
+        await _rolled_back(request, conn, settings, staged)
         raise presets_api.store_failed() from None
     except BaseException:
-        await _rolled_back(request, settings, staged)
+        await _rolled_back(request, conn, settings, staged)
         raise
     note_fields(request, [i.path for i in plan.items])
     if any(i.secret for i in previous.items):
