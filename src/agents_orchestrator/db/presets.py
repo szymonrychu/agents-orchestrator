@@ -115,15 +115,16 @@ async def create(
     spec: dict[str, Any],
     superleader_manageable: bool = False,
     labels: list[str] | None = None,
+    project: str = "default",
 ) -> Preset:
     validate_preset_name(name)
     try:
         async with conn.transaction():
             rows = await _fetch(
                 conn,
-                "INSERT INTO presets (id, name, spec, superleader_manageable, labels)"
-                " VALUES (%s, %s, %s, %s, %s) RETURNING *",
-                (uuid.uuid4(), name, Jsonb(spec), superleader_manageable, labels or []),
+                "INSERT INTO presets (id, name, spec, superleader_manageable, labels, project)"
+                " VALUES (%s, %s, %s, %s, %s, %s) RETURNING *",
+                (uuid.uuid4(), name, Jsonb(spec), superleader_manageable, labels or [], project),
             )
     except psycopg.errors.UniqueViolation:
         raise PresetExists(name) from None
@@ -138,8 +139,9 @@ async def update(
     superleader_manageable: bool | None = None,
     labels: list[str] | None = None,
     expected_updated_at: datetime | None = None,
+    project: str | None = None,
 ) -> Preset:
-    """Replace name and spec; a None flag or None labels keep the stored values.
+    """Replace name and spec; a None flag, None labels or a None project keep the stored values.
 
     With `expected_updated_at`, the row must still carry that timestamp (checked under the row
     lock) or `PresetChanged` is raised and nothing is written."""
@@ -159,8 +161,9 @@ async def update(
                 conn,
                 "UPDATE presets SET name = %s, spec = %s,"
                 " superleader_manageable = COALESCE(%s, superleader_manageable),"
-                " labels = COALESCE(%s, labels), updated_at = now() WHERE id = %s RETURNING *",
-                (name, Jsonb(spec), superleader_manageable, labels, preset_id),
+                " labels = COALESCE(%s, labels), project = COALESCE(%s, project),"
+                " updated_at = now() WHERE id = %s RETURNING *",
+                (name, Jsonb(spec), superleader_manageable, labels, project, preset_id),
             )
     except psycopg.errors.UniqueViolation:
         raise PresetExists(name) from None

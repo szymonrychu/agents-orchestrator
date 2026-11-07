@@ -13,6 +13,8 @@ and false equal:
 - env.<NAME> of a stored protected variable: may not be removed or unprotected
   (decision 7 b); adding a protected variable and setting its value stay allowed.
 
+`HUMAN_ONLY_COLUMNS` are preset columns outside the spec that an agent may not change at all.
+
 A live session adds two rules of its own: `fixed_changes` (fields that cannot change on a
 running session) and `tighten_changes` (limits a regular leader may only lower).
 
@@ -38,6 +40,9 @@ HUMAN_ONLY: tuple[str, ...] = (
     "wrapper.permissions.allow",
     "wrapper.permissions.deny",
 )
+# Preset columns an agent may not change: `project` decides which project secrets the preset's
+# sessions get (projects plan 3.16), so only a human moves a preset between projects.
+HUMAN_ONLY_COLUMNS: tuple[str, ...] = ("project",)
 
 # Fields of a live session that a spec edit may not change.
 SESSION_FIXED: tuple[str, ...] = (

@@ -1079,6 +1079,17 @@
               }
             ],
             "title": "Name"
+          },
+          "project": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project"
           }
         },
         "title": "CopyPreset",
@@ -3120,6 +3131,11 @@
             "title": "Name",
             "type": "string"
           },
+          "project": {
+            "default": "default",
+            "title": "Project",
+            "type": "string"
+          },
           "spec": {
             "$ref": "#/components/schemas/SessionSpecIn",
             "default": {
@@ -3153,7 +3169,7 @@
       },
       "PresetPatch": {
         "additionalProperties": false,
-        "description": "Admin partial edit: `spec` is an RFC 7396 merge patch of the stored spec.",
+        "description": "Admin partial edit: `spec` is an RFC 7396 merge patch of the stored spec. A `project`\nother than the stored one is refused (human-only).",
         "properties": {
           "labels": {
             "anyOf": [
@@ -3179,6 +3195,17 @@
               }
             ],
             "title": "Name"
+          },
+          "project": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project"
           },
           "spec": {
             "anyOf": [
@@ -3223,6 +3250,17 @@
             "title": "Name",
             "type": "string"
           },
+          "privileged": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Privileged",
+            "type": "array"
+          },
+          "project": {
+            "title": "Project",
+            "type": "string"
+          },
           "spec": {
             "additionalProperties": true,
             "title": "Spec",
@@ -3244,6 +3282,8 @@
           "is_default",
           "superleader_manageable",
           "labels",
+          "project",
+          "privileged",
           "spec",
           "created_at",
           "updated_at"
@@ -11746,6 +11786,24 @@
     "/api/v1/presets": {
       "get": {
         "operationId": "list_presets_api_v1_presets_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "project",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Project"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -11760,6 +11818,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "List Presets"
