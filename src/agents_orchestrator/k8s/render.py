@@ -89,8 +89,8 @@ def kube_cluster_granted(spec: SessionSpec, settings: Settings) -> bool:
 
 
 def kube_namespace_grants(spec: SessionSpec, settings: Settings) -> dict[str, list[str]]:
-    """The namespace tiers granted, sorted by namespace with tiers in canonical order. Cluster
-    access wins (empty while it is granted); the spec map is filtered to the allowlisted
+    """The namespace tiers granted, sorted by namespace with tiers in canonical order.
+    Cluster access wins (empty while it is granted); the spec map is filtered to the allowlisted
     namespaces and enabled tiers, so a grant the allowlist dropped renders closed."""
     if kube_cluster_granted(spec, settings) or not spec.kube_namespace_access:
         return {}

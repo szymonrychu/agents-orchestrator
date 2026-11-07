@@ -1,6 +1,6 @@
 """The reconciler applies, prunes and discards the per-session ServiceAccount and its bindings
-across the three scopes: the orchestrator namespace, each allowlisted namespace and the cluster
-(T-55, plan 3.4). Bookkeeping is keyed by (kind, namespace, name).
+across the three scopes: the orchestrator namespace, each allowlisted namespace and
+the cluster scope (T-55, plan 3.4). Bookkeeping is keyed by (kind, namespace, name).
 
 The pure tests drive `_foreign`, `_apply`, `_prune` and `_remaining` on a Reconciler without a
 pool; the converge and discard tests run against Postgres (CI)."""
@@ -110,9 +110,9 @@ async def test_switch_cluster_to_namespace_swaps_bindings():
     k, s = kube(cluster_rbac=True), settings(kube_cluster_access_enabled=True)
     r = reconciler(k, s)
     grants = {"kube_namespace_access": {"media": ["read"]}}
-    cluster = make_session(kube_cluster_access=True, **grants)
-    sa, crb = account(cluster), cluster_binding_name(cluster.slug, cluster.id)
-    await converge_rbac(r, cluster)
+    wide = make_session(kube_cluster_access=True, **grants)
+    sa, crb = account(wide), cluster_binding_name(wide.slug, wide.id)
+    await converge_rbac(r, wide)
     assert ("ClusterRoleBinding", "", crb) in k.objects  # has() reads "" as the default namespace
     assert k.names("RoleBinding") == []
 

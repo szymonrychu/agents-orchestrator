@@ -1,4 +1,4 @@
-"""Chart RBAC and env of per-session cluster and namespace access, the transition-only legacy
+"""Chart RBAC and env of per-session cluster access and namespace access, the transition-only legacy
 shared ServiceAccount and the unprivileged agent ServiceAccount."""
 
 from __future__ import annotations
@@ -17,14 +17,14 @@ BASE: dict[str, Any] = {
     "claude": {"token": "tok"},
     "postgres": {"url": "postgresql://u:p@db:5432/app"},
 }
-CLUSTER = {"kubeClusterAccess": {"enabled": True}}
+WIDE = {"kubeClusterAccess": {"enabled": True}}
 NSV = {
     "kubeNamespaceAccess": {
         "namespaces": ["media", "games"],
         "tiers": ["read", "port-forward", "exec", "edit", "admin"],
     }
 }
-ON = CLUSTER
+ON = WIDE
 
 
 def _docs(values: dict[str, Any] | None = None) -> list[dict]:
@@ -54,7 +54,7 @@ def test_defaults_render_no_kube_objects() -> None:
 
 
 def test_cluster_access_reconciler_role() -> None:
-    docs = _docs(CLUSTER)
+    docs = _docs(WIDE)
     cr = _named(docs, "ClusterRole")[f"{FULL}-kube-cluster-access"]
     assert {
         "apiGroups": ["rbac.authorization.k8s.io"],
@@ -78,7 +78,7 @@ def test_cluster_access_reconciler_role() -> None:
 
 
 def test_cluster_access_without_rbac_create() -> None:
-    docs = _docs({**CLUSTER, "rbac": {"create": False}})
+    docs = _docs({**WIDE, "rbac": {"create": False}})
     assert not {d["kind"] for d in docs} & {"ClusterRole", "ClusterRoleBinding", "Role"}
     assert _settings(docs)["ORCH_KUBE_CLUSTER_ACCESS_ENABLED"] == "true"
 
@@ -92,7 +92,7 @@ def test_legacy_shared_sa_only_with_flag() -> None:
     ]
     sa = _named(docs, "ServiceAccount")[f"{FULL}-kube-access"]
     assert sa["automountServiceAccountToken"] is False
-    assert f"{FULL}-kube-access" not in _named(_docs(CLUSTER), "ServiceAccount")
+    assert f"{FULL}-kube-access" not in _named(_docs(WIDE), "ServiceAccount")
     nobind = _docs(
         {"kubeClusterAccess": {"legacySharedServiceAccount": True}, "rbac": {"create": False}}
     )
@@ -199,7 +199,7 @@ def test_reconciler_role_serviceaccounts_verbs() -> None:
         role = _named(_docs(values), "Role")[f"{FULL}-reconciler"]
         return [r for r in role["rules"] if "serviceaccounts" in r["resources"]]
 
-    for values in (CLUSTER, NSV):
+    for values in (WIDE, NSV):
         (rule,) = sa_rules(values)
         assert rule["apiGroups"] == [""]
         assert rule["resources"] == ["serviceaccounts"]
