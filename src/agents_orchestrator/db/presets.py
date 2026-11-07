@@ -51,6 +51,7 @@ class Preset:
     labels: list[str]
     created_at: datetime
     updated_at: datetime
+    project: str = "default"
 
 
 def validate_preset_name(name: str) -> str:
@@ -75,6 +76,7 @@ def _from_row(row: dict[str, Any]) -> Preset:
         labels=row["labels"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        project=row["project"],
     )
 
 
@@ -84,9 +86,15 @@ async def _fetch(conn: psycopg.AsyncConnection, query: str, params: tuple) -> li
         return [_from_row(r) for r in await cur.fetchall()]
 
 
-async def list_presets(conn: psycopg.AsyncConnection) -> list[Preset]:
+async def list_presets(
+    conn: psycopg.AsyncConnection, *, project: str | None = None
+) -> list[Preset]:
+    """Every preset; with `project`, only that project's."""
+    where = "" if project is None else " WHERE project = %s"
     return await _fetch(
-        conn, "SELECT * FROM presets ORDER BY is_default DESC, lower(name), name", ()
+        conn,
+        f"SELECT * FROM presets{where} ORDER BY is_default DESC, lower(name), name",
+        () if project is None else (project,),
     )
 
 

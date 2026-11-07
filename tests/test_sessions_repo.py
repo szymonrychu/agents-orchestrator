@@ -574,3 +574,16 @@ async def test_request_close_refuses_an_unknown_kind(pool):
             "SELECT close_requested_at, close_kind FROM sessions WHERE id = %s", (s["id"],)
         )
         assert await cur.fetchone() == (None, None)
+
+
+async def test_session_project_defaults_and_is_listed(pool):
+    async with pool.connection() as conn:
+        await conn.execute("INSERT INTO projects (slug, name) VALUES ('alpha', 'Alpha')")
+        s = await sessions.create(conn, "proj", SessionSpec())
+        assert s.project == "default"
+        moved = await sessions.set_project(conn, s.id, "alpha")
+        listed = {x.slug: x.project for x in await sessions.list_sessions(conn)}
+        assert listed == {"proj": "alpha"}
+        assert (await sessions.get_by_slug(conn, "proj")).project == moved.project
+        labelled = await sessions.set_labels(conn, s.id, ["x"])
+        assert labelled.project == "alpha"
