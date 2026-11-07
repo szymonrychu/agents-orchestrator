@@ -16,7 +16,7 @@ session, which the controller recreates on the new template:
   eligible member exists, a `handover` request with reason `rollout` is queued from the leader,
   the one request the reconciler inserts; the dispatcher's pass applies it only at the
   leader's turn boundary (a leader that claimed a message after the request was queued keeps
-  it queued until the turn ends), like the lease and compaction handovers, so leadership never
+  it queued until the turn ends), like the compaction handover, so leadership never
   moves mid-turn for a rollout; the old leader's pod is deleted only once `session_leaders`
   names another agent. A session of one agent rolls its pod when idle.
 

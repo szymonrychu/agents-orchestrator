@@ -3871,19 +3871,6 @@
             ],
             "title": "Kube Namespace Access"
           },
-          "leader_lease_seconds": {
-            "anyOf": [
-              {
-                "maximum": 604800.0,
-                "minimum": 60.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Leader Lease Seconds"
-          },
           "max_attempts": {
             "default": 5,
             "maximum": 10.0,
@@ -4223,19 +4210,6 @@
               }
             ],
             "title": "Kube Namespace Access"
-          },
-          "leader_lease_seconds": {
-            "anyOf": [
-              {
-                "maximum": 604800.0,
-                "minimum": 60.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Leader Lease Seconds"
           },
           "max_attempts": {
             "default": 5,

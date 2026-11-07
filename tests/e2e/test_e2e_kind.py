@@ -1898,7 +1898,6 @@ def test_session_without_init_scripts_skipped(api: httpx.Client, baseline: dict)
 HOOK_FILE = "hook-ran.txt"
 HOOK_TIMEOUT = 120
 COMPACT_TIMEOUT = 180
-LEASE_TIMEOUT = 180  # lease 60 s plus the dispatcher poll and the turn-boundary wait
 AUTOCLOSE_TIMEOUT = 240  # 30 s window plus the sweeper interval and the discard
 
 
@@ -1976,35 +1975,6 @@ def test_wrapper_hook_and_idle_compact(api: httpx.Client) -> None:
 
         events = wait_for("a compacted event after 5 s idle", compacted, COMPACT_TIMEOUT)
         assert all(e["type"] == "compacted" for e in events), events
-
-
-def test_leader_lease_hands_over(api: httpx.Client) -> None:
-    spec = {"replicas": 2, "leader_lease_seconds": 60}
-    with config_session(api, "lease", spec) as created:
-        cid = created["id"]
-        ready_agents(api, cid, 2)
-
-        def first_leader() -> dict[str, Any] | None:
-            view = api.get(f"/sessions/{cid}").json()
-            return view if view["leader_agent_id"] and view["leader_epoch"] is not None else None
-
-        first = wait_for("a first leader", first_leader, LEADER_TIMEOUT)
-
-        def handed_over() -> dict[str, Any] | None:
-            view = api.get(f"/sessions/{cid}").json()
-            ok = (
-                view["leader_agent_id"] not in (None, first["leader_agent_id"])
-                and view["leader_epoch"] > first["leader_epoch"]
-                and view["leader_reason"] == "lease_expired"
-            )
-            return view if ok else None
-
-        wait_for(
-            f"leader to change from {first['leader_agent_id']} (epoch {first['leader_epoch']}) "
-            "with reason lease_expired",
-            handed_over,
-            LEASE_TIMEOUT,
-        )
 
 
 COMPACT_PROMPT = "compact mid turn: report when done"
