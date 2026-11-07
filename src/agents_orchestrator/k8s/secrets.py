@@ -7,6 +7,12 @@ to read another secret (the Role has no get). Metadata lives in `preset_secrets`
 
 A value is only ever held as a `SecretStr` until it goes into `stringData`; the apply response
 is dropped, nothing here logs a value or an exception body, and errors are generic.
+
+Change proposals stage a value (preset-change-proposals 3.6): it is written once, directly as the
+version it would become, and that number is reserved in `change_proposal_secrets` (`staged`)
+until the proposal is approved (`promote_staged` makes it current, `bind_staged` lets one session
+name it) or released. Every writer allocates above the reservations, and `gc` never deletes a
+reserved version.
 """
 
 from __future__ import annotations
@@ -29,6 +35,7 @@ from agents_orchestrator.k8s.labels import MANAGED_BY, MANAGED_BY_LABEL
 log = logging.getLogger(__name__)
 
 VALUE_KEY = "value"
+PROPOSAL_LABEL = "orchestrator.proposal"
 
 
 class SecretStoreError(Exception):
@@ -45,6 +52,10 @@ class SecretUnset(SecretStoreError):
 
 class PresetNotFound(SecretStoreError):
     """The preset a secret is set on does not exist; nothing was written."""
+
+
+class StagedStale(SecretStoreError):
+    """No `staged` reservation of this proposal revision, or it is not above the live version."""
 
 
 @dataclass(frozen=True)
@@ -68,6 +79,39 @@ async def _lock(conn: psycopg.AsyncConnection, preset_id: uuid.UUID, name: str) 
     """Serialise writers and session snapshots of one variable until the transaction ends."""
     await conn.execute(
         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"{preset_id}/{name}",)
+    )
+
+
+async def _next_version(conn: psycopg.AsyncConnection, preset_id: uuid.UUID, name: str) -> int:
+    """The next free version: above the stored one and every reservation. Call under `_lock`."""
+    cur = await conn.execute(
+        "SELECT COALESCE(GREATEST("
+        " (SELECT max(version) FROM preset_secrets WHERE preset_id = %s AND name = %s),"
+        " (SELECT max(version) FROM change_proposal_secrets WHERE preset_id = %s AND name = %s)"
+        "), 0) + 1",
+        (preset_id, name, preset_id, name),
+    )
+    return (await cur.fetchone())[0]
+
+
+async def _write(
+    kube: KubeApi, namespace: str, full: str, value: SecretStr, labels: dict[str, str]
+) -> None:
+    """Apply the immutable Secret `full`, first deleting a leftover of that name.
+
+    The name is never live when this runs (its version is above every row), so a leftover is a
+    write whose row never committed. Raises KubeError, which callers turn into a generic error.
+    """
+    await kube.delete("Secret", namespace, full)
+    await kube.apply(
+        {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": full, "namespace": namespace, "labels": labels},
+            "type": "Opaque",
+            "immutable": True,
+            "stringData": {VALUE_KEY: value.get_secret_value()},
+        }
     )
 
 
@@ -156,30 +200,10 @@ async def set_secret(
         if recheck is not None:
             recheck(row[0])
         await _lock(conn, preset_id, name)
-        cur = await conn.execute(
-            "SELECT version FROM preset_secrets WHERE preset_id = %s AND name = %s",
-            (preset_id, name),
-        )
-        row = await cur.fetchone()
-        version = (row[0] if row else 0) + 1
+        version = await _next_version(conn, preset_id, name)
         full = secret_name(preset_id, name, version)
         try:
-            # a leftover of a write whose row never committed: the name is not live, replace it
-            await kube.delete("Secret", namespace, full)
-            await kube.apply(
-                {
-                    "apiVersion": "v1",
-                    "kind": "Secret",
-                    "metadata": {
-                        "name": full,
-                        "namespace": namespace,
-                        "labels": {MANAGED_BY_LABEL: MANAGED_BY},
-                    },
-                    "type": "Opaque",
-                    "immutable": True,
-                    "stringData": {VALUE_KEY: value.get_secret_value()},
-                }
-            )
+            await _write(kube, namespace, full, value, {MANAGED_BY_LABEL: MANAGED_BY})
         except KubeError as exc:
             log.warning("secret write failed: %s v%d (%s)", name, version, type(exc).__name__)
             raise SecretStoreError(f"could not store secret {name}") from None
@@ -227,12 +251,19 @@ async def sync_declared(
         await gc(conn, kube, namespace, preset_id=preset_id)
 
 
-async def _referenced(conn: psycopg.AsyncConnection) -> set[str]:
+async def _session_referenced(conn: psycopg.AsyncConnection) -> set[str]:
     cur = await conn.execute(
         "SELECT DISTINCT e.value FROM sessions s, jsonb_each_text(s.secret_versions) AS e"
         " WHERE s.secret_versions IS NOT NULL"
     )
     return {r[0] for r in await cur.fetchall()}
+
+
+async def _referenced(conn: psycopg.AsyncConnection) -> set[str]:
+    """Secret names `gc` keeps: those a session names, and every reserved (staged, bound) one."""
+    cur = await conn.execute("SELECT preset_id, name, version FROM change_proposal_secrets")
+    reserved = {secret_name(*r) for r in await cur.fetchall()}
+    return reserved | await _session_referenced(conn)
 
 
 async def gc(
@@ -298,6 +329,232 @@ async def _sweep(conn, kube: KubeApi, namespace: str, row: dict, referenced: set
             "UPDATE preset_secrets SET swept = %s WHERE preset_id = %s AND name = %s",
             (swept, pid, name),
         )
+
+
+# ------------------------------------------- staged versions of change proposals (Q13 B, 3.6)
+
+
+async def stage_secret(
+    conn: psycopg.AsyncConnection,
+    kube: KubeApi,
+    namespace: str,
+    preset_id: uuid.UUID,
+    name: str,
+    value: SecretStr,
+    *,
+    proposal_id: int,
+    revision: int,
+) -> str:
+    """Write `value` as the next version of `name` and reserve it for the proposal revision.
+
+    Runs in the caller's transaction: the reservation commits with the proposal, and a caller
+    whose transaction rolls back deletes the returned Secret itself. The version does not go
+    live; `promote_staged` or `bind_staged` use it on approval, `release` drops it. Returns the
+    Secret name. Raises SecretStoreError, with a generic message, when the write fails.
+    """
+    async with conn.transaction():
+        await _lock(conn, preset_id, name)
+        version = await _next_version(conn, preset_id, name)
+        full = secret_name(preset_id, name, version)
+        labels = {MANAGED_BY_LABEL: MANAGED_BY, PROPOSAL_LABEL: str(proposal_id)}
+        try:
+            await _write(kube, namespace, full, value, labels)
+        except KubeError as exc:
+            log.warning(
+                "staged secret write failed: %s v%d proposal=%d (%s)",
+                name,
+                version,
+                proposal_id,
+                type(exc).__name__,
+            )
+            raise SecretStoreError(f"could not stage secret {name}") from None
+        await conn.execute(
+            "INSERT INTO change_proposal_secrets"
+            " (preset_id, name, version, proposal_id, revision, state)"
+            " VALUES (%s, %s, %s, %s, %s, 'staged')",
+            (preset_id, name, version, proposal_id, revision),
+        )
+    log.info(
+        "secret staged: preset=%s name=%s version=%d proposal=%d",
+        str(preset_id)[:8],
+        name,
+        version,
+        proposal_id,
+    )
+    return full
+
+
+async def _take_staged(
+    conn: psycopg.AsyncConnection,
+    preset_id: uuid.UUID,
+    name: str,
+    proposal_id: int,
+    revision: int,
+) -> int:
+    """Lock the variable and return the version this revision staged; StagedStale if none."""
+    await _lock(conn, preset_id, name)
+    cur = await conn.execute(
+        "SELECT version FROM change_proposal_secrets WHERE preset_id = %s AND name = %s"
+        " AND proposal_id = %s AND revision = %s AND state = 'staged'",
+        (preset_id, name, proposal_id, revision),
+    )
+    row = await cur.fetchone()
+    if row is None:
+        raise StagedStale(f"no staged value of {name} for this proposal revision")
+    return row[0]
+
+
+async def promote_staged(
+    conn: psycopg.AsyncConnection,
+    preset_id: uuid.UUID,
+    name: str,
+    *,
+    proposal_id: int,
+    revision: int,
+) -> int:
+    """Make the version the proposal revision staged the current one; returns it.
+
+    Call inside the apply transaction, with the preset row already locked FOR UPDATE. The
+    reservation must be `staged` for this proposal revision and above the stored version (a
+    rotation since staging makes the proposal stale): otherwise StagedStale and nothing is
+    written. The previous version is collected by `gc` after the commit.
+    """
+    version = await _take_staged(conn, preset_id, name, proposal_id, revision)
+    cur = await conn.execute(
+        "SELECT version FROM preset_secrets WHERE preset_id = %s AND name = %s",
+        (preset_id, name),
+    )
+    row = await cur.fetchone()
+    if row is not None and row[0] >= version:
+        raise StagedStale(f"staged value of {name} is older than the stored one")
+    await conn.execute(
+        "INSERT INTO preset_secrets (preset_id, name, version) VALUES (%s, %s, %s)"
+        " ON CONFLICT (preset_id, name) DO UPDATE"
+        " SET version = excluded.version, retired_at = NULL, updated_at = now()",
+        (preset_id, name, version),
+    )
+    await conn.execute(
+        "DELETE FROM change_proposal_secrets WHERE preset_id = %s AND name = %s AND version = %s",
+        (preset_id, name, version),
+    )
+    log.info(
+        "staged secret promoted: preset=%s name=%s version=%d proposal=%d",
+        str(preset_id)[:8],
+        name,
+        version,
+        proposal_id,
+    )
+    return version
+
+
+async def bind_staged(
+    conn: psycopg.AsyncConnection,
+    preset_id: uuid.UUID,
+    name: str,
+    *,
+    proposal_id: int,
+    revision: int,
+) -> str:
+    """Turn the revision's `staged` reservation `bound`; returns its Secret name.
+
+    For a session apply: the caller writes the name into that session's `secret_versions` in the
+    same transaction. A bound version keeps its number until `collect_bound` sees no session
+    naming it. Raises StagedStale when the revision staged no value of `name`.
+    """
+    version = await _take_staged(conn, preset_id, name, proposal_id, revision)
+    await conn.execute(
+        "UPDATE change_proposal_secrets SET state = 'bound'"
+        " WHERE preset_id = %s AND name = %s AND version = %s",
+        (preset_id, name, version),
+    )
+    log.info(
+        "staged secret bound: preset=%s name=%s version=%d proposal=%d",
+        str(preset_id)[:8],
+        name,
+        version,
+        proposal_id,
+    )
+    return secret_name(preset_id, name, version)
+
+
+async def _drop_reservation(
+    conn: psycopg.AsyncConnection, kube: KubeApi, namespace: str, row: tuple, state: str
+) -> str | None:
+    """Delete the reserved Secret, then its row (still in `state`); None when the delete failed.
+
+    The Secret goes first, so a stage cannot reuse the number for a Secret this then deletes. A
+    Secret already gone is fine.
+    """
+    preset_id, name, version, proposal_id = row
+    full = secret_name(preset_id, name, version)
+    async with conn.transaction():
+        await _lock(conn, preset_id, name)
+        try:
+            await kube.delete("Secret", namespace, full)
+        except KubeError as exc:
+            log.warning(
+                "reserved secret delete failed: %s v%d proposal=%d (%s)",
+                name,
+                version,
+                proposal_id,
+                type(exc).__name__,
+            )
+            return None
+        await conn.execute(
+            "DELETE FROM change_proposal_secrets"
+            " WHERE preset_id = %s AND name = %s AND version = %s AND state = %s",
+            (preset_id, name, version, state),
+        )
+    log.info("reserved secret %s dropped: %s v%d proposal=%d", state, name, version, proposal_id)
+    return full
+
+
+async def release(
+    conn: psycopg.AsyncConnection,
+    kube: KubeApi,
+    namespace: str,
+    *,
+    proposal_id: int,
+    revision: int | None = None,
+) -> list[str]:
+    """Drop the `staged` reservations of the proposal (one revision, or all) and their Secrets.
+
+    A failed delete keeps its row for the sweeper to retry. Returns the Secret names dropped.
+    """
+    cur = await conn.execute(
+        "SELECT preset_id, name, version, proposal_id FROM change_proposal_secrets"
+        " WHERE proposal_id = %s AND (%s::int IS NULL OR revision = %s) AND state = 'staged'"
+        " ORDER BY preset_id, name, version",
+        (proposal_id, revision, revision),
+    )
+    dropped = []
+    for row in await cur.fetchall():
+        full = await _drop_reservation(conn, kube, namespace, row, "staged")
+        if full is not None:
+            dropped.append(full)
+    return dropped
+
+
+async def collect_bound(conn: psycopg.AsyncConnection, kube: KubeApi, namespace: str) -> int:
+    """Drop each `bound` reservation no session names any more, Secret first; returns the count.
+
+    The bound rows are read before the session references: a reservation turns bound in the
+    transaction that writes the session's reference, so a reference list read after it includes
+    every committed one.
+    """
+    cur = await conn.execute(
+        "SELECT preset_id, name, version, proposal_id FROM change_proposal_secrets"
+        " WHERE state = 'bound' ORDER BY preset_id, name, version"
+    )
+    bound = await cur.fetchall()
+    referenced = await _session_referenced(conn)
+    dropped = 0
+    for row in bound:
+        if secret_name(row[0], row[1], row[2]) in referenced:
+            continue
+        if await _drop_reservation(conn, kube, namespace, row, "bound") is not None:
+            dropped += 1
+    return dropped
 
 
 # ----------------------------------------------------- webhook credentials (superleader-crud D9)

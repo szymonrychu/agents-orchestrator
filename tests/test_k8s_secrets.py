@@ -215,3 +215,42 @@ async def test_set_on_a_deleted_preset_does_not_leave_a_collected_secret(pool, k
         await presets_repo.delete(conn, pid)
     with pytest.raises(store.PresetNotFound):
         await put(pool, kube, pid, "TOK", canary)
+
+
+async def stage(pool, kube, preset_id, name, value, *, proposal_id=7, revision=1) -> str:
+    async with pool.connection() as conn:
+        return await store.stage_secret(
+            conn,
+            kube,
+            NS,
+            preset_id,
+            name,
+            SecretStr(value),
+            proposal_id=proposal_id,
+            revision=revision,
+        )
+
+
+async def test_set_during_a_reservation_takes_the_version_above_it(pool, kube, canary):
+    pid = await make_preset(pool)
+    await put(pool, kube, pid, "TOK", canary)
+    staged = await stage(pool, kube, pid, "TOK", canary + "s")
+    assert staged == store.secret_name(pid, "TOK", 2)
+    meta = await put(pool, kube, pid, "TOK", canary + "x")
+    assert meta.version == 3
+    assert ("Secret", NS, staged) not in kube.deletes
+    assert set(secret_objects(kube)) == {staged, store.secret_name(pid, "TOK", 3)}
+
+
+async def test_gc_after_a_rotation_keeps_staged_and_bound_versions(pool, kube, canary):
+    pid = await make_preset(pool)
+    await put(pool, kube, pid, "TOK", canary)
+    v2 = await stage(pool, kube, pid, "TOK", canary, proposal_id=7)
+    v3 = await stage(pool, kube, pid, "TOK", canary, proposal_id=8)
+    async with pool.connection() as conn:
+        assert await store.bind_staged(conn, pid, "TOK", proposal_id=8, revision=1) == v3
+    await put(pool, kube, pid, "TOK", canary)
+    await put(pool, kube, pid, "TOK", canary)
+    assert set(secret_objects(kube)) == {v2, v3, store.secret_name(pid, "TOK", 5)}
+    deleted = {d[2] for d in kube.deletes if d[0] == "Secret"}
+    assert deleted == {store.secret_name(pid, "TOK", v) for v in (1, 4)}
