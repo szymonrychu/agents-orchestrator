@@ -395,7 +395,7 @@ async def _said(pool, sender: Sess, receiver: Sess, *, hours_ago: float = 0) -> 
     await _exec(
         pool,
         "UPDATE messages SET sender_session_id = %s, sender_slug = %s, hop = 1,"
-        " created_at = now() - make_interval(hours => %s::float8) WHERE id = %s",
+        " created_at = now() - make_interval(secs => %s::float8 * 3600) WHERE id = %s",
         (sender.id, sender.slug, hours_ago, row["id"]),
     )
 
