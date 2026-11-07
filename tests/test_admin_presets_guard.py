@@ -929,6 +929,7 @@ NON_SECURITY_EDITS: dict[str, dict] = {
     "reuse_running_agent": {"reuse_running_agent": True},
     "usage_quota": {"usage_quota": {"seven_day_pct": 60}},
     "inactivity": {"inactivity": {"close_seconds": 120}},
+    "leader_lease_seconds": {"leader_lease_seconds": 600, "max_replicas": 2},
     "docker_storage": {"docker_storage": "40Gi"},
     "docker_cpu": {"docker_cpu": "2"},
     "docker_memory": {"docker_memory": "4Gi"},
@@ -968,6 +969,18 @@ async def test_privileged_target_human_only_refusal_is_proposable(call, seed, pa
     assert r.json()["error"]["fields"] == [path]
     assert r.json()["error"]["proposable"] is True
     assert r.json()["error"]["message"].endswith("; send it as a proposal: proposal_create")
+
+
+async def test_privileged_target_namespace_grant_growth_is_proposable(call, seed):
+    pid = await seed({"kube_namespace_access": {"media": ["read"]}})
+    r = await call(
+        "PATCH",
+        f"{A}/{pid}",
+        json={"spec": {"kube_namespace_access": {"media": ["read", "port-forward"]}}},
+    )
+    assert_error(r, 403, "human_only_field")
+    assert r.json()["error"]["fields"] == ["kube_namespace_access"]
+    assert r.json()["error"]["proposable"] is True
 
 
 # ---------------------------------- explicit security list (agent-preset-editing O2)

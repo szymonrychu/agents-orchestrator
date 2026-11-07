@@ -368,7 +368,6 @@ def test_tighten_does_not_mutate():
 # ---------------------------------- classification (preset-change-proposals plan 3.1)
 
 # Plan 3.1 row 2, pinned here so a new spec field fails until it is classified.
-# leader_lease_seconds: T-54 removes it; until then it stays security (fail closed, ruling F2).
 SECURITY = frozenset(
     {
         "init_scripts",
@@ -377,7 +376,6 @@ SECURITY = frozenset(
         "any_mcp_config",
         "any_mcp_sources",
         "cache",
-        "leader_lease_seconds",
         "wrapper.hooks",
         "wrapper.mcp_servers",
         "wrapper.plugins",
@@ -442,7 +440,7 @@ def test_privileged_target_allows_non_security():
         "model": "opus",
         "peers": False,
         "inactivity": {"close_seconds": 60},
-        "wrapper": {"turn_max_seconds": 600, "agent_commands": {}},
+        "wrapper": {"turn_max_seconds": 600, "agent_commands": []},
     }
     assert ptc(stored, new) == []
     assert ptc(stored, {**new, "cache": {"key": "x"}}) == ["cache"]
