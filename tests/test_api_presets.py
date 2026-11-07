@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 import pytest
@@ -10,6 +11,7 @@ from test_api_sessions import assert_error, client_for, make_settings
 
 from agents_orchestrator.api.app import create_app
 from agents_orchestrator.db import presets as repo
+from agents_orchestrator.preset_policy import privileged
 
 DEFAULT_ID = "00000000-0000-0000-0000-000000000001"
 P = "/api/v1/presets"
@@ -317,3 +319,136 @@ async def test_put_flag_roundtrip_keeps_spec(pool, dsn):
     assert again["spec"] == first["spec"]
     assert again["spec"]["env"]["API_KEY"]["version"] == 1
     assert again["superleader_manageable"] is True
+
+
+# ---------------------------------------------------------------- projects (T-19 P3)
+
+PROJECTS = "/api/v1/projects"
+
+
+async def make_project(http, slug, archived=False):
+    r = await http.post(PROJECTS, json={"slug": slug, "name": slug.title()})
+    assert r.status_code == 201, r.text
+    if archived:
+        r = await http.patch(f"{PROJECTS}/{slug}", json={"archived": True})
+        assert r.status_code == 200, r.text
+
+
+async def test_preset_defaults_to_default_project(http):
+    created = await make(http, "plain")
+    assert created["project"] == "default"
+    assert (await http.get(f"{P}/{created['id']}")).json()["project"] == "default"
+    listed = {p["name"]: p for p in (await http.get(P)).json()}
+    assert listed["Default"]["project"] == "default" and listed["plain"]["project"] == "default"
+
+
+async def test_preset_create_in_project(http):
+    await make_project(http, "alpha")
+    r = await http.post(P, json={"name": "in-alpha", "spec": {}, "project": "alpha"})
+    assert r.status_code == 201, r.text
+    assert r.json()["project"] == "alpha"
+    assert (await http.get(f"{P}/{r.json()['id']}")).json()["project"] == "alpha"
+    assert (await http.get(f"{PROJECTS}/alpha")).json()["presets"] == 1
+
+
+async def test_preset_unknown_project_422(http):
+    r = await http.post(P, json={"name": "lost", "spec": {}, "project": "nope"})
+    assert_error(r, 422, "unknown_project")
+    assert "lost" not in [p["name"] for p in (await http.get(P)).json()]
+    kept = await make(http, "kept")
+    r = await http.put(f"{P}/{kept['id']}", json={"name": "kept", "project": "nope"})
+    assert_error(r, 422, "unknown_project")
+    assert (await http.get(f"{P}/{kept['id']}")).json() == kept
+    r = await http.post(f"{P}/{kept['id']}/copy", json={"name": "lost", "project": "nope"})
+    assert_error(r, 422, "unknown_project")
+    assert "lost" not in [p["name"] for p in (await http.get(P)).json()]
+
+
+async def test_preset_archived_project_422(http):
+    await make_project(http, "attic", archived=True)
+    r = await http.post(P, json={"name": "late", "spec": {}, "project": "attic"})
+    assert_error(r, 422, "project_archived")
+    assert "late" not in [p["name"] for p in (await http.get(P)).json()]
+    kept = await make(http, "kept")
+    r = await http.put(f"{P}/{kept['id']}", json={"name": "kept", "project": "attic"})
+    assert_error(r, 422, "project_archived")
+    assert (await http.get(f"{P}/{kept['id']}")).json() == kept
+    r = await http.post(f"{P}/{kept['id']}/copy", json={"name": "late", "project": "attic"})
+    assert_error(r, 422, "project_archived")
+
+
+async def test_preset_list_filter_project(http):
+    await make_project(http, "alpha")
+    await make_project(http, "beta")
+    await http.post(P, json={"name": "a1", "project": "alpha"})
+    await http.post(P, json={"name": "a2", "project": "alpha"})
+    await http.post(P, json={"name": "b1", "project": "beta"})
+    await make(http, "d1")
+    assert [p["name"] for p in (await http.get(P, params={"project": "alpha"})).json()] == [
+        "a1",
+        "a2",
+    ]
+    assert [p["name"] for p in (await http.get(P, params={"project": "beta"})).json()] == ["b1"]
+    assert [p["name"] for p in (await http.get(P, params={"project": "default"})).json()] == [
+        "Default",
+        "d1",
+    ]
+    assert len((await http.get(P)).json()) == 5
+    assert_error(await http.get(P, params={"project": "nope"}), 422, "unknown_project")
+    # an archived project still lists its presets
+    await http.patch(f"{PROJECTS}/beta", json={"archived": True})
+    assert [p["name"] for p in (await http.get(P, params={"project": "beta"})).json()] == ["b1"]
+
+
+async def test_user_moves_preset_by_put(http):
+    await make_project(http, "alpha")
+    await make_project(http, "beta")
+    r = await http.post(P, json={"name": "mover", "spec": {"replicas": 2}, "project": "alpha"})
+    pid = r.json()["id"]
+    r = await http.put(
+        f"{P}/{pid}", json={"name": "mover", "spec": {"replicas": 2}, "project": "beta"}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["project"] == "beta" and r.json()["spec"] == {"replicas": 2}
+    assert (await http.get(f"{PROJECTS}/alpha")).json()["presets"] == 0
+    assert (await http.get(f"{PROJECTS}/beta")).json()["presets"] == 1
+    # PUT replaces the whole preset: an omitted project is the default project
+    r = await http.put(f"{P}/{pid}", json={"name": "mover", "spec": {"replicas": 2}})
+    assert r.status_code == 200 and r.json()["project"] == "default"
+
+
+async def test_user_copy_keeps_or_sets_project(http):
+    await make_project(http, "alpha")
+    await make_project(http, "beta")
+    src = (await http.post(P, json={"name": "src", "project": "alpha"})).json()
+    kept = await http.post(f"{P}/{src['id']}/copy")
+    assert kept.status_code == 201 and kept.json()["project"] == "alpha"
+    moved = await http.post(f"{P}/{src['id']}/copy", json={"project": "beta"})
+    assert moved.status_code == 201 and moved.json()["project"] == "beta"
+
+
+async def test_preset_view_lists_privileged_grants(http):
+    spec = {
+        "session_messaging": True,
+        "kube_cluster_access": False,
+        "discard_hook_url": "https://h.ex",
+    }
+    r = await http.post(P, json={"name": "granted", "spec": spec})
+    assert r.status_code == 201, r.text
+    granted = r.json()
+    assert granted["privileged"] == privileged(spec) == ["session_messaging"]
+    assert (await http.get(f"{P}/{granted['id']}")).json()["privileged"] == granted["privileged"]
+    assert (await make(http, "plain"))["privileged"] == []
+
+
+async def test_preset_save_holds_project_row_share_lock(http, pool):
+    """Every save takes the project row FOR SHARE in its transaction, so a writer holding the
+    row FOR UPDATE (the S4 secret write, an archive) makes the save wait."""
+    await make_project(http, "alpha")
+    async with pool.connection() as conn, conn.transaction():
+        await conn.execute("SELECT 1 FROM projects WHERE slug = 'alpha' FOR UPDATE")
+        save = asyncio.create_task(http.post(P, json={"name": "waits", "project": "alpha"}))
+        done, _ = await asyncio.wait({save}, timeout=0.5)
+        assert not done
+    r = await save
+    assert r.status_code == 201, r.text

@@ -268,8 +268,9 @@ async def copy_preset(
 ) -> schemas.PresetView:
     async with pool.connection() as conn:
         found = await manageable_preset(conn, ref)
+        body = body or schemas.CopyPreset()
         return await presets_api.copy(
-            conn, found.id, body.name if body else None, superleader=True, request=request
+            conn, found.id, body.name, superleader=True, request=request, project=body.project
         )
 
 
