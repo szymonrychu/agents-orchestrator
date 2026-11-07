@@ -1240,3 +1240,73 @@ async def test_bootstrap_step_events_keep_latest_and_failure(harness, pool, list
     h.fake.emit("bootstrap_step", _step("install_plugins", "succeeded"))
     await h.stored_through(h.last_fake_seq())
     assert (await status_row(pool, h.agent_id))["bootstrap_failure"] is None
+
+
+async def background(pool, agent_id: uuid.UUID) -> dict[str, str]:
+    return (await status_row(pool, agent_id))["background_subagents"]
+
+
+async def test_subagent_started_projects_background(harness, pool, listener) -> None:
+    h = await harness()
+    await h.start()
+    await h.stored_through(h.last_fake_seq())
+    mark = len(listener.on("status"))
+
+    h.emit_at("subagent_started", T1, {"agent_id": "sa1", "agent_type": "general-purpose"})
+    await h.stored_through(h.last_fake_seq())
+    stored = await background(pool, h.agent_id)
+    assert list(stored) == ["sa1"]
+    assert datetime.fromisoformat(stored["sa1"]) == datetime.fromisoformat(T1)
+    assert len(listener.on("status")) > mark
+    assert listener.on(LEADERSHIP_CHANNEL) == []
+
+
+async def test_subagent_stopped_clears_entry(harness, pool) -> None:
+    h = await harness()
+    await h.start()
+    h.emit_at("subagent_started", T1, {"agent_id": "sa1", "agent_type": "x"})
+    h.emit_at("subagent_started", T2, {"agent_id": "sa2", "agent_type": "x"})
+    await h.stored_through(h.last_fake_seq())
+    assert set(await background(pool, h.agent_id)) == {"sa1", "sa2"}
+
+    h.fake.emit("subagent_stopped", {"agent_id": "sa1", "agent_type": "x"})
+    await h.stored_through(h.last_fake_seq())
+    assert set(await background(pool, h.agent_id)) == {"sa2"}
+
+
+async def test_stop_wakes_leadership_pass(harness, pool, listener) -> None:
+    h = await harness()
+    await h.start()
+    h.fake.emit("subagent_started", {"agent_id": "sa1", "agent_type": "x"})
+    await h.stored_through(h.last_fake_seq())
+    h.fake.emit("subagent_stopped", {"agent_id": "sa1", "agent_type": "x"})
+    await h.stored_through(h.last_fake_seq())
+    await wait_until(lambda: listener.on(LEADERSHIP_CHANNEL))
+    assert listener.on(LEADERSHIP_CHANNEL) == [{"session_id": str(h.session_id)}]
+
+
+async def test_attach_with_zero_outstanding_clears(harness, pool) -> None:
+    h = await harness()
+    async with pool.connection() as conn:
+        await status.set_background(conn, h.agent_id, "stale", T1)
+    assert set(await background(pool, h.agent_id)) == {"stale"}
+    h.fake.set_outstanding_subagents(0)
+    await h.start()
+    await h.stored_through(h.last_fake_seq())
+
+    async def cleared() -> bool:
+        return await background(pool, h.agent_id) == {}
+
+    await wait_until(cleared)
+
+
+async def test_attach_with_outstanding_keeps_map(harness, pool) -> None:
+    h = await harness()
+    async with pool.connection() as conn:
+        await status.set_background(conn, h.agent_id, "sa1", T1)
+    h.fake.set_outstanding_subagents(1)
+    await h.start()
+    await h.stored_through(h.last_fake_seq())
+    row = await status_row(pool, h.agent_id)
+    assert row["state"] == "idle"
+    assert set(row["background_subagents"]) == {"sa1"}

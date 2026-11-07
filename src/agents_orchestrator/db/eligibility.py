@@ -34,3 +34,14 @@ ELIGIBLE = f"{READY_STAYS} AND a.wrapper_session_id IS NOT NULL"
 # a column); the trigger also requires the agent not gone.
 LEAVING = f"a.ordinal >= {REPLICAS}"
 HANDOVER_TRIGGER = f"(a.gone_at IS NULL AND {LEAVING})"
+
+# A running background subagent keeps its leader from being moved.
+# `agent_status.background_subagents` maps subagent id -> start time; an entry older than
+# BACKGROUND_STALE_SECONDS is ignored, so a lost stop event cannot pin a leader forever.
+# Alias `s` is a LEFT JOINed `agent_status` row.
+BACKGROUND_STALE_SECONDS = 7200
+BACKGROUND_BUSY = (
+    "coalesce((SELECT bool_or(b.value::timestamptz"
+    f" > now() - make_interval(secs => {BACKGROUND_STALE_SECONDS}))"
+    " FROM jsonb_each_text(s.background_subagents) b), false)"
+)

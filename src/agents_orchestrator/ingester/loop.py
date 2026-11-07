@@ -39,7 +39,8 @@ from typing import Any
 
 from psycopg_pool import AsyncConnectionPool
 
-from agents_orchestrator.db import events, status
+from agents_orchestrator.db import events, leadership, status
+from agents_orchestrator.db.pool import notify
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.tokens import tokens_for
 from agents_orchestrator.wrapper import Envelope, WrapperClient, WrapperError, WrapperUnreachable
@@ -134,6 +135,7 @@ class _AgentStream:
                 last_seq=self.last_seq,
                 waiting=(snap.waiting.reason, snap.waiting.since) if snap.waiting else None,
                 permission_mode=(snap.permission_mode_state, snap.permission_mode_reason),
+                outstanding_subagents=snap.outstanding_subagents,
                 bootstrap=status.bootstrap_from_steps(
                     [st.model_dump(mode="json") for st in snap.bootstrap.steps]
                     if snap.bootstrap
@@ -250,6 +252,14 @@ class _AgentStream:
         elif env.type == "bootstrap_step":
             await status.apply_bootstrap_step(conn, ref.agent_id, data)
             await status.notify_status(conn, ref.session_id, ref.agent_id)
+        elif env.type == "subagent_started" and isinstance(data.get("agent_id"), str):
+            await status.set_background(conn, ref.agent_id, data["agent_id"], env.ts)
+            await status.notify_status(conn, ref.session_id, ref.agent_id)
+        elif env.type == "subagent_stopped" and isinstance(data.get("agent_id"), str):
+            await status.set_background(conn, ref.agent_id, data["agent_id"], None)
+            await status.notify_status(conn, ref.session_id, ref.agent_id)
+            # a leader that was only waiting on its subagents can now be moved
+            await notify(conn, leadership.CHANNEL, {"session_id": str(ref.session_id)})
         elif env.type in _COMPACTION:
             # every compaction counts (D2), at the time the wrapper reported it (D3); it is
             # an advisory only and never wakes the leadership pass
