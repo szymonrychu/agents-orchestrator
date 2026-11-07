@@ -17,6 +17,8 @@ from agents_orchestrator.spec import (
     CACHE_MAX_BYTES_LIMIT,
     INACTIVITY_MAX_SECONDS,
     INACTIVITY_MIN_SECONDS,
+    KUBE_CUSTOM_ROLE_TIERS,
+    KUBE_TIERS,
     parse_quantity,
 )
 
@@ -252,7 +254,15 @@ class Settings(BaseSettings):
     cache_s3_api_access_key_id: str = ""
     cache_s3_api_secret_access_key: str = Field(default="", repr=False)
 
-    kube_access_service_account: str = ""
+    # Cluster-wide Kubernetes access (spec.kube_cluster_access): each granted session gets its own
+    # ServiceAccount bound to cluster-admin, so the setting is a plain switch.
+    kube_cluster_access_enabled: bool = False
+    # Namespace-scoped Kubernetes access (spec.kube_namespace_access): the allowlisted
+    # namespaces, the enabled tiers (subset of KUBE_TIERS) and the prefix of the custom
+    # ClusterRoles of the port-forward and exec tiers (required when either tier is enabled).
+    kube_namespace_access_namespaces: CsvList = []
+    kube_namespace_access_tiers: CsvList = []
+    kube_namespace_access_role_prefix: str = Field(default="", validate_default=True)
     # Opt-in privileged Docker-in-Docker sidecar for agent pods (spec.docker). Empty image = off.
     # Pinned by exact semver tag (docker:X.Y.Z-dind), never latest or a sha.
     docker_image: str = ""
@@ -322,7 +332,14 @@ class Settings(BaseSettings):
             raise SettingsError(problems) from None
 
     _split = field_validator(
-        "models", "efforts", "allowed_cidrs", "allowed_origins", "agent_images", mode="before"
+        "models",
+        "efforts",
+        "allowed_cidrs",
+        "allowed_origins",
+        "agent_images",
+        "kube_namespace_access_namespaces",
+        "kube_namespace_access_tiers",
+        mode="before",
     )(lambda cls, v: _csv(v))
 
     # Checks are field validators (not one mode="after" model validator) so they still run
@@ -451,6 +468,22 @@ class Settings(BaseSettings):
     def _check_ref(cls, v: str) -> str:
         if not _TAG_RE.match(v):
             raise _Bad(f"{v!r} must be a pinned release tag like v1.2.3, not a branch")
+        return v
+
+    @field_validator("kube_namespace_access_tiers")
+    @classmethod
+    def _check_kube_tiers(cls, v: list[str]) -> list[str]:
+        unknown = [t for t in v if t not in KUBE_TIERS]
+        if unknown:
+            raise _Bad(f"{', '.join(map(repr, unknown))} not in {', '.join(KUBE_TIERS)}")
+        return v
+
+    @field_validator("kube_namespace_access_role_prefix")
+    @classmethod
+    def _check_kube_role_prefix(cls, v: str, info: ValidationInfo) -> str:
+        tiers = info.data.get("kube_namespace_access_tiers") or []
+        if not v and any(t in tiers for t in KUBE_CUSTOM_ROLE_TIERS):
+            raise _Bad("required when ORCH_KUBE_NAMESPACE_ACCESS_TIERS has port-forward or exec")
         return v
 
     @field_validator("docker_image")
@@ -783,8 +816,19 @@ class Settings(BaseSettings):
         return bool(self.agent_usage_url)
 
     @property
-    def kube_access_available(self) -> bool:
-        return bool(self.kube_access_service_account)
+    def kube_cluster_access_available(self) -> bool:
+        return self.kube_cluster_access_enabled
+
+    @property
+    def kube_namespace_access_available(self) -> bool:
+        return bool(self.kube_namespace_access_namespaces and self.kube_namespace_access_tiers)
+
+    def kube_tier_role(self, tier: str) -> str:
+        """The ClusterRole bound for a tier: the built-in view, edit or admin, or the custom
+        `<role prefix><tier>` role of port-forward and exec."""
+        if tier in KUBE_CUSTOM_ROLE_TIERS:
+            return f"{self.kube_namespace_access_role_prefix}{tier}"
+        return {"read": "view"}.get(tier, tier)
 
     @property
     def docker_available(self) -> bool:

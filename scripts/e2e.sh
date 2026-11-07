@@ -265,6 +265,8 @@ echo "ORCH_PVC_STORAGE_CLASS=$STORAGE_CLASS"
 
 log "namespace $NS and the e2e Postgres"
 kubectl create namespace "$NS"
+# allowlisted by e2e/values-kind.yaml (kubeNamespaceAccess) for the kubernetes access e2e
+kubectl create namespace e2e-target
 # credentials are generated per run; nothing secret-shaped is committed
 gen_secret() { openssl rand -hex 16; }
 PG_PASSWORD="$(gen_secret)"

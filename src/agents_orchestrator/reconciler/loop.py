@@ -1,12 +1,20 @@
 """Level-triggered reconcile: the sessions table drives Kubernetes and the agents table.
 
 Every tick reads every session row and converges it (D6), so a crash mid-way leaves nothing
-that the next tick does not repair. All calls target `settings.namespace`, the one namespace
-shared with the orchestrator's own objects (D26). The guards that keep the reconciler off those:
+that the next tick does not repair. Calls target three scopes (`Reconciler._scopes`): the
+session's own objects live in `settings.namespace`, the one namespace shared with the
+orchestrator's own objects (D26); the RoleBindings of granted namespace access in each namespace
+of `ORCH_KUBE_NAMESPACE_ACCESS_NAMESPACES`; the cluster-admin ClusterRoleBinding at cluster scope,
+reached only while `ORCH_KUBE_CLUSTER_ACCESS_ENABLED` is on. Every bookkeeping key is (kind,
+namespace, name) (`obj_key`): the same RoleBinding name exists in each granted namespace. The
+guards that keep the reconciler off objects that are not its own:
 - every list carries the session selector, and only objects carrying both the managed-by and
   the session label are ever deleted
-- before applying a StatefulSet, Service, ConfigMap or PVC it reads the object; one that exists
-  without both labels is foreign, and then nothing of that session is applied
+- before applying a StatefulSet, Service, ConfigMap, PVC, ServiceAccount or binding it reads the
+  object; one that exists without both labels is foreign, and then nothing of that session is
+  applied
+- a live ServiceAccount or binding with the session labels but another session's id
+  (`SESSION_ID_LABEL`, a slug reused) is deleted and recreated, never adopted
 - a live StatefulSet whose updateStrategy is not OnDelete is moved there by a strategy-only
   merge patch before it is applied (`_apply`, D1)
 - Secrets are never read or listed: the session Secret is applied with the rest and deleted by
@@ -54,10 +62,12 @@ from agents_orchestrator.k8s.kube import (
     Obj,
     drift,
     is_owned,
+    obj_namespace,
     pod_ready,
 )
 from agents_orchestrator.k8s.labels import (
     MANAGED_BY_LABEL,
+    SESSION_ID_LABEL,
     SESSION_LABEL,
     object_names,
     session_labels,
@@ -78,9 +88,22 @@ from agents_orchestrator.tokens import tokens_for
 log = logging.getLogger(__name__)
 
 CHANNELS = ("session_changed",)
-GUARDED_KINDS = frozenset({"StatefulSet", "Service", "ConfigMap", "PersistentVolumeClaim"})
-# Deletion order: the StatefulSet first so its pods stop using the config and the volume.
-PRUNE_ORDER = ("StatefulSet", "Service", "ConfigMap", "PersistentVolumeClaim")
+# The per-session Kubernetes access objects; each carries the session id (`SESSION_ID_LABEL`).
+KUBE_KINDS = frozenset({"ServiceAccount", "RoleBinding", "ClusterRoleBinding"})
+GUARDED_KINDS = (
+    frozenset({"StatefulSet", "Service", "ConfigMap", "PersistentVolumeClaim"}) | KUBE_KINDS
+)
+# Deletion order: the StatefulSet first so its pods stop using the config, the volume and the
+# ServiceAccount; the bindings before the ServiceAccount they name.
+PRUNE_ORDER = (
+    "StatefulSet",
+    "Service",
+    "ConfigMap",
+    "PersistentVolumeClaim",
+    "RoleBinding",
+    "ClusterRoleBinding",
+    "ServiceAccount",
+)
 # A discard also deletes the check, init and cache Jobs, ahead of the PVC they mount. A converge
 # never prunes them: they are created per check and once per session, not rendered.
 DISCARD_ORDER = ("Job", *PRUNE_ORDER)
@@ -123,6 +146,14 @@ def _deleting(message: str, status: dict[str, Any]) -> dict[str, Any]:
     return {"phase": "deleting", "message": "; ".join(filter(None, [message, note]))}
 
 
+ObjKey = tuple[str, str, str]
+"""(kind, namespace, name) of an object; the namespace is "" for a cluster-scoped one."""
+
+
+def obj_key(obj: Obj) -> ObjKey:
+    return obj["kind"], obj_namespace(obj), obj["metadata"]["name"]
+
+
 WrapperFactory = Callable[[str, str], Any]
 """(base_url, auth_token) -> wrapper client; used by session bootstrap."""
 
@@ -151,9 +182,9 @@ class Reconciler:
             settings.require_cache()
         self.wrapper_factory = wrapper_factory
         self._warned_no_agent_url: set[UUID] = set()
-        # (kind, name) -> (fingerprint, monotonic time) of the last object this process
-        # applied; see `_apply`
-        self._applied: dict[tuple[str, str], tuple[str, float]] = {}
+        # (kind, namespace, name) -> (fingerprint, monotonic time) of the last object this
+        # process applied; see `_apply`
+        self._applied: dict[ObjKey, tuple[str, float]] = {}
         self.hook_transport: httpx.AsyncBaseTransport | None = None
         self._hook_spent = 0.0  # seconds of discard hooks run in this pass
         self._hook_attempted: dict[UUID, float] = {}  # session -> monotonic start of its last hook
@@ -449,7 +480,7 @@ class Reconciler:
         )
         objs = render_session(rendered, self.settings, tokens_for(self.settings, session.id))
 
-        foreign, live = await self._foreign(slug, objs)
+        foreign, live = await self._foreign(session, objs)
         if foreign:
             await self._write_status(
                 session,
@@ -469,8 +500,8 @@ class Reconciler:
             if sessions_gate.hold and obj["kind"] == "StatefulSet":
                 obj = {**obj, "spec": {**obj["spec"], "replicas": 0}}
                 reason = "held for the transcripts restore"
-            await self._apply(obj, live.get((obj["kind"], obj["metadata"]["name"])), reason)
-        desired = {(o["kind"], o["metadata"]["name"]) for o in objs}
+            await self._apply(obj, live.get(obj_key(obj)), reason)
+        desired = {obj_key(o) for o in objs}
         await self._prune(slug, desired, reason="no longer rendered")
         cache_gate = await self.cache.restore_step(session)
         # init waits for the restore, so a script never runs on a workspace about to be replaced
@@ -547,10 +578,11 @@ class Reconciler:
 
         A live StatefulSet not on OnDelete is first moved there.
         """
-        kind, name = obj["kind"], obj["metadata"]["name"]
-        ns, slug = self.settings.namespace, obj["metadata"]["labels"][SESSION_LABEL]
+        key = obj_key(obj)
+        kind, ns, name = key
+        slug = obj["metadata"]["labels"][SESSION_LABEL]
         fingerprint = hashlib.sha256(json.dumps(obj, sort_keys=True).encode()).hexdigest()
-        last, now = self._applied.get((kind, name)), time.monotonic()
+        last, now = self._applied.get(key), time.monotonic()
         if last is not None and last[0] == fingerprint:
             if kind == "Secret":
                 if now - last[1] < SECRET_REASSERT_SECONDS:
@@ -579,9 +611,9 @@ class Reconciler:
                     reason,
                     ", ".join(f"{name}-{i}" for i in range(after, before)),
                 )
-        self._applied.pop((kind, name), None)
+        self._applied.pop(key, None)
         await self.kube.apply(obj, field_manager=FIELD_MANAGER, force=True)
-        self._applied[(kind, name)] = (fingerprint, now)
+        self._applied[key] = (fingerprint, now)
 
     async def _draining(self, session_id: UUID, replicas: int) -> list[tuple[int, bool]]:
         """(ordinal, busy) of each agent at or above `replicas` that is not gone (D3).
@@ -638,39 +670,79 @@ class Reconciler:
             return True
         return bool(agent_pods(slug, await self.kube.list_pods(ns, session_labels(slug))))
 
+    def _scopes(self, kind: str) -> list[str]:
+        """The namespaces the reconciler lists `kind` in: RoleBindings in every allowlisted
+        namespace, ClusterRoleBindings at cluster scope ("") only while cluster access is
+        enabled, ServiceAccounts in `settings.namespace` only while either access is configured
+        (the chart's `serviceaccounts` rule has the same condition), everything else in
+        `settings.namespace`. Its RBAC reaches nowhere else, so nothing is ever listed outside
+        the Role (no 403 loop)."""
+        s = self.settings
+        if kind == "RoleBinding":
+            return list(s.kube_namespace_access_namespaces)
+        if kind == "ClusterRoleBinding":
+            return [""] if s.kube_cluster_access_enabled else []
+        if kind == "ServiceAccount":
+            granted = s.kube_cluster_access_enabled or s.kube_namespace_access_namespaces
+            return [s.namespace] if granted else []
+        return [s.namespace]
+
     async def _foreign(
-        self, slug: str, objs: list[Obj]
-    ) -> tuple[list[str], dict[tuple[str, str], Obj]]:
+        self, session: Session, objs: list[Obj]
+    ) -> tuple[list[str], dict[ObjKey, Obj]]:
         """`foreign_object <kind>/<name>` for each rendered name held by an unlabelled object,
-        and the live objects read on the way by (kind, name), for `_apply`."""
-        found, live = [], {}
+        and the live objects read on the way by `obj_key`, for `_apply`. A live ServiceAccount
+        or binding of another session id (the slug reused) is deleted, logged and left out of
+        the live objects, so it is recreated, never adopted."""
+        slug = session.slug
+        found: list[str] = []
+        live: dict[ObjKey, Obj] = {}
         for obj in objs:
-            kind, name = obj["kind"], obj["metadata"]["name"]
+            key = obj_key(obj)
+            kind, ns, name = key
             if kind not in GUARDED_KINDS:
                 continue  # Secrets cannot be read; the reserved prefix protects them
-            existing = await self.kube.get_object(kind, self.settings.namespace, name)
-            if existing is not None and not is_owned(existing, slug):
+            existing = await self.kube.get_object(kind, ns, name)
+            if existing is None:
+                continue
+            if not is_owned(existing, slug):
                 found.append(f"foreign_object {kind}/{name}")
-            elif existing is not None:
-                live[(kind, name)] = existing
+                continue
+            owner = (existing["metadata"].get("labels") or {}).get(SESSION_ID_LABEL)
+            if kind in KUBE_KINDS and owner != str(session.id):
+                log.warning(
+                    "session %s: %s %s/%s belongs to session %s, recreating",
+                    slug,
+                    kind,
+                    ns,
+                    name,
+                    owner,
+                )
+                self._applied.pop(key, None)
+                await self.kube.delete(kind, ns, name)
+                continue
+            live[key] = existing
         return found, live
 
     async def _prune(
         self,
         slug: str,
-        desired: set[tuple[str, str]],
+        desired: set[ObjKey],
         order: tuple[str, ...] = PRUNE_ORDER,
         *,
         reason: str,
     ) -> None:
-        ns, selector = self.settings.namespace, session_labels(slug)
+        selector = session_labels(slug)
         for kind in order:
-            for obj in await self.kube.list_objects(kind, ns, selector):
-                name = obj["metadata"]["name"]
-                if (kind, name) not in desired and is_owned(obj, slug):
-                    log.info("session %s: deleting %s %s (%s)", slug, kind, name, reason)
-                    self._applied.pop((kind, name), None)
-                    await self.kube.delete(kind, ns, name)
+            for ns in self._scopes(kind):
+                for obj in await self.kube.list_objects(kind, ns, selector):
+                    key: ObjKey = (kind, ns, obj["metadata"]["name"])
+                    if key not in desired and is_owned(obj, slug):
+                        own = ns in ("", self.settings.namespace)
+                        where = key[2] if own else f"{key[2]} in {ns}"
+                        log.info("session %s: deleting %s %s (%s)", slug, kind, where, reason)
+                        self._applied.pop(key, None)
+                        await self.kube.delete(kind, ns, key[2])
 
     async def _observe(self, session: Session) -> int:
         """Pods into agents rows; returns the number of ready pods within replicas.
@@ -745,7 +817,7 @@ class Reconciler:
             await self._retain_pvc(session)
         await self._prune(slug, set(), DISCARD_ORDER, reason="discard")
         secret = object_names(slug)["secret"]
-        self._applied.pop(("Secret", secret), None)
+        self._applied.pop(("Secret", ns, secret), None)
         await self.kube.delete("Secret", ns, secret)  # absent is fine
 
         remaining = await self._remaining(slug)
@@ -789,7 +861,7 @@ class Reconciler:
             }
         }
         await self.kube.merge_patch("PersistentVolumeClaim", ns, name, patch)
-        self._applied.pop(("PersistentVolumeClaim", name), None)
+        self._applied.pop(("PersistentVolumeClaim", ns, name), None)
         log.warning(
             "session %s: kept PersistentVolumeClaim %s as the backup (discard hook %s abandoned)",
             slug,
@@ -876,9 +948,10 @@ class Reconciler:
         ns, selector = self.settings.namespace, session_labels(slug)
         left = []
         for kind in DISCARD_ORDER:
-            for obj in await self.kube.list_objects(kind, ns, selector):
-                if is_owned(obj, slug):
-                    left.append(f"{kind}/{obj['metadata']['name']}")
+            for scope in self._scopes(kind):
+                for obj in await self.kube.list_objects(kind, scope, selector):
+                    if is_owned(obj, slug):
+                        left.append(f"{kind}/{obj['metadata']['name']}")
         for pod in await self.kube.list_pods(ns, selector):
             if is_owned(pod, slug):
                 left.append(f"Pod/{pod['metadata']['name']}")

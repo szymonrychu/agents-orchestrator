@@ -27,4 +27,10 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
+{{- if or .Values.kubeClusterAccess.enabled .Values.kubeNamespaceAccess.namespaces }}
+  # Per-session identities (agent-<slug>-<sid>) live in the release namespace.
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+{{- end }}
 {{- end }}

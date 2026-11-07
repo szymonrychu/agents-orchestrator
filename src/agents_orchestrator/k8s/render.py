@@ -15,6 +15,10 @@ from agents_orchestrator import rendering
 from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.dispatcher.hive import compact_pct
 from agents_orchestrator.k8s.labels import (
+    cluster_binding_name,
+    kube_labels,
+    kube_service_account,
+    namespace_binding_name,
     object_names,
     prefix,
     selector,
@@ -23,7 +27,13 @@ from agents_orchestrator.k8s.labels import (
 )
 from agents_orchestrator.k8s.on_start import render_on_start
 from agents_orchestrator.settings import Settings
-from agents_orchestrator.spec import WORKDIR_ROOT, SessionSpec, WrapperSettings, parse_quantity
+from agents_orchestrator.spec import (
+    KUBE_TIERS,
+    WORKDIR_ROOT,
+    SessionSpec,
+    WrapperSettings,
+    parse_quantity,
+)
 from agents_orchestrator.tokens import SessionTokens
 
 HASH_ANNOTATION = "agents.szymonrichert.pl/config-hash"
@@ -68,9 +78,87 @@ def agent_identity(settings: Settings) -> dict[str, Any]:
     }
 
 
-def kube_access_granted(spec: SessionSpec, settings: Settings) -> bool:
-    """A kube_access spec gets the privileged identity only while the setting is set (D3)."""
-    return bool(spec.kube_access and settings.kube_access_service_account)
+RBAC_API_GROUP = "rbac.authorization.k8s.io"
+CLUSTER_ADMIN_ROLE = "cluster-admin"
+
+
+def kube_cluster_granted(spec: SessionSpec, settings: Settings) -> bool:
+    """Cluster access is granted only while the setting is on: a spec that outlived the
+    setting renders closed."""
+    return bool(spec.kube_cluster_access and settings.kube_cluster_access_enabled)
+
+
+def kube_namespace_grants(spec: SessionSpec, settings: Settings) -> dict[str, list[str]]:
+    """The namespace tiers granted, sorted by namespace with tiers in canonical order.
+    Cluster access wins (empty while it is granted); the spec map is filtered to the allowlisted
+    namespaces and enabled tiers, so a grant the allowlist dropped renders closed."""
+    if kube_cluster_granted(spec, settings) or not spec.kube_namespace_access:
+        return {}
+    namespaces = set(settings.kube_namespace_access_namespaces)
+    enabled = set(settings.kube_namespace_access_tiers)
+    grants = {
+        ns: [t for t in KUBE_TIERS if t in tiers and t in enabled]
+        for ns, tiers in sorted(spec.kube_namespace_access.items())
+        if ns in namespaces
+    }
+    return {ns: tiers for ns, tiers in grants.items() if tiers}
+
+
+def kube_granted(spec: SessionSpec, settings: Settings) -> bool:
+    """Whether any Kubernetes access is granted, so the pods run as the session ServiceAccount."""
+    return kube_cluster_granted(spec, settings) or bool(kube_namespace_grants(spec, settings))
+
+
+def kube_access_objects(session: Session, settings: Settings) -> list[dict[str, Any]]:
+    """The per-session ServiceAccount and its bindings, empty when nothing is granted."""
+    spec, slug, sid = session.spec, session.slug, session.id
+    if not kube_granted(spec, settings):
+        return []
+    account = kube_service_account(slug, sid)
+    labels = kube_labels(slug, sid)
+    subject = {"kind": "ServiceAccount", "name": account, "namespace": settings.namespace}
+    objs: list[dict[str, Any]] = [
+        {
+            "apiVersion": "v1",
+            "kind": "ServiceAccount",
+            "metadata": {"name": account, "namespace": settings.namespace, "labels": labels},
+            "automountServiceAccountToken": False,
+        }
+    ]
+    if kube_cluster_granted(spec, settings):
+        objs.append(
+            {
+                "apiVersion": f"{RBAC_API_GROUP}/v1",
+                "kind": "ClusterRoleBinding",
+                "metadata": {"name": cluster_binding_name(slug, sid), "labels": dict(labels)},
+                "roleRef": {
+                    "apiGroup": RBAC_API_GROUP,
+                    "kind": "ClusterRole",
+                    "name": CLUSTER_ADMIN_ROLE,
+                },
+                "subjects": [subject],
+            }
+        )
+    for namespace, tiers in kube_namespace_grants(spec, settings).items():
+        objs.extend(
+            {
+                "apiVersion": f"{RBAC_API_GROUP}/v1",
+                "kind": "RoleBinding",
+                "metadata": {
+                    "name": namespace_binding_name(slug, sid, tier),
+                    "namespace": namespace,
+                    "labels": dict(labels),
+                },
+                "roleRef": {
+                    "apiGroup": RBAC_API_GROUP,
+                    "kind": "ClusterRole",
+                    "name": settings.kube_tier_role(tier),
+                },
+                "subjects": [dict(subject)],
+            }
+            for tier in tiers
+        )
+    return objs
 
 
 DOCKER_SOCKET_DIR = "/var/run/docker"
@@ -176,11 +264,12 @@ def _docker_volumes(spec: SessionSpec, settings: Settings) -> list[dict[str, Any
     return volumes
 
 
-def pod_identity(spec: SessionSpec, settings: Settings) -> dict[str, Any]:
-    """The agent StatefulSet pod identity: the privileged account with its token (D5), else D4."""
-    if kube_access_granted(spec, settings):
+def pod_identity(session: Session, settings: Settings) -> dict[str, Any]:
+    """The agent StatefulSet pod identity: the session ServiceAccount with its token when any
+    Kubernetes access is granted, else the tokenless agent account (D4)."""
+    if kube_granted(session.spec, settings):
         return {
-            "serviceAccountName": settings.kube_access_service_account,
+            "serviceAccountName": kube_service_account(session.slug, session.id),
             "automountServiceAccountToken": True,
         }
     return agent_identity(settings)
@@ -329,7 +418,7 @@ def _apply_wrapper(cfg: dict[str, Any], wrapper: WrapperSettings, session: Sessi
 
 def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
     spec, slug = session.spec, session.slug
-    kube_env = KUBE_PASSTHROUGH_ENV if kube_access_granted(spec, settings) else ()
+    kube_env = KUBE_PASSTHROUGH_ENV if kube_granted(spec, settings) else ()
     docker_env = ()
     if docker_enabled(spec, settings):
         docker_env = DOCKER_PASSTHROUGH_ENV + (
@@ -593,7 +682,7 @@ def render_session(
         },
     }
     pod_spec: dict[str, Any] = {
-        **pod_identity(spec, settings),
+        **pod_identity(session, settings),
         "securityContext": {"runAsUser": 1000, "fsGroup": 1000},
         "terminationGracePeriodSeconds": settings.agent_termination_grace_seconds,
         "containers": [_container(session, settings, names)],
@@ -628,4 +717,11 @@ def render_session(
             },
         },
     }
-    return [pvc, secret, configmap, service, statefulset]
+    return [
+        pvc,
+        secret,
+        configmap,
+        *kube_access_objects(session, settings),
+        service,
+        statefulset,
+    ]

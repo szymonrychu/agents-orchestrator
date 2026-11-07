@@ -50,3 +50,12 @@ env:
 serviceApi:
   tokenHashes:
     e2e: d0c4480135ce7e2d8c3b4ae32acd5022a90d9c34b66738d8ea6807d324da401f
+
+# Per-session Kubernetes access e2e: cluster access on, and one allowlisted namespace
+# (created by scripts/e2e.sh before the install) with the read and port-forward tiers.
+kubeClusterAccess:
+  enabled: true
+
+kubeNamespaceAccess:
+  namespaces: [e2e-target]
+  tiers: [read, port-forward]

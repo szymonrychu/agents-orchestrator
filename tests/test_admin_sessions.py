@@ -35,7 +35,7 @@ async def boss(pool):
 @pytest.fixture
 def app(pool, dsn):
     settings = make_settings(dsn).model_copy(
-        update={"kube_access_service_account": "kube-sa", "docker_image": "docker:27-dind"}
+        update={"kube_cluster_access_enabled": True, "docker_image": "docker:27-dind"}
     )
     return create_app(settings, pool, kube=FakeKube(namespace="agents"))
 
@@ -208,10 +208,10 @@ async def test_discarding_the_callers_own_session_is_refused(call, pool):
 @pytest.mark.parametrize(
     "flags",
     [
-        {"kube_access": True},
+        {"kube_cluster_access": True},
         {"session_messaging": True},
         {"docker": True},
-        {"kube_access": True, "docker": True},
+        {"kube_cluster_access": True, "docker": True},
     ],
 )
 async def test_admin_create_from_privileged_preset_201(call, main, pool, boss, flags):
@@ -231,15 +231,15 @@ async def test_admin_create_from_privileged_preset_201(call, main, pool, boss, f
 
 
 async def test_admin_create_from_docker_and_kube_access_preset_201(call, main):
-    """The `infrastructure` shape (mx-195): docker and kube_access together."""
-    spec = {"docker": True, "kube_access": True}
+    """The `infrastructure` shape (mx-195): docker and kube_cluster_access together."""
+    spec = {"docker": True, "kube_cluster_access": True}
     made = await main(
         "POST", M, json={"name": "infrastructure", "spec": spec, "superleader_manageable": True}
     )
     assert made.status_code == 201, made.text
     r = await call("POST", S, json={"preset_id": made.json()["id"], "slug": "infra-child"})
     assert r.status_code == 201, r.text
-    assert r.json()["spec"]["docker"] is True and r.json()["spec"]["kube_access"] is True
+    assert r.json()["spec"]["docker"] is True and r.json()["spec"]["kube_cluster_access"] is True
 
 
 async def test_start_allowed_but_edit_and_delete_of_privileged_preset_still_refused(
@@ -249,7 +249,11 @@ async def test_start_allowed_but_edit_and_delete_of_privileged_preset_still_refu
     made = await main(
         "POST",
         M,
-        json={"name": "keep", "spec": {"kube_access": True}, "superleader_manageable": True},
+        json={
+            "name": "keep",
+            "spec": {"kube_cluster_access": True},
+            "superleader_manageable": True,
+        },
     )
     pid = made.json()["id"]
     started = await call("POST", S, json={"preset_id": pid, "slug": "child-keep"})
@@ -262,13 +266,15 @@ async def test_start_allowed_but_edit_and_delete_of_privileged_preset_still_refu
     plain = await main(
         "POST", M, json={"name": "plain", "spec": {}, "superleader_manageable": True}
     )
-    on = await call("PATCH", f"{P}/{plain.json()['id']}", json={"spec": {"kube_access": True}})
+    on = await call(
+        "PATCH", f"{P}/{plain.json()['id']}", json={"spec": {"kube_cluster_access": True}}
+    )
     assert_error(on, 403, "human_only_field")
 
 
 async def test_admin_create_from_preset_with_flags_off_201(call, main):
     spec = {
-        "kube_access": False,
+        "kube_cluster_access": False,
         "session_messaging": None,
         "discard_hook_url": "https://h.example",
     }
@@ -279,14 +285,14 @@ async def test_admin_create_from_preset_with_flags_off_201(call, main):
 
 
 async def test_admin_create_hidden_privileged_is_404(call, main):
-    made = await main("POST", M, json={"name": "hidp", "spec": {"kube_access": True}})
+    made = await main("POST", M, json={"name": "hidp", "spec": {"kube_cluster_access": True}})
     assert made.status_code == 201, made.text
     r = await call("POST", S, json={"preset_id": made.json()["id"], "slug": "child-hp"})
     assert_error(r, 404, "not_found")
 
 
 async def test_main_create_from_privileged_preset_201(main):
-    spec = {"kube_access": True, "session_messaging": True}
+    spec = {"kube_cluster_access": True, "session_messaging": True}
     made = await main("POST", M, json={"name": "mainp", "spec": spec})
     assert made.status_code == 201, made.text
     r = await main(

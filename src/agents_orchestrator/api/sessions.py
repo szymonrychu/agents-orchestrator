@@ -261,7 +261,14 @@ async def meta(settings: Cfg) -> schemas.Meta:
         cache=schemas.MetaCache(
             available=settings.cache_available, max_bytes=settings.cache_max_bytes
         ),
-        kube_access=schemas.MetaKubeAccess(available=settings.kube_access_available),
+        kube_cluster_access=schemas.MetaKubeClusterAccess(
+            available=settings.kube_cluster_access_available
+        ),
+        kube_namespace_access=schemas.MetaKubeNamespaceAccess(
+            available=settings.kube_namespace_access_available,
+            namespaces=settings.kube_namespace_access_namespaces,
+            tiers=settings.kube_namespace_access_tiers,
+        ),
         docker=schemas.MetaDocker(
             available=settings.docker_available,
             storage=settings.docker_storage,
