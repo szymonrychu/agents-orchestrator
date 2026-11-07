@@ -254,6 +254,19 @@
           "message": {
             "title": "Message",
             "type": "string"
+          },
+          "occupier": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Only on 409 room_bound, for the orchestrator: the session bound to a room agents may start a chat in.",
+            "title": "Occupier"
           }
         },
         "required": [
@@ -517,6 +530,10 @@
             ],
             "title": "Alias"
           },
+          "anonymize_names": {
+            "title": "Anonymize Names",
+            "type": "boolean"
+          },
           "binding": {
             "anyOf": [
               {
@@ -672,6 +689,7 @@
           "trigger",
           "effective_trigger",
           "agents_may_initiate",
+          "anonymize_names",
           "session",
           "binding",
           "last_event_at",
@@ -703,6 +721,10 @@
               }
             ],
             "title": "Alias"
+          },
+          "anonymize_names": {
+            "title": "Anonymize Names",
+            "type": "boolean"
           },
           "binding": {
             "anyOf": [
@@ -855,6 +877,7 @@
           "trigger",
           "effective_trigger",
           "agents_may_initiate",
+          "anonymize_names",
           "session",
           "binding",
           "last_event_at",
@@ -1075,6 +1098,17 @@
             ],
             "title": "Agents May Initiate"
           },
+          "anonymize_names": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anonymize Names"
+          },
           "preset_id": {
             "anyOf": [
               {
@@ -1125,6 +1159,10 @@
               }
             ],
             "title": "Alias"
+          },
+          "anonymize_names": {
+            "title": "Anonymize Names",
+            "type": "boolean"
           },
           "binding": {
             "anyOf": [
@@ -1270,6 +1308,7 @@
           "trigger",
           "effective_trigger",
           "agents_may_initiate",
+          "anonymize_names",
           "session",
           "binding",
           "last_event_at",
@@ -2243,7 +2282,7 @@
     },
     "/chat/v1/messages": {
       "post": {
-        "description": "Queue a message, optionally a quoted reply.",
+        "description": "Queue a message, optionally a quoted reply. In a room with `anonymize_names`, a text\ncontaining a pseudonym (`user-<sha>`, `admin-<sha>`) is 422 `pseudonym_disclosed`.",
         "operationId": "send_message_chat_v1_messages_post",
         "parameters": [
           {
@@ -2633,7 +2672,7 @@
     },
     "/chat/v1/rooms": {
       "get": {
-        "description": "The rooms this session may post to: its bound room, else the unbound flagged rooms.",
+        "description": "The rooms this session may post to: its bound room, else the unbound flagged rooms.\nA room with `anonymize_names` is named with its people's pseudonyms.",
         "operationId": "list_rooms_chat_v1_rooms_get",
         "parameters": [
           {
