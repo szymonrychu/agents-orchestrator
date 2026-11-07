@@ -111,6 +111,7 @@ def create_app(
     app.include_router(sessions.router)
     app.include_router(agent.router)
     app.include_router(admin.router)
+    app.include_router(admin.session_router)
     app.include_router(chat.router)
     app.include_router(tasks.router)
     app.include_router(session_labels.router)

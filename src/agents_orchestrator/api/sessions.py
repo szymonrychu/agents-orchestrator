@@ -376,8 +376,13 @@ _SLUG_ATTEMPTS = 5
 
 
 def _secret_unset(names: list[str]) -> ApiError:
+    """422 naming the protected variables that have no value; `fields` are their paths."""
+    ordered = sorted(names)
     return ApiError(
-        422, "secret_unset", "protected variables with no value: " + ", ".join(sorted(names))
+        422,
+        "secret_unset",
+        "protected variables with no value: " + ", ".join(ordered),
+        extra={"fields": [f"env.{n}" for n in ordered]},
     )
 
 
