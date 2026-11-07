@@ -37,6 +37,13 @@ if TYPE_CHECKING:
 INACTIVITY_MIN_SECONDS = 60
 INACTIVITY_MAX_SECONDS = 2592000
 
+# Kubernetes access tiers of a namespace, weakest first (the canonical order of a spec list).
+KUBE_TIERS: tuple[str, ...] = ("read", "port-forward", "exec", "edit", "admin")
+KubeTier = Literal["read", "port-forward", "exec", "edit", "admin"]
+# Tiers without a built-in ClusterRole: bound to custom roles named `<role prefix><tier>`.
+KUBE_CUSTOM_ROLE_TIERS: tuple[str, ...] = ("port-forward", "exec")
+_NAMESPACE_RE = re.compile(r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
+
 SLUG_MAX = 40
 RESERVED_PLUGIN = "orchestrator"
 _LABEL_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
@@ -683,6 +690,10 @@ class SessionSpec(BaseModel):
     # Full read-write Kubernetes access in every namespace for the agent pods; refused until
     # ORCH_KUBE_ACCESS_SERVICE_ACCOUNT is set. Sparse: unset is not stored or dumped in a preset.
     kube_cluster_access: bool | None = Field(default=None, strict=True)
+    # Allowlisted namespace -> access tiers for the agent pods; each namespace must be in
+    # ORCH_KUBE_NAMESPACE_ACCESS_NAMESPACES and each tier in ORCH_KUBE_NAMESPACE_ACCESS_TIERS.
+    # Lists are stored in the canonical KUBE_TIERS order. Sparse: unset is not stored or dumped.
+    kube_namespace_access: dict[str, list[KubeTier]] | None = None
     # Usage ceilings that refuse a session start or scale-up (see api/usage_gate.py). Sparse:
     # unset is not stored or dumped in a preset.
     usage_quota: UsageQuota | None = None
@@ -858,6 +869,24 @@ class SessionSpec(BaseModel):
                 raise ValueError("discard_hook_url must be an http or https URL")
         return v
 
+    @field_validator("kube_namespace_access")
+    @classmethod
+    def _check_kube_namespace_access(
+        cls, v: dict[str, list[str]] | None
+    ) -> dict[str, list[str]] | None:
+        if v is None:
+            return v
+        if not v:
+            raise ValueError("must name at least one namespace")
+        for namespace, tiers in v.items():
+            if not _NAMESPACE_RE.match(namespace):
+                raise ValueError(f"namespace {namespace!r} is not a valid namespace name")
+            if not tiers:
+                raise ValueError(f"namespace {namespace!r} needs at least one tier")
+            if len(set(tiers)) != len(tiers):
+                raise ValueError(f"namespace {namespace!r} lists a tier twice")
+        return {ns: sorted(tiers, key=KUBE_TIERS.index) for ns, tiers in v.items()}
+
 
 def fill_resource_defaults(spec: SessionSpec, settings: Settings) -> SessionSpec:
     """Fill each empty resources key from the settings defaults; explicit values win per key.
@@ -974,9 +1003,9 @@ def validate_spec(spec: SessionSpec, settings: Settings, stored: SessionSpec | N
     """Validate a spec.
 
     `stored` stays for the preset PUT: a model, effort or image that has since left the settings
-    lists, and a cache, kube_cluster_access or docker whose setting has since been unset,
-    is accepted only when unchanged from the stored preset spec. Scheduling a session
-    passes no `stored` and validates fully.
+    lists, and a cache, kube_cluster_access, kube_namespace_access or docker whose setting has
+    since been unset, is accepted only when unchanged from the stored preset spec. Scheduling a
+    session passes no `stored` and validates fully.
     """
     from any_mcp.config import AnyMcpConfig
     from pydantic import ValidationError
@@ -1018,6 +1047,19 @@ def validate_spec(spec: SessionSpec, settings: Settings, stored: SessionSpec | N
         errors.append(
             "Kubernetes access is not configured (ORCH_KUBE_ACCESS_SERVICE_ACCOUNT is unset)"
         )
+    if spec.kube_namespace_access and (
+        stored is None or spec.kube_namespace_access != stored.kube_namespace_access
+    ):
+        for namespace, tiers in spec.kube_namespace_access.items():
+            if namespace not in settings.kube_namespace_access_namespaces:
+                errors.append(
+                    f"namespace {namespace!r} is not in the Kubernetes namespace allowlist"
+                )
+            errors.extend(
+                f"tier {tier!r} is not enabled for Kubernetes namespace access"
+                for tier in tiers
+                if tier not in settings.kube_namespace_access_tiers
+            )
     if (
         spec.docker
         and not settings.docker_available

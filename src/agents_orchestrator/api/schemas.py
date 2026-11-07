@@ -312,6 +312,12 @@ class MetaKubeClusterAccess(BaseModel):
     available: bool
 
 
+class MetaKubeNamespaceAccess(BaseModel):
+    available: bool
+    namespaces: list[str]
+    tiers: list[str]
+
+
 class MetaDocker(BaseModel):
     available: bool
     storage: str
@@ -374,6 +380,7 @@ class Meta(BaseModel):
     discard_hook: Literal["none", "command", "url"]
     cache: MetaCache
     kube_cluster_access: MetaKubeClusterAccess
+    kube_namespace_access: MetaKubeNamespaceAccess
     docker: MetaDocker
     hook_events: list[MetaHookEvent]
     permission_modes: list[MetaPermissionMode]

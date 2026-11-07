@@ -160,6 +160,27 @@ async def test_meta_kube_cluster_access_available(pool, dsn):
         assert "kube_access" not in (await http.get("/api/v1/meta")).json()
 
 
+async def test_meta_kube_namespace_access(pool, dsn):
+    async with app_client(pool, dsn) as http:
+        assert (await http.get("/api/v1/meta")).json()["kube_namespace_access"] == {
+            "available": False,
+            "namespaces": [],
+            "tiers": [],
+        }
+    async with app_client(
+        pool,
+        dsn,
+        kube_namespace_access_namespaces="media,games",
+        kube_namespace_access_tiers="read,exec",
+        kube_namespace_access_role_prefix="o-ns-",
+    ) as http:
+        assert (await http.get("/api/v1/meta")).json()["kube_namespace_access"] == {
+            "available": True,
+            "namespaces": ["media", "games"],
+            "tiers": ["read", "exec"],
+        }
+
+
 BOUNDED = (
     "session_message_rate_per_minute",
     "session_message_queued_max",

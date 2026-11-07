@@ -2520,6 +2520,9 @@
           "kube_cluster_access": {
             "$ref": "#/components/schemas/MetaKubeClusterAccess"
           },
+          "kube_namespace_access": {
+            "$ref": "#/components/schemas/MetaKubeNamespaceAccess"
+          },
           "models": {
             "items": {
               "type": "string"
@@ -2548,6 +2551,7 @@
           "discard_hook",
           "cache",
           "kube_cluster_access",
+          "kube_namespace_access",
           "docker",
           "hook_events",
           "permission_modes",
@@ -2771,6 +2775,35 @@
           "available"
         ],
         "title": "MetaKubeClusterAccess",
+        "type": "object"
+      },
+      "MetaKubeNamespaceAccess": {
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "namespaces": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Namespaces",
+            "type": "array"
+          },
+          "tiers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tiers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "available",
+          "namespaces",
+          "tiers"
+        ],
+        "title": "MetaKubeNamespaceAccess",
         "type": "object"
       },
       "MetaPermissionMode": {
@@ -3813,6 +3846,30 @@
             ],
             "title": "Kube Cluster Access"
           },
+          "kube_namespace_access": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "items": {
+                    "enum": [
+                      "read",
+                      "port-forward",
+                      "exec",
+                      "edit",
+                      "admin"
+                    ],
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kube Namespace Access"
+          },
           "leader_lease_seconds": {
             "anyOf": [
               {
@@ -4141,6 +4198,30 @@
               }
             ],
             "title": "Kube Cluster Access"
+          },
+          "kube_namespace_access": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "items": {
+                    "enum": [
+                      "read",
+                      "port-forward",
+                      "exec",
+                      "edit",
+                      "admin"
+                    ],
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kube Namespace Access"
           },
           "leader_lease_seconds": {
             "anyOf": [
