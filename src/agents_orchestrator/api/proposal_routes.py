@@ -11,7 +11,6 @@ agent route and no MCP tool reaches the review.
 
 from __future__ import annotations
 
-import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Request, Response
@@ -21,7 +20,6 @@ from agents_orchestrator.api.admin import ADMIN_PREFIX, AdminRoute, caller_of, r
 from agents_orchestrator.api.agent import Caller
 from agents_orchestrator.api.errors import not_found
 from agents_orchestrator.api.sessions import Cfg, Pool
-from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.db import proposals as repo
 from agents_orchestrator.db import sessions as sessions_repo
 
@@ -46,23 +44,9 @@ proposal_router = APIRouter(
 main_router = APIRouter(prefix="/api/v1", tags=["proposals"])
 
 
-async def _hidden(conn) -> set[str]:
-    """Preset ids the superleader may not manage (a deleted preset is not hidden: its proposals
-    stay readable as target_gone)."""
-    return {str(i) for i in await presets_repo.unmanageable_ids(conn)}
-
-
-async def _visible(conn, p: repo.Proposal) -> bool:
-    if p.kind != "preset":
-        return True
-    preset = await presets_repo.get(conn, uuid.UUID(p.target_id))
-    return preset is None or preset.superleader_manageable
-
-
 async def _own(conn, proposal_id: int, caller: sessions_repo.Session) -> None:
     """404 unless the caller filed the proposal and may still see its target."""
-    found = await repo.get(conn, proposal_id, caller.id)
-    if found is None or not await _visible(conn, found):
+    if await repo.get(conn, proposal_id, caller.id, visible_only=True) is None:
         raise not_found("proposal")
 
 
@@ -96,11 +80,9 @@ async def list_own_proposals(
     """The caller's own proposals, newest first, current revision only."""
     _, caller = caller_of(request)
     async with pool.connection() as conn:
-        views = await proposals.list_views(
-            conn, settings, proposer=caller.id, status=status, limit=limit
+        return await proposals.list_views(
+            conn, settings, proposer=caller.id, status=status, limit=limit, visible_only=True
         )
-        hidden = await _hidden(conn)
-    return [v for v in views if not (v.kind == "preset" and v.target_id in hidden)]
 
 
 @proposal_router.get("/proposals/{proposal_id}", response_model=schemas.ProposalView)

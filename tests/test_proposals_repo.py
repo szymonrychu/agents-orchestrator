@@ -8,6 +8,7 @@ import psycopg
 import psycopg.errors
 import pytest
 
+from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.db import proposals
 from agents_orchestrator.db.migrate import MIGRATIONS_DIR, run_migrations
 
@@ -530,3 +531,23 @@ async def test_concurrent_client_key_replay_makes_one_row(pool):
     async with pool.connection() as conn:
         cur = await conn.execute("SELECT count(*) FROM change_proposals WHERE client_key = 'race'")
         assert (await cur.fetchone())[0] == 1
+
+
+async def test_visible_only_excludes_hidden_targets_before_limit(pool):
+    """Hidden-target rows are dropped in SQL, so a page straddling them is still full."""
+    session = uuid.uuid4()
+    async with pool.connection() as conn:
+        hidden = await presets_repo.create(conn, "hid", {}, superleader_manageable=False)
+        shown = await presets_repo.create(conn, "shw", {}, superleader_manageable=True)
+        a = await _insert(conn, session, target=str(shown.id))
+        b = await _insert(conn, session, target=str(shown.id))
+        hid = await _insert(conn, session, target=str(hidden.id))
+        await _insert(conn, session, target=str(hidden.id))
+        gone = await _insert(conn, session, target=str(uuid.uuid4()))
+        kw = {"proposer_session": session, "statuses": proposals.ACTIVE}
+        page = await proposals.list_for(conn, limit=3, visible_only=True, **kw)
+        assert [p.id for p in page] == [gone, b, a]
+        assert len(await proposals.list_for(conn, limit=3, **kw)) == 3
+        assert await proposals.get(conn, a, session, visible_only=True) is not None
+        assert await proposals.get(conn, hid, session) is not None
+        assert await proposals.get(conn, hid, session, visible_only=True) is None

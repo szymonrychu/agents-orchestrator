@@ -352,15 +352,29 @@ async def lock(conn: psycopg.AsyncConnection, proposal_id: int) -> Proposal | No
     return found[0] if found else None
 
 
+# The one visibility rule: a proposal is hidden from a superleader when its target is a preset
+# that exists and is not superleader-manageable (a deleted target stays visible as target_gone).
+VISIBLE_SQL = (
+    "NOT (kind = 'preset' AND EXISTS (SELECT 1 FROM presets pr"
+    " WHERE pr.id::text = change_proposals.target_id AND NOT pr.superleader_manageable))"
+)
+
+
 async def get(
-    conn: psycopg.AsyncConnection, proposal_id: int, proposer_session: uuid.UUID | None = None
+    conn: psycopg.AsyncConnection,
+    proposal_id: int,
+    proposer_session: uuid.UUID | None = None,
+    *,
+    visible_only: bool = False,
 ) -> Proposal | None:
-    """The proposal with its whole revision history; with proposer_session, only that one's."""
+    """The proposal with its whole revision history; with proposer_session, only that one's;
+    with visible_only, none when its target is hidden (`VISIBLE_SQL`)."""
     rows = await _all(
         conn,
         f"SELECT {_COLS} FROM change_proposals WHERE id = %s"
-        " AND (%s::uuid IS NULL OR proposer_session = %s)",
-        (proposal_id, proposer_session, proposer_session),
+        " AND (%s::uuid IS NULL OR proposer_session = %s)"
+        f" AND (NOT %s OR {VISIBLE_SQL})",
+        (proposal_id, proposer_session, proposer_session, visible_only),
     )
     found = await _load(conn, rows, current_only=False)
     return found[0] if found else None
@@ -372,13 +386,16 @@ async def list_for(
     proposer_session: uuid.UUID | None,
     statuses: Sequence[str],
     limit: int,
+    visible_only: bool = False,
 ) -> list[Proposal]:
-    """Newest first, in `statuses`, of one proposer or (None) of everyone; current revision only."""
+    """Newest first, in `statuses`, of one proposer or (None) of everyone; current revision only.
+    With visible_only, proposals on a hidden target (`VISIBLE_SQL`) are excluded before LIMIT."""
     rows = await _all(
         conn,
         f"SELECT {_COLS} FROM change_proposals WHERE status = ANY(%s)"
-        " AND (%s::uuid IS NULL OR proposer_session = %s) ORDER BY id DESC LIMIT %s",
-        (list(statuses), proposer_session, proposer_session, limit),
+        " AND (%s::uuid IS NULL OR proposer_session = %s)"
+        f" AND (NOT %s OR {VISIBLE_SQL}) ORDER BY id DESC LIMIT %s",
+        (list(statuses), proposer_session, proposer_session, visible_only, limit),
     )
     return await _load(conn, rows, current_only=True)
 

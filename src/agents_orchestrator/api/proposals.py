@@ -117,12 +117,15 @@ async def _metas(conn, preset_id: uuid.UUID) -> dict[str, EnvMeta]:
     return {m.name: EnvMeta(m.version, m.updated_at) for m in found}
 
 
-async def _locked(conn, preset_id: uuid.UUID) -> presets_repo.Preset:
+async def _locked(conn, preset_id: uuid.UUID, *, hidden_as: str = "preset") -> presets_repo.Preset:
     """The target preset under a share lock (it cannot change until the commit); one the
-    superleader may not manage is as missing as an unknown."""
+    superleader may not manage is as missing as an unknown (`hidden_as` names what the 404
+    says is missing)."""
     preset = await presets_repo.get_for_share(conn, preset_id)
-    if preset is None or not preset.superleader_manageable:
+    if preset is None:
         raise not_found("preset")
+    if not preset.superleader_manageable:
+        raise not_found(hidden_as)
     return preset
 
 
@@ -295,7 +298,7 @@ async def revise(
                 raise _not_open()
             if current.kind != "preset":
                 raise _unsupported(current.kind)
-            preset = await _locked(conn, uuid.UUID(current.target_id))
+            preset = await _locked(conn, uuid.UUID(current.target_id), hidden_as="proposal")
             plan = await _plan(conn, settings, preset, body.patch, body.secrets)
             previous = current.revisions[0]  # `lock` loads the current revision only
             revision = await repo.add_revision(
@@ -391,13 +394,21 @@ async def get_view(
 
 
 async def list_views(
-    conn, settings: Settings, *, proposer: uuid.UUID | None, status: str, limit: int
+    conn,
+    settings: Settings,
+    *,
+    proposer: uuid.UUID | None,
+    status: str,
+    limit: int,
+    visible_only: bool = False,
 ) -> list[schemas.ProposalView]:
     """Newest first, the current revision only; `status` is active, open, closed or all."""
     statuses = STATUSES.get(status)
     if statuses is None:
         raise ApiError(422, "invalid_request", f"status must be one of: {', '.join(STATUSES)}")
-    found = await repo.list_for(conn, proposer_session=proposer, statuses=statuses, limit=limit)
+    found = await repo.list_for(
+        conn, proposer_session=proposer, statuses=statuses, limit=limit, visible_only=visible_only
+    )
     return [await _view(conn, p) for p in found]
 
 

@@ -354,7 +354,7 @@ async def test_agent_port_has_no_review_route(app, pool, boss, preset):
     view = await filed(app, boss)
     review = {"revision": 1, "items": [{"path": "wrapper.mcp_servers", "decision": "approve"}]}
     r = await agent(app, boss, "POST", f"{P}/{view['id']}/review", json=review)
-    assert r.status_code in (404, 405), r.text
+    assert_error(r, 404, "not_found")
     assert (await human(app, "GET", f"{M}/{view['id']}")).json()["status"] == "open"
     agent_paths = [p for p in app.openapi()["paths"] if p.startswith("/agent/v1")]
     assert [p for p in agent_paths if "review" in p.split("/")] == []
@@ -377,3 +377,34 @@ def test_review_route_only_on_the_main_router():
     }
     agent_side = [r.path for r in proposal_routes.proposal_router.routes]
     assert not [p for p in agent_side if "review" in p.split("/")]
+
+
+async def test_list_page_straddling_hidden_rows_is_full(app, pool, kube, boss, preset):
+    async with pool.connection() as conn:
+        other = await presets_repo.create(conn, "pr-other-target", {}, superleader_manageable=True)
+    first = await filed(app, boss)
+    second = await filed(app, boss, target="pr-other-target")
+    await hide(pool, other.id)
+    third = await filed(app, boss)
+    r = await agent(app, boss, "GET", P, params={"limit": 2})
+    assert [v["id"] for v in r.json()] == [third["id"], first["id"]]
+    assert second["id"] not in [v["id"] for v in r.json()]
+
+
+async def test_revise_on_target_hidden_mid_call_answers_proposal_404(
+    app, pool, kube, boss, preset, monkeypatch
+):
+    """The target turns hidden after the route pre-check: still the unknown-proposal body."""
+    view = await filed(app, boss)
+    unknown = await agent(app, boss, "GET", f"{P}/999999")
+    monkeypatch.setattr(proposal_routes, "_own", _hide_then_pass(pool, preset.id))
+    r = await agent(app, boss, "POST", f"{P}/{view['id']}/revise", json={"patch": PLAIN_PATCH})
+    assert_error(r, 404, "not_found")
+    assert r.json() == unknown.json()
+
+
+def _hide_then_pass(pool, preset_id):
+    async def own(conn, proposal_id, caller):
+        await hide(pool, preset_id)
+
+    return own
