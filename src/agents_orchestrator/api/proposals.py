@@ -19,7 +19,6 @@ import logging
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
@@ -590,7 +589,8 @@ async def _stale_others(conn, p: repo.Proposal) -> list[repo.Proposal]:
         except repo.NotInState:
             continue  # rework or stale already: re-based on its next revision anyway
         other = await repo.lock(conn, other_id)
-        assert other is not None
+        if other is None:  # locked above and never deleted by a transition
+            raise RuntimeError(f"proposal {other_id} vanished while locked")
         await _notify(conn, other, f"{_head(other)} {_CLOSED_TEXT['stale'].format(id=other.id)}")
         out.append(other)
     return out
@@ -606,7 +606,7 @@ async def _review_locked(
         raise not_found("proposal")
     if p.status not in _REVIEWABLE:
         raise _not_open()
-    if p.expires_at <= datetime.now(UTC):
+    if await repo.is_expired(conn, p.id):  # the database clock, as expires_at was set
         return await _close(conn, p, "expired", ApiError(409, "proposal_expired", "expired"))
     if body.revision != p.revision:
         raise ApiError(
@@ -662,13 +662,21 @@ async def _after_commit(request: Request, conn, settings: Settings, done: _Done)
         return
     try:
         kube = secret_store.kube_of(request)
-        async with conn.transaction():
-            for p in held:
-                await secret_store.release(conn, kube, settings.namespace, proposal_id=p.id)
-            if done.gc is not None:
-                await secret_store.gc(conn, kube, settings.namespace, preset_id=done.gc)
     except Exception as exc:  # the review committed; never turn it into an error
         log.warning("proposal cleanup after review failed: %s", type(exc).__name__)
+        return
+    for p in held:  # one transaction each: a failure leaves the others untouched
+        try:
+            async with conn.transaction():
+                await secret_store.release(conn, kube, settings.namespace, proposal_id=p.id)
+        except Exception as exc:
+            log.warning("proposal cleanup after review failed: %s", type(exc).__name__)
+    if done.gc is not None:
+        try:
+            async with conn.transaction():
+                await secret_store.gc(conn, kube, settings.namespace, preset_id=done.gc)
+        except Exception as exc:
+            log.warning("proposal cleanup after review failed: %s", type(exc).__name__)
 
 
 async def review(

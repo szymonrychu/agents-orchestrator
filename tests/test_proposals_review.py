@@ -612,6 +612,41 @@ async def test_applying_one_proposal_marks_another_open_one_stale_and_notifies_i
     await _assert_nowhere(pool, canary, done)
 
 
+async def test_a_failing_cleanup_of_one_proposal_does_not_undo_the_others(
+    pool, kube, settings, boss, preset, canary, monkeypatch
+):
+    first = await _filed(pool, kube, settings, boss, canary)
+    other = await _session(pool, "prop-other")
+    second = await _filed(
+        pool, kube, settings, other, canary, patch=PLAIN_PATCH, secrets={"TOKEN": canary + "b"}
+    )
+    real = store.release
+
+    async def flaky(conn, kube_, ns, *, proposal_id):
+        if proposal_id == first.id:
+            raise RuntimeError("boom")
+        return await real(conn, kube_, ns, proposal_id=proposal_id)
+
+    monkeypatch.setattr(store, "release", flaky)
+    done = await _review(
+        pool,
+        kube,
+        settings,
+        first.id,
+        1,
+        {"env.TOKEN": "approve", "wrapper.mcp_servers": "approve"},
+    )
+    assert done.status == "applied"  # the review never turns a cleanup failure into an error
+    assert (await _status(pool, second.id))[0] == "stale"
+    assert (
+        await _rows(
+            pool, "SELECT 1 FROM change_proposal_secrets WHERE proposal_id = %s", (second.id,)
+        )
+        == []
+    )
+    assert store.secret_name(preset.id, "TOKEN", 3) not in _secrets(kube)
+
+
 # ---------------------------------------------------------------- lifecycle conflicts
 
 
@@ -622,6 +657,29 @@ async def test_an_old_revision_is_409_revision_changed(pool, kube, settings, bos
         await _review(pool, kube, settings, view.id, 1, {"wrapper.mcp_servers": "approve"})
     _error(exc, 409, "revision_changed")
     assert (await _status(pool, view.id))[0] == "open"
+
+
+async def test_a_proposal_expired_on_the_database_clock_cannot_be_approved(
+    pool, kube, settings, boss, preset, canary
+):
+    view = await _filed(pool, kube, settings, boss, canary)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE change_proposals SET expires_at = clock_timestamp() - interval '1 second'"
+            " WHERE id = %s",
+            (view.id,),
+        )
+    with pytest.raises(ApiError) as exc:
+        await _review(
+            pool,
+            kube,
+            settings,
+            view.id,
+            1,
+            {"env.TOKEN": "approve", "wrapper.mcp_servers": "approve"},
+        )
+    _error(exc, 409, "proposal_expired")
+    assert (await _status(pool, view.id))[0] == "expired"
 
 
 async def test_an_expired_proposal_is_409_and_marked_expired(

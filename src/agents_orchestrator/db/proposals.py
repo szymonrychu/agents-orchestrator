@@ -427,6 +427,17 @@ async def active_on_target(
     return [r["id"] for r in rows]
 
 
+async def is_expired(conn: psycopg.AsyncConnection, proposal_id: int) -> bool:
+    """Whether the proposal's expires_at has passed on the database clock (wall time, not the
+    transaction start). A missing proposal is not expired."""
+    row = await _one(
+        conn,
+        "SELECT expires_at <= clock_timestamp() AS gone FROM change_proposals WHERE id = %s",
+        (proposal_id,),
+    )
+    return bool(row and row["gone"])
+
+
 async def due(conn: psycopg.AsyncConnection, now: datetime) -> list[int]:
     """Active proposals whose expires_at has passed `now`."""
     rows = await _all(

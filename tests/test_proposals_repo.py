@@ -377,6 +377,34 @@ async def test_active_on_target(pool):
         assert await proposals.active_on_target(conn, "schedule", "t1") == []
 
 
+async def test_record_review_statuses_widens_the_allowed_states(pool):
+    async with pool.connection() as conn:
+        pid = await _insert(conn)
+        await proposals.transition(conn, pid, from_states=("open",), to="stale")
+        with pytest.raises(proposals.NotInState):
+            await proposals.record_review(conn, pid, 1, {"replicas": ("rework", None)})
+        await proposals.record_review(
+            conn, pid, 1, {"replicas": ("rework", "n")}, statuses=("open", "stale")
+        )
+        got = await proposals.get(conn, pid)
+    assert got.revisions[0].items[0].decision == "rework"
+
+
+async def test_active_on_target_lock_skips_a_row_another_transaction_holds(pool):
+    async with pool.connection() as conn:
+        a = await _insert(conn, target="lk")
+        b = await _insert(conn, target="lk")
+    async with pool.connection() as holder, pool.connection() as conn:
+        async with holder.transaction():
+            await holder.execute("SELECT 1 FROM change_proposals WHERE id = %s FOR UPDATE", (a,))
+            async with conn.transaction():
+                assert await proposals.active_on_target(conn, "preset", "lk", lock=True) == [b]
+        async with conn.transaction():
+            assert await proposals.active_on_target(conn, "preset", "lk", lock=True) == [a, b]
+    async with pool.connection() as conn:
+        assert await proposals.active_on_target(conn, "preset", "lk") == [a, b]
+
+
 async def test_due_returns_only_active_past_expiry(pool):
     async with pool.connection() as conn:
         past = await _insert(conn)
