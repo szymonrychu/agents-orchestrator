@@ -1898,6 +1898,7 @@ def test_session_without_init_scripts_skipped(api: httpx.Client, baseline: dict)
 HOOK_FILE = "hook-ran.txt"
 HOOK_TIMEOUT = 120
 COMPACT_TIMEOUT = 180
+COMPACTION_SETTLE_SECONDS = 15  # dispatcher polls (2 s) after the compaction, no move expected
 AUTOCLOSE_TIMEOUT = 240  # 30 s window plus the sweeper interval and the discard
 
 
@@ -1980,7 +1981,8 @@ def test_wrapper_hook_and_idle_compact(api: httpx.Client) -> None:
 COMPACT_PROMPT = "compact mid turn: report when done"
 
 
-def test_leader_compaction_hands_over(api: httpx.Client) -> None:
+def test_leader_compaction_keeps_leading(api: httpx.Client) -> None:
+    """A compaction is an advisory only (voluntary handover): the compacted leader keeps leading."""
     with config_session(api, "compact", {"replicas": 2}) as created:
         cid = created["id"]
         ready_agents(api, cid, 2)
@@ -2003,16 +2005,11 @@ def test_leader_compaction_hands_over(api: httpx.Client) -> None:
         compacting = [e for e in events if e["type"] == "compacting"]
         assert any(e["agent_id"] == first["id"] for e in compacting), compacting
 
-        def handed_over() -> dict[str, Any] | None:
-            view = api.get(f"/sessions/{cid}").json()
-            ok = (
-                view["leader_agent_id"] not in (None, first["id"])
-                and view["leader_epoch"] > epoch
-                and view["leader_reason"] == "compaction"
-            )
-            return view if ok else None
-
-        new = wait_for("leadership to hand over (compaction)", handed_over, LEADER_TIMEOUT)
+        # several dispatcher polls and leadership passes run before the check
+        time.sleep(COMPACTION_SETTLE_SECONDS)
+        view = api.get(f"/sessions/{cid}").json()
+        assert view["leader_agent_id"] == first["id"], view
+        assert view["leader_epoch"] == epoch, view
 
         resp = api.post(f"/sessions/{cid}/messages", json={"text": "say hello"})
         assert resp.status_code == 202, resp.text
@@ -2022,7 +2019,7 @@ def test_leader_compaction_hands_over(api: httpx.Client) -> None:
             TURN_TIMEOUT,
             interval=0.5,
         )
-        assert second["agent_id"] == new["leader_agent_id"], (second, new)
+        assert second["agent_id"] == first["id"], (second, first)
 
 
 def test_autoclose_discards_session(api: httpx.Client) -> None:
