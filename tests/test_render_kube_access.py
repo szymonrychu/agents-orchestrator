@@ -17,10 +17,16 @@ from agents_orchestrator.reconciler.cache import render_cache_job
 from agents_orchestrator.reconciler.checks import render_job
 from agents_orchestrator.reconciler.init import render_init_job
 from agents_orchestrator.settings import Settings
+from agents_orchestrator.spec import KUBE_TIERS
 
 TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount"
 KUBE_ENV = {"KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT"}
 KUBE_KINDS = {"ServiceAccount", "ClusterRoleBinding", "RoleBinding"}
+NSET: dict[str, Any] = {
+    "kube_namespace_access_namespaces": ["media", "games"],
+    "kube_namespace_access_tiers": list(KUBE_TIERS),
+    "kube_namespace_access_role_prefix": "orch-ns-",
+}
 
 
 def on(**over: Any) -> Settings:
@@ -195,3 +201,92 @@ def test_cluster_access_jobs_stay_unprivileged() -> None:
         pod = job["spec"]["template"]["spec"]
         assert pod["serviceAccountName"] == settings.agent_service_account
         assert pod["automountServiceAccountToken"] is False
+
+
+def test_namespace_access_renders_one_binding_per_namespace_and_tier() -> None:
+    s = make_session(kube_namespace_access={"media": ["read", "port-forward"], "games": ["admin"]})
+    objs = render.render_session(s, make_settings(**NSET), TOKENS)
+    rbs = {
+        (o["metadata"]["namespace"], o["metadata"]["name"]): o
+        for o in objs
+        if o["kind"] == "RoleBinding"
+    }
+    sa = session_sa(s)
+    assert set(rbs) == {
+        ("media", f"{sa}-read"),
+        ("media", f"{sa}-port-forward"),
+        ("games", f"{sa}-admin"),
+    }
+    assert rbs[("media", f"{sa}-read")]["roleRef"]["name"] == "view"
+    assert rbs[("media", f"{sa}-port-forward")]["roleRef"]["name"] == "orch-ns-port-forward"
+    assert rbs[("games", f"{sa}-admin")]["roleRef"]["name"] == "admin"
+    assert all(
+        r["subjects"] == [{"kind": "ServiceAccount", "name": sa, "namespace": "agents"}]
+        for r in rbs.values()
+    )
+    assert all(
+        r["apiVersion"] == "rbac.authorization.k8s.io/v1"
+        and r["roleRef"]["kind"] == "ClusterRole"
+        and r["roleRef"]["apiGroup"] == "rbac.authorization.k8s.io"
+        and r["metadata"]["labels"] == {**session_labels(s.slug), SESSION_ID_LABEL: str(s.id)}
+        for r in rbs.values()
+    )
+    assert "ClusterRoleBinding" not in kinds(objs)
+    order = [
+        (o["metadata"].get("namespace"), o["metadata"]["name"])
+        for o in objs
+        if o["kind"] == "RoleBinding"
+    ]
+    assert order == [
+        ("games", f"{sa}-admin"),
+        ("media", f"{sa}-read"),
+        ("media", f"{sa}-port-forward"),
+    ]
+    pod = pod_of(objs)
+    assert pod["serviceAccountName"] == sa and pod["automountServiceAccountToken"] is True
+
+
+def test_cluster_wins_over_namespace_map() -> None:
+    s = make_session(kube_cluster_access=True, kube_namespace_access={"media": ["read"]})
+    objs = render.render_session(s, make_settings(kube_cluster_access_enabled=True, **NSET), TOKENS)
+    assert "RoleBinding" not in kinds(objs) and "ClusterRoleBinding" in kinds(objs)
+    assert (
+        render.kube_namespace_grants(
+            s.spec, make_settings(kube_cluster_access_enabled=True, **NSET)
+        )
+        == {}
+    )
+
+
+def test_namespace_grant_renders_closed_when_unlisted() -> None:
+    s = make_session(kube_namespace_access={"media": ["exec"], "old": ["read"]})
+    st = make_settings(
+        kube_namespace_access_namespaces=["media"], kube_namespace_access_tiers=["read"]
+    )
+    objs = render.render_session(s, st, TOKENS)
+    assert not kinds(objs) & {"ServiceAccount", "RoleBinding"}
+    assert pod_of(objs)["automountServiceAccountToken"] is False
+    assert render.kube_namespace_grants(s.spec, st) == {}
+    assert render.kube_granted(s.spec, st) is False
+
+
+def test_namespace_grants_filter_tiers_and_namespaces() -> None:
+    s = make_session(kube_namespace_access={"media": ["read", "exec"], "old": ["read"]})
+    st = make_settings(
+        kube_namespace_access_namespaces=["media"], kube_namespace_access_tiers=["read"]
+    )
+    assert render.kube_namespace_grants(s.spec, st) == {"media": ["read"]}
+    objs = render.render_session(s, st, TOKENS)
+    (rb,) = (o for o in objs if o["kind"] == "RoleBinding")
+    assert (rb["metadata"]["namespace"], rb["metadata"]["name"]) == (
+        "media",
+        f"{session_sa(s)}-read",
+    )
+
+
+def test_switch_keeps_pod_template() -> None:
+    base = {"kube_namespace_access": {"media": ["read"]}}
+    st = make_settings(kube_cluster_access_enabled=True, **NSET)
+    a = pod_of(render.render_session(make_session(**base), st, TOKENS))
+    b = pod_of(render.render_session(make_session(kube_cluster_access=True, **base), st, TOKENS))
+    assert a == b  # same session id in make_session: same SA, no roll
