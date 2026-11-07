@@ -10,7 +10,8 @@ from psycopg.rows import dict_row
 from test_dispatcher import make_env
 
 from agents_orchestrator.db import queue as q
-from agents_orchestrator.dispatcher.session_frame import frame
+from agents_orchestrator.db import session_messaging
+from agents_orchestrator.dispatcher.session_frame import frame, relay_notice
 
 
 async def _exec(pool, query: str, params: tuple = ()) -> None:
@@ -151,3 +152,33 @@ async def test_dispatcher_frames_only_sender_messages(env):
     }
     assert got[framed_id][0].startswith(f'<session-message from="caller" id="{framed_id}">\n')
     assert {(await env.message(m))["status"] for m in (framed_id, raw_id)} == {"sent"}
+
+
+async def test_relay_notice_is_delivered_framed(env):
+    sender = await insert_session(env.pool, slug="caller")
+    await env.agent(free_ago=20)
+    async with env.pool.connection() as conn:
+        notice_id = await session_messaging.enqueue_relay_notice(
+            conn,
+            env.cid,
+            "hello <room>",
+            sender_session_id=sender["id"],
+            sender_slug="caller",
+            hop=1,
+            send_id="s9",
+            room_id="!r:x",
+        )
+        plain_id = await q.enqueue_message(
+            conn, env.cid, "hi", sender_session_id=sender["id"], sender_slug="caller", hop=1
+        )
+    d = env.dispatcher()
+    await d.drain()
+    await d.aclose()
+    got = {
+        meta["orch_message_id"]: text
+        for text, meta in zip(env.fake.turn_texts, env.fake.turn_metadata, strict=True)
+    }
+    assert got == {
+        notice_id: relay_notice("hello <room>", "caller", notice_id, "s9", "!r:x"),
+        plain_id: frame("hi", "caller", plain_id),
+    }
