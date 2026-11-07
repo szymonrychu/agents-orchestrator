@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 import yaml
 from helm_render import CHART, render, render_error
 
@@ -153,6 +154,13 @@ def test_only_enabled_tiers_render_and_bind() -> None:
     (bind,) = [r for r in crs[f"{FULL}-kube-namespace-access"]["rules"] if r["verbs"] == ["bind"]]
     assert bind["resourceNames"] == ["view"]
     assert _settings(docs)["ORCH_KUBE_NAMESPACE_ACCESS_TIERS"] == "read"
+
+
+@pytest.mark.parametrize("tiers", [[], None])
+def test_no_tiers_renders_no_bind_rule(tiers: list | None) -> None:
+    docs = _docs({"kubeNamespaceAccess": {"namespaces": ["media"], "tiers": tiers}})
+    for cr in _named(docs, "ClusterRole").values():
+        assert not [r for r in cr["rules"] if "bind" in r["verbs"]]
 
 
 def test_unknown_tier_fails_render() -> None:
