@@ -1285,6 +1285,33 @@ async def test_stop_wakes_leadership_pass(harness, pool, listener) -> None:
     assert listener.on(LEADERSHIP_CHANNEL) == [{"session_id": str(h.session_id)}]
 
 
+async def test_restart_clears_background_and_wakes_leadership(harness, pool, listener) -> None:
+    h = await harness()
+    await h.start()
+    h.fake.emit("subagent_started", {"agent_id": "sa1", "agent_type": "x"})
+    await h.stored_through(h.last_fake_seq())
+    assert set(await background(pool, h.agent_id)) == {"sa1"}
+    assert listener.on(LEADERSHIP_CHANNEL) == []
+
+    h.fake.emit(
+        "session_state",
+        {"state": "idle", "since": T1, "restart": {"count": 1, "resumed": True}},
+    )
+    await h.stored_through(h.last_fake_seq())
+    assert await background(pool, h.agent_id) == {}
+    await wait_until(lambda: listener.on(LEADERSHIP_CHANNEL))
+    assert listener.on(LEADERSHIP_CHANNEL) == [{"session_id": str(h.session_id)}]
+
+
+async def test_state_change_without_restart_keeps_background(harness, pool) -> None:
+    h = await harness()
+    await h.start()
+    h.fake.emit("subagent_started", {"agent_id": "sa1", "agent_type": "x"})
+    h.fake.emit("session_state", {"state": "busy", "since": T1})
+    await h.stored_through(h.last_fake_seq())
+    assert set(await background(pool, h.agent_id)) == {"sa1"}
+
+
 async def test_attach_with_zero_outstanding_clears(harness, pool) -> None:
     h = await harness()
     async with pool.connection() as conn:

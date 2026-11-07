@@ -231,6 +231,10 @@ class _AgentStream:
                 await status.notify_agent_free(conn, ref.session_id, ref.agent_id)
             if change.changed:
                 await status.notify_status(conn, ref.session_id, ref.agent_id)
+            # the wrapper clears its subagent set on a claude restart without a stop event
+            if data.get("restart") and await status.clear_background(conn, ref.agent_id):
+                await status.notify_status(conn, ref.session_id, ref.agent_id)
+                await notify(conn, leadership.CHANNEL, {"session_id": str(ref.session_id)})
             return _Projected(became_idle=change.became_idle)
         if env.type == "session_closed":
             return _Projected(closed=True)  # not projected: `_closed` reads the snapshot

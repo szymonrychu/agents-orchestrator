@@ -279,6 +279,17 @@ async def set_context(
     )
 
 
+async def clear_background(conn: psycopg.AsyncConnection, agent_id: uuid.UUID) -> bool:
+    """Empty the background map (claude restarted: its subagents died with the process).
+    True when something was cleared."""
+    cur = await conn.execute(
+        "UPDATE agent_status SET background_subagents = '{}'::jsonb, updated_at=now()"
+        " WHERE agent_id=%s AND background_subagents <> '{}'::jsonb",
+        (agent_id,),
+    )
+    return cur.rowcount > 0
+
+
 async def set_background(
     conn: psycopg.AsyncConnection,
     agent_id: uuid.UUID,
