@@ -614,3 +614,22 @@ def test_verify_route_is_post_only_and_exact():
     assert service_auth.route_allowed("POST", verify_path(cid))
     assert not service_auth.route_allowed("GET", verify_path(cid))
     assert not service_auth.route_allowed("POST", "/api/v1/sessions/x/agent-token/verify")
+
+
+async def test_service_port_allows_project_gets_only(app):
+    async with client(app, 8002) as c:
+        r = await c.get("/api/v1/projects")
+        assert r.status_code == 200, r.text
+        assert [p["slug"] for p in r.json()] == ["default"]
+        assert r.json()[0]["presets"] is None and r.json()[0]["sessions"] is None
+        r = await c.get("/api/v1/projects/default")
+        assert r.status_code == 200, r.text
+        assert r.json()["presets"] is None and r.json()["sessions"] is None
+        for method, path in [
+            ("POST", "/api/v1/projects"),
+            ("PATCH", "/api/v1/projects/default"),
+            ("GET", "/api/v1/projects/default/"),
+            ("GET", "/api/v1/projects/Default"),
+        ]:
+            r = await c.request(method, path, json={} if method != "GET" else None)
+            assert_error(r, 403, "forbidden")

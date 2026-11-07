@@ -337,6 +337,7 @@ In-cluster trigger services (agents-webhook, agents-schedule) call the orchestra
   - `GET /api/v1/meta`
   - `GET /api/v1/presets`
   - `GET /api/v1/presets/{preset_id}`
+  - `GET /api/v1/projects` and `GET /api/v1/projects/{slug}` (project views without the `presets` and `sessions` counts, which are null on this port)
   - `GET /api/v1/sessions`
   - `POST /api/v1/sessions`
   - `GET /api/v1/sessions/{session_id}`
@@ -893,6 +894,22 @@ Deletes the preset. Sessions made from it keep their spec; their `preset_id` bec
 ### `POST /api/v1/presets/{preset_id}/copy`
 
 Optional body `{"name": "<name>"}`. Creates a new, non-default preset holding the source's stored spec verbatim and its labels. Without a name it is `<source name> copy`, then `<source name> copy 2`, `copy 3` and so on until free; the source part is cut to fit 40 characters and right-trimmed before ` copy`. Response 201 with the new preset view. Errors: 404 `not_found` (unknown source), 409 `conflict` (an explicit name is taken), 422 `invalid_request` (bad explicit name).
+
+### `GET /api/v1/projects`
+
+Projects as a list of project views `{slug, name, description, archived, created_at, updated_at, presets, sessions}` by slug. `presets` is the number of presets in the project and `sessions` the number of its active (not being deleted) sessions; both are null on the service port. Without a query only active projects are listed; `?archived=true` lists only archived ones. Response 200. A fresh database has one project, `default`.
+
+### `POST /api/v1/projects`
+
+Body `{"slug": "<slug>", "name": "<name>", "description": "<text>"}`; `description` is optional. The slug is 1 to 40 lowercase letters, digits and dashes starting with a letter or digit and never changes; the name is 1 to 80 characters; the description is at most 4000. Response 201 with the project view. Errors: 422 `invalid_request`, 409 `project_exists`.
+
+### `GET /api/v1/projects/{slug}`
+
+One project view, with the `presets` and `sessions` counts on the main port. Errors: 404 `not_found`.
+
+### `PATCH /api/v1/projects/{slug}`
+
+Body with any of `name`, `description`, `archived` (other keys, the slug included, are 422 `invalid_request`). `archived: true` archives the project, `false` restores it; archiving the `default` project is 409 `default_project`. Response 200 with the project view. Errors: 404 `not_found`.
 
 ### `PUT /api/v1/presets/{preset}/secrets/{name}`
 

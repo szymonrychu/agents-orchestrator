@@ -123,6 +123,8 @@ SERVICE_ROUTES = (
     "GET /api/v1/meta",
     "GET /api/v1/presets",
     "GET /api/v1/presets/{preset_id}",
+    "GET /api/v1/projects",
+    "GET /api/v1/projects/{slug}",
     "GET /api/v1/sessions",
     "POST /api/v1/sessions",
     "GET /api/v1/sessions/{session_id}",

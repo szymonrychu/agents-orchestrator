@@ -20,12 +20,16 @@ NAME_MAX = 80
 DESCRIPTION_MAX = 4000
 _SLUG = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
 
-# Per-project counts in one grouped query: presets, and sessions not being deleted.
+# The one definition of an active session: not being deleted.
+_ACTIVE_SESSION = "desired = 'active'"
+
+# Per-project counts in one grouped query: presets, and active sessions.
 _COUNTS = (
     "LEFT JOIN (SELECT project, count(*) AS n FROM presets GROUP BY project) pc"
     " ON pc.project = p.slug"
-    " LEFT JOIN (SELECT project, count(*) AS n FROM sessions WHERE desired = 'active'"
-    " GROUP BY project) sc ON sc.project = p.slug"
+    " LEFT JOIN (SELECT project, count(*) AS n FROM sessions WHERE "
+    + _ACTIVE_SESSION
+    + " GROUP BY project) sc ON sc.project = p.slug"
 )
 
 
@@ -196,7 +200,7 @@ async def project_counts(conn: psycopg.AsyncConnection, slug: str) -> dict[str, 
     """Presets and active (not deleting) sessions in the project."""
     cur = await conn.execute(
         "SELECT (SELECT count(*) FROM presets WHERE project = %(s)s),"
-        " (SELECT count(*) FROM sessions WHERE project = %(s)s AND desired = 'active')",
+        f" (SELECT count(*) FROM sessions WHERE project = %(s)s AND {_ACTIVE_SESSION})",
         {"s": slug},
     )
     n_presets, n_sessions = await cur.fetchone()
