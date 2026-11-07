@@ -96,7 +96,7 @@ Every process reads `ORCH_*` variables (the contract `agents-orchestrator-settin
 | `ORCH_ANY_MCP_REPO` | `https://github.com/szymonrychu/any-mcp` | api, reconciler | any-mcp git repository |
 | `ORCH_ANY_MCP_REF` | `v0.5.0` | api, reconciler | any-mcp pinned release tag vX.Y.Z (never a branch) |
 | `ORCH_ANY_MCP_PLUGINS_REPO` | `https://github.com/szymonrychu/any-mcp-tatara-plugins` | api, reconciler | any-mcp plugins git repository (holds the orchestrator plugin) |
-| `ORCH_ANY_MCP_PLUGINS_REF` | `v0.11.1` | api, reconciler | any-mcp plugins pinned release tag vX.Y.Z (never a branch) |
+| `ORCH_ANY_MCP_PLUGINS_REF` | `v0.14.0` | api, reconciler | any-mcp plugins pinned release tag vX.Y.Z (never a branch) |
 | `ORCH_ON_START_TIMEOUT_SECONDS` | `600` | api, reconciler | onStart hook timeout |
 | `ORCH_KUBE_ACCESS_SERVICE_ACCOUNT` | empty | api, reconciler | ServiceAccount (bound to the `cluster-admin` ClusterRole by the chart) that pods of a `kube_access` session run as; empty refuses `spec.kube_access: true` with 422 and `GET /api/v1/meta` reports `kube_access.available` false |
 | `ORCH_DOCKER_IMAGE` | empty | api, reconciler | Docker-in-Docker image of the privileged sidecar of a `docker` session, pinned by semver tag like `docker:27.3.1-dind` (`latest`, `dind` and sha pins are refused at startup); empty refuses `spec.docker: true` with 422 and `GET /api/v1/meta` reports `docker.available` false |
@@ -159,7 +159,7 @@ CI (`.github/workflows/ci.yaml`, job `images`) builds the orchestrator image fro
 
 - Orchestrator image: `harbor.szymonrichert.pl/containers/agents-orchestrator:<sha7>`, where `<sha7>` is the first seven characters of the commit sha. Tags are immutable; there is no `latest`.
 - Agent image: no agent image is built here. Agent pods run the claude-code-wrapper image named by `ORCH_AGENT_IMAGE`; the recommended one is `harbor.szymonrichert.pl/containers/claude-code-wrapper:0.9.0`. This is the value for the chart's `agentImage` and agents-helmfile, and the commit the dev dependency `claude-code-wrapper` in `pyproject.toml` is pinned to, so config validation tests the wrapper the agents run.
-- any-mcp: it reaches agent pods through the rendered onStart hook, not through an image. The `any-mcp` dependency in `pyproject.toml` and `ORCH_ANY_MCP_REF` pin the same release tag (`v0.5.0`). The dev dependency `any-mcp-tatara-orchestrator` in `pyproject.toml` (the orchestrator plugin from the plugins repo) and `ORCH_ANY_MCP_PLUGINS_REF` pin the same plugins release tag (`v0.11.1`).
+- any-mcp: it reaches agent pods through the rendered onStart hook, not through an image. The `any-mcp` dependency in `pyproject.toml` and `ORCH_ANY_MCP_REF` pin the same release tag (`v0.5.0`). The dev dependency `any-mcp-tatara-orchestrator` in `pyproject.toml` (the orchestrator plugin from the plugins repo) and `ORCH_ANY_MCP_PLUGINS_REF` pin the same plugins release tag (`v0.14.0`).
 - The onStart script (`k8s/on_start.py`, ConfigMap key `on-start.sh`) runs before claude starts, on every pod start: it installs any-mcp into `/opt/any-mcp` when `/opt/any-mcp/.ref` differs from `ORCH_ANY_MCP_REF`, writes the session's any-mcp config to `/opt/any-mcp/etc/any-mcp.yaml`, runs `/opt/any-mcp/bin/any-mcp plugins install --config /opt/any-mcp/etc/any-mcp.yaml` (every run, so every `plugins[].source` of the config is installed into the any-mcp venv, branch and tag refs refreshed), then `/opt/any-mcp/bin/any-mcp --help`. The orchestrator plugin is one of those sources: the reserved entry is `source: git::<ORCH_ANY_MCP_PLUGINS_REPO>//orchestration/orchestrator?ref=<ORCH_ANY_MCP_PLUGINS_REF>` (no `plugin` key), installed as the package `any-mcp-tatara-orchestrator`. The rendered `plugins` list is the base config's entries (the spec's `any_mcp_config`, else the `ORCH_ANY_MCP_CONFIG_FILE` default), then one `{name, source}` per `spec.any_mcp_sources` entry in order, then the reserved entry (omitted without `ORCH_AGENT_API_URL`; the sources are rendered either way). A failed install does not block the session: the script logs `on-start: <step> failed (exit N)` to stderr, exits 0 and the hook is `on_error: allow`, so the pod stays Ready without the failed piece. Changing `ORCH_ANY_MCP_PLUGINS_REPO`, `ORCH_ANY_MCP_PLUGINS_REF` or a session's sources changes the config hash and rolls its pods.
 
 ## Helm chart
@@ -289,6 +289,10 @@ ingress:
 ```
 
 A `kube_access` agent is cluster-admin. Its pods run as the ServiceAccount bound to `cluster-admin` with the token mounted, so it can read every Secret in every namespace (including the orchestrator master key, the Claude token and the database credentials) and can mint tokens, certificates and bindings that outlive its session; discarding the session is therefore not a full revocation, and the credentials it could read must be rotated. Sessions started by the trigger services (agents-webhook, agents-schedule) from a preset with `kube_access` get the same access, so untrusted webhook content reaching such a session is a cluster-admin prompt-injection path. Any superleader session (`session_messaging`) can feed text to the leader of any `kube_access` session, and any session's leader can feed text to a superleader session that has `kube_access`; the frame trailer on the delivered turn is the only defence.
+
+### Session spec self-edit (known risk)
+
+`PATCH /agent/v1/admin/sessions/{slug}` lets a session's leader edit its own spec, executable fields included: `wrapper.hooks`, `wrapper.mcp_servers` (stdio commands), `wrapper.plugins`, `init_scripts`, `any_mcp_*`, `start_prompt` and `wrapper.system_append`. These apply with the same guards as the preset PATCH (human-only fields toward safe only, protected values never accepted, fixed fields, tighten-only limits for a regular leader) but the own-session exemption from `privileged_target` stays: the pod already runs with its grants, so the edit adds none. The residual risk is `wrapper.permission_mode: auto`: a hook or a stdio MCP command runs outside the permission classifier, so a prompt-injected leader can widen what its own session runs unclassified. It is confined to that session (the preset is never written, and `kube_access`, `session_messaging`, `docker` and looser permissions cannot be turned on), takes effect only after the pod roll, and every call is audited with the changed paths. Treat a session in `auto` mode that takes untrusted input (webhook, chat) as able to rewrite its own tooling, and keep the grants off such presets. The edit surface for other sessions is the superleader's, bounded by `privileged_target` and `superleader_manageable`.
 
 ### Origin allowlist
 
@@ -778,7 +782,7 @@ Versioning: `/api/v1` is additive only. New routes, new optional request fields 
 
 Documented exception, 2026-10-23: `PATCH /api/v1/sessions/{session_id}` was removed (it now answers 405), and `POST /api/v1/sessions` requires exactly one of `spec` and `preset_id`. Why: a live spec edit rolled every agent pod of a running session; sessions now snapshot their preset at create and the spec is fixed from then on. To change it, discard the session and schedule again from a preset.
 
-In-place fields (amends the exception above): `spec.replicas` and `spec.init_scripts` change in place with no generation bump and no pod roll; `spec.wrapper.permission_mode` (2026-11-01) also changes in place through `PUT /api/v1/sessions/{session_id}/permission-mode`, but it is rendered into the pod config, so a changed value bumps the generation and the config hash rolls the pods through the normal rollout (idle pods restart, busy ones wait for the turn to end). PATCH on the session stays 405 (only `PATCH /api/v1/sessions/{session_id}/labels` exists).
+In-place fields (amends the exception above): `spec.replicas` and `spec.init_scripts` change in place with no generation bump and no pod roll; `spec.wrapper.permission_mode` (2026-11-01) also changes in place through `PUT /api/v1/sessions/{session_id}/permission-mode`, but it is rendered into the pod config, so a changed value bumps the generation and the config hash rolls the pods through the normal rollout (idle pods restart, busy ones wait for the turn to end). PATCH on the session stays 405 (only `PATCH /api/v1/sessions/{session_id}/labels` exists). The agent-port route `PATCH /agent/v1/admin/sessions/{slug}` (see Admin session spec edit) edits the rest of a live session's spec for an agent; it is not on the main port.
 
 Documented exception, 2026-10-25: the orchestrator's unit is a session. Every `/api/v1/clusters...` route became `/api/v1/sessions...` (path parameter `session_id`), every `cluster_id` field became `session_id`, the schemas `SessionSpec`, `SessionSummary`, `SessionView` and `CreateSession`, `caps.max_sessions`, the error codes `session_deleting`, `static_session` and `session_limit`, and the SSE events `session_status` and `session_removed`. There is no alias: the old routes answer 404. Why: one word for one thing across the API, the UI and the database (tables `sessions` and `session_leaders`, migration `0005`).
 
@@ -1132,7 +1136,7 @@ The `/sessions/{session_id}/events/stream` frames are named by the stored wrappe
 
 ### Session configuration
 
-Create-time only fields of the session `spec` (also accepted on `POST /api/v1/presets` and `PUT /api/v1/presets/{preset_id}`; a session created from a preset snapshots them). They cannot be edited on a running session; discard and schedule again. Unset fields are not stored and not rendered.
+Create-time only fields of the session `spec` (also accepted on `POST /api/v1/presets` and `PUT /api/v1/presets/{preset_id}`; a session created from a preset snapshots them). On the main port they cannot be edited on a running session (discard and schedule again); an agent edits them through `PATCH /agent/v1/admin/sessions/{slug}` (see Admin session spec edit). Unset fields are not stored and not rendered.
 
 `spec.wrapper` is a typed block of claude-code-wrapper settings; unknown keys are 422. Every key, with the wrapper config path it renders to:
 
@@ -1411,6 +1415,41 @@ Superleaders manage ALL chat rooms whatever their preset (user decision, 2026-11
 Opening a chat or inviting someone never happens without the user's yes. `POST /chats/room-requests` (`target`, `action`, `room_id`, `task_key`) is relayed after a check that the task exists on the taskboard (422 `unknown_task`, nothing forwarded; 503 `taskboard_unconfigured` when no taskboard is set). When the connector answers 201 with a `pending_confirmation` request, the orchestrator asks a taskboard decision on that task as the calling session ("Yes, open it" recommended, or "No"; `client_key` `room-request-<id>`) and attaches its id to the request through the connector's internal routes (`/chat/v1/internal`, used only by the orchestrator and never relayed, so an agent cannot reach them). The 201 answer carries `decision: {id, url}`; if the taskboard failed, `decision` is null and the confirm route asks again.
 
 `POST /agent/v1/admin/chats/room-requests/{request_id}/confirm` (no body) settles the request from the answer: not `pending_confirmation` is 409 `not_pending`; no decision yet asks one (202); decision still open is 409 `decision_open` (with `url`); answered with the first option confirms (200, status `confirmed`); any other answer, or a withdrawn decision, rejects (200, status `rejected`). The connector confirms only with the decision id the orchestrator attached, so a decision the agent asked itself on the same task confirms nothing. Taskboard failure is 503 `taskboard_unavailable`, connector failure 503 `upstream_unavailable`; no state is half-applied. The tools are `chat_admin_room`, `chat_users`, `chat_room_allow`, `chat_open`, `chat_open_status` and `chat_open_confirm`.
+
+### Admin session spec edit (GET and PATCH /agent/v1/admin/sessions/{slug})
+
+`GET /agent/v1/admin/sessions/{slug}` returns the session view (protected entries redacted). `PATCH /agent/v1/admin/sessions/{slug}` takes `{"spec": {...}}`, an RFC 7396 merge patch of the stored session spec (objects merge, `null` deletes a key, arrays replace whole, so read the current list with the GET first; an empty patch is a 200 no-op), and answers 200 with the new session view. Both are on the agent port only, under the admin audit (`admin_call` event with the changed or refused paths in `fields`, never a value). The source preset is never written, and the `generation` is bumped once, only when the spec changed. The agent tools are `session_get` and `session_patch`; every session is offered them.
+
+Who may call (the editor gate, evaluated before anything else, on the slug alone):
+
+- A superleader session (`session_messaging` on; any agent of it, as on every admin route) may read and patch its own session and any session of a `superleader_manageable` preset, a non-leader agent of the superleader session included. Any other slug, a hidden preset and a session without a preset are 404 `not_found`.
+- Any other session may read and patch only its own session, and only its leader: another slug is 403 `not_superleader` (no lookup, so an unknown slug answers alike), a non-leader agent of its own session is 403 `not_leader`, on GET too.
+
+Guards, in order, all before any write and repeated on the row under its lock; every refusal names sorted paths in `error.fields`, never values:
+
+| Status | Code | When |
+|---|---|---|
+| 200 | - | applied or no-op; body is the session view |
+| 401 | `unauthorized` | missing or bad token or session header |
+| 403 | `forbidden` | the caller is not a live agent pod of its session |
+| 403 | `not_superleader` | non-superleader caller, slug is not its own session |
+| 403 | `not_leader` | non-superleader caller on its own session, not its leader |
+| 404 | `not_found` | superleader: unknown slug, preset not manageable, no preset (its own session excepted) |
+| 422 | `secret_in_spec` | the patch gives a value to a protected `env` entry (set it through the secret route) |
+| 422 | `invalid_request` | the merged spec is invalid (same texts as session create and the preset PATCH) |
+| 403 | `human_only_field` | a human-only field moves away from safe (same list as the preset guard above); or a regular leader raises `usage_quota` or lengthens an inactivity limit |
+| 403 | `privileged_target` | superleader on ANOTHER session whose stored spec has `kube_access`, `session_messaging` or `docker` on and the patch changes a path beyond the preset allowance |
+| 422 | `session_fixed_field` | `replicas`, `max_replicas`, `static`, `workdir`, `pvc_size` or `cache` changed (`fields`); use the scale and init-scripts routes for the ones that have one |
+| 422 | `secret_unset` | a protected variable that has no stored Secret (a newly declared one); `fields` lists the `env.<NAME>` paths, set the value through the secret route first |
+| 409 | `session_deleting` | the session is being discarded |
+| 409 | `conflict` | a concurrent spec write beat the patch three times in a row; read and retry |
+
+- `human_only_field` and the preset-style guard apply to sessions as they do to presets: `kube_access`, `session_messaging` and `docker` may be turned off, never on; `discard_hook_url` may be removed, never set; `wrapper.permission_mode` may become `auto`, never another change; `wrapper.permissions.deny` entries may be added, never removed and `allow` entries removed, never added; a stored protected `env` entry may not be removed or unprotected. This holds for every caller, a session editing itself included: a leader cannot give itself `kube_access`.
+- `privileged_target` applies to foreign targets only. A session editing its own spec is exempt (the pod already runs with those grants; the same ruling as the init-scripts route), so the leader of a `kube_access`, `docker` or superleader session may edit its own `init_scripts`, hooks, MCP servers and plugins. A superleader editing another privileged session may change only what a preset PATCH of a privileged preset may.
+- Tighten-only for a regular leader on its own session: it may only lower `usage_quota` (an unset value counts as `ORCH_USAGE_QUOTA_DEFAULT`) and shorten `inactivity.reminder_seconds` and `inactivity.close_seconds` (0 is off and counts as infinite; unset counts as the setting default). Anything looser is 403 `human_only_field`. A superleader may set any value on a session it may edit; this mirrors the preset PATCH.
+- The write is one transaction on the session row: the stored spec is re-read and compared with the one the patch was built on (a concurrent scale, init-scripts, permission-mode or other PATCH makes it re-read and retry, three tries, so disjoint edits both survive), the guards run again on the locked row, and a superleader on a foreign session also locks the preset `FOR SHARE` and re-checks `superleader_manageable` (lock order sessions, then presets).
+
+Pickup: nothing is hot-reloaded. The write wakes the reconciler, which re-renders the ConfigMap and the StatefulSet template in one pass (the config hash changes) and the Replacer then replaces each pod once it is idle, the hive leader last, after a handover; a one-agent session rolls when idle. The new pod loads the new config. A busy pod finishes its turn first, so the edit takes effect on the next restart, which comes by itself. A superleader may restart sooner with `session_restart` (cooldown applies to its own session). Fields read live take effect at once: `inactivity`, `autoclose_after_seconds`, `leader_lease_seconds`, `usage_quota`, and `session_messaging` turned off (the admin gate reads it live). `replicas` and `init_scripts` keep their own routes.
 
 ### Admin relay: secrets, cooldown and known risks
 

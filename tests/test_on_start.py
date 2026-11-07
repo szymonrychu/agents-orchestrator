@@ -58,7 +58,6 @@ ADMIN_TOOLS = [
     "history_records", "usage_get",
 ]  # fmt: skip
 SECRET = "s3cr3t-token-value"
-PLUGIN_PENDING_TOOLS = {"session_patch"}
 PLUGINS_REPO = "https://github.com/szymonrychu/any-mcp-tatara-plugins"
 PLUGINS_REF = Settings.model_fields["any_mcp_plugins_ref"].default
 RESERVED_SOURCE = f"git::{PLUGINS_REPO}//orchestration/orchestrator?ref={PLUGINS_REF}"
@@ -365,12 +364,7 @@ async def test_allowed_tools_exist_in_plugin():
     )
     assert named == {"orchestrator_init_scripts_edit", "orchestrator_session_send"}
     assert set(CHAT_TOOLS) <= allowed
-    # Allowed here, offered by the plugin from its next release (task P1 adds the row): the
-    # exemption is exact and must go, with this assert failing to say so, once the pin offers it.
-    assert PLUGIN_PENDING_TOOLS.isdisjoint(offered), "the pinned plugin offers it: drop the set"
-    assert (
-        allowed - PLUGIN_PENDING_TOOLS | {n.removeprefix("orchestrator_") for n in named} <= offered
-    )
+    assert allowed | {n.removeprefix("orchestrator_") for n in named} <= offered
 
 
 def _fake_tools(tmp_path: Path) -> tuple[Path, Path]:
