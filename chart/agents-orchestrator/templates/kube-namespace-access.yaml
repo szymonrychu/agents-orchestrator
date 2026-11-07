@@ -1,0 +1,87 @@
+{{- $full := include "agents-orchestrator.fullname" . -}}
+{{- $known := list "read" "port-forward" "exec" "edit" "admin" -}}
+{{- range .Values.kubeNamespaceAccess.tiers }}
+{{- if not (has . $known) }}
+{{- fail (printf "agents-orchestrator: kubeNamespaceAccess.tiers has unknown tier %q (allowed: read, port-forward, exec, edit, admin)" .) }}
+{{- end }}
+{{- end }}
+{{- if and .Values.kubeNamespaceAccess.namespaces .Values.rbac.create }}
+{{- $tiers := .Values.kubeNamespaceAccess.tiers }}
+{{- $bind := list }}
+{{- if has "read" $tiers }}{{ $bind = append $bind "view" }}{{ end }}
+{{- if has "edit" $tiers }}{{ $bind = append $bind "edit" }}{{ end }}
+{{- if has "admin" $tiers }}{{ $bind = append $bind "admin" }}{{ end }}
+{{- if has "port-forward" $tiers }}{{ $bind = append $bind (printf "%s-ns-port-forward" $full) }}{{ end }}
+{{- if has "exec" $tiers }}{{ $bind = append $bind (printf "%s-ns-exec" $full) }}{{ end }}
+{{- if has "port-forward" $tiers }}
+# Tier role of port-forward: bound per session by the reconciler in an allowlisted namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $full }}-ns-port-forward
+  labels:
+    {{- include "agents-orchestrator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/portforward"]
+    verbs: ["get", "create"]
+---
+{{- end }}
+{{- if has "exec" $tiers }}
+# Tier role of exec: reads the env and files of every pod, so it exposes the namespace Secrets.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $full }}-ns-exec
+  labels:
+    {{- include "agents-orchestrator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["get", "create"]
+---
+{{- end }}
+# The reconciler manages per-session RoleBindings in the allowlisted namespaces and may bind
+# only the enabled tier roles.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $full }}-kube-namespace-access
+  labels:
+    {{- include "agents-orchestrator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["rolebindings"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles"]
+    verbs: ["bind"]
+    resourceNames:
+      {{- range $bind }}
+      - {{ . | quote }}
+      {{- end }}
+{{- range .Values.kubeNamespaceAccess.namespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $full }}-kube-namespace-access
+  namespace: {{ . | quote }}
+  labels:
+    {{- include "agents-orchestrator.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $full }}-kube-namespace-access
+subjects:
+  - kind: ServiceAccount
+    name: {{ $full }}-reconciler
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- end }}

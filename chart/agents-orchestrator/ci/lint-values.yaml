@@ -12,3 +12,9 @@ cache:
     bucket: lint-cache
     pathStyle: true
     existingSecret: lint-cache-credentials
+kubeClusterAccess:
+  enabled: true
+  legacySharedServiceAccount: true
+kubeNamespaceAccess:
+  namespaces: [media, games]
+  tiers: [read, port-forward, exec, edit, admin]
