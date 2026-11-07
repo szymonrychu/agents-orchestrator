@@ -3113,6 +3113,65 @@ def test_admin_relay_without_upstream_is_503(superleader: dict[str, Any]) -> Non
         assert status == 503 and body["error"]["code"] == "upstream_unconfigured", (path, body)
 
 
+START_ORDER_SLUG = "e2e-start-order"
+START_PROMPT = "slow start prompt marker: report when done"  # a 4 s turn: overtaking shows
+
+
+def test_start_prompt_is_turn_one_before_a_message_sent_right_after_create(
+    api: httpx.Client, superleader: dict[str, Any]
+) -> None:
+    """T-63: the preset start prompt is queued at create as the session's first message; a
+    session message sent right after create, before the pod is ready, is turn 2."""
+    spec = {"replicas": 1, "static": True, "env": FAKE_TURN_ENV, "start_prompt": START_PROMPT}
+    resp = api.post("/presets", json={"name": "E2E start prompt order", "spec": spec})
+    assert resp.status_code == 201, resp.text
+    preset_id = resp.json()["id"]
+    cid: str | None = None
+    try:
+        resp = api.post("/sessions", json={"preset_id": preset_id, "slug": START_ORDER_SLUG})
+        assert resp.status_code == 201, resp.text
+        cid = resp.json()["id"]
+        status, sent = agent_call(
+            superleader["pod"],
+            "POST",
+            f"/agent/v1/sessions/{START_ORDER_SLUG}/messages",
+            {"text": "peer first"},
+        )
+        assert status == 202, (status, sent)
+        peer_id = sent["message_id"]
+        listed = api.get(f"/sessions/{cid}/messages").json()
+        start = next(m for m in listed if m["text"] == START_PROMPT)
+        assert start["id"] < peer_id, listed
+
+        def both_completed() -> tuple[dict[str, Any], dict[str, Any]] | None:
+            first, second = message(api, start["id"]), message(api, peer_id)
+            return (first, second) if turn_completed(first) and turn_completed(second) else None
+
+        first, second = wait_for("both turns completed", both_completed, READY_TIMEOUT)
+
+        def at(view: dict[str, Any], *keys: str) -> datetime:
+            value: Any = view
+            for key in keys:
+                value = value[key]
+            return datetime.fromisoformat(value)
+
+        assert at(first, "dispatched_at") < at(second, "dispatched_at"), (first, second)
+        assert at(first, "turn", "started_at") < at(second, "turn", "started_at"), (first, second)
+        assert second["text"] == "peer first", second  # never prefixed with the start prompt
+        rows = sorted(api.get(f"/sessions/{cid}/messages").json(), key=lambda m: m["id"])
+        texts = [m["text"] for m in rows]
+        assert texts == [START_PROMPT, "peer first"], texts
+    finally:
+        if cid:
+            api.delete(f"/sessions/{cid}")
+            wait_for(
+                f"session {START_ORDER_SLUG} row to be gone",
+                lambda: api.get(f"/sessions/{cid}").status_code == 404,
+                DISCARD_TIMEOUT,
+            )
+        api.delete(f"/presets/{preset_id}")
+
+
 def wait_command_done(api: httpx.Client, command_id: int) -> dict[str, Any]:
     """Through the main port: a restart of the caller's own session briefly replaces the
     agent whose identity the admin route checks."""
