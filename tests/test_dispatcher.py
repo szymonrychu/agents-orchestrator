@@ -247,6 +247,23 @@ async def test_interrupt_and_compact_commands(env):
     assert row["status"] == "failed" and "404" in row["result"]["error"]
 
 
+async def test_clear_command_runs_and_client_allowlist_enforced(env):
+    agent = await env.agent()
+    cc = await insert_command(env.pool, agent["id"], kind="clear")
+    d = env.dispatcher()
+    await d.drain()
+    row = (await env.rows("SELECT * FROM commands WHERE id=%s", (cc["id"],)))[0]
+    assert row["status"] == "done" and row["result"]["response"]["state"] == "queued"
+    # a wrapper whose `sessions.commands.client` lacks the name answers 403: a failed row
+    env.fake.client_commands = ["compact"]
+    again = await insert_command(env.pool, agent["id"], kind="clear")
+    await d.drain()
+    await d.aclose()
+    row = (await env.rows("SELECT * FROM commands WHERE id=%s", (again["id"],)))[0]
+    assert row["status"] == "failed" and "403" in row["result"]["error"]
+    assert await env.rows("SELECT * FROM commands WHERE status = 'queued'") == []
+
+
 async def test_every_non_accept_status_releases_agent(pool, dsn):
     expect = {
         404: ("queued", "session_gone"),

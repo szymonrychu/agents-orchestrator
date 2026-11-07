@@ -19,13 +19,22 @@ from agents_orchestrator.db.sessions import _sweep_each
 
 # Main chain of the predecessor: rows a subagent emitted carry `data.agent_id`, except the
 # subagent lifecycle rows, which the renderer needs for "In flight" and the launching prompt.
+# The body starts after the latest `session_cleared` of that wrapper session (Q13: an ex-leader
+# is cleared and keeps its wrapper session, so its pre-clear history is not handed over again);
+# the clear row itself is left out.
 _TRANSCRIPT_ROWS = """
+    WITH ws AS (
+        SELECT w.wrapper_session_id FROM events w
+        WHERE w.agent_id = %(agent)s AND w.ts <= %(until)s
+        ORDER BY w.id DESC LIMIT 1),
+    cleared AS (
+        SELECT coalesce(max(c.id), 0) AS id FROM events c
+        WHERE c.agent_id = %(agent)s AND c.ts <= %(until)s AND c.type = 'session_cleared'
+          AND c.wrapper_session_id = (SELECT wrapper_session_id FROM ws))
     SELECT e.id, e.ts, e.type, e.data FROM events e
     WHERE e.agent_id = %(agent)s AND e.ts <= %(until)s
-      AND e.wrapper_session_id = (
-          SELECT w.wrapper_session_id FROM events w
-          WHERE w.agent_id = %(agent)s AND w.ts <= %(until)s
-          ORDER BY w.id DESC LIMIT 1)
+      AND e.wrapper_session_id = (SELECT wrapper_session_id FROM ws)
+      AND e.id > (SELECT id FROM cleared)
       AND (e.data->>'agent_id' IS NULL
            OR e.type IN ('subagent_started', 'subagent_stopped', 'subagent_linked'))
     ORDER BY e.id
@@ -42,7 +51,8 @@ async def transcript_rows(
     conn: psycopg.AsyncConnection, agent_id: uuid.UUID, until: datetime
 ) -> list[dict[str, Any]]:
     """Events (`id`, `ts`, `type`, `data`) of the agent's latest wrapper session with an event at
-    or before `until`, up to `until`, main chain only, ascending id."""
+    or before `until`, up to `until`, after that session's latest `session_cleared` at or before
+    `until`, main chain only, ascending id."""
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(_TRANSCRIPT_ROWS, {"agent": agent_id, "until": until})
         return await cur.fetchall()

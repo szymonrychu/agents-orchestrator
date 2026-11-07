@@ -867,3 +867,59 @@ async def test_user_make_leader_never_waits(pool):
     change = await lpass(pool, c["id"])
     assert change is not None and change.agent_id == a1["id"]
     assert await decided(pool, rid) == ("applied", None)
+
+
+# ---------------------------------------------------------------- Q13: ex-leader reset
+
+
+async def commands_of(pool, agent_id) -> list[tuple[str, str]]:
+    got = await rows(
+        pool, "SELECT kind, status FROM commands WHERE agent_id = %s ORDER BY id", (agent_id,)
+    )
+    return [(r["kind"], r["status"]) for r in got]
+
+
+async def test_voluntary_move_resets_ex_leader(pool):
+    c, (a0, a1, a2) = await hive(pool)
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
+    # a named target
+    await request(pool, c["id"], "handover", a0["id"], a1["id"], "summary", 3)
+    change = await lpass(pool, c["id"])
+    assert change is not None and change.agent_id == a1["id"]
+    assert await commands_of(pool, a0["id"]) == [("clear", "queued")]
+    assert await commands_of(pool, a1["id"]) == []
+    # the pass picks the successor
+    await request(pool, c["id"], "handover", a1["id"], None, "summary", 4)
+    change = await lpass(pool, c["id"])
+    assert change is not None and change.previous_agent_id == a1["id"]
+    assert await commands_of(pool, a1["id"]) == [("clear", "queued")]
+    # one clear per move, each for the agent that stopped leading
+    assert len(await rows(pool, "SELECT id FROM commands")) == 2
+
+
+async def test_forced_and_user_moves_do_not_reset(pool):
+    c, (a0, a1, a2) = await hive(pool)
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
+    # a rollout handover is forced by the reconciler, not chosen by the leader
+    await request(pool, c["id"], "handover", a0["id"], a1["id"], "rollout", 3)
+    assert (await lpass(pool, c["id"])).agent_id == a1["id"]
+    # a user make-leader
+    await request(pool, c["id"], "user", None, a2["id"], "user", None)
+    assert (await lpass(pool, c["id"])).agent_id == a2["id"]
+    # a lost leader
+    await run(pool, "UPDATE agents SET gone_at = now() WHERE id = %s", (a2["id"],))
+    assert (await lpass(pool, c["id"])).reason == "leader_lost"
+    # a rejected handover moves nobody
+    leader = await leader_row(pool, c["id"])
+    rid = await request(pool, c["id"], "handover", leader["agent_id"], a2["id"], "summary", 0)
+    assert await lpass(pool, c["id"]) is None
+    assert await decided(pool, rid) == ("rejected", "stale_epoch")
+    assert await rows(pool, "SELECT * FROM commands") == []
+
+
+async def test_scale_down_does_not_reset(pool):
+    c, (a0, a1, a2) = await hive(pool)
+    await set_leader(pool, c["id"], a2["id"], epoch=3)
+    await shrink(pool, c["id"], 2)
+    assert (await lpass(pool, c["id"])).reason == "scale_down"
+    assert await rows(pool, "SELECT * FROM commands") == []

@@ -38,7 +38,7 @@ log = logging.getLogger(__name__)
 
 MAX_IN_FLIGHT = 8
 CHANNELS = ("agent_free", "message_queued", leadership.CHANNEL, leadership.LEADER_CHANGED_CHANNEL)
-COMMAND_KINDS = ("interrupt", "compact")
+COMMAND_KINDS = ("interrupt", "compact", "clear")
 
 
 class Dispatcher:
