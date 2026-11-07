@@ -105,10 +105,13 @@ def _launch_prompts(rows: Sequence[Mapping[str, Any]]) -> dict[str, str]:
 def _in_flight_lines(rows: Sequence[Mapping[str, Any]], in_flight: InFlight) -> list[str]:
     prompts = _launch_prompts(rows)
     running: dict[str, Mapping[str, Any]] = {}
+    linked: dict[str, str] = {}  # agent_id -> parent tool_use_id, from `subagent_linked`
     for row in rows:
         data = row.get("data") or {}
         if row["type"] == "subagent_started" and data.get("agent_id"):
             running[str(data["agent_id"])] = row
+        elif row["type"] == "subagent_linked" and data.get("parent_tool_use_id"):
+            linked[str(data.get("agent_id"))] = str(data["parent_tool_use_id"])
         elif row["type"] == "subagent_stopped":
             running.pop(str(data.get("agent_id")), None)
     lines = ["## In flight", ""]
@@ -117,7 +120,8 @@ def _in_flight_lines(rows: Sequence[Mapping[str, Any]], in_flight: InFlight) -> 
         lines.append("- none")
     for agent_id, row in running.items():
         data = row["data"]
-        prompt = prompts.get(str(data.get("parent_tool_use_id")), "")
+        parent = data.get("parent_tool_use_id") or linked.get(agent_id)
+        prompt = prompts.get(str(parent), "")
         first = next(iter(prompt.strip().splitlines()), "")
         text = f"- {_esc(data.get('agent_type') or 'subagent')} {_esc(agent_id)}"
         text += f", started {_when(row.get('ts'))}"

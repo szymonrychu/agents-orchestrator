@@ -55,6 +55,23 @@ def test_in_flight_lists_unstopped_subagents():
     assert "Queued messages for the session: 2" in flight and "repo/a" in flight
 
 
+def test_in_flight_uses_subagent_linked_parent():
+    rows = [
+        row(
+            1,
+            "tool_call",
+            tool_use_id="t9",
+            tool_name="Task",
+            tool_input={"prompt": "Late link\nx"},
+        ),
+        row(2, "subagent_started", agent_id="sa9", agent_type="general", parent_tool_use_id=None),
+        row(3, "subagent_linked", agent_id="sa9", parent_tool_use_id="t9"),
+    ]
+    text = render(rows)
+    flight = text[text.index("## In flight") : text.index("## Transcript")]
+    assert "sa9" in flight and "Late link" in flight
+
+
 def test_prose_kept_up_to_4000():
     text = render([row(1, "assistant_text", text="a" * 5000)])
     assert "a" * 4000 in text and "a" * 4001 not in text
