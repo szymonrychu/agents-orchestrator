@@ -420,18 +420,42 @@ async def test_secret_canary_refused_and_never_echoed(pool, settings, canary, ca
 LIMITS = {
     "usage_quota": {"five_hour_pct": 50},
     "inactivity": {"reminder_seconds": 1800, "close_seconds": 7200},
+    "autoclose_after_seconds": 3600,
+    "resources": {
+        # Below the setting defaults (500m, 1Gi), so a removed request (refilled from the
+        # defaults on write) is a real raise for a superleader too.
+        "requests": {"cpu": "250m", "memory": "512Mi"},
+        "limits": {"cpu": "2", "memory": "4Gi"},
+    },
 }
+ALL_RESOURCES = [
+    "resources.limits.cpu",
+    "resources.limits.memory",
+    "resources.requests.cpu",
+    "resources.requests.memory",
+]
 LOOSER = [
     (["usage_quota.five_hour_pct"], {"usage_quota": {"five_hour_pct": 80}}),
     (["usage_quota.five_hour_pct"], {"usage_quota": None}),
     (["inactivity.close_seconds"], {"inactivity": {"close_seconds": 14400}}),
     (["inactivity.close_seconds"], {"inactivity": {"close_seconds": 0}}),
     (["inactivity.reminder_seconds"], {"inactivity": {"reminder_seconds": 0}}),
+    (["autoclose_after_seconds"], {"autoclose_after_seconds": 7200}),
+    (["autoclose_after_seconds"], {"autoclose_after_seconds": None}),
+    (["resources.limits.cpu"], {"resources": {"limits": {"cpu": "3"}}}),
+    (["resources.limits.cpu"], {"resources": {"limits": {"cpu": None}}}),
+    (["resources.limits.memory"], {"resources": {"limits": {"memory": "4097Mi"}}}),
+    (["resources.requests.cpu"], {"resources": {"requests": {"cpu": "0.6"}}}),
+    (["resources.requests.memory"], {"resources": {"requests": {"memory": None}}}),
+    (ALL_RESOURCES, {"resources": None}),
 ]
 TIGHTER = [
     {"usage_quota": {"five_hour_pct": 30, "seven_day_pct": 90}},
     {"inactivity": {"close_seconds": 3600}},
     {"inactivity": {"reminder_seconds": 600}},
+    {"autoclose_after_seconds": 1800},
+    {"resources": {"limits": {"cpu": "1500m", "memory": "4096Mi"}}},  # lower, and equal
+    {"resources": {"requests": {"cpu": "0.25", "memory": "256Mi"}}},  # equal, and lower
 ]
 
 
@@ -482,6 +506,14 @@ async def test_leader_cannot_raise_an_unset_quota_above_the_setting_default(pool
     before = await _row(pool, me.id)
     await _patch(pool, low, me, me, {"usage_quota": {key: 40}})
     assert (await _row(pool, me.id))["generation"] == before["generation"] + 1
+
+
+async def test_leader_may_set_an_unset_autoclose(pool, settings):
+    me = await alone(pool, "svc-autoclose-set")
+    stored = await _seed(pool, settings, me, {})
+    assert "autoclose_after_seconds" not in stored
+    await _patch(pool, settings, me, me, {"autoclose_after_seconds": 3600})
+    assert (await _row(pool, me.id))["spec"]["autoclose_after_seconds"] == 3600
 
 
 @pytest.mark.parametrize("patch", TIGHTER)
