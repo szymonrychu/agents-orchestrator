@@ -11,13 +11,13 @@ from agents_orchestrator.preset_policy import (
 )
 
 
-@pytest.mark.parametrize("field", ["kube_access", "session_messaging", "docker"])
+@pytest.mark.parametrize("field", ["kube_cluster_access", "session_messaging", "docker"])
 def test_grant_turned_on_is_refused(field):
     assert human_only_changes({}, {field: True}) == [field]
     assert human_only_changes({field: False}, {field: True}) == [field]
 
 
-@pytest.mark.parametrize("field", ["kube_access", "session_messaging", "docker"])
+@pytest.mark.parametrize("field", ["kube_cluster_access", "session_messaging", "docker"])
 def test_grant_turned_off_or_removed_is_allowed(field):
     assert human_only_changes({field: True}, {field: False}) == []
     assert human_only_changes({field: True}, {}) == []
@@ -25,7 +25,7 @@ def test_grant_turned_off_or_removed_is_allowed(field):
 
 
 def test_absent_false_null_are_equal():
-    for new in ({}, {"kube_access": False}, {"kube_access": None}):
+    for new in ({}, {"kube_cluster_access": False}, {"kube_cluster_access": None}):
         assert human_only_changes({}, new) == []
 
 
@@ -86,15 +86,15 @@ def test_protected_env_removal_is_human_only():
 
 
 def test_several_fields_sorted():
-    assert human_only_changes({}, {"session_messaging": True, "kube_access": True}) == [
-        "kube_access",
+    assert human_only_changes({}, {"session_messaging": True, "kube_cluster_access": True}) == [
+        "kube_cluster_access",
         "session_messaging",
     ]
 
 
 def test_strip_grants():
     spec = {
-        "kube_access": True,
+        "kube_cluster_access": True,
         "docker": True,
         "docker_cpu": "1",
         "discard_hook_url": "https://x",
@@ -108,27 +108,34 @@ def test_strip_grants():
         "discard_hook_url",
         "docker",
         "docker_cpu",
-        "kube_access",
+        "kube_cluster_access",
         "session_messaging",
     ]
-    assert spec["kube_access"] is True  # not mutated
+    assert spec["kube_cluster_access"] is True  # not mutated
 
 
 def test_strip_grants_keeps_sizes_without_docker():
-    out, removed = strip_grants({"kube_access": True, "docker_cpu": "1"})
+    out, removed = strip_grants({"kube_cluster_access": True, "docker_cpu": "1"})
     assert out == {"docker_cpu": "1"}
-    assert removed == ["kube_access"]
+    assert removed == ["kube_cluster_access"]
 
 
 def test_privileged():
     assert privileged({}) == []
     assert (
         privileged(
-            {"kube_access": False, "session_messaging": None, "discard_hook_url": "https://x"}
+            {
+                "kube_cluster_access": False,
+                "session_messaging": None,
+                "discard_hook_url": "https://x",
+            }
         )
         == []
     )
-    assert privileged({"docker": True, "kube_access": True}) == ["docker", "kube_access"]
+    assert privileged({"docker": True, "kube_cluster_access": True}) == [
+        "docker",
+        "kube_cluster_access",
+    ]
     assert privileged({"session_messaging": True}) == ["session_messaging"]
 
 
@@ -160,7 +167,7 @@ def test_changed_paths():
 def test_privileged_target_changes():
     from agents_orchestrator.preset_policy import privileged_target_changes as ptc
 
-    stored = {"kube_access": True, "env": {"K": {"protected": True}}, "start_prompt": "a"}
+    stored = {"kube_cluster_access": True, "env": {"K": {"protected": True}}, "start_prompt": "a"}
     assert ptc({"start_prompt": "a"}, {"start_prompt": "b"}) == []  # not privileged
     assert ptc(stored, {**stored, "usage_quota": {"five_hour_pct": 5}}) == []
     assert ptc(stored, {"env": {"K": {"protected": True}}, "start_prompt": "a"}) == []
@@ -177,12 +184,39 @@ def test_privileged_target_refuses_secret_values():
     pod with a grant) is refused even though the stored spec does not change."""
     from agents_orchestrator.preset_policy import privileged_target_changes as ptc
 
-    stored = {"kube_access": True, "env": {"K": {"protected": True}}}
+    stored = {"kube_cluster_access": True, "env": {"K": {"protected": True}}}
     assert ptc(stored, stored, ["K"]) == ["env.K"]
     assert ptc(stored, {**stored, "start_prompt": "p"}, ["K"]) == ["env.K", "start_prompt"]
     assert (
         ptc({"env": {"K": {"protected": True}}}, {"env": {"K": {"protected": True}}}, ["K"]) == []
     )
+
+
+NS = "kube_namespace_access"
+
+
+@pytest.mark.parametrize(
+    ("stored", "new"),
+    [
+        ({}, {NS: {"media": ["read"]}}),
+        ({NS: {"media": ["read"]}}, {NS: {"media": ["read", "port-forward"]}}),
+        ({NS: {"media": ["read"]}}, {NS: {"media": ["read"], "games": ["read"]}}),
+    ],
+)
+def test_namespace_grant_growth_is_human_only(stored, new):
+    assert NS in human_only_changes(stored, new)
+
+
+@pytest.mark.parametrize("new", [{}, {NS: None}, {NS: {"media": ["read"]}}])
+def test_namespace_grant_shrink_passes(new):
+    stored = {NS: {"media": ["read", "port-forward"], "games": ["read"]}}
+    assert NS not in human_only_changes(stored, new)
+
+
+def test_namespace_grant_is_privileged_and_stripped():
+    assert privileged({NS: {"media": ["read"]}}) == [NS]
+    out, removed = strip_grants({NS: {"media": ["read"]}, "replicas": 1})
+    assert out == {"replicas": 1} and removed == [NS]
 
 
 @pytest.mark.parametrize(

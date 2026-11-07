@@ -3,6 +3,10 @@
 - Every call outside `namespace` raises Forbidden, and so do get and list on Secrets (the Role
   grants secrets only create, patch and delete). Forbidden attempts are also recorded in
   `forbidden`, so a test can assert none were made even when the caller swallowed the error.
+- RBAC kinds: a ServiceAccount is allowed in `namespace`; a RoleBinding only in `rbac_namespaces`;
+  a ClusterRoleBinding only at cluster scope (namespace "") and with `cluster_rbac`. Applying a
+  binding whose `roleRef.name` is not in `bindable` is Forbidden, like the API server's
+  escalation check. Cluster-scoped objects are stored under namespace "".
 - Applies, merge patches, deletes and every call are recorded (`applies`, `patches`, `deletes`,
   `calls`).
 - Applying a StatefulSet simulates its controller: pods `<sts>-<i>` for i < replicas carrying the
@@ -43,7 +47,14 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from agents_orchestrator.k8s.kube import FIELD_MANAGER, Forbidden, KubeError, NotFound
+from agents_orchestrator.k8s.kube import (
+    CLUSTER_SCOPED,
+    FIELD_MANAGER,
+    Forbidden,
+    KubeError,
+    NotFound,
+    obj_namespace,
+)
 from agents_orchestrator.reconciler.rollout import REVISION_LABEL
 from agents_orchestrator.spec import parse_quantity
 
@@ -94,6 +105,10 @@ class FakeKube:
     pods_ready: bool = False
     controller_paused: bool = False  # the StatefulSet controller lags: no pod or status changes
     graceful_pod_deletes: bool = False  # a deleted pod stays terminating until finish_termination
+    rbac_namespaces: frozenset[str] = frozenset()  # namespaces where RoleBindings are allowed
+    cluster_rbac: bool = False  # ClusterRoleBindings are allowed
+    serviceaccounts: bool = False  # ServiceAccounts are allowed (chart: either kube access on)
+    bindable: frozenset[str] = frozenset()  # role names a binding may reference
     objects: dict[tuple[str, str, str], dict[str, Any]] = field(default_factory=dict)
     applies: list[Apply] = field(default_factory=list)
     patches: list[tuple[str, str, dict[str, Any]]] = field(default_factory=list)
@@ -109,7 +124,7 @@ class FakeKube:
         for obj in objs:
             o = copy.deepcopy(dict(obj))
             meta = o.setdefault("metadata", {})
-            meta.setdefault("namespace", self.namespace)
+            meta.setdefault("namespace", "" if o["kind"] in CLUSTER_SCOPED else self.namespace)
             meta.setdefault("labels", {})
             meta.setdefault("uid", str(uuid.uuid4()))
             self.objects[(o["kind"], meta["namespace"], meta["name"])] = o
@@ -242,7 +257,7 @@ class FakeKube:
     ) -> None:
         call = Call(verb, kind, namespace, name, dict(selector) if selector is not None else None)
         self.calls.append(call)
-        if namespace != self.namespace:
+        if not self._in_scope(kind, namespace):
             self.forbidden.append(call)
             raise Forbidden(f"{verb} {kind} in namespace {namespace!r} is outside the Role")
         if kind == "Secret" and verb in READ_VERBS:
@@ -257,14 +272,35 @@ class FakeKube:
                         self.heal(kind, name)
                 raise failure.exc
 
+    def _in_scope(self, kind: str, namespace: str) -> bool:
+        if kind == "RoleBinding":
+            return namespace in self.rbac_namespaces
+        if kind == "ClusterRoleBinding":
+            return namespace == "" and self.cluster_rbac
+        if kind == "ServiceAccount":
+            return namespace == self.namespace and self.serviceaccounts
+        return namespace == self.namespace
+
+    def _check_escalation(self, obj: dict[str, Any]) -> None:
+        """The API server refuses a binding to a role the caller may not itself hold or bind."""
+        if obj["kind"] not in ("RoleBinding", "ClusterRoleBinding"):
+            return
+        role = (obj.get("roleRef") or {}).get("name")
+        if role not in self.bindable:
+            self.forbidden.append(
+                Call("patch", obj["kind"], obj_namespace(obj), obj["metadata"]["name"])
+            )
+            raise Forbidden(f"binding to role {role!r} is not permitted (escalation check)")
+
     # ------------------------------------------------------------------ KubeApi
 
     async def apply(
         self, obj: dict[str, Any], *, field_manager: str = FIELD_MANAGER, force: bool = True
     ) -> dict[str, Any]:
         meta = obj["metadata"]
-        self._check("patch", obj["kind"], meta.get("namespace", ""), meta["name"])
-        key = (obj["kind"], meta["namespace"], meta["name"])
+        self._check("patch", obj["kind"], obj_namespace(obj), meta["name"])
+        self._check_escalation(obj)
+        key = (obj["kind"], obj_namespace(obj), meta["name"])
         stored = copy.deepcopy(obj)
         previous = self.objects.get(key)
         stored["metadata"]["uid"] = (

@@ -323,7 +323,8 @@ def privileged_delete_refused(flags: list[str]) -> ApiError:
     return ApiError(
         403,
         "privileged_target",
-        "only a human can delete a preset with kube_access, session_messaging or docker on",
+        "only a human can delete a preset with kube_cluster_access, kube_namespace_access, "
+        "session_messaging or docker on",
         extra={"fields": flags},
     )
 

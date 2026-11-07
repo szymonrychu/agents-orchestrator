@@ -2517,8 +2517,11 @@
           "inactivity": {
             "$ref": "#/components/schemas/MetaInactivity"
           },
-          "kube_access": {
-            "$ref": "#/components/schemas/MetaKubeAccess"
+          "kube_cluster_access": {
+            "$ref": "#/components/schemas/MetaKubeClusterAccess"
+          },
+          "kube_namespace_access": {
+            "$ref": "#/components/schemas/MetaKubeNamespaceAccess"
           },
           "models": {
             "items": {
@@ -2547,7 +2550,8 @@
           "caps",
           "discard_hook",
           "cache",
-          "kube_access",
+          "kube_cluster_access",
+          "kube_namespace_access",
           "docker",
           "hook_events",
           "permission_modes",
@@ -2760,7 +2764,7 @@
         "title": "MetaInactivity",
         "type": "object"
       },
-      "MetaKubeAccess": {
+      "MetaKubeClusterAccess": {
         "properties": {
           "available": {
             "title": "Available",
@@ -2770,7 +2774,36 @@
         "required": [
           "available"
         ],
-        "title": "MetaKubeAccess",
+        "title": "MetaKubeClusterAccess",
+        "type": "object"
+      },
+      "MetaKubeNamespaceAccess": {
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "namespaces": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Namespaces",
+            "type": "array"
+          },
+          "tiers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tiers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "available",
+          "namespaces",
+          "tiers"
+        ],
+        "title": "MetaKubeNamespaceAccess",
         "type": "object"
       },
       "MetaPermissionMode": {
@@ -3802,7 +3835,7 @@
             "title": "Init Scripts",
             "type": "array"
           },
-          "kube_access": {
+          "kube_cluster_access": {
             "anyOf": [
               {
                 "type": "boolean"
@@ -3811,7 +3844,31 @@
                 "type": "null"
               }
             ],
-            "title": "Kube Access"
+            "title": "Kube Cluster Access"
+          },
+          "kube_namespace_access": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "items": {
+                    "enum": [
+                      "read",
+                      "port-forward",
+                      "exec",
+                      "edit",
+                      "admin"
+                    ],
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kube Namespace Access"
           },
           "leader_lease_seconds": {
             "anyOf": [
@@ -4131,7 +4188,7 @@
             "title": "Init Scripts",
             "type": "array"
           },
-          "kube_access": {
+          "kube_cluster_access": {
             "anyOf": [
               {
                 "type": "boolean"
@@ -4140,7 +4197,31 @@
                 "type": "null"
               }
             ],
-            "title": "Kube Access"
+            "title": "Kube Cluster Access"
+          },
+          "kube_namespace_access": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "items": {
+                    "enum": [
+                      "read",
+                      "port-forward",
+                      "exec",
+                      "edit",
+                      "admin"
+                    ],
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kube Namespace Access"
           },
           "leader_lease_seconds": {
             "anyOf": [

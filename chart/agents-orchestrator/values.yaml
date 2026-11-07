@@ -28,7 +28,7 @@ serviceAccount:
   # If not set and create is true, a name is generated using the fullname template.
   name: ""
 
-# The unprivileged <fullname>-agent ServiceAccount (agent pods without kube_access, every Job).
+# The unprivileged <fullname>-agent ServiceAccount (agent pods without Kubernetes access, every Job).
 agentServiceAccount:
   # Annotations of the agent ServiceAccount only. Never copied from serviceAccount.annotations, so
   # cloud-identity annotations of the api ServiceAccount cannot reach agent pods.
@@ -84,14 +84,30 @@ serviceApi:
 rbac:
   create: true
 
-# Kubernetes access for opted-in sessions. Renders the privileged ServiceAccount
-# <fullname>-kube-access and, with rbac.create, a ClusterRoleBinding of it to the built-in
-# ClusterRole cluster-admin (all namespaces, all resources, full read-write), and sets
-# ORCH_KUBE_ACCESS_SERVICE_ACCOUNT to it. Sessions with kube_access are refused while it is off.
-kubeAccess:
+# Cluster-wide Kubernetes access for opted-in sessions (spec.kube_cluster_access). With enabled
+# and rbac.create the reconciler gets a ClusterRole/ClusterRoleBinding <fullname>-kube-cluster-access
+# (bind on cluster-admin, clusterrolebindings CRUD) and creates one ClusterRoleBinding to
+# cluster-admin per granted session. A cluster-access session can read every Secret in every
+# namespace; rotate what it could read when discarding it. Becomes ORCH_KUBE_CLUSTER_ACCESS_ENABLED.
+kubeClusterAccess:
   enabled: false
-  # Annotations of the <fullname>-kube-access ServiceAccount only. Never copied from serviceAccount.annotations.
-  annotations: {}
+  # Transition only, removed by T-55 stage 2: renders the old shared ServiceAccount
+  # <fullname>-kube-access and its cluster-admin ClusterRoleBinding so running sessions keep
+  # working until the Replacer rolls them to per-session identities.
+  legacySharedServiceAccount: false
+
+# Namespace-scoped Kubernetes access for opted-in sessions (spec.kube_namespace_access). Only the
+# listed namespaces can be granted, and only the listed tiers (read, port-forward, exec, edit,
+# admin). Each tier binds a ClusterRole in the target namespace: read -> view, edit -> edit,
+# admin -> admin, port-forward -> <fullname>-ns-port-forward, exec -> <fullname>-ns-exec (the
+# last two are rendered by this chart). The namespaces must exist before the apply: a RoleBinding
+# of the manager ClusterRole is rendered into each. Secrets exposure: exec (reads the env and
+# mounted files of every pod), edit and admin (read Secrets) expose the Secrets of the namespace;
+# read (view) and port-forward do not. Becomes ORCH_KUBE_NAMESPACE_ACCESS_NAMESPACES,
+# ORCH_KUBE_NAMESPACE_ACCESS_TIERS and ORCH_KUBE_NAMESPACE_ACCESS_ROLE_PREFIX.
+kubeNamespaceAccess:
+  namespaces: []
+  tiers: [read, port-forward, exec, edit, admin]
 
 # Docker-in-Docker sidecar for opted-in sessions (spec.docker): a privileged container in the
 # agent pod. Empty image = off (sessions with docker: true are refused). The image must be

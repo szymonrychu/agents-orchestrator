@@ -4,7 +4,9 @@ An agent (the superleader) may change these preset fields only toward safe;
 anything else is refused. Compared against the stored spec, with absent, None
 and false equal:
 
-- kube_access, session_messaging, docker: may be turned off or removed, never on.
+- kube_cluster_access, session_messaging, docker: may be turned off or removed, never on.
+- kube_namespace_access (namespace -> tiers map): may shrink or be removed, never grow: no
+  namespace or tier may appear that the stored map lacks.
 - discard_hook_url: may be removed, never set to a value other than the stored one.
 - wrapper.permission_mode: unset means bypassPermissions; may become "auto",
   never any other change.
@@ -25,12 +27,24 @@ import copy
 from collections.abc import Iterable
 from typing import Any
 
-GRANTS: tuple[str, ...] = ("kube_access", "session_messaging", "docker", "discard_hook_url")
+GRANTS: tuple[str, ...] = (
+    "kube_cluster_access",
+    "kube_namespace_access",
+    "session_messaging",
+    "docker",
+    "discard_hook_url",
+)
 DOCKER_SIZES: tuple[str, ...] = ("docker_storage", "docker_cpu", "docker_memory")
 # discard_hook_url is human-only to set but grants no reach to a started session.
-PRIVILEGED: tuple[str, ...] = ("kube_access", "session_messaging", "docker")
+PRIVILEGED: tuple[str, ...] = (
+    "kube_cluster_access",
+    "kube_namespace_access",
+    "session_messaging",
+    "docker",
+)
 HUMAN_ONLY: tuple[str, ...] = (
-    "kube_access",
+    "kube_cluster_access",
+    "kube_namespace_access",
     "session_messaging",
     "docker",
     "discard_hook_url",
@@ -72,6 +86,12 @@ def _entries(value: Any) -> set[str]:
     return {str(v) for v in value} if isinstance(value, list) else set()
 
 
+def _grant_grows(stored: Any, new: Any) -> bool:
+    """True when `new` holds a namespace or a tier of a namespace that `stored` lacks."""
+    old = _dict(stored)
+    return any(not _entries(tiers) <= _entries(old.get(ns)) for ns, tiers in _dict(new).items())
+
+
 def privileged(spec: dict[str, Any]) -> list[str]:
     return sorted(f for f in PRIVILEGED if bool(spec.get(f)))
 
@@ -79,7 +99,11 @@ def privileged(spec: dict[str, Any]) -> list[str]:
 def human_only_changes(stored: dict[str, Any], new: dict[str, Any]) -> list[str]:
     out: list[str] = []
     for f in PRIVILEGED:
-        if bool(new.get(f)) and not bool(stored.get(f)):
+        if f == "kube_namespace_access":
+            grows = _grant_grows(stored.get(f), new.get(f))
+        else:
+            grows = bool(new.get(f)) and not bool(stored.get(f))
+        if grows:
             out.append(f)
 
     hook = new.get("discard_hook_url")

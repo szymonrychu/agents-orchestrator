@@ -3332,3 +3332,89 @@ def test_docker_sidecar_runs_containers_and_kind(api: httpx.Client, baseline: di
             assert "Ready" in nodes and "control-plane" in nodes, nodes
     finally:
         api.delete(f"/presets/{preset['id']}")
+
+
+# ------------------------------------------------------------------ kubernetes access
+
+TARGET_NAMESPACE = "e2e-target"  # created by scripts/e2e.sh, allowlisted in e2e/values-kind.yaml
+
+
+def can_i(verb: str, resource: str, namespace: str, sa: str) -> str:
+    """`kubectl auth can-i` as the session ServiceAccount; stdout is "yes" or "no".
+
+    `resource` may name a subresource ("pods/portforward"): can-i reads TYPE/NAME as a resource
+    name, so the subresource goes in --subresource instead."""
+    resource, _, subresource = resource.partition("/")
+    proc = run(
+        "kubectl",
+        "auth",
+        "can-i",
+        verb,
+        resource,
+        f"--subresource={subresource}",
+        "-n",
+        namespace,
+        f"--as={sa}",
+        check=False,
+    )
+    return proc.stdout.strip()
+
+
+def session_sa_name(created: dict[str, Any]) -> str:
+    """agent-<slug>-<sid>, sid being the first 8 hex characters of the session id."""
+    return f"agent-{created['slug']}-{uuid.UUID(created['id']).hex[:8]}"
+
+
+def rbac_objects(kind: str, slug: str, namespace: str | None = None) -> list[str]:
+    scope = ["-n", namespace] if namespace else []
+    out = run("kubectl", "get", kind, *scope, "-l", f"{SESSION_LABEL}={slug}", "-o", "name").stdout
+    return [line for line in out.splitlines() if line.strip()]
+
+
+def test_kube_namespace_access_read_tier(api: httpx.Client, baseline: dict) -> None:
+    spec = {"replicas": 1, "kube_namespace_access": {TARGET_NAMESPACE: ["read", "port-forward"]}}
+    with scale_session(api, "nsaccess", spec) as created:
+        slug = created["slug"]
+        sa_name = session_sa_name(created)
+        wait_sessions(api, created["id"], 1)
+        pod = kube_json("get", "pods", "-l", f"{SESSION_LABEL}={slug}")["items"][0]
+        assert pod["spec"]["serviceAccountName"] == sa_name, pod["spec"]
+        sa = f"system:serviceaccount:{NAMESPACE}:{sa_name}"
+
+        assert can_i("list", "pods", TARGET_NAMESPACE, sa) == "yes"
+        assert can_i("get", "secrets", TARGET_NAMESPACE, sa) == "no"
+        assert can_i("create", "pods/portforward", TARGET_NAMESPACE, sa) == "yes"
+        assert can_i("create", "pods/exec", TARGET_NAMESPACE, sa) == "no"
+        assert can_i("list", "pods", NAMESPACE, sa) == "no"
+        assert rbac_objects("clusterrolebindings", slug) == []
+
+    def gone() -> bool:
+        return not rbac_objects("rolebindings", slug, TARGET_NAMESPACE) and not rbac_objects(
+            "serviceaccounts", slug, NAMESPACE
+        )
+
+    wait_for(f"session {slug} RoleBindings and ServiceAccount to be removed", gone, DISCARD_TIMEOUT)
+
+
+def test_kube_cluster_access_per_session_sa(api: httpx.Client, baseline: dict) -> None:
+    spec = {"replicas": 1, "kube_cluster_access": True}
+    with scale_session(api, "clusteraccess", spec) as created:
+        slug = created["slug"]
+        sa_name = session_sa_name(created)
+        wait_sessions(api, created["id"], 1)
+        pod = kube_json("get", "pods", "-l", f"{SESSION_LABEL}={slug}")["items"][0]
+        assert pod["spec"]["serviceAccountName"] == sa_name, pod["spec"]
+        sa = f"system:serviceaccount:{NAMESPACE}:{sa_name}"
+
+        assert can_i("*", "*", "kube-system", sa) == "yes"
+        assert rbac_objects("clusterrolebindings", slug) == [
+            f"clusterrolebinding.rbac.authorization.k8s.io/{sa_name}-cluster-admin"
+        ]
+        # cluster access wins: no namespace RoleBinding while it is granted
+        assert rbac_objects("rolebindings", slug, TARGET_NAMESPACE) == []
+
+    wait_for(
+        f"session {slug} ClusterRoleBinding to be removed",
+        lambda: not rbac_objects("clusterrolebindings", slug),
+        DISCARD_TIMEOUT,
+    )

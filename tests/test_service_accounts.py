@@ -35,15 +35,17 @@ def make_settings(**over: Any) -> Settings:
         "cache_s3_access_key_id": "TESTIDEXAMPLEACCESSKEY",
         "cache_s3_secret_access_key": "s3cr3t-example-secret-access-key",
         "cache_image": "harbor.example/containers/agents-orchestrator:abc1234",
-        "kube_access_service_account": "orch-kube-access",
     }
     base.update(over)
     return Settings(**base)
 
 
-def make_session(**spec: Any) -> Session:
+SESSION_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
+
+
+def make_session(session_id: uuid.UUID = SESSION_ID, **spec: Any) -> Session:
     return Session(
-        id=uuid.UUID("11111111-1111-1111-1111-111111111111"),
+        id=session_id,
         slug="alpha",
         spec=SessionSpec.model_validate(
             {
@@ -79,14 +81,14 @@ def test_agent_pod_explicit_sa_no_token(over: dict[str, Any], account: str) -> N
     assert_explicit_sa_no_token(sts["spec"]["template"]["spec"], account)
 
 
-@pytest.mark.parametrize("kube_access", [None, False, True])
+@pytest.mark.parametrize("kube_cluster_access", [None, False, True])
 @pytest.mark.parametrize(("over", "account"), SETTINGS)
 def test_jobs_explicit_sa_no_token(
-    over: dict[str, Any], account: str, kube_access: bool | None
+    over: dict[str, Any], account: str, kube_cluster_access: bool | None
 ) -> None:
-    """Every Job runs unprivileged, a kube_access session's included."""
+    """Every Job runs unprivileged, a kube_cluster_access session's included."""
     settings = make_settings(**over)
-    session = make_session(kube_access=kube_access)
+    session = make_session(kube_cluster_access=kube_cluster_access)
     check = queue.Check(
         id=7,
         session_id=session.id,

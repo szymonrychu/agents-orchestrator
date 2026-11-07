@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from typing import Any
 
 SESSION_LABEL = "agents.szymonrichert.pl/session"
+SESSION_ID_LABEL = "agents.szymonrichert.pl/session-id"
 MANAGED_BY_LABEL = "app.kubernetes.io/managed-by"
 MANAGED_BY = "agents-orchestrator"
 
@@ -17,6 +18,24 @@ def prefix(slug: str) -> str:
 
 def session_labels(slug: str) -> dict[str, str]:
     return {SESSION_LABEL: slug, MANAGED_BY_LABEL: MANAGED_BY}
+
+
+def kube_labels(slug: str, session_id: uuid.UUID) -> dict[str, str]:
+    """Labels of the per-session Kubernetes access objects: the session labels plus its id."""
+    return {**session_labels(slug), SESSION_ID_LABEL: str(session_id)}
+
+
+def kube_service_account(slug: str, session_id: uuid.UUID) -> str:
+    """The per-session ServiceAccount of granted Kubernetes access: unique per session id."""
+    return f"{prefix(slug)}-{session_id.hex[:8]}"
+
+
+def cluster_binding_name(slug: str, session_id: uuid.UUID) -> str:
+    return f"{kube_service_account(slug, session_id)}-cluster-admin"
+
+
+def namespace_binding_name(slug: str, session_id: uuid.UUID, tier: str) -> str:
+    return f"{kube_service_account(slug, session_id)}-{tier}"
 
 
 def selector(slug: str) -> dict[str, dict[str, str]]:

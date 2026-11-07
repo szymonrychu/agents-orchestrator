@@ -385,10 +385,10 @@ async def test_discard_logs_each_deletion(env, caplog):
 async def test_discard_forgets_the_secret_it_deleted(env):
     c = await env.session("alpha", replicas=1)
     await env.rec.reconcile_once()
-    assert ("Secret", "agent-alpha-ccw") in env.rec._applied
+    assert ("Secret", "agents", "agent-alpha-ccw") in env.rec._applied
     async with env.pool.connection() as conn:
         await sessions.request_delete(conn, c.id)
 
     await env.rec.reconcile_once()
     assert "agent-alpha-ccw" in env.kube.deleted("Secret")
-    assert ("Secret", "agent-alpha-ccw") not in env.rec._applied
+    assert ("Secret", "agents", "agent-alpha-ccw") not in env.rec._applied
