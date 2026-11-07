@@ -188,3 +188,30 @@ def test_privileged_target_refuses_secret_values():
     assert (
         ptc({"env": {"K": {"protected": True}}}, {"env": {"K": {"protected": True}}}, ["K"]) == []
     )
+
+
+NS = "kube_namespace_access"
+
+
+@pytest.mark.parametrize(
+    ("stored", "new"),
+    [
+        ({}, {NS: {"media": ["read"]}}),
+        ({NS: {"media": ["read"]}}, {NS: {"media": ["read", "port-forward"]}}),
+        ({NS: {"media": ["read"]}}, {NS: {"media": ["read"], "games": ["read"]}}),
+    ],
+)
+def test_namespace_grant_growth_is_human_only(stored, new):
+    assert NS in human_only_changes(stored, new)
+
+
+@pytest.mark.parametrize("new", [{}, {NS: None}, {NS: {"media": ["read"]}}])
+def test_namespace_grant_shrink_passes(new):
+    stored = {NS: {"media": ["read", "port-forward"], "games": ["read"]}}
+    assert NS not in human_only_changes(stored, new)
+
+
+def test_namespace_grant_is_privileged_and_stripped():
+    assert privileged({NS: {"media": ["read"]}}) == [NS]
+    out, removed = strip_grants({NS: {"media": ["read"]}, "replicas": 1})
+    assert out == {"replicas": 1} and removed == [NS]

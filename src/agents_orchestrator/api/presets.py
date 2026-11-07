@@ -74,7 +74,7 @@ def privileged_edit_refused(paths: list[str]) -> ApiError:
         403,
         "privileged_target",
         "only a human can change these fields of a preset with kube_cluster_access, "
-        f"session_messaging or docker on: {', '.join(paths)}",
+        f"kube_namespace_access, session_messaging or docker on: {', '.join(paths)}",
         extra={"fields": paths},
     )
 
@@ -386,7 +386,8 @@ def privileged_delete_refused(flags: list[str]) -> ApiError:
     return ApiError(
         403,
         "privileged_target",
-        "only a human can delete a preset with kube_cluster_access, session_messaging or docker on",
+        "only a human can delete a preset with kube_cluster_access, kube_namespace_access, "
+        "session_messaging or docker on",
         extra={"fields": flags},
     )
 

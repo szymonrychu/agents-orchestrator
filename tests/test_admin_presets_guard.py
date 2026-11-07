@@ -29,6 +29,7 @@ M = "/api/v1/presets"
 
 REFUSED = [
     ("kube_cluster_access", {"kube_cluster_access": True}),
+    ("kube_namespace_access", {"kube_namespace_access": {"media": ["read"]}}),
     ("session_messaging", {"session_messaging": True}),
     ("docker", {"docker": True}),
     ("discard_hook_url", {"discard_hook_url": "https://h.example"}),
@@ -44,7 +45,12 @@ def canary():
 @pytest.fixture
 def settings(dsn):
     return make_settings(dsn).model_copy(
-        update={"kube_access_service_account": "kube-sa", "docker_image": "docker:27-dind"}
+        update={
+            "kube_access_service_account": "kube-sa",
+            "docker_image": "docker:27-dind",
+            "kube_namespace_access_namespaces": ["media"],
+            "kube_namespace_access_tiers": ["read"],
+        }
     )
 
 
@@ -509,6 +515,7 @@ async def test_patch_disjoint_concurrent(call, human, seed):
 KUBE = {"kube_cluster_access": True}
 FLAGS = [
     ("kube_cluster_access", {"kube_cluster_access": True}),
+    ("kube_namespace_access", {"kube_namespace_access": {"media": ["read"]}}),
     ("session_messaging", {"session_messaging": True}),
     ("docker", {"docker": True}),
 ]
