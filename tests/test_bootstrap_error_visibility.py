@@ -129,3 +129,50 @@ async def test_sessions_list_has_start_state_and_reason(pool, dsn):
     assert by_slug[bad.slug]["start_reason"] == "mise_install: mise exploded"
     assert by_slug[booting.slug]["start_state"] == "booting"
     assert by_slug[booting.slug]["start_reason"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "https://example.test/cb?access_token=abc123SECRET&x=1",
+        "https://example.test/f?sig=abc123SECRET",
+        "https://example.test/f?Signature=abc123SECRET",
+        "https://example.test/f?key=abc123SECRET",
+        "https://example.test/f?api_key=abc123SECRET",
+        "https://example.test/f?apikey=abc123SECRET",
+        "https://example.test/f?code=abc123SECRET",
+        "https://example.test/f?client_secret=abc123SECRET",
+        "https://alice:abc123SECRET@git.example/org/repo.git",
+    ],
+)
+def test_redact_text_masks_generic_secret_query_params(text):
+    assert "abc123SECRET" not in redact_text(text)
+
+
+def test_redact_text_leaves_ordinary_words_alone():
+    for text in (
+        "keyboard layout: us",
+        "monkey=banana",
+        "unicode=utf8 passcode word",
+        "postcode: 12345",
+        "design signature missing",
+        "hockey: 3",
+    ):
+        assert redact_text(text) == text
+
+
+def test_booting_start_reason_is_redacted():
+    from agents_orchestrator.db.start_state import start_reason
+
+    out = start_reason("booting", [], "waiting for https://u:abc123SECRET@h/x token=abc123SECRET")
+    assert "abc123SECRET" not in out
+
+
+async def test_create_failure_message_is_redacted(env, fake):
+    c = await env.session("alpha")
+    fake.set_create_error(500, "boom token=abc123SECRET")
+    await env.rec.reconcile_once()
+    assert "abc123SECRET" not in (await env.status(c.id))["message"]
+    v = await view(env, c.id)
+    assert v.summary.bootstrap_failures[0].step == "create"
+    assert "abc123SECRET" not in v.summary.bootstrap_failures[0].message

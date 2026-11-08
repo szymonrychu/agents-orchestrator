@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from agents_orchestrator.redact import redact_text
+
 START_REASON_MAX = 200
 
 
@@ -25,7 +27,6 @@ def start_reason(
             :START_REASON_MAX
         ]
     if state == "booting":
-        return (status_message.strip() or "waiting for agent pods to become ready")[
-            :START_REASON_MAX
-        ]
+        message = redact_text(status_message.strip()) or "waiting for agent pods to become ready"
+        return message[:START_REASON_MAX]
     return None

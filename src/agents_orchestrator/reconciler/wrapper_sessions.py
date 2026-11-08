@@ -119,7 +119,8 @@ class WrapperSessionBootstrapper:
                 raise
             except (WrapperError, WrapperUnreachable) as exc:
                 log.warning("session bootstrap of %s deferred: %s", agent.pod_name, exc)
-                return f"session bootstrap of {agent.pod_name}: {_describe(exc)}"
+                message = f"session bootstrap of {agent.pod_name}: {_describe(exc)}"
+                return redact_text(message) or message
             finally:
                 aclose = getattr(client, "aclose", None)
                 if aclose is not None:
@@ -201,7 +202,7 @@ class WrapperSessionBootstrapper:
             raise WrapperUnreachable(message) from exc
         except (WrapperError, WrapperUnreachable) as exc:
             if not (isinstance(exc, WrapperError) and exc.status == 429):  # 429: wrapper full
-                message = f"create failed: {_describe(exc)}"
+                message = redact_text(f"create failed: {_describe(exc)}") or "create failed"
                 await self._record_failure(agent, _create_failure(message), keep_other_step=True)
             raise
         return created, False

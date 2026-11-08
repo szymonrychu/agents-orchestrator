@@ -26,6 +26,11 @@ _ASSIGNED = re.compile(
     (?P<value>[^\s"',;&]+)
     """
 )
+# Short, common names are only secrets inside a URL query string, so they need a ? or & before them
+# (a bare `code=1` or `key: x` in a log line stays readable).
+_QUERY = re.compile(
+    r"(?i)(?P<lead>[?&])(?P<key>[A-Za-z0-9_.\-]*(?:sig|signature|key|code))=(?P<value>[^\s&#\"']+)"
+)
 
 
 def redact_text(text: str | None) -> str | None:
@@ -35,4 +40,5 @@ def redact_text(text: str | None) -> str | None:
     out = _USERINFO.sub(lambda m: f"{m['scheme']}{MASK}@", text)
     out = _BEARER.sub(lambda m: f"{m['kind']} {MASK}", out)
     out = _PREFIXED.sub(MASK, out)
+    out = _QUERY.sub(lambda m: f"{m['lead']}{m['key']}={MASK}", out)
     return _ASSIGNED.sub(lambda m: f"{m['key']}{m['sep']}{MASK}", out)
