@@ -611,6 +611,8 @@ def _schedule_plan(live: Mapping[str, Any], patch: dict[str, Any], visible: set[
     unknown = sorted(set(patch) - set(SCHEDULE_FIELDS))
     if unknown:
         raise ApiError(422, "invalid_request", f"not a schedule field: {', '.join(unknown)}")
+    if "timezone" in patch and patch["timezone"] is None:
+        raise ApiError(422, "invalid_request", "give an explicit timezone, not null")
     base = _schedule_fields(live)
     try:
         new = schemas.ScheduleIn.model_validate(merge_patch(base, patch)).model_dump(mode="json")
@@ -951,12 +953,14 @@ async def _review_schedule(
     approved = {i.path: i.after for i in current.items if decisions[i.path][0] == "approved"}
     if p.status == "open" and live["updated_at"] != current.fingerprint:
         expected = _schedule_with(current.base, approved)
-        if expected["timezone"] is None:  # the upstream fills its default timezone
-            expected["timezone"] = live.get("timezone")
         landed = to == "applied" and _schedule_fields(live) == expected
         if not landed:
             return await _close(conn, p, "stale", _stale_error(p.kind))
     elif to == "applied":
+        target_preset = approved.get("preset_id")
+        if target_preset is not None and str(target_preset) not in visible:
+            # the proposed preset stopped being manageable since revise (parity with the relay)
+            return await _close(conn, p, "stale", _stale_error(p.kind))
         status, payload = await _schedule_call(
             request,
             settings,

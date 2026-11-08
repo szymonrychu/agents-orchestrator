@@ -429,14 +429,25 @@ async def test_a_cron_with_extra_whitespace_is_normalised_and_the_retry_is_appli
     assert await _state(pool, view.id) == ("applied", {"cron": "approved"})
 
 
-async def test_an_approved_null_timezone_matches_the_default_the_upstream_fills(
-    pool, rig, monkeypatch
-):
-    view = await _create(pool, rig, patch={"timezone": None})
-    done = await _fail_commit_then_retry(pool, rig, view, monkeypatch)
-    assert done.status == "applied"
-    assert len(rig.sched.puts()) == 1
-    assert await _state(pool, view.id) == ("applied", {"timezone": "approved"})
+async def test_a_null_timezone_in_the_patch_is_refused_with_422(pool, rig):
+    with pytest.raises(proposals.ApiError) as exc:
+        await _create(pool, rig, patch={"timezone": None})
+    assert "timezone" in _error(exc, 422, "invalid_request").message
+    assert await _rows(pool, "SELECT id FROM change_proposals") == []
+
+
+async def test_an_approved_preset_that_stopped_being_manageable_is_stale_at_review(pool, rig):
+    other = await _preset(pool, True)
+    view = await _create(pool, rig, patch={"preset_id": other})
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE presets SET superleader_manageable = false WHERE id = %s", (other,)
+        )
+    with pytest.raises(proposals.ApiError) as exc:
+        await _review(pool, rig, view)
+    _error(exc, 409, "proposal_stale")
+    assert rig.sched.puts() == []
+    assert (await _state(pool, view.id))[0] == "stale"
 
 
 async def test_a_schedule_whose_preset_became_hidden_is_target_gone_at_review(pool, rig):
