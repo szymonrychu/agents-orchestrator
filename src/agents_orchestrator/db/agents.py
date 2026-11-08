@@ -70,7 +70,8 @@ async def upsert_agent(
     async with conn.transaction():
         before = await _one(
             conn,
-            f"SELECT {_COLUMNS} FROM agents WHERE session_id = %s AND ordinal = %s FOR UPDATE",
+            f"SELECT {_COLUMNS} FROM agents WHERE session_id = %s AND ordinal = %s"
+            " FOR NO KEY UPDATE",
             (session_id, ordinal),
         )
         row = await _one(
