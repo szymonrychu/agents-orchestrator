@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import ast
+import gc
 import uuid
+import weakref
 from datetime import datetime
 from pathlib import Path
 
@@ -395,6 +397,19 @@ async def test_health_and_readiness(pool, dsn):
     async with client_for(app) as c:
         assert (await c.get("/healthz")).status_code == 200
         assert_error(await c.get("/readyz"), 503, "internal")
+
+
+async def test_dropped_app_is_freed(pool, dsn):
+    # FastAPI caches endpoint functions process-wide; a route closing over its app kept every
+    # app ever built alive, and the suite's heap grew until gen2 GC pauses broke time-bound tests
+    app = create_app(make_settings(dsn), pool)
+    async with client_for(app) as c:
+        assert (await c.get("/healthz")).status_code == 200
+        assert (await c.get("/readyz")).status_code == 200
+    ref = weakref.ref(app)
+    del app, c
+    gc.collect()
+    assert ref() is None
 
 
 async def test_lifespan_opens_and_closes_own_pool(dsn):
