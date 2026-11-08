@@ -148,6 +148,9 @@ async def rig(pool, dsn) -> AsyncIterator[RelayRig]:
     state = RelayRig(None, pool, session, [], app)
     async with serve_api(app) as port, client_for(app) as http:
         state.port, state.http = port, http
+        # FastAPI builds every route of a new app on its first request (about 0.5 s of CPU);
+        # take that here, so no WebSocket opening handshake (WAIT) pays for it
+        assert (await http.get("/healthz")).status_code == 200
         try:
             yield state
         finally:

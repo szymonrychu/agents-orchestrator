@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from psycopg_pool import AsyncConnectionPool
 
@@ -43,6 +43,22 @@ from agents_orchestrator.api.service_auth import ServiceGate
 from agents_orchestrator.api.usage_gate import UsageSource
 from agents_orchestrator.db.pool import open_pool
 from agents_orchestrator.settings import Settings
+
+
+# Module level, not closures in `create_app`: FastAPI keeps a process-wide cache keyed by
+# endpoint function (fastapi.dependencies.models), so an endpoint closing over its app pins
+# that app, its routes and its state for the life of the process.
+async def healthz() -> dict:
+    return {"status": "ok"}
+
+
+async def readyz(request: Request):
+    try:
+        async with request.app.state.pool.connection(timeout=3) as conn:
+            await conn.execute("SELECT 1")
+    except Exception as exc:
+        return error_response(503, "internal", f"database unavailable: {type(exc).__name__}")
+    return JSONResponse({"status": "ready"})
 
 
 def create_app(
@@ -129,19 +145,8 @@ def create_app(
     app.include_router(streams.router)
     app.include_router(workspace.router)
 
-    @app.get("/healthz", include_in_schema=False)
-    async def healthz() -> dict:
-        return {"status": "ok"}
-
-    @app.get("/readyz", include_in_schema=False)
-    async def readyz():
-        try:
-            async with app.state.pool.connection(timeout=3) as conn:
-                await conn.execute("SELECT 1")
-        except Exception as exc:
-            return error_response(503, "internal", f"database unavailable: {type(exc).__name__}")
-        return JSONResponse({"status": "ready"})
-
+    app.add_api_route("/healthz", healthz, include_in_schema=False)
+    app.add_api_route("/readyz", readyz, include_in_schema=False)
     app.add_middleware(OriginAllowlist, origins=settings.allowed_origins)
     app.add_middleware(
         SourceAllowlist,
