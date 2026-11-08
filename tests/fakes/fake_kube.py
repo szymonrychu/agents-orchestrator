@@ -311,6 +311,8 @@ class FakeKube:
         if obj["kind"] == "StatefulSet":
             _keep_defaulted_rolling_update(stored, previous)
             _admit_statefulset(stored)
+        if obj["kind"] == "PersistentVolumeClaim":
+            _admit_pvc(stored, previous)
         self.applies.append(Apply(copy.deepcopy(obj), field_manager, force))
         return self._store(key, stored, previous)
 
@@ -520,6 +522,23 @@ def _merge(target: Any, patch: Any) -> Any:
         else:
             out[key] = _merge(out.get(key), value)
     return out
+
+
+def _admit_pvc(stored: dict[str, Any], previous: dict[str, Any] | None) -> None:
+    """PVC validation: a smaller request than before is a 422; the status survives an apply."""
+    if previous is None:
+        return
+    floor = max(
+        parse_quantity(previous["spec"]["resources"]["requests"]["storage"]),
+        parse_quantity(((previous.get("status") or {}).get("capacity") or {}).get("storage", "0")),
+    )
+    if parse_quantity(stored["spec"]["resources"]["requests"]["storage"]) < floor:
+        raise KubeError(
+            "422: PersistentVolumeClaim is invalid: spec.resources.requests.storage: Forbidden:"
+            " field can not be less than previous value"
+        )
+    if "status" in previous:
+        stored["status"] = copy.deepcopy(previous["status"])
 
 
 def _keep_defaulted_rolling_update(sts: dict[str, Any], previous: dict[str, Any] | None) -> None:

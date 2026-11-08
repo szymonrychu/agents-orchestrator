@@ -252,6 +252,13 @@ def _same_quantity(desired: str, live: str) -> bool:
         return False
 
 
+def _at_least(live: Any, desired: Any) -> bool:
+    try:
+        return parse_quantity(live) >= parse_quantity(desired)
+    except ValueError:
+        return False
+
+
 def drift(desired: Any, live: Any, path: str = "") -> str | None:
     """The path of the first field of `desired` the live object does not hold, or None.
 
@@ -288,4 +295,6 @@ def drift(desired: Any, live: Any, path: str = "") -> str | None:
         and _same_quantity(desired, live)
     ):
         return None
+    if path.endswith(".requests.storage") and _at_least(live, desired):
+        return None  # a PVC only grows: a larger live size is not drift
     return path or "."

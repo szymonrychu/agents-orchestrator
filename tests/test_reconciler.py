@@ -35,10 +35,12 @@ from agents_orchestrator.k8s.kube import (
     Forbidden,
     KubeError,
     LightkubeApi,
+    drift,
 )
 from agents_orchestrator.k8s.labels import MANAGED_BY_LABEL, SESSION_LABEL, session_labels
 from agents_orchestrator.k8s.render import HASH_ANNOTATION, render_session
 from agents_orchestrator.reconciler import Reconciler
+from agents_orchestrator.reconciler.loop import grow_only_pvc
 from agents_orchestrator.settings import Settings, SettingsError
 from agents_orchestrator.spec import SessionSpec
 from agents_orchestrator.tokens import tokens_for
@@ -152,6 +154,77 @@ async def test_create_applies_five_objects(env):
     await env.rec.reconcile_once()
     assert env.kube.applied() == []
     assert env.kube.deletes == []
+
+
+def live_pvc(slug: str, request: str, capacity: str | None = None) -> dict:
+    return {
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {"name": f"agent-{slug}-workspace", "labels": session_labels(slug)},
+        "spec": {
+            "accessModes": ["ReadWriteMany"],
+            "storageClassName": "rook-ceph-rwx",
+            "resources": {"requests": {"storage": request}},
+        },
+        "status": {"capacity": {"storage": capacity or request}},
+    }
+
+
+async def test_pvc_grown_by_hand_is_never_shrunk(env):
+    env.kube.seed(live_pvc("alpha", "50Gi"))
+    c = await env.session("alpha", replicas=2)
+    for _ in range(2):
+        await env.rec.reconcile_once()
+
+    pvc = env.kube.get("PersistentVolumeClaim", "agent-alpha-workspace")
+    assert pvc["spec"]["resources"]["requests"]["storage"] == "50Gi"
+    assert env.kube.has("StatefulSet", "agent-alpha")
+    assert (await env.get(c.id)).status["phase"] != "error"
+    # the PVC already holds the live size: it is not applied again
+    assert len(env.kube.applied("PersistentVolumeClaim")) <= 1
+
+
+async def test_larger_pvc_size_still_grows_the_pvc(env):
+    env.kube.seed(live_pvc("alpha", "50Gi"))
+    await env.session("alpha", pvc_size="60Gi")
+    await env.rec.reconcile_once()
+
+    pvc = env.kube.get("PersistentVolumeClaim", "agent-alpha-workspace")
+    assert pvc["spec"]["resources"]["requests"]["storage"] == "60Gi"
+
+
+async def test_pvc_request_follows_the_larger_capacity(env):
+    env.kube.seed(live_pvc("alpha", "20Gi", capacity="51200Mi"))
+    await env.session("alpha")
+    await env.rec.reconcile_once()
+
+    pvc = env.kube.get("PersistentVolumeClaim", "agent-alpha-workspace")
+    assert pvc["spec"]["resources"]["requests"]["storage"] == "50Gi"  # the fake canonicalises
+    assert env.kube.has("StatefulSet", "agent-alpha")
+
+
+@pytest.mark.parametrize(
+    ("desired", "request_", "capacity", "want"),
+    [
+        ("20Gi", "51200Mi", None, "51200Mi"),
+        ("20Gi", "50G", None, "50G"),
+        ("1Ti", "50Gi", "100Gi", "1Ti"),
+        ("50Gi", "50Gi", None, "50Gi"),
+        ("20Gi", "10Gi", "30Gi", "30Gi"),
+        ("20Gi", "10Gi", None, "20Gi"),
+    ],
+)
+def test_grow_only_pvc_compares_units(desired, request_, capacity, want):
+    obj = {"spec": {"resources": {"requests": {"storage": desired}}}}
+    got = grow_only_pvc(obj, live_pvc("alpha", request_, capacity))
+    assert got["spec"]["resources"]["requests"]["storage"] == want
+
+
+def test_drift_ignores_a_larger_live_pvc_size():
+    desired = {"spec": {"resources": {"requests": {"storage": "20Gi"}}}}
+    live = {"spec": {"resources": {"requests": {"storage": "50Gi"}}}}
+    assert drift(desired, live) is None
+    assert drift(live, desired) == ".spec.resources.requests.storage"
 
 
 async def test_unlabelled_foreign_object_not_applied_over(env):
