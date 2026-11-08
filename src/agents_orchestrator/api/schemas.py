@@ -742,6 +742,16 @@ class LeadershipRequested(BaseModel):
     applies: str = "when your turn has ended and your background agents have reported"
 
 
+class WithdrawIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: int | None = None
+
+
+class Withdrawn(BaseModel):
+    withdrawn: list[int]
+
+
 class ArchiveView(BaseModel):
     key: str
     name: str

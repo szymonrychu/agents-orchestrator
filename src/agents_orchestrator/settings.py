@@ -199,6 +199,9 @@ class Settings(BaseSettings):
     #: leader since its forced request was queued). The cap must exceed the window.
     rollout_handover_seconds: int = Field(default=1800, ge=0, le=86400)
     rollout_max_defer_seconds: int = Field(default=14400, ge=600, le=86400)
+    #: The deadline of every other `handover` request: queued longer than this, background
+    #: work stops holding it, and one the leader's turn still holds is rejected `expired`.
+    handover_max_wait_seconds: int = Field(default=1800, ge=60, le=86400)
 
     wrapper_send_timeout_seconds: float = 15
     #: Rendered into every wrapper as `sessions.interrupt_settle_seconds`; the priority lane's
