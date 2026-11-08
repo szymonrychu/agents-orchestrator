@@ -238,13 +238,14 @@ async def _session_plan(
     patch: dict[str, Any],
     secrets: Mapping[str, SecretStr],
 ) -> _Plan:
-    """`_plan` for a live session: merged and checked as the session PATCH does (fixed fields,
-    `check_spec`, every protected variable with a value bound or staged), no agent guard."""
+    """`_plan` for a live session: merged and checked in the session PATCH's order (fixed fields,
+    then `check_spec`, then every protected variable with a value bound or staged), no agent
+    guard."""
     spec = _merged(stored, patch, secrets)
-    await session_spec.validated(spec, settings, session)
     new = spec.model_dump(mode="json", exclude_unset=True)
     if fixed := fixed_changes(stored, new):
         raise session_spec.fixed_refused(fixed)
+    await session_spec.validated(spec, settings, session)
     protected = {n for n, e in spec.env.items() if e.protected}
     if unset := sorted(protected - set(session.secret_versions) - set(secrets)):
         raise _secret_unset(unset)
@@ -262,8 +263,10 @@ async def live_session(conn, session_id: uuid.UUID) -> tuple[Session, dict[str, 
 async def _visible_session(
     conn, session_id: uuid.UUID, caller: Session, *, hidden_as: str
 ) -> tuple[Session, dict[str, Any]]:
-    """The target session as stored now, if the caller may still see it (`admin._target`: its
-    own, or one of a manageable preset; else as missing as an unknown); 409 while deleting."""
+    """The target session as stored now (a plain read, no row lock: the review rechecks the
+    fingerprint under `replace_spec`'s lock), if the caller may still see it (`admin._target`:
+    its own, or one of a manageable preset; else as missing as an unknown); 409 while
+    deleting."""
     found = await sessions_repo.get_stored(conn, session_id)
     if found is None:
         raise not_found(hidden_as)
@@ -299,8 +302,9 @@ async def _based(
     *,
     hidden_as: str,
 ) -> tuple[uuid.UUID | None, str, _Plan]:
-    """A preset or session target read now under its locks and the revision planned against
-    it: the preset whose Secret family stages the values, the target's display name, the plan."""
+    """A preset (under its row lock) or session (a plain read) target read now and the
+    revision planned against it: the preset whose Secret family stages the values, the
+    target's display name, the plan."""
     if kind == "preset":
         preset = await _locked(conn, target_id, hidden_as=hidden_as)
         return preset.id, preset.name, await _plan(conn, settings, preset, body.patch, body.secrets)

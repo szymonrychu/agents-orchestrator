@@ -226,6 +226,24 @@ async def test_fixed_field_is_422(pool, kube, settings, boss, preset, target, ca
     assert await _rows(pool, "SELECT id FROM change_proposals") == []
 
 
+async def test_fixed_field_is_checked_before_the_spec(
+    pool, kube, settings, boss, preset, target, canary, monkeypatch
+):
+    """Same order as the session PATCH: a fixed field answers before an invalid spec."""
+
+    def refuse(*args, **kw):
+        raise ApiError(422, "invalid_request", "image not allowed")
+
+    monkeypatch.setattr(proposals.session_spec, "check_spec", refuse)
+    with pytest.raises(ApiError) as exc:
+        await _filed(pool, kube, settings, boss, canary, patch={"replicas": 1})
+    err = _error(exc, 422, "session_fixed_field")
+    assert err.extra["fields"] == ["replicas"]
+    with pytest.raises(ApiError) as exc:
+        await _filed(pool, kube, settings, boss, canary, patch=MCP_PATCH)
+    _error(exc, 422, "invalid_request")
+
+
 async def test_secret_on_a_preset_less_session_is_422(pool, kube, settings, boss, canary):
     with pytest.raises(ApiError) as exc:
         await _create(

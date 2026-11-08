@@ -628,3 +628,69 @@ def _hide_then_pass(pool, preset_id):
         await hide(pool, preset_id)
 
     return own
+
+
+# ---------------------------------------------------------------- session targets
+
+
+async def _session_of(pool, slug: str, preset_id) -> Sess:
+    sess = await alone(pool, slug)
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE sessions SET preset_id = %s WHERE id = %s", (preset_id, sess.id))
+    return sess
+
+
+async def test_session_proposal_hidden_when_its_preset_turns_unmanageable(app, pool, boss, preset):
+    """A foreign session's proposal follows `admin._target`: once the session's preset is no
+    longer manageable, get, list, revise and withdraw answer like an unknown id."""
+    target = await _session_of(pool, "pr-target", preset.id)
+    view = await filed(app, boss, kind="session", target=target.slug, patch=PLAIN_PATCH)
+    await hide(pool, preset.id)
+    unknown = await agent(app, boss, "GET", f"{P}/999999")
+    for method, suffix, kw in [
+        ("GET", "", {}),
+        ("POST", "/revise", {"json": {"patch": MCP_PATCH}}),
+        ("POST", "/withdraw", {}),
+    ]:
+        r = await agent(app, boss, method, f"{P}/{view['id']}{suffix}", **kw)
+        assert_error(r, 404, "not_found")
+        assert r.json() == unknown.json(), suffix
+    assert (await agent(app, boss, "GET", P)).json() == []
+    r = await human(app, "GET", f"{M}/{view['id']}")
+    assert r.json()["status"] == "open" and r.json()["revision"] == 1
+
+
+async def test_session_proposal_hidden_when_its_preset_is_deleted(app, pool, boss, preset):
+    """A deleted preset leaves the session with no preset: `admin._target` hides it, so does
+    the listing (unlike a deleted preset target, which stays readable)."""
+    target = await _session_of(pool, "pr-target", preset.id)
+    view = await filed(app, boss, kind="session", target=target.slug, patch=PLAIN_PATCH)
+    async with pool.connection() as conn:
+        await conn.execute("DELETE FROM presets WHERE id = %s", (preset.id,))
+    r = await agent(app, boss, "GET", f"{P}/{view['id']}")
+    assert_error(r, 404, "not_found")
+    assert (await agent(app, boss, "GET", P)).json() == []
+
+
+async def test_own_session_proposal_stays_visible_on_an_unmanageable_preset(
+    app, pool, boss, preset
+):
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE sessions SET preset_id = %s WHERE id = %s", (preset.id, boss.id))
+    view = await filed(app, boss, kind="session", target=boss.slug, patch=MCP_PATCH)
+    await hide(pool, preset.id)
+    r = await agent(app, boss, "GET", f"{P}/{view['id']}")
+    assert r.status_code == 200, r.text
+    assert [v["id"] for v in (await agent(app, boss, "GET", P)).json()] == [view["id"]]
+    r = await agent(app, boss, "POST", f"{P}/{view['id']}/revise", json={"patch": PLAIN_PATCH})
+    assert r.status_code == 200, r.text
+
+
+async def test_purged_session_proposal_stays_readable(app, pool, boss, preset):
+    target = await _session_of(pool, "pr-target", preset.id)
+    view = await filed(app, boss, kind="session", target=target.slug, patch=PLAIN_PATCH)
+    async with pool.connection() as conn:
+        await conn.execute("DELETE FROM sessions WHERE id = %s", (target.id,))
+    r = await agent(app, boss, "GET", f"{P}/{view['id']}")
+    assert r.status_code == 200, r.text
+    assert [v["id"] for v in (await agent(app, boss, "GET", P)).json()] == [view["id"]]
