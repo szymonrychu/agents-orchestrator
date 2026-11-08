@@ -83,6 +83,7 @@ from agents_orchestrator.reconciler.rollout import BUSY, LEADS, Replacer, agent_
 from agents_orchestrator.reconciler.sweeper import CacheSweeper
 from agents_orchestrator.reconciler.wrapper_sessions import WrapperSessionBootstrapper
 from agents_orchestrator.settings import DiscardHook, Settings
+from agents_orchestrator.spec import parse_quantity
 from agents_orchestrator.tokens import tokens_for
 from agents_orchestrator.wrapper.models import describe_exception
 
@@ -180,6 +181,29 @@ _DRAINING = (
     " WHERE a.session_id = %s AND a.ordinal >= %s AND a.gone_at IS NULL"
     " ORDER BY a.ordinal"
 )
+
+
+def grow_only_pvc(obj: Obj, live: Obj) -> Obj:
+    """`obj` with its storage request raised to the live request or capacity when that is
+    larger: the API server rejects a PVC shrink with a 422, so a workspace grown by hand
+    keeps its size and a larger `pvc_size` still grows it."""
+    want = obj["spec"]["resources"]["requests"]["storage"]
+    sizes = [
+        ((live.get("spec") or {}).get("resources") or {}).get("requests", {}).get("storage"),
+        ((live.get("status") or {}).get("capacity") or {}).get("storage"),
+    ]
+    best = want
+    for size in sizes:
+        try:
+            if size and parse_quantity(size) > parse_quantity(best):
+                best = size
+        except ValueError:
+            continue
+    if best == want:
+        return obj
+    resources = obj["spec"]["resources"]
+    requests = {**resources["requests"], "storage": best}
+    return {**obj, "spec": {**obj["spec"], "resources": {**resources, "requests": requests}}}
 
 
 class Reconciler:
@@ -652,6 +676,8 @@ class Reconciler:
 
         A live StatefulSet not on OnDelete is first moved there.
         """
+        if obj["kind"] == "PersistentVolumeClaim" and live is not None:
+            obj = grow_only_pvc(obj, live)
         key = obj_key(obj)
         kind, ns, name = key
         slug = obj["metadata"]["labels"][SESSION_LABEL]
