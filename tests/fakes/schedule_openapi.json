@@ -797,6 +797,7 @@
         "summary": "Get Schedule"
       },
       "put": {
+        "description": "Optional `If-Match: \"<updated_at>\"`: replace only if the schedule is unchanged, else 412.",
         "operationId": "replace_schedule_schedules_api_v1_schedules__schedule_id__put",
         "parameters": [
           {
@@ -806,6 +807,22 @@
             "schema": {
               "title": "Schedule Id",
               "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
             }
           }
         ],
@@ -829,6 +846,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "malformed If-Match header (bad_request)"
           },
           "403": {
             "content": {
@@ -859,6 +886,16 @@
               }
             },
             "description": "a schedule with this name already exists (conflict)"
+          },
+          "412": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "the schedule changed since the If-Match value was read (precondition_failed)"
           },
           "422": {
             "content": {

@@ -135,6 +135,20 @@ class ProposalIn(BaseModel):
     client_key: str | None = Field(default=None, max_length=200)
 
 
+class ScheduleIn(BaseModel):
+    """agents-schedule's `ScheduleIn` (v0.6.0): the full body of its `PUT /schedules/{id}`, which
+    a schedule proposal is merged into, validated as and applied with."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=100)
+    cron: str
+    timezone: str | None = None  # None: the schedule service's default timezone
+    preset_id: uuid.UUID
+    prompt: str = Field(min_length=1, max_length=16384)
+    enabled: bool = True
+
+
 class ProposalRevise(BaseModel):
     """A new revision: a full proposal against the target as it is now, not a delta."""
 

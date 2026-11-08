@@ -270,7 +270,7 @@ async def _visible(request: Request) -> set[str]:
     return cached
 
 
-def _target(settings: Settings, service: str) -> forward_core.Target:
+def upstream_target(settings: Settings, service: str) -> forward_core.Target:
     upstream = settings.admin_upstream(service)
     if upstream is None:
         raise ApiError(503, "upstream_unconfigured", f"no {service} upstream is configured")
@@ -284,7 +284,7 @@ async def _upstream_json(request: Request, settings: Settings, service: str, pat
     _, session = caller_of(request)
     status, content = await forward_core.forward(
         request,
-        _target(settings, service),
+        upstream_target(settings, service),
         "GET",
         SERVICES[service][1] + path,
         None,
@@ -454,7 +454,7 @@ def _handler(service: str, method: str, template: str) -> Callable[..., Awaitabl
 
     async def relay(request: Request, settings: Cfg) -> Response:
         _, session = caller_of(request)
-        target = _target(settings, service)
+        target = upstream_target(settings, service)
         body = None
         if method in _BODY_METHODS:
             body = await forward_core.capped_body(request) or None

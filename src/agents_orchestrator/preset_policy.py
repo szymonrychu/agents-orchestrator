@@ -128,6 +128,17 @@ def classify(paths: Iterable[str]) -> dict[str, tuple[bool, bool]]:
     return {p: (p not in NON_SECURITY, p in HUMAN_ONLY_PATHS) for p in paths}
 
 
+# Schedule fields (agents-schedule `ScheduleIn`) a reviewer may wave through (plan 3.1); `prompt`
+# (text the started session runs) and `preset_id` (which grants it runs with) are security.
+SCHEDULE_NON_SECURITY: frozenset[str] = frozenset({"name", "cron", "timezone", "enabled"})
+
+
+def classify_schedule(fields: Iterable[str]) -> dict[str, tuple[bool, bool]]:
+    """Each schedule field to (security, grant), failing closed like `classify`; no schedule
+    field is a grant."""
+    return {f: (f not in SCHEDULE_NON_SECURITY, False) for f in fields}
+
+
 def privileged(spec: dict[str, Any]) -> list[str]:
     return sorted(f for f in PRIVILEGED if bool(spec.get(f)))
 

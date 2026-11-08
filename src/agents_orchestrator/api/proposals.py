@@ -1,9 +1,14 @@
 """Change proposals service (preset-change-proposals 3.4, 3.5): create, revise, withdraw, read
 and the human review that applies the approved items.
 
-Stage A handles `kind: "preset"` only; the routes and gates live in `proposal_routes`. A proposal
-never runs the agent guards (human-only, privileged): it may carry any path, security, grant or
-not, for a human to decide; only `review` (a human) writes the target.
+It handles `kind: "preset"` and `kind: "schedule"` (stage B); the routes and gates live in
+`proposal_routes`. A proposal never runs the agent guards (human-only, privileged): it may carry
+any path, security, grant or not, for a human to decide; only `review` (a human) writes the target.
+
+A schedule lives in agents-schedule, so there is no shared transaction: its fingerprint is the
+upstream `updated_at` exactly as the schedule view spells it, and the review applies with `PUT`
+and `If-Match: "<that value>"` (412 there is stale here). Views never call the upstream, so a
+schedule proposal reads `stale: false` until a review compares.
 
 A protected value arrives as a `SecretStr` in `secrets` and goes only into a staged Secret's
 `stringData` (`stage_secret`); no row, view, error, log line or audit entry ever holds it. The
@@ -27,9 +32,11 @@ from typing import Any
 
 import psycopg
 from fastapi import Request
+from fastapi.exceptions import RequestValidationError
 from pydantic import SecretStr, ValidationError
 
-from agents_orchestrator.api import admin, schemas, secret_store, session_spec
+from agents_orchestrator.api import admin, admin_relay, schemas, secret_store, session_spec
+from agents_orchestrator.api import forward as forward_core
 from agents_orchestrator.api import presets as presets_api
 from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.spec_edit import merged_spec_in, note_fields
@@ -37,7 +44,12 @@ from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.db import proposals as repo
 from agents_orchestrator.db.queue import SessionBeingDeleted, enqueue_message
 from agents_orchestrator.db.sessions import Session
-from agents_orchestrator.preset_policy import changed_paths, classify
+from agents_orchestrator.preset_policy import (
+    changed_paths,
+    classify,
+    classify_schedule,
+    merge_patch,
+)
 from agents_orchestrator.secret_view import EnvMeta, redact_spec_dict
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import SessionSpecIn
@@ -56,6 +68,7 @@ STATUSES: dict[str, tuple[str, ...]] = {
 # what a protected env entry keeps: in a revision's base (plan 3.2) and in an item's `after`
 _BASE_KEYS = ("protected", "expand", "set", "version")
 _AFTER_KEYS = ("protected", "expand")
+SCHEDULE_FIELDS = tuple(schemas.ScheduleIn.model_fields)
 
 
 @dataclass(frozen=True)
@@ -244,6 +257,40 @@ async def _rolled_back(
         log.error("could not delete %d staged secrets: %s", len(staged), type(exc).__name__)
 
 
+async def _insert(
+    conn,
+    settings: Settings,
+    body: schemas.ProposalIn,
+    caller: Session,
+    superleader: bool,
+    target_id: str,
+    target_name: str,
+    plan: _Plan,
+) -> int:
+    """Insert revision 1 in the caller's transaction, within the open-proposal cap (soft)."""
+    if await repo.count_active(conn, caller.id) >= settings.proposals_open_max:
+        raise ApiError(
+            409,
+            "too_many_proposals",
+            f"at most {settings.proposals_open_max} open proposals per session; withdraw one first",
+        )
+    return await repo.insert(
+        conn,
+        kind=body.kind,
+        target_id=target_id,
+        target_name=target_name,
+        proposer_session=caller.id,
+        proposer_slug=caller.slug,
+        proposer_superleader=superleader,
+        client_key=body.client_key,
+        reason=body.reason,
+        base=plan.base,
+        fingerprint=plan.fingerprint,
+        items=plan.items,
+        ttl_seconds=settings.proposal_ttl_seconds,
+    )
+
+
 async def create(
     request: Request,
     conn,
@@ -263,10 +310,12 @@ async def create(
             return await get_view(
                 conn, settings, first, proposer=caller.id, visible_only=True
             ), False
-    if body.kind != "preset":
+    if body.kind == "session":
         raise _unsupported(body.kind)
     if not superleader:
         raise session_spec.not_superleader()
+    if body.kind == "schedule":
+        return await _create_schedule(request, conn, settings, body, caller, superleader)
     _check_values(body.secrets)
     async with conn.transaction():
         target = await admin.manageable_preset(conn, body.target)
@@ -275,27 +324,8 @@ async def create(
         async with conn.transaction():
             preset = await _locked(conn, target.id)
             plan = await _plan(conn, settings, preset, body.patch, body.secrets)
-            if await repo.count_active(conn, caller.id) >= settings.proposals_open_max:
-                raise ApiError(
-                    409,
-                    "too_many_proposals",
-                    f"at most {settings.proposals_open_max} open proposals per session;"
-                    " withdraw one first",
-                )
-            proposal_id = await repo.insert(
-                conn,
-                kind="preset",
-                target_id=str(preset.id),
-                target_name=preset.name,
-                proposer_session=caller.id,
-                proposer_slug=caller.slug,
-                proposer_superleader=superleader,
-                client_key=body.client_key,
-                reason=body.reason,
-                base=plan.base,
-                fingerprint=plan.fingerprint,
-                items=plan.items,
-                ttl_seconds=settings.proposal_ttl_seconds,
+            proposal_id = await _insert(
+                conn, settings, body, caller, superleader, str(preset.id), preset.name, plan
             )
             await _stage(request, conn, settings, preset.id, body.secrets, proposal_id, 1, staged)
     except repo.ProposalExists as exc:  # a concurrent replay won the insert; nothing staged
@@ -336,10 +366,18 @@ async def revise(
                 raise not_found("proposal")
             if current.status not in repo.ACTIVE:
                 raise _not_open()
-            if current.kind != "preset":
+            if current.kind == "schedule":
+                _no_values(body.secrets)
+                live = await _fetch_schedule(request, settings, current.target_id, caller)
+                if live is None:  # deleted: as unknown, like a deleted preset
+                    raise not_found("proposal")
+                visible = await _manageable(conn, live, hidden_as="proposal")
+                plan = _schedule_plan(live, body.patch, visible)
+            elif current.kind == "preset":
+                preset = await _locked(conn, uuid.UUID(current.target_id), hidden_as="proposal")
+                plan = await _plan(conn, settings, preset, body.patch, body.secrets)
+            else:
                 raise _unsupported(current.kind)
-            preset = await _locked(conn, uuid.UUID(current.target_id), hidden_as="proposal")
-            plan = await _plan(conn, settings, preset, body.patch, body.secrets)
             previous = current.revisions[0]  # `lock` loads the current revision only
             revision = await repo.add_revision(
                 conn,
@@ -351,9 +389,10 @@ async def revise(
                 items=plan.items,
                 ttl_seconds=settings.proposal_ttl_seconds,
             )
-            await _stage(
-                request, conn, settings, preset.id, body.secrets, proposal_id, revision, staged
-            )
+            if current.kind == "preset":
+                await _stage(
+                    request, conn, settings, preset.id, body.secrets, proposal_id, revision, staged
+                )
     except secret_store.SecretStoreError:
         await _rolled_back(request, conn, settings, staged)
         raise presets_api.store_failed() from None
@@ -393,7 +432,8 @@ async def live_fingerprint(conn, preset: presets_repo.Preset) -> str:
 
 
 async def _stale(conn, proposal: repo.Proposal) -> bool:
-    """Read-only (never changes state): the live target differs from the current revision's."""
+    """Read-only (never changes state): the live preset differs from the current revision's. A
+    schedule is never read upstream here (module docstring): the review compares."""
     if proposal.status not in repo.ACTIVE or proposal.kind != "preset":
         return False
     current = next(r for r in proposal.revisions if r.revision == proposal.revision)
@@ -457,6 +497,175 @@ async def list_views(
     return [await _view(conn, p) for p in found]
 
 
+# ---------------------------------------------------------------- schedules (stage B)
+
+
+def _no_values(secrets: Mapping[str, SecretStr]) -> None:
+    if secrets:
+        raise ApiError(422, "invalid_request", "a schedule has no protected values: drop secrets")
+
+
+def _upstream_failed(status: int) -> ApiError:
+    return ApiError(503, "upstream_unavailable", f"the schedule upstream answered {status}")
+
+
+def _upstream_message(payload: Any, status: int) -> str:
+    """The upstream's error message (`error.message`, or FastAPI's `loc: msg`), never its input."""
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict) and isinstance(error.get("message"), str):
+            return error["message"]
+        detail = payload.get("detail")
+        if isinstance(detail, list):
+            return "; ".join(
+                f"{'.'.join(str(x) for x in d.get('loc', []))}: {d.get('msg')}"
+                for d in detail
+                if isinstance(d, dict)
+            )
+    return f"the schedule upstream answered {status}"
+
+
+async def _schedule_call(
+    request: Request,
+    settings: Settings,
+    method: str,
+    schedule_id: str,
+    by: Session | repo.Proposal,
+    *,
+    body: dict[str, Any] | None = None,
+    if_match: str | None = None,
+) -> tuple[int, Any]:
+    """One call to `/schedules/{id}` of the schedule upstream, as the proposer (a session, or the
+    proposal's proposer for a review): 503 `upstream_unconfigured` or `upstream_unavailable`."""
+    session, slug = (
+        (by.id, by.slug) if isinstance(by, Session) else (by.proposer_session, by.proposer_slug)
+    )
+    path = f"{admin_relay.SERVICES['schedule'][1]}/schedules/{uuid.UUID(schedule_id)}"
+    status, content = await forward_core.forward(
+        request,
+        admin_relay.upstream_target(settings, "schedule"),
+        method,
+        path,
+        None if body is None else json.dumps(body).encode(),
+        str(session),
+        slug,
+        query="",
+        extra_headers=None if if_match is None else {"If-Match": f'"{if_match}"'},
+    )
+    return status, json.loads(content)
+
+
+async def _fetch_schedule(
+    request: Request, settings: Settings, schedule_id: str, by: Session | repo.Proposal
+) -> dict[str, Any] | None:
+    """The schedule view; None when the upstream does not know it (or the id is no UUID)."""
+    try:
+        uuid.UUID(schedule_id)
+    except ValueError:
+        return None
+    status, payload = await _schedule_call(request, settings, "GET", schedule_id, by)
+    if status == 404:
+        return None
+    if status != 200:
+        raise _upstream_failed(status)
+    if not isinstance(payload, dict) or not isinstance(payload.get("updated_at"), str):
+        raise ApiError(502, "upstream_shape", "the schedule upstream answer is not a schedule")
+    return payload
+
+
+def _schedule_fields(obj: Mapping[str, Any]) -> dict[str, Any]:
+    """The `ScheduleIn` fields of a schedule view or a stored base, in their JSON form."""
+    present = {k: obj[k] for k in SCHEDULE_FIELDS if obj.get(k) is not None}
+    try:
+        return schemas.ScheduleIn.model_validate(present).model_dump(mode="json")
+    except ValidationError:
+        raise ApiError(
+            502, "upstream_shape", "the schedule upstream answer is not a schedule"
+        ) from None
+
+
+def _schedule_with(obj: Mapping[str, Any], approved: Mapping[str, Any]) -> dict[str, Any]:
+    """The full `ScheduleIn` of `obj` with each approved field set to its proposed value (None:
+    removed, the upstream default), re-validated (422 `invalid_spec`)."""
+    out = _schedule_fields(obj)
+    for path, value in approved.items():
+        _put(out, path, value)
+    try:
+        return schemas.ScheduleIn.model_validate(out).model_dump(mode="json")
+    except ValidationError as exc:
+        raise ApiError(422, "invalid_spec", _pydantic_text(exc)) from None
+
+
+async def _manageable(conn, live: Mapping[str, Any], *, hidden_as: str) -> set[str]:
+    """The manageable preset ids; a schedule on any other preset is as missing as an unknown."""
+    visible = {str(i) for i in await presets_repo.manageable_ids(conn)}
+    if str(live.get("preset_id")) not in visible:
+        raise not_found(hidden_as)
+    return visible
+
+
+def _schedule_plan(live: Mapping[str, Any], patch: dict[str, Any], visible: set[str]) -> _Plan:
+    """Merge the patch (RFC 7396, `ScheduleIn` fields only) into the schedule, validate it as
+    `ScheduleIn` and make one item per changed field; the fingerprint is the view's `updated_at`
+    verbatim, the `If-Match` value the review sends."""
+    unknown = sorted(set(patch) - set(SCHEDULE_FIELDS))
+    if unknown:
+        raise ApiError(422, "invalid_request", f"not a schedule field: {', '.join(unknown)}")
+    if "timezone" in patch and patch["timezone"] is None:
+        raise ApiError(422, "invalid_request", "give an explicit timezone, not null")
+    base = _schedule_fields(live)
+    try:
+        new = schemas.ScheduleIn.model_validate(merge_patch(base, patch)).model_dump(mode="json")
+    except ValidationError as exc:
+        errors = [{**e, "loc": ("body", "patch", *e["loc"])} for e in exc.errors()]
+        raise RequestValidationError(errors) from None
+    if new["preset_id"] != base["preset_id"] and new["preset_id"] not in visible:
+        raise not_found("preset")
+    new["cron"] = " ".join(new["cron"].split())  # agents-schedule stores it normalised
+    paths = [f for f in SCHEDULE_FIELDS if new[f] != base[f]]
+    if not paths:
+        raise ApiError(422, "nothing_changed", "the patch changes nothing")
+    classes = classify_schedule(paths)
+    items = [
+        repo.Item(
+            path=f, before=base[f], after=new[f], security=classes[f][0], grant=False, secret=None
+        )
+        for f in paths
+    ]
+    return _Plan(base, live["updated_at"], items)
+
+
+async def _create_schedule(
+    request: Request,
+    conn,
+    settings: Settings,
+    body: schemas.ProposalIn,
+    caller: Session,
+    superleader: bool,
+) -> tuple[schemas.ProposalView, bool]:
+    """`create` for a schedule on a manageable preset; the upstream read runs before the
+    transaction, which only reads presets and inserts (the fingerprint pins the read)."""
+    _no_values(body.secrets)
+    live = await _fetch_schedule(request, settings, body.target, caller)
+    if live is None:
+        raise not_found("schedule")
+    try:
+        async with conn.transaction():
+            plan = _schedule_plan(
+                live, body.patch, await _manageable(conn, live, hidden_as="schedule")
+            )
+            proposal_id = await _insert(
+                conn, settings, body, caller, superleader, str(live["id"]), live["name"], plan
+            )
+    except repo.ProposalExists as exc:  # a concurrent replay won the insert
+        view = await get_view(
+            conn, settings, exc.proposal_id, proposer=caller.id, visible_only=True
+        )
+        return view, False
+    note_fields(request, [i.path for i in plan.items])
+    return await get_view(conn, settings, proposal_id, proposer=caller.id), True
+
+
 # ---------------------------------------------------------------- review (plan 3.5)
 
 _DECISION = {"approve": "approved", "rework": "rework", "deny": "denied"}
@@ -475,13 +684,17 @@ class _Done:
     gc: uuid.UUID | None = None
 
 
-def _stale_error() -> ApiError:
+def _stale_error(kind: str) -> ApiError:
     return ApiError(
         409,
         "proposal_stale",
-        "the preset changed since this revision was based; only rework or deny remain",
+        f"the {kind} changed since this revision was based; only rework or deny remain",
         extra={"fields": []},
     )
+
+
+def _gone_error(kind: str) -> ApiError:
+    return ApiError(409, "target_gone", f"the {kind} no longer exists")
 
 
 def _head(p: repo.Proposal) -> str:
@@ -516,11 +729,11 @@ def _reviewed_text(p: repo.Proposal, decisions: Decisions) -> str:
 
 
 _CLOSED_TEXT = {
-    "stale": "is stale: the preset changed since this revision was based; nothing was applied."
-    " Revise it against the current preset with proposal_revise {id}.",
+    "stale": "is stale: the {kind} changed since this revision was based; nothing was applied."
+    " Revise it against the current {kind} with proposal_revise {id}.",
     "expired": "expired before it was reviewed; nothing was applied."
     " File it again with proposal_create if it is still needed.",
-    "target_gone": "was closed: the preset no longer exists or is no longer open to superleader"
+    "target_gone": "was closed: the {kind} no longer exists or is no longer open to superleader"
     " changes; nothing was applied.",
 }
 
@@ -540,7 +753,7 @@ async def mark_closed(
     """Move the proposal to `to` (stale, expired, target_gone) and queue the proposer's one-line
     notice, in the caller's transaction. Status-guarded: NotInState when another writer won."""
     await repo.transition(conn, p.id, from_states=from_states, to=to, outcome=to)
-    await _notify(conn, p, f"{_head(p)} {_CLOSED_TEXT[to].format(id=p.id)}")
+    await _notify(conn, p, f"{_head(p)} {_CLOSED_TEXT[to].format(id=p.id, kind=p.kind)}")
 
 
 async def _close(conn, p: repo.Proposal, to: str, error: ApiError) -> _Done:
@@ -681,34 +894,91 @@ async def _review_locked(
         raise ApiError(
             422, "invalid_request", "a stale proposal takes only rework or deny; revise it first"
         )
+    if p.kind == "schedule":
+        return await _review_schedule(request, conn, settings, p, decisions)
     if p.kind != "preset":
         raise _unsupported(p.kind)
     preset = await presets_repo.get_for_update(conn, uuid.UUID(p.target_id))
     if preset is None:
-        return await _close(
-            conn, p, "target_gone", ApiError(409, "target_gone", "the preset no longer exists")
-        )
+        return await _close(conn, p, "target_gone", _gone_error(p.kind))
     if p.status == "open" and await live_fingerprint(conn, preset) != current.fingerprint:
-        return await _close(conn, p, "stale", _stale_error())
+        return await _close(conn, p, "stale", _stale_error(p.kind))
     done = _Done(release=[p])
-    if "rework" in verdicts:
-        to = "rework"
-    elif "approved" in verdicts:
-        to = "applied"
+    to = _outcome(decisions)
+    if to == "applied":
         try:
             async with conn.transaction():  # a stale staged value undoes the write, not the mark
                 touched = await _apply(request, conn, settings, preset, p, decisions)
         except secret_store.StagedStale:
-            return await _close(conn, p, "stale", _stale_error())
+            return await _close(conn, p, "stale", _stale_error(p.kind))
         done.gc = preset.id if touched else None
-    else:
-        to = "denied"
+    return await _record(conn, p, decisions, to, done)
+
+
+def _outcome(decisions: Decisions) -> str:
+    """Any rework makes a rework request (D1); else any approval applies; else all denied."""
+    verdicts = {d for d, _ in decisions.values()}
+    if "rework" in verdicts:
+        return "rework"
+    return "applied" if "approved" in verdicts else "denied"
+
+
+async def _record(conn, p: repo.Proposal, decisions: Decisions, to: str, done: _Done) -> _Done:
+    """Steps 7-8: verdicts, outcome, the other open proposals on the target stale after an
+    apply, and the proposer's notice, in the caller's transaction."""
     await repo.record_review(conn, p.id, p.revision, decisions, statuses=_REVIEWABLE)
     await repo.transition(conn, p.id, from_states=_REVIEWABLE, to=to, outcome=to)
     if to == "applied":
         done.release += await _stale_others(conn, p)
     await _notify(conn, p, _reviewed_text(p, decisions))
     return done
+
+
+async def _review_schedule(
+    request: Request, conn, settings: Settings, p: repo.Proposal, decisions: Decisions
+) -> _Done:
+    """Plan 3.5, schedules (no shared transaction): read the schedule, compare its `updated_at`
+    with the fingerprint, `PUT` the full object with `If-Match`, then record in the caller's
+    transaction (it holds the proposal row). When that commit failed after a PUT that landed,
+    the retried review finds a changed `updated_at` whose fields equal the revision's base plus
+    the approved items, and records `applied` without a second PUT."""
+    current = p.revisions[0]
+    to = _outcome(decisions)
+    live = await _fetch_schedule(request, settings, p.target_id, p)
+    if live is None:
+        return await _close(conn, p, "target_gone", _gone_error(p.kind))
+    visible = {str(i) for i in await presets_repo.manageable_ids(conn)}
+    if str(live.get("preset_id")) not in visible:  # parity with the sweeper's preset branch
+        return await _close(conn, p, "target_gone", _gone_error(p.kind))
+    approved = {i.path: i.after for i in current.items if decisions[i.path][0] == "approved"}
+    if p.status == "open" and live["updated_at"] != current.fingerprint:
+        expected = _schedule_with(current.base, approved)
+        landed = to == "applied" and _schedule_fields(live) == expected
+        if not landed:
+            return await _close(conn, p, "stale", _stale_error(p.kind))
+    elif to == "applied":
+        target_preset = approved.get("preset_id")
+        if target_preset is not None and str(target_preset) not in visible:
+            # the proposed preset stopped being manageable since revise (parity with the relay)
+            return await _close(conn, p, "stale", _stale_error(p.kind))
+        status, payload = await _schedule_call(
+            request,
+            settings,
+            "PUT",
+            p.target_id,
+            p,
+            body=_schedule_with(live, approved),
+            if_match=current.fingerprint,
+        )
+        if status == 412:
+            return await _close(conn, p, "stale", _stale_error(p.kind))
+        if status == 404:
+            return await _close(conn, p, "target_gone", _gone_error(p.kind))
+        if status in (409, 422):  # a name taken, an unknown preset, a bad cron or prompt
+            raise ApiError(422, "invalid_spec", _upstream_message(payload, status))
+        if not 200 <= status < 300:
+            raise _upstream_failed(status)
+    return await _record(conn, p, decisions, to, _Done(release=[p]))
 
 
 async def _after_commit(request: Request, conn, settings: Settings, done: _Done) -> None:

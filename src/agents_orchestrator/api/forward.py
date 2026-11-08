@@ -1,8 +1,9 @@
 """The forwarding core shared by the chat relay and the admin relay (superleader-crud D10).
 
 One call to an upstream carries only the service bearer, `X-Orch-Session` and `X-Orch-Slug` of
-the caller and, for a body, `Content-Type: application/json`; never an inbound header and never
-the agent token. The upstream status and body come back unchanged. A connection error, a
+the caller, for a body `Content-Type: application/json`, and the headers the orchestrator itself
+sets (`extra_headers`, a proposal's `If-Match`); never an inbound header and never the agent
+token. The upstream status and body come back unchanged. A connection error, a
 timeout or a non-JSON answer is a 503 with the caller's `unavailable` code. Log lines carry the
 label, method, path and status only, never a token or a body.
 """
@@ -102,12 +103,14 @@ async def forward(
     *,
     empty_ok: bool = False,
     query: str | None = None,
+    extra_headers: dict[str, str] | None = None,
 ) -> tuple[int, bytes]:
     """Send one call and return the upstream status and raw body.
 
     `path` is appended to `target.base`; the request's query string is passed on. With
     `empty_ok` an empty body is accepted (a 204), otherwise the answer must be JSON. `query`
-    replaces the request's query string when given.
+    replaces the request's query string when given; `extra_headers` (for example `If-Match`)
+    are sent as well.
     """
     url = target.base.rstrip("/") + path
     if query is None:
@@ -118,6 +121,7 @@ async def forward(
         "Authorization": f"Bearer {target.token}",
         "X-Orch-Session": session,
         "X-Orch-Slug": slug,
+        **(extra_headers or {}),
     }
     if body is not None:
         headers["Content-Type"] = "application/json"
