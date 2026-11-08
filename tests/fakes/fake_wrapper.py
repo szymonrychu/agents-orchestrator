@@ -207,6 +207,7 @@ class _Session:
     waiting: dict[str, Any] | None = None
     outstanding_subagents: int = 0
     bootstrap_steps: list[dict[str, Any]] = field(default_factory=list)
+    error: dict[str, Any] | None = None
     permission_mode_state: str | None = None
     permission_mode_reason: str | None = None
     turns: dict[str, _Turn] = field(default_factory=dict)
@@ -222,7 +223,7 @@ class _Session:
             "name": self.name,
             "state": self.state,
             "step": self.state,
-            "error": None,
+            "error": self.error,
             "workdir": self.workdir,
             "model": self.model,
             "effort": None,
@@ -295,6 +296,8 @@ class FakeWrapper:
         self.turn_message_ids: list[str | None] = []  # the message_id of every POST /turns
         # the `attachments` of every POST /turns that reached the workdir (None when absent)
         self.turn_attachments: list[list[dict[str, Any]] | None] = []
+        self._create_error: tuple[int, str] | None = None
+        self._create_delay: tuple[float, str] | None = None
         self._priority_hold = 0.0
         self._priority_ids: dict[str, str] = {}
         self._status_code: str | None = None
@@ -490,6 +493,30 @@ class FakeWrapper:
         """Set the snapshot `bootstrap.steps` (wrapper 0.7.0)."""
         self._session(session_id).bootstrap_steps = steps
 
+    def fail_session(
+        self,
+        step: str,
+        message: str,
+        session_id: str | None = None,
+        *,
+        has_transcript: bool = False,
+    ) -> None:
+        """The session failed to bootstrap: state `failed` with the wrapper's `error`."""
+        ses = self._session(session_id)
+        ses.error = {"step": step, "message": message}
+        ses.bootstrap_steps = [
+            {"step": step, "status": "failed", "message": message[:200]},
+        ]
+        self.set_session_state("failed", has_transcript=has_transcript, session_id=ses.session_id)
+
+    def set_create_error(self, status: int | None, code: str = "bootstrap_failed") -> None:
+        """Answer `POST /v1/sessions` with this error status (None restores success)."""
+        self._create_error = None if status is None else (status, code)
+
+    def delay_create(self, seconds: float, step: str = "mise_install") -> None:
+        """`POST /v1/sessions` registers the session at `step`, then answers after `seconds`."""
+        self._create_delay = (seconds, step)
+
     def drop_streams(self) -> None:
         """End every open SSE stream, as a network disconnect would."""
         for ses in self.sessions.values():
@@ -666,6 +693,8 @@ class FakeWrapper:
         async def create_session(request: Request) -> dict[str, Any]:
             self._auth(request)
             body = await self._json_body(request)
+            if self._create_error is not None:
+                raise _Err(*self._create_error)
             live = [s for s in self.sessions.values() if s.state in ("creating", "ready", "busy")]
             if len(live) >= MAX_SESSIONS:
                 raise _Err(429, "too_many_sessions")
@@ -678,6 +707,10 @@ class FakeWrapper:
             ses.model = body.get("model")
             self.sessions[sid] = ses
             self._set_state(ses, "creating")
+            if self._create_delay is not None:
+                seconds, step = self._create_delay
+                ses.bootstrap_steps = [{"step": step, "status": "running"}]
+                await asyncio.sleep(seconds)
             self._set_state(ses, "ready")
             return ses.snapshot()
 

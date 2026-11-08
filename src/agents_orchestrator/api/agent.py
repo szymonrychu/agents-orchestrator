@@ -11,7 +11,7 @@ import hmac
 import posixpath
 import uuid
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from xml.sax.saxutils import escape
 
 from fastapi import APIRouter, Depends, Header, Query, Request
@@ -407,6 +407,9 @@ class SessionPeer(BaseModel):
     preset_name: str | None
     superleader: bool
     leader_present: bool
+    # booting | ready | bootstrap_failed, and a one-line reason unless ready
+    start_state: Literal["booting", "ready", "bootstrap_failed"]
+    start_reason: str | None
 
 
 class SessionPeers(BaseModel):
@@ -442,6 +445,8 @@ async def sessions_list(agent: Caller, pool: Pool) -> SessionPeers:
                 preset_name=p.preset_name,
                 superleader=p.superleader,
                 leader_present=p.leader_present,
+                start_state=p.start_state,
+                start_reason=p.start_reason,
             )
             for p in peers
         ]

@@ -107,8 +107,20 @@ async def _send(app, caller: Sess, slug: str, text: str = "hello", ip: str | Non
         )
 
 
-def _entry(sess: Sess, *, superleader: bool, leader_present: bool, preset: str | None = None):
+BOOTING = ("booting", "waiting for agent pods to become ready")
+
+
+def _entry(
+    sess: Sess,
+    *,
+    superleader: bool,
+    leader_present: bool,
+    preset: str | None = None,
+    start: tuple[str, str | None] = ("ready", None),
+):
     return {
+        "start_state": start[0],
+        "start_reason": start[1],
         "slug": sess.slug,
         "preset_name": preset,
         "superleader": superleader,
@@ -139,7 +151,7 @@ async def test_superleader_lists_all_sessions(pool, dsn):
         _entry(plain_hive, superleader=False, leader_present=True),
         _entry(leaderless, superleader=False, leader_present=False),
         _entry(gone_leader, superleader=False, leader_present=False),
-        _entry(gone_alone, superleader=False, leader_present=False),
+        _entry(gone_alone, superleader=False, leader_present=False, start=BOOTING),
     ]
     r = await _list(app, boss)
     assert r.status_code == 200, r.text

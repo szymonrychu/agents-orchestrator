@@ -25,6 +25,7 @@ from agents_orchestrator.wrapper.models import (
     TurnSummary,
     Unavailable,
     WrapperError,
+    WrapperTimeout,
     WrapperUnreachable,
 )
 from agents_orchestrator.wrapper.sse import SSEParser
@@ -37,6 +38,18 @@ log = logging.getLogger(__name__)
 NoteOutcome = Literal["ok", "disabled", "failed"]
 
 DEFAULT_TIMEOUT = 30.0
+CREATE_TIMEOUT = 120.0
+
+
+def _unreachable(
+    exc: httpx.HTTPError, context: str, timeout: float | None = None
+) -> WrapperUnreachable:
+    """The failure of a transport call; a timeout names the wait, and the text is never empty."""
+    if isinstance(exc, httpx.TimeoutException) and timeout is not None:
+        return WrapperTimeout(
+            f"{type(exc).__name__}: {context} timed out after {timeout:g}s", timeout
+        )
+    return WrapperUnreachable(f"{type(exc).__name__}: {str(exc).strip() or context}")
 
 
 def _error_parts(resp: httpx.Response) -> tuple[str, str]:
@@ -60,9 +73,11 @@ class WrapperClient:
         token: str,
         http: httpx.AsyncClient | None = None,
         send_timeout: float = 15.0,
+        create_timeout: float = CREATE_TIMEOUT,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.send_timeout = send_timeout
+        self.create_timeout = create_timeout
         self._http = http or httpx.AsyncClient()
         self._owns_http = http is None
         self._headers = {"Authorization": f"Bearer {token}"}
@@ -82,7 +97,7 @@ class WrapperClient:
                 method, self._url(path), json=json, headers=self._headers, timeout=timeout
             )
         except httpx.HTTPError as exc:
-            raise WrapperUnreachable(f"{type(exc).__name__}: {exc}") from exc
+            raise _unreachable(exc, f"{method} {path}", timeout) from exc
         _raise_for_error(resp)
         return resp
 
@@ -110,7 +125,7 @@ class WrapperClient:
                 timeout=timeout,
             )
         except httpx.HTTPError as exc:
-            raise WrapperUnreachable(f"{type(exc).__name__}: {exc}") from exc
+            raise _unreachable(exc, f"{method} {path}", timeout) from exc
         _raise_for_error(resp)
         if not resp.content:
             return resp.status_code, None
@@ -121,8 +136,8 @@ class WrapperClient:
 
     # sessions
 
-    async def list_sessions(self) -> list[Snapshot]:
-        resp = await self._request("GET", "/sessions")
+    async def list_sessions(self, timeout: float = DEFAULT_TIMEOUT) -> list[Snapshot]:
+        resp = await self._request("GET", "/sessions", timeout=timeout)
         return [Snapshot.model_validate(s) for s in resp.json()["sessions"]]
 
     async def create_session(
@@ -131,7 +146,7 @@ class WrapperClient:
         body = {"name": name, "workdir": workdir, "model": model, "effort": effort}
         body = {k: v for k, v in body.items() if v is not None}
         # creation blocks until claude is ready, so it gets the long default
-        resp = await self._request("POST", "/sessions", json=body, timeout=120.0)
+        resp = await self._request("POST", "/sessions", json=body, timeout=self.create_timeout)
         return Snapshot.model_validate(resp.json())
 
     async def get_session(self, session_id: str) -> Snapshot:
@@ -140,7 +155,9 @@ class WrapperClient:
         )
 
     async def resume_session(self, session_id: str) -> Snapshot:
-        resp = await self._request("POST", f"/sessions/{session_id}/resume", timeout=120.0)
+        resp = await self._request(
+            "POST", f"/sessions/{session_id}/resume", timeout=self.create_timeout
+        )
         return Snapshot.model_validate(resp.json())
 
     # turns
@@ -288,7 +305,7 @@ class WrapperClient:
                     for ev in parser.feed(chunk):
                         yield Envelope.model_validate_json(ev.data)
         except httpx.HTTPError as exc:
-            raise WrapperUnreachable(f"{type(exc).__name__}: {exc}") from exc
+            raise _unreachable(exc, "wrapper call") from exc
 
     # file download
 
@@ -308,13 +325,13 @@ class WrapperClient:
         try:
             resp = await self._http.send(request, stream=True)
         except httpx.HTTPError as exc:
-            raise WrapperUnreachable(f"{type(exc).__name__}: {exc}") from exc
+            raise _unreachable(exc, "wrapper call") from exc
         if resp.status_code < 300:
             return resp
         try:
             await resp.aread()
         except httpx.HTTPError as exc:
-            raise WrapperUnreachable(f"{type(exc).__name__}: {exc}") from exc
+            raise _unreachable(exc, "wrapper call") from exc
         finally:
             await resp.aclose()
         _raise_for_error(resp)

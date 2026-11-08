@@ -50,6 +50,7 @@ from agents_orchestrator.reconciler.checks import (
     job_condition,
     log_tail,
 )
+from agents_orchestrator.redact import redact_text
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import INIT_DIR, init_scripts_hash
 
@@ -290,8 +291,8 @@ class InitRunner:
             if state == "failed" and reason is None:
                 exit_code = container_exit_code(pod)
             try:
-                tail = log_tail(
-                    await self.kube.read_pod_log(ns, pod["metadata"]["name"], TAIL_LINES)
+                tail = redact_text(
+                    log_tail(await self.kube.read_pod_log(ns, pod["metadata"]["name"], TAIL_LINES))
                 )
             except KubeError as exc:
                 log.warning("reading the init log of session %s failed: %s", session.slug, exc)

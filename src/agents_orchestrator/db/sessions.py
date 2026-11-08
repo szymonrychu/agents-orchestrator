@@ -17,6 +17,7 @@ from agents_orchestrator.db import leadership
 from agents_orchestrator.db.eligibility import ELIGIBLE
 from agents_orchestrator.db.pool import notify
 from agents_orchestrator.db.queue import SessionBeingDeleted, enqueue_message
+from agents_orchestrator.db.start_state import start_reason, start_state
 from agents_orchestrator.inactivity import NOTICE_CLOSE, NOTICE_REMINDER, close_reason
 from agents_orchestrator.spec import SessionSpec, validate_slug
 
@@ -250,6 +251,8 @@ class MessagingPeer:
     preset_name: str | None
     superleader: bool
     leader_present: bool
+    start_state: str
+    start_reason: str | None
 
 
 # Active sessions other than the caller's, with whether a not-gone agent holds the leader row
@@ -259,7 +262,13 @@ SELECT c.*,
        EXISTS (SELECT 1 FROM session_leaders l JOIN agents a ON a.id = l.agent_id
                WHERE l.session_id = c.id AND a.gone_at IS NULL) AS live_leader,
        EXISTS (SELECT 1 FROM agents a
-               WHERE a.session_id = c.id AND a.gone_at IS NULL) AS live_agent
+               WHERE a.session_id = c.id AND a.gone_at IS NULL) AS live_agent,
+       (SELECT count(*) FROM agents a
+         WHERE a.session_id = c.id AND a.gone_at IS NULL AND a.ready) AS ready_agents,
+       coalesce((SELECT jsonb_agg(jsonb_build_object('pod', a.pod_name) || a.start_failure
+                                  ORDER BY a.ordinal)
+                 FROM agents a WHERE a.session_id = c.id AND a.gone_at IS NULL
+                   AND a.start_failure IS NOT NULL), '[]'::jsonb) AS start_failures
 FROM sessions c
 WHERE c.desired = 'active' AND c.id <> %s
 ORDER BY c.slug
@@ -280,8 +289,14 @@ async def list_messaging_peers(
         superleader = bool(spec.session_messaging)
         if superleaders_only and not superleader:
             continue
+        failures = row["start_failures"]
+        state = start_state(row["ready_agents"], failures)
         out.append(
             MessagingPeer(
+                start_state=state,
+                start_reason=start_reason(
+                    state, failures, str(_from_row(row).status.get("message") or "")
+                ),
                 slug=row["slug"],
                 preset_name=row["preset_name"],
                 superleader=superleader,

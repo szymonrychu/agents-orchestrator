@@ -84,6 +84,7 @@ from agents_orchestrator.reconciler.sweeper import CacheSweeper
 from agents_orchestrator.reconciler.wrapper_sessions import WrapperSessionBootstrapper
 from agents_orchestrator.settings import DiscardHook, Settings
 from agents_orchestrator.tokens import tokens_for
+from agents_orchestrator.wrapper.models import describe_exception
 
 log = logging.getLogger(__name__)
 
@@ -972,7 +973,7 @@ class Reconciler:
                 raise
             except Exception as exc:
                 log.exception("restart command %s failed", cmd.id)
-                status, result = "failed", {"error": str(exc) or type(exc).__name__}
+                status, result = "failed", {"error": describe_exception(exc)}
             async with self.pool.connection() as conn:
                 await queue.complete_command(conn, cmd.id, status, result)
 
@@ -1019,7 +1020,7 @@ class Reconciler:
                 raise
             except Exception as exc:
                 log.exception("rebootstrap command %s failed", cmd.id)
-                status, result = "failed", {"error": str(exc) or type(exc).__name__}
+                status, result = "failed", {"error": describe_exception(exc)}
             async with self.pool.connection() as conn:
                 await queue.complete_command(conn, cmd.id, status, result)
 
@@ -1078,7 +1079,7 @@ class Reconciler:
         try:
             await self._write_status(
                 session,
-                {"phase": "error", "message": str(exc) or type(exc).__name__},
+                {"phase": "error", "message": describe_exception(exc)},
                 session.observed_generation,
             )
         except SessionNotFound:

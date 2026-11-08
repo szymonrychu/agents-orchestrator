@@ -34,14 +34,24 @@ from psycopg_pool import AsyncConnectionPool
 
 from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db.agents import Agent
+from agents_orchestrator.reconciler.checks import log_tail
+from agents_orchestrator.redact import redact_text
 from agents_orchestrator.spec import SessionSpec
-from agents_orchestrator.wrapper.models import Snapshot, WrapperError, WrapperUnreachable
+from agents_orchestrator.wrapper.models import (
+    Snapshot,
+    WrapperError,
+    WrapperTimeout,
+    WrapperUnreachable,
+    describe_exception,
+)
 
 log = logging.getLogger(__name__)
 
 ADOPTABLE = frozenset({"creating", "ready", "busy"})
 RESUMABLE = frozenset({"stopped", "failed"})
 MAX_CONCURRENT_BOOTSTRAPS = 8
+FAILURE_MESSAGE_MAX = 200
+STEP_HINT_TIMEOUT = 5.0
 
 WrapperFactory = Callable[[str, str], Any]
 
@@ -58,7 +68,27 @@ def _newest_first(sessions: list[Snapshot]) -> list[Snapshot]:
 def _describe(exc: Exception) -> str:
     if isinstance(exc, WrapperError):
         return f"{exc.status} {exc.code}"
-    return str(exc) or type(exc).__name__
+    return describe_exception(exc)
+
+
+def failure_of(snap: Snapshot) -> dict[str, Any]:
+    """`{step, message, log_tail}` of a failed wrapper session, redacted.
+
+    The step is the wrapper's error step, else its first failed bootstrap step; `message` is the
+    first line of the error text (at most 200 characters) and `log_tail` the cut, redacted text.
+    """
+    steps = snap.bootstrap.steps if snap.bootstrap else []
+    failed = next((b for b in steps if b.status == "failed"), None)
+    err = snap.error
+    step = (err.step if err else None) or (failed.step if failed else None) or snap.step
+    raw = (err.message if err else None) or (failed.message if failed else None) or ""
+    redacted = redact_text(raw) or ""
+    first = next((line.strip() for line in redacted.splitlines() if line.strip()), "")
+    return {
+        "step": step or "bootstrap",
+        "message": first[:FAILURE_MESSAGE_MAX] or f"session {snap.state}",
+        "log_tail": log_tail(redacted) or None,
+    }
 
 
 class WrapperSessionBootstrapper:
@@ -127,7 +157,7 @@ class WrapperSessionBootstrapper:
                 agent.pod_name,
                 stored.state if stored else "gone",
             )
-        snap, resumed = await self._pick(client, listed, spec)
+        snap, resumed = await self._pick(client, agent, listed, spec)
         await self._record(agent, snap, resumed=resumed)
         return None
 
@@ -142,7 +172,7 @@ class WrapperSessionBootstrapper:
             )
 
     async def _pick(
-        self, client: Any, listed: list[Snapshot], spec: SessionSpec
+        self, client: Any, agent: Agent, listed: list[Snapshot], spec: SessionSpec
     ) -> tuple[Snapshot, bool]:
         """The session to record and whether it was resumed."""
         ordered = _newest_first(listed)
@@ -157,7 +187,48 @@ class WrapperSessionBootstrapper:
                     if exc.status >= 500 or exc.status == 429:
                         raise
                     log.info("resume of %s refused: %s", snap.wrapper_session_id, exc)
-        created = await client.create_session(
-            spec.workdir, spec.workdir, model=spec.model, effort=spec.effort
-        )
+        failed = next((s for s in ordered if s.state == "failed"), None)
+        if failed is not None:  # the failed session is passed over: keep why it failed
+            await self._record_failure(agent, failure_of(failed))
+        try:
+            created = await client.create_session(
+                spec.workdir, spec.workdir, model=spec.model, effort=spec.effort
+            )
+        except WrapperTimeout as exc:
+            step = await self._wrapper_step(client)
+            message = f"create timed out after {exc.timeout:g}s, wrapper still at step {step}"
+            await self._record_failure(agent, _create_failure(message), keep_other_step=True)
+            raise WrapperUnreachable(message) from exc
+        except (WrapperError, WrapperUnreachable) as exc:
+            if not (isinstance(exc, WrapperError) and exc.status == 429):  # 429: wrapper full
+                message = f"create failed: {_describe(exc)}"
+                await self._record_failure(agent, _create_failure(message), keep_other_step=True)
+            raise
         return created, False
+
+    async def _record_failure(
+        self, agent: Agent, failure: dict[str, Any], *, keep_other_step: bool = False
+    ) -> None:
+        async with self.pool.connection() as conn:
+            await agents_repo.set_start_failure(
+                conn, agent.id, failure, keep_other_step=keep_other_step
+            )
+
+    @staticmethod
+    async def _wrapper_step(client: Any) -> str:
+        """The step the wrapper's newest unfinished session is at, "unknown" when it cannot say."""
+        try:
+            listed = await client.list_sessions(timeout=STEP_HINT_TIMEOUT)
+        except (WrapperError, WrapperUnreachable, TypeError):
+            return "unknown"
+        for snap in _newest_first(listed):
+            if snap.state != "creating":
+                continue
+            steps = snap.bootstrap.steps if snap.bootstrap else []
+            running = next((b.step for b in reversed(steps) if b.status == "running"), None)
+            return running or snap.step or "unknown"
+        return "unknown"
+
+
+def _create_failure(message: str) -> dict[str, Any]:
+    return {"step": "create", "message": message, "log_tail": None}

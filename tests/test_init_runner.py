@@ -160,6 +160,18 @@ async def test_runs_once_and_records_success(env):
     assert "init" not in status["message"]
 
 
+async def test_failure_log_tail_is_redacted(wenv):
+    c = await wenv.session("alpha", init_scripts=["exit 3"])
+    await wenv.tick()
+    log = "cloning https://bot:hunter2secret@git.example/r.git\nGITHUB_TOKEN=" + "z" * 16 + "\nboom"
+    wenv.kube.finish_job(init_job_name("alpha"), exit_code=3, log=log)
+    await wenv.tick()
+    tail = (await wenv.init(c.id))["log_tail"]
+    assert "hunter2secret" not in tail
+    assert "z" * 16 not in tail
+    assert tail.endswith("boom")
+
+
 async def test_failure_records_and_releases_sessions(wenv, fake):
     c = await wenv.session("alpha", init_scripts=["exit 3"])
     job = init_job_name("alpha")
