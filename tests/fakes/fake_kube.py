@@ -525,8 +525,7 @@ def _merge(target: Any, patch: Any) -> Any:
 
 
 def _admit_pvc(stored: dict[str, Any], previous: dict[str, Any] | None) -> None:
-    """The API server's PVC validation: a request below the live request or the status capacity
-    is a 422 (a PVC only grows). The status survives an apply, like on a real cluster."""
+    """PVC validation: a smaller request than before is a 422; the status survives an apply."""
     if previous is None:
         return
     floor = max(
