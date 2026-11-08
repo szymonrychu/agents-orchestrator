@@ -283,6 +283,21 @@ ingress:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
 ```
+## Projects
+
+A project groups presets and sessions; it is the unit of permission scope for agents. Projects live in the orchestrator (table `projects`, one writer), a fresh database has the `default` project, and every preset and session carries a `project` slug (default `default`). The slug is 1 to 40 lowercase letters, digits and dashes and never changes. The `project` column of a preset and of a session is human-only: only the main-port routes set it (`POST|PUT /api/v1/presets`, `POST /api/v1/sessions`, `PATCH /api/v1/sessions/{session_id}/project`); no agent-port route moves a session or a preset.
+
+Archive: `PATCH /api/v1/projects/{slug}` with `archived: true` hides a project from the default list (`?archived=true` lists the archived ones) and refuses new placements into it (422 `project_archived`); existing presets and sessions stay, and an archived project still lists its sessions. `default` cannot be archived (409 `default_project`). Restoring is `archived: false`.
+
+Scope rule: a session's scope is computed per request and never stored: `*` (every project) for a superleader session (`spec.session_messaging`), else the session's own project, read live, so moving a session changes its reach on the next call. The scope is data only: it limits what an agent can read and address through the relays; it is not a security boundary between processes in a pod. Every agent-port route is classified in `AGENT_SCOPE` (`own`, `peers`, `project`, `superleader`; a test fails on an unclassified route). Every orchestrator call to the taskboard sends `X-Orch-Projects`: the caller's scope on the agent task relay, `*` on the superleader admin relay and on room-request decisions (rooms are not project-bound). The orchestrator sets it; an inbound value is dropped.
+
+Routes (details under API and Agent API):
+
+- Main port: `GET|POST /api/v1/projects`, `GET|PATCH /api/v1/projects/{slug}`, `PATCH /api/v1/sessions/{session_id}/project`, `project` on preset and session create and replace, and `?project=` on `GET /api/v1/presets` and `GET /api/v1/sessions` (`superleaders=include`, `slug`). Service port: the read routes `GET /api/v1/projects` and `GET /api/v1/projects/{slug}`, `project` on `POST /api/v1/sessions`, and `slug` on `GET /api/v1/sessions`.
+- Agent port: `GET /agent/v1/projects`, and `project` and `projects_scope` on `GET /agent/v1/me`.
+- Error codes: 409 `project_exists`, 409 `default_project`, 409 `session_deleting`, 422 `unknown_project`, 422 `project_archived`, 422 `invalid_request`, 404 `not_found`, and 403 `project_forbidden` on a cross-project session message.
+- Session messaging: leaders of two sessions of the same project may message each other, a superleader and any session may message each other, and a cross-project send otherwise needs the reply right; the refusal is 403 `project_forbidden`. The peer list (`GET /agent/v1/sessions`) is the other sessions of the caller's project plus every superleader (all sessions for a superleader) and never includes the caller.
+
 ## Security
 
 Agent pods reach `/agent/v1` on the agents Service only, with the session token and from their own pod IP. The agent port serves nothing else (404), and `/agent/v1` is 404 on the main port.
@@ -302,6 +317,8 @@ ingress:
 ```
 
 A `kube_cluster_access` agent is cluster-admin. Its pods run as its own ServiceAccount, bound to `cluster-admin` by a per-session ClusterRoleBinding, with the token mounted, so it can read every Secret in every namespace (including the orchestrator master key, the Claude token and the database credentials) and can mint tokens, certificates and bindings that outlive its session; discarding the session is therefore not a full revocation, and the credentials it could read must be rotated. A `kube_namespace_access` agent is bounded to the allowlisted namespaces and tiers it holds, but a tier can still expose that namespace's Secrets (see Kubernetes permissions, Namespace access). Sessions started by the trigger services (agents-webhook, agents-schedule) from a preset with either option get the same access, so untrusted webhook content reaching such a session is a prompt-injection path into the granted access. Any superleader session (`session_messaging`) can feed text to the leader of any session with Kubernetes access, and any session's leader can feed text to a superleader session that has it; the frame trailer on the delivered turn is the only defence.
+
+Project scope is data-only (see Projects): it filters what the relays and the peer list show and which sessions an agent may message, but an agent pod holds its session token and can run any process, so a compromised agent is limited to its project's data and to the same-project and superleader leaders it may message, nothing more. Same-project messaging (projects Q5 C) lets any session's leader feed text to another leader of its project; the frame trailer on the delivered turn is the only defence, as with superleader messages above.
 
 ### Session spec self-edit (known risk)
 
