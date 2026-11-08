@@ -298,6 +298,9 @@ class FakeWrapper:
         self.turn_attachments: list[list[dict[str, Any]] | None] = []
         self._create_error: tuple[int, str] | None = None
         self._create_delay: tuple[float, str] | None = None
+        self._create_gate: asyncio.Event | None = None
+        self._create_step = "mise_install"
+        self.create_entered = asyncio.Event()
         self._priority_hold = 0.0
         self._priority_ids: dict[str, str] = {}
         self._status_code: str | None = None
@@ -517,6 +520,14 @@ class FakeWrapper:
         """`POST /v1/sessions` registers the session at `step`, then answers after `seconds`."""
         self._create_delay = (seconds, step)
 
+    def gate_create(self, step: str = "mise_install") -> asyncio.Event:
+        """`POST /v1/sessions` registers the session at `step` (setting `create_entered`), then
+        answers only once the returned event is set: an event-driven alternative to a delay."""
+        self._create_gate = asyncio.Event()
+        self._create_step = step
+        self.create_entered.clear()
+        return self._create_gate
+
     def drop_streams(self) -> None:
         """End every open SSE stream, as a network disconnect would."""
         for ses in self.sessions.values():
@@ -707,7 +718,11 @@ class FakeWrapper:
             ses.model = body.get("model")
             self.sessions[sid] = ses
             self._set_state(ses, "creating")
-            if self._create_delay is not None:
+            if self._create_gate is not None:
+                ses.bootstrap_steps = [{"step": self._create_step, "status": "running"}]
+                self.create_entered.set()
+                await self._create_gate.wait()
+            elif self._create_delay is not None:
                 seconds, step = self._create_delay
                 ses.bootstrap_steps = [{"step": step, "status": "running"}]
                 await asyncio.sleep(seconds)

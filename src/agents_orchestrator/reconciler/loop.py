@@ -225,6 +225,13 @@ class Reconciler:
         Restart and rebootstrap commands also run in their own task (`_command_loop`), on the
         same clock, so a pass held for minutes by slow wrapper creates cannot hold them.
         """
+        async with self.pool.connection() as conn:
+            # a command cut short by the last shutdown would stay `running` for its poller
+            n = await queue.fail_running_commands(
+                conn, ["restart", "rebootstrap"], {"error": "interrupted_by_restart"}
+            )
+        if n:
+            log.warning("failed %d restart/rebootstrap command(s) cut short by a shutdown", n)
         wake = asyncio.Event()
         command_wake = asyncio.Event()
 
@@ -263,7 +270,7 @@ class Reconciler:
             sweep_task.cancel()  # a sweep cut short is idempotent: the next one replans
             with contextlib.suppress(asyncio.CancelledError):
                 await sweep_task
-            # a command cut short stays `running`; it is not claimed again
+            # a command cut short stays `running` until the next start fails it (run)
             command_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await command_task

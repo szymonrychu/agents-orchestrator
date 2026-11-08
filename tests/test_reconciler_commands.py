@@ -62,6 +62,10 @@ async def creating(fake: FakeWrapper) -> bool:
     return any(s.state == "creating" for s in fake.sessions.values())
 
 
+async def status_of(env: Env, cmd_id: int) -> str:
+    return (await command(env, cmd_id))["status"]
+
+
 async def test_restart_completes_while_another_bootstrap_blocks(env, fake, other):
     beta = await env.session("beta")
     await env.rec.reconcile_once()  # beta is up with its wrapper session
@@ -70,7 +74,7 @@ async def test_restart_completes_while_another_bootstrap_blocks(env, fake, other
 
     await env.session("alpha")
     fake.token = TOKEN
-    fake.delay_create(4.0)  # alpha's create holds the next pass for 4 s
+    gate = fake.gate_create()  # alpha's create holds the next pass until the gate opens
     env.rec.settings = Settings(
         database_url=env.settings.database_url,
         master_key=env.settings.master_key,
@@ -80,16 +84,18 @@ async def test_restart_completes_while_another_bootstrap_blocks(env, fake, other
     stop = asyncio.Event()
     task = asyncio.create_task(env.rec.run(stop))
     try:
-        assert await wait_for(lambda: creating(fake), 5)
+        await asyncio.wait_for(fake.create_entered.wait(), 10)
         cmd = await insert_command(env.pool, beta_agent.id, kind="restart")
 
         async def done() -> bool:
-            return (await command(env, cmd["id"]))["status"] == "done"
+            return await status_of(env, cmd["id"]) == "done"
 
-        assert await wait_for(done, 2.0), await command(env, cmd["id"])
-        assert await creating(fake)  # the slow pass is still in alpha's create
+        assert await wait_for(done, 10), await command(env, cmd["id"])
+        assert not gate.is_set()  # the slow pass is still inside alpha's create
+        assert await creating(fake)
         assert ("Pod", "agents", "agent-beta-0") in env.kube.deletes
     finally:
+        gate.set()
         stop.set()
         await asyncio.wait_for(task, 10)
 
@@ -97,24 +103,77 @@ async def test_restart_completes_while_another_bootstrap_blocks(env, fake, other
 async def test_restart_waits_for_the_converge_of_its_own_session(env, fake):
     alpha = await env.session("alpha")
     fake.token = TOKEN
-    fake.delay_create(1.5)
+    gate = fake.gate_create()
     rec_pass = asyncio.create_task(env.rec.reconcile_once())
-    assert await wait_for(lambda: creating(fake), 5)
+    await asyncio.wait_for(fake.create_entered.wait(), 10)
     (agent,) = await env.agents(alpha.id)
     cmd = await insert_command(env.pool, agent.id, kind="restart")
 
     commands = asyncio.create_task(env.rec.run_commands())
-    await asyncio.sleep(0.5)
-    # the converge of alpha is in flight: the restart must not delete its pod under it
-    assert ("Pod", "agents", "agent-alpha-0") not in env.kube.deletes
-    assert (await command(env, cmd["id"]))["status"] in ("queued", "running")
 
-    await asyncio.wait_for(rec_pass, 5)
-    await asyncio.wait_for(commands, 5)
+    async def claimed() -> bool:
+        return await status_of(env, cmd["id"]) == "running"
+
+    # the command is claimed and now waits on alpha's session lock, held by the open converge
+    assert await wait_for(claimed, 10)
+    assert not commands.done()
+    assert ("Pod", "agents", "agent-alpha-0") not in env.kube.deletes
+
+    gate.set()
+    await asyncio.wait_for(rec_pass, 10)
+    await asyncio.wait_for(commands, 10)
     await env.rec.run_commands()  # a second drain finds the command already finished
     row = await command(env, cmd["id"])
     assert row["status"] == "done" and row["result"]["pod"] == "agent-alpha-0"
     assert env.kube.deletes.count(("Pod", "agents", "agent-alpha-0")) == 1
+
+
+async def test_run_fails_commands_cut_short_by_a_shutdown(env):
+    alpha = await env.session("alpha")
+    await env.rec.reconcile_once()
+    (agent,) = await env.agents(alpha.id)
+    restart = await insert_command(env.pool, agent.id, kind="restart", status="running")
+    rebootstrap = await insert_command(env.pool, agent.id, kind="rebootstrap", status="running")
+    queued = await insert_command(env.pool, agent.id, kind="rebootstrap")
+
+    stop = asyncio.Event()
+    stop.set()  # one start-up, no passes
+    await asyncio.wait_for(env.rec.run(stop), 10)
+
+    for cmd in (restart, rebootstrap):
+        row = await command(env, cmd["id"])
+        assert row["status"] == "failed", row
+        assert row["result"] == {"error": "interrupted_by_restart"}
+    assert await status_of(env, queued["id"]) != "failed"
+
+
+async def test_command_exception_does_not_kill_the_command_loop(env, monkeypatch):
+    calls = 0
+    second = asyncio.Event()
+
+    async def flaky() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("boom")
+        second.set()
+
+    monkeypatch.setattr(env.rec, "run_commands", flaky)
+    env.rec.settings = Settings(
+        database_url=env.settings.database_url,
+        master_key=env.settings.master_key,
+        agent_image=env.settings.agent_image,
+        reconcile_poll_seconds=0.05,
+    )
+    stop = asyncio.Event()
+    wake = asyncio.Event()
+    task = asyncio.create_task(env.rec._command_loop(stop, wake))
+    try:
+        await asyncio.wait_for(second.wait(), 10)  # a pass after the failed one still ran
+        assert not task.done()
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, 10)
 
 
 async def test_restart_of_never_bootstrapped_agent_says_so(env, fake):

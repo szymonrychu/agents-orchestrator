@@ -882,6 +882,20 @@ async def claim_command(conn: psycopg.AsyncConnection, kinds: Sequence[str]) -> 
         return Command(**row) if row is not None else None
 
 
+async def fail_running_commands(
+    conn: psycopg.AsyncConnection, kinds: Sequence[str], result: Any
+) -> int:
+    """Fail every `running` command of these kinds (status-guarded). Only the single reconciler
+    claims them, so at its start none is really in flight: each was cut short by a shutdown."""
+    async with conn.transaction():
+        cur = await conn.execute(
+            "UPDATE commands SET status = 'failed', result = %s, finished_at = now()"
+            " WHERE status = 'running' AND kind = ANY(%s)",
+            (Jsonb(result), list(kinds)),
+        )
+        return cur.rowcount
+
+
 async def complete_command(
     conn: psycopg.AsyncConnection, id: int, status: str, result: Any
 ) -> bool:
