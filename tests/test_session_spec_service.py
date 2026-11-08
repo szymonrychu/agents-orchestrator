@@ -520,6 +520,34 @@ async def test_leader_cannot_raise_an_unset_quota_above_the_setting_default(pool
     assert (await _row(pool, me.id))["generation"] == before["generation"] + 1
 
 
+@pytest.mark.parametrize(
+    ("field", "stored", "looser", "tighter"),
+    [
+        ("docker_cpu", "2", "6", "1"),
+        ("docker_memory", "4Gi", "12Gi", "2Gi"),
+        ("docker_storage", "10Gi", "50Gi", "5Gi"),
+    ],
+)
+async def test_leader_cannot_raise_docker_sizes(pool, settings, field, stored, looser, tighter):
+    me = await alone(pool, f"svc-docker-{field[7:10]}")
+    await _seed(pool, settings, me, {"docker": True, field: stored})
+    await _refused(pool, settings, me, me, {field: looser}, 403, "human_only_field", [field])
+    before = await _row(pool, me.id)
+    await _patch(pool, settings, me, me, {field: tighter})
+    row = await _row(pool, me.id)
+    assert row["generation"] == before["generation"] + 1
+    assert row["spec"][field] == tighter
+
+
+async def test_leader_cannot_clear_a_docker_size_below_the_deploy_default(pool, settings):
+    """Cleared reads as `docker_memory_limit` (8Gi): looser than 4Gi, tighter than 16Gi."""
+    me = await alone(pool, "svc-docker-clear")
+    await _seed(pool, settings, me, {"docker": True, "docker_memory": "4Gi"})
+    await _refused(
+        pool, settings, me, me, {"docker_memory": None}, 403, "human_only_field", ["docker_memory"]
+    )
+
+
 async def test_leader_may_set_an_unset_autoclose(pool, settings):
     me = await alone(pool, "svc-autoclose-set")
     stored = await _seed(pool, settings, me, {})

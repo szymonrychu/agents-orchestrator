@@ -86,6 +86,9 @@ async def patch(
                 quota_default=settings.usage_quota_default,
                 reminder_default=settings.inactivity_reminder_seconds,
                 close_default=settings.inactivity_close_seconds,
+                docker_cpu_default=settings.docker_cpu_limit,
+                docker_memory_default=settings.docker_memory_limit,
+                docker_storage_default=settings.docker_storage,
             )
         ):
             note_fields(request, looser)
