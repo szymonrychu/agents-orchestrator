@@ -22,7 +22,8 @@ from agents_orchestrator.db.pool import notify
 
 _COLUMNS = (
     "id, session_id, ordinal, pod_name, url, pod_phase, ready, wrapper_session_id,"
-    " wrapper_session_created_at, gone_at, last_dispatched_at, pod_ip, wrapper_resumed_at"
+    " wrapper_session_created_at, gone_at, last_dispatched_at, pod_ip, wrapper_resumed_at,"
+    " start_failure"
 )
 
 
@@ -41,6 +42,7 @@ class Agent:
     last_dispatched_at: datetime | None
     pod_ip: str | None = None
     wrapper_resumed_at: datetime | None = None
+    start_failure: dict[str, Any] | None = None  # {step, message, log_tail}, see set_start_failure
 
 
 async def _one(conn: psycopg.AsyncConnection, query: str, params: Any) -> dict | None:

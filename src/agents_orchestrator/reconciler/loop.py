@@ -147,6 +147,20 @@ def _deleting(message: str, status: dict[str, Any]) -> dict[str, Any]:
     return {"phase": "deleting", "message": "; ".join(filter(None, [message, note]))}
 
 
+def _never_bootstrapped(agent: agents_repo.Agent) -> str | None:
+    """A restart's warning for an agent whose wrapper session failed to start: the new pod
+    re-runs the same bootstrap, so the restart does not fix the cause."""
+    failure = agent.start_failure
+    if agent.wrapper_session_id is not None or not failure:
+        return None
+    message = str(failure.get("message") or "").strip().splitlines()
+    reason = f"{failure.get('step') or 'unknown'}: {message[0][:200] if message else 'no detail'}"
+    return (
+        f"agent never bootstrapped (last failure {reason}); the new pod re-runs the same"
+        " bootstrap and fails the same way until that cause is fixed"
+    )
+
+
 ObjKey = tuple[str, str, str]
 """(kind, namespace, name) of an object; the namespace is "" for a cluster-scoped one."""
 
@@ -189,6 +203,9 @@ class Reconciler:
         self.hook_transport: httpx.AsyncBaseTransport | None = None
         self._hook_spent = 0.0  # seconds of discard hooks run in this pass
         self._hook_attempted: dict[UUID, float] = {}  # session -> monotonic start of its last hook
+        # session -> lock held by its converge or discard and by each restart or rebootstrap
+        # command of it, so the command task never acts on a session the pass is converging
+        self._session_locks: dict[UUID, asyncio.Lock] = {}
         self.checks = CheckRunner(pool, kube, settings)
         self.init = InitRunner(pool, kube, settings, write_status=self._write_status)
         self.cache = CacheRunner(pool, kube, settings, write_status=self._write_status)
@@ -203,16 +220,23 @@ class Reconciler:
     # ------------------------------------------------------------------ lifecycle
 
     async def run(self, stop: asyncio.Event) -> None:
-        """Reconcile every `reconcile_poll_seconds`, and at once on NOTIFY session_changed."""
+        """Reconcile every `reconcile_poll_seconds`, and at once on NOTIFY session_changed.
+
+        Restart and rebootstrap commands also run in their own task (`_command_loop`), on the
+        same clock, so a pass held for minutes by slow wrapper creates cannot hold them.
+        """
         wake = asyncio.Event()
+        command_wake = asyncio.Event()
 
         async def listener() -> None:
             async for _channel, _payload in listen(self.pool.conninfo, CHANNELS):
                 wake.set()
+                command_wake.set()
 
         listener_task = asyncio.create_task(listener())
         stop_wait = asyncio.create_task(stop.wait())
         sweep_task = asyncio.create_task(self.sweeper.run(stop))
+        command_task = asyncio.create_task(self._command_loop(stop, command_wake))
         try:
             while not stop.is_set():
                 wake.clear()
@@ -239,6 +263,47 @@ class Reconciler:
             sweep_task.cancel()  # a sweep cut short is idempotent: the next one replans
             with contextlib.suppress(asyncio.CancelledError):
                 await sweep_task
+            # a command cut short stays `running`; it is not claimed again
+            command_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await command_task
+
+    async def _command_loop(self, stop: asyncio.Event, wake: asyncio.Event) -> None:
+        """Drain the restart and rebootstrap commands every `reconcile_poll_seconds` and on
+        NOTIFY, independently of the reconcile pass."""
+        stop_wait = asyncio.create_task(stop.wait())
+        try:
+            while not stop.is_set():
+                wake.clear()
+                try:
+                    await self.run_commands()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("command pass failed")
+                wake_wait = asyncio.create_task(wake.wait())
+                try:
+                    await asyncio.wait(
+                        {wake_wait, stop_wait},
+                        timeout=self.settings.reconcile_poll_seconds,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    wake_wait.cancel()
+        finally:
+            stop_wait.cancel()
+
+    def _session_lock(self, session_id: UUID) -> asyncio.Lock:
+        """The in-process lock serialising a session's converge or discard with its restart and
+        rebootstrap commands. In-process is enough: the reconciler is a singleton
+        (`runtime.singleton`), and an advisory lock held across a converge would pin a pooled
+        connection for minutes."""
+        return self._session_locks.setdefault(session_id, asyncio.Lock())
+
+    def _prune_session_locks(self, live: set[UUID]) -> None:
+        self._session_locks = {
+            k: v for k, v in self._session_locks.items() if k in live or v.locked()
+        }
 
     # ------------------------------------------------------------------ one pass
 
@@ -267,18 +332,19 @@ class Reconciler:
 
     async def reconcile_once(self) -> None:
         self._start_pass()
-        await self._run_restarts()
-        await self._release_notes()
-        await self._run_rebootstraps()
+        # the command task drains these too; a claim is status-guarded, so each runs once
+        await self.run_commands()
         await self.checks.run_once()
         async with self.pool.connection() as conn:
             rows = await sessions.list_sessions(conn)
+        self._prune_session_locks({r.id for r in rows})
         for session in self._hook_order(rows):
             try:
-                if session.desired == "deleting":
-                    await self._discard(session)
-                else:
-                    await self._converge(session)
+                async with self._session_lock(session.id):
+                    if session.desired == "deleting":
+                        await self._discard(session)
+                    else:
+                        await self._converge(session)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -961,6 +1027,12 @@ class Reconciler:
 
     # ------------------------------------------------------------------ restart commands
 
+    async def run_commands(self) -> None:
+        """Every queued restart, then the self-restart notes, then every queued rebootstrap."""
+        await self._run_restarts()
+        await self._release_notes()
+        await self._run_rebootstraps()
+
     async def _run_restarts(self) -> None:
         while True:
             async with self.pool.connection() as conn:
@@ -968,7 +1040,8 @@ class Reconciler:
             if cmd is None:
                 return
             try:
-                status, result = await self._restart(cmd)
+                async with self._session_lock(cmd.session_id):
+                    status, result = await self._restart(cmd)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -1003,6 +1076,10 @@ class Reconciler:
             f", issued by session {cmd.issued_by_session}" if cmd.issued_by_session else "",
         )
         await self.kube.delete_pod(ns, agent.pod_name)
+        warning = _never_bootstrapped(agent)
+        if warning:
+            log.warning("session %s: restart of pod %s: %s", slug, agent.pod_name, warning)
+            return "done", {"pod": agent.pod_name, "warning": warning}
         return "done", {"pod": agent.pod_name}
 
     # ------------------------------------------------------------------ rebootstrap commands
@@ -1015,7 +1092,8 @@ class Reconciler:
             if cmd is None:
                 return
             try:
-                status, result = await self._rebootstrap(cmd)
+                async with self._session_lock(cmd.session_id):
+                    status, result = await self._rebootstrap(cmd)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
