@@ -3248,11 +3248,22 @@ def test_self_restart_cooldown_and_held_note(
 DOCKER_SLUG = "e2e-docker"
 DOCKER_TIMEOUT = 900  # kind node image pull and boot inside the sidecar
 # Run inside the agent container: fetch a static binary into /tmp (the agent image has no kind).
+# github.com release downloads and dl.k8s.io answer 502/504 at times, so it retries with backoff.
 FETCH_BINARY = (
-    "import os, platform, stat, sys, urllib.request\n"
+    "import os, platform, shutil, stat, sys, time\n"
+    "import urllib.request\n"
     "arch = {'aarch64': 'arm64', 'arm64': 'arm64', 'x86_64': 'amd64'}[platform.machine()]\n"
     "url, dest = sys.argv[1].format(arch=arch), sys.argv[2]\n"
-    "urllib.request.urlretrieve(url, dest)\n"
+    "for attempt in range(1, 8):\n"
+    "    try:\n"
+    "        with urllib.request.urlopen(url, timeout=120) as resp, open(dest, 'wb') as out:\n"
+    "            shutil.copyfileobj(resp, out)\n"
+    "        break\n"
+    "    except OSError as exc:  # HTTPError (502/504 from the release CDN) is an OSError\n"
+    "        print(f'fetch {url} attempt {attempt} failed: {exc}', file=sys.stderr)\n"
+    "        if attempt == 7:\n"
+    "            raise\n"
+    "        time.sleep(min(5 * 2 ** attempt, 60))\n"
     "os.chmod(dest, os.stat(dest).st_mode | stat.S_IXUSR)\n"
 )
 KIND_VERSION = "v0.33.0"
