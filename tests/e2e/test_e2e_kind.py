@@ -288,6 +288,7 @@ def on_start_any_mcp(configmap: dict[str, Any]) -> dict[str, Any]:
 HIVE_ONLY_TOOLS = {
     "activity",
     "leadership_handover",
+    "leadership_withdraw",
     "lock_claim",
     "lock_release",
     "lock_list",

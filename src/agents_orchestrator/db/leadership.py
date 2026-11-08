@@ -2,17 +2,20 @@
 
 Besides elections, queued requests and the lost-leader fallback, the pass hands a leader over
 by itself when its pod is about to be removed by a scale-down (`scale_down`, at once). A
-compaction is only an advisory: a compacted leader keeps leading. A queued
-`rollout` handover is likewise applied only at the leader's turn boundary; mid-turn it stays
-queued. Every pick is restricted to agents that stay (`ordinal < spec.replicas`). A dead
-agent (`agent_status.state`) never leads: it is not eligible, and a leader whose agent is dead
-is a lost leader (D4).
+compaction is only an advisory: a compacted leader keeps leading. A queued `rollout` handover is
+likewise applied only at the leader's turn boundary; mid-turn it stays queued. Every handover
+has a deadline (`PassPolicy`): past it background work no longer holds it, and a voluntary one
+the leader's turn still holds is rejected `expired`. Every pick is restricted to agents that
+stay (`ordinal < spec.replicas`). A dead agent (`agent_status.state`) never leads: it is not
+eligible, and a leader whose agent is dead is a lost leader (D4).
 
 The api and the reconciler only insert `leadership_requests` rows (status `queued`) and read the
 leader record: the api the agents' handovers and the user overrides, the reconciler one
 `handover` with reason `rollout` from an idle leader whose pod a rollout replaces next
-(`reconciler/rollout.py`).
-`session_leaders` and every request decision belong to the dispatcher, through
+(`reconciler/rollout.py`). The one exception is `withdraw_handovers`: the api rejects a still
+queued `handover` with reason `withdrawn`, through the same status-guarded update the pass
+decides with, so a request is decided exactly once by whichever commits first.
+`session_leaders` and every other request decision belong to the dispatcher, through
 `leadership_pass`, which runs under the per-session claim lock of `db/queue.py` so a leader
 change and a message claim never interleave. A voluntary handover (an agent `handover` other
 than `rollout`) also queues a `clear` command for the ex-leader in the same transaction (Q13);
@@ -77,6 +80,32 @@ async def insert_request(
         return row[0]
 
 
+async def withdraw_handovers(
+    conn: psycopg.AsyncConnection, session_id: uuid.UUID, request_id: int | None = None
+) -> list[int]:
+    """Reject the session's still queued `handover` requests (only `request_id` when given) with
+    reason `withdrawn`; the ids withdrawn, ascending. Status-guarded like the pass's decisions,
+    so a request the pass decided first is left alone."""
+    cur = await conn.execute(
+        "UPDATE leadership_requests SET status = 'rejected', reject_reason = 'withdrawn',"
+        " decided_at = now() WHERE session_id = %s AND kind = 'handover' AND status = 'queued'"
+        " AND (%s::bigint IS NULL OR id = %s) RETURNING id",
+        (session_id, request_id, request_id),
+    )
+    return sorted(r[0] for r in await cur.fetchall())
+
+
+async def handover_exists(
+    conn: psycopg.AsyncConnection, session_id: uuid.UUID, request_id: int
+) -> bool:
+    """A `handover` request with this id belongs to the session, whatever its status."""
+    cur = await conn.execute(
+        "SELECT 1 FROM leadership_requests WHERE id = %s AND session_id = %s AND kind = 'handover'",
+        (request_id, session_id),
+    )
+    return await cur.fetchone() is not None
+
+
 async def current_leader(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Leader | None:
     cur = await conn.execute(
         "SELECT l.agent_id, a.pod_name, l.epoch FROM session_leaders l"
@@ -102,10 +131,12 @@ class LeaderChange:
 @dataclass(frozen=True)
 class PassPolicy:
     """The settings the pass reads: the pods' default compaction point (the successor
-    threshold of a spec without `auto_compact_pct`) and the rollout deferral cap."""
+    threshold of a spec without `auto_compact_pct`) and the deadlines of queued handovers: the
+    rollout deferral cap for the reconciler's `rollout` request, the max wait for any other."""
 
     default_auto_compact_pct: int = 95
     rollout_max_defer_seconds: int = 14400
+    handover_max_wait_seconds: int = 1800
 
 
 DEFAULT_POLICY = PassPolicy()
@@ -306,9 +337,9 @@ async def _judge(
 
 def _waits_for_boundary(req: dict, leader: dict | None) -> bool:
     """A `handover` from the current leader at the current epoch waits for the leader's true
-    boundary: its turn ended and no background subagent running. A `rollout` handover older than
-    the deferral cap (`overdue`) stops waiting for background work, never for the turn. A `user`
-    request never waits."""
+    boundary: its turn ended and no background subagent running. A handover past its deadline
+    (`overdue`: the deferral cap for `rollout`, the max wait for any other) stops waiting for
+    background work, never for the turn. A `user` request never waits."""
     if not (
         req["kind"] == "handover"
         and leader is not None
@@ -318,7 +349,14 @@ def _waits_for_boundary(req: dict, leader: dict | None) -> bool:
         return False
     if not leader["at_boundary"]:
         return True
-    return bool(leader["background_busy"]) and not (req["reason"] == "rollout" and req["overdue"])
+    return bool(leader["background_busy"]) and not req["overdue"]
+
+
+def _expired(req: dict) -> bool:
+    """A voluntary handover still waiting past its deadline (only the leader's turn can hold it
+    then) is rejected `expired`. The reconciler's `rollout` request never expires: it waits for
+    the turn, which no deadline interrupts."""
+    return _voluntary(req) and req["overdue"]
 
 
 def _voluntary(req: dict) -> bool:
@@ -364,16 +402,20 @@ async def leadership_pass(
 
         # 2. Queued requests in id order, each re-checked against the leader as it is now. A
         # `handover` from the current leader waits for the leader's true boundary (see
-        # _waits_for_boundary): until then it stays queued for a later pass.
+        # _waits_for_boundary): until then it stays queued for a later pass, and a voluntary
+        # one past its deadline is rejected `expired` instead (_expired).
         for req in await _all(
             conn,
             "SELECT id, kind, from_agent_id, to_agent_id, reason, epoch,"
-            " created_at < now() - make_interval(secs => %s) AS overdue"
+            " created_at < now() - make_interval(secs => CASE WHEN reason = 'rollout'"
+            "  THEN %s ELSE %s END) AS overdue"
             " FROM leadership_requests WHERE session_id = %s AND status = 'queued'"
             " ORDER BY id FOR UPDATE",
-            (policy.rollout_max_defer_seconds, session_id),
+            (policy.rollout_max_defer_seconds, policy.handover_max_wait_seconds, session_id),
         ):
             if _waits_for_boundary(req, leader):
+                if _expired(req):
+                    await _decide(conn, req["id"], "expired")
                 continue
             reject, target, reason = await _judge(conn, session_id, req, leader, policy)
             if not await _decide(conn, req["id"], reject):

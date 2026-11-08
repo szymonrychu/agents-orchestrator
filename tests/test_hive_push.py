@@ -521,8 +521,15 @@ async def test_handover_due_runs_when_hive_state_unchanged(env):
 ROLLOUT = "rollout_due"
 
 
-async def set_rollout(env, session_id, revision="r1", leader_since: str | None = "t") -> None:
-    rollout = {"revision": revision, "since": "t", "leader_since": leader_since}
+async def set_rollout(
+    env, session_id, revision="r1", leader_since: str | None = "t", pending=(0,)
+) -> None:
+    rollout = {
+        "revision": revision,
+        "pending": list(pending),
+        "since": "t",
+        "leader_since": leader_since,
+    }
     await env.run(
         "UPDATE sessions SET status = %s WHERE id = %s",
         (json.dumps({"rollout": rollout}), session_id),
@@ -552,6 +559,7 @@ async def test_rollout_due_sent_once_per_epoch_and_revision(env):
         "UPDATE session_leaders SET agent_id = %s, epoch = epoch + 1 WHERE session_id = %s",
         (a1["id"], c["id"]),
     )
+    await set_rollout(env, c["id"], revision="r2", pending=(1,))  # its pod is the old one
     await env.push()
     assert len(env.notes(a1, ROLLOUT)) == 1
     assert "epoch=2" in env.notes(a1, ROLLOUT)[0]
@@ -570,6 +578,23 @@ async def test_no_rollout_note_without_leader_since(env):
     await set_rollout(env, c["id"])  # the window closed and reopened: told again
     await env.push()
     assert len(env.notes(a0, ROLLOUT)) == 2
+
+
+async def test_no_rollout_note_to_a_leader_whose_pod_is_current(env):
+    # the stored status still names the old leader's pod: a new leader on the current revision
+    # (a voluntary move inside the window) is never told its pod is the last on the old one
+    c, (a0, a1, a2) = await env.hive()
+    await env.push()
+    await env.run(
+        "UPDATE session_leaders SET agent_id = %s, epoch = epoch + 1 WHERE session_id = %s",
+        (a1["id"], c["id"]),
+    )
+    await set_rollout(env, c["id"], pending=(0,))
+    await env.push()
+    assert all(env.notes(a, ROLLOUT) == [] for a in (a0, a1, a2))
+    await set_rollout(env, c["id"], pending=(1,))  # now the leader's own pod is outdated
+    await env.push()
+    assert len(env.notes(a1, ROLLOUT)) == 1
 
 
 async def test_rollout_note_retried_after_failure(env):

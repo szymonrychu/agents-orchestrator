@@ -24,13 +24,22 @@ session, which the controller recreates on the new template:
   older than the cap), so leadership never moves mid-turn for a rollout; the old leader's pod
   is deleted only once `session_leaders` names another agent. A session of one agent rolls
   its pod when idle.
+- a dead peer never takes the lead (`ELIGIBLE` excludes `DEAD`), and nothing else revives a
+  dead agent whose pod is on the current revision. So once the window is over and no member
+  can lead, a dead member's pod is deleted (at most one per tick, once per revision and
+  ordinal, recorded in `revived`): the recreated pod resumes the agent. When the leader is then
+  the only live member (every peer dead and revived over `REVIVE_GRACE_SECONDS` ago), the
+  leader's own pod is replaced at an idle boundary: no open turn (`TURN_BUSY`) and no
+  background subagent within the `BACKGROUND_BUSY` bound. No request is queued: the pass finds
+  no successor and keeps the leader row, and the recreated pod resumes the same leader.
 
 Before the delete the agent is marked unready, so the dispatcher stops picking it, and its idle
 test is read again; a message claimed between that read and the delete is retried by the
 verify path, never dropped. The step reports `status.rollout`
-`{revision, pending, waiting, leader_pending, since, leader_since}`, None once nothing is
-pending; `since` and `leader_since` (ISO, database clock) are carried from the stored value
-while its `revision` matches, so they survive a reconciler failover.
+`{revision, pending, waiting, leader_pending, since, leader_since}` plus `revived` (ordinal ->
+ISO time) once a dead member was revived, None once nothing is pending; `since`,
+`leader_since` and `revived` (database clock) are carried from the stored value while its
+`revision` matches, so they survive a reconciler failover.
 
 Assumed, confirmed on a real Kubernetes cluster by orch-e2e-rollout-mid-turn: the controller
 labels every pod it creates `controller-revision-hash: <the ControllerRevision name>`, the name
@@ -41,7 +50,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -50,7 +59,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import leadership
-from agents_orchestrator.db.eligibility import BACKGROUND_BUSY, ELIGIBLE
+from agents_orchestrator.db.eligibility import BACKGROUND_BUSY, DEAD, ELIGIBLE
 from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.k8s.kube import KubeApi, Obj, is_owned, pod_ready
 from agents_orchestrator.k8s.labels import object_names, prefix, session_labels
@@ -60,6 +69,9 @@ log = logging.getLogger(__name__)
 
 REVISION_LABEL = "controller-revision-hash"
 ROLLOUT_REASON = "rollout"
+# A revived member gets this long to come back before the leader counts as the only live one
+# (a module constant by design, D14).
+REVIVE_GRACE_SECONDS = 300
 
 # The in-turn predicate of an agent, shared by the scale-down drain and the replacer (reuse.md:
 # one busy query). Aliases: `a` the agent, `s` its `agent_status` row (LEFT JOIN). It also holds
@@ -85,12 +97,14 @@ LEADS = "EXISTS (SELECT 1 FROM session_leaders l WHERE l.agent_id = a.id)"
 _AGENTS = (
     "SELECT a.id, a.ordinal, a.pod_name, a.url, a.pod_phase, a.pod_ip,"
     f" ({TURN_BUSY}) AS turn_busy, {BACKGROUND_BUSY} AS background, ({LEADS}) AS leads,"
+    f" {DEAD} AS dead,"
     f" ({ELIGIBLE}) AND COALESCE(s.state = 'idle', false) AND NOT ({TURN_BUSY}) AS can_lead"
     " FROM agents a LEFT JOIN agent_status s ON s.agent_id = a.id"
     " WHERE a.session_id = %s AND a.gone_at IS NULL ORDER BY a.ordinal"
 )
 _HELD = (
-    f"SELECT ({TURN_BUSY}) AS turn_busy, {BACKGROUND_BUSY} AS background, ({LEADS}) AS leads"
+    f"SELECT ({TURN_BUSY}) AS turn_busy, {BACKGROUND_BUSY} AS background, ({LEADS}) AS leads,"
+    f" {DEAD} AS dead"
     " FROM agents a LEFT JOIN agent_status s ON s.agent_id = a.id WHERE a.id = %s"
 )
 _QUEUED = (
@@ -107,9 +121,11 @@ class Rollout:
     leader_pending: bool  # the leader's pod is pending and waits for the rollout handover
     since: str  # ISO time of the first tick `revision` was pending
     leader_since: str | None  # ISO time of the first tick only the leader's pod was pending
+    # ordinal (str) -> ISO time its dead member's pod was deleted for this revision
+    revived: dict[str, str] = field(default_factory=dict)
 
     def status(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "revision": self.revision,
             "pending": self.pending,
             "waiting": self.waiting,
@@ -117,6 +133,9 @@ class Rollout:
             "since": self.since,
             "leader_since": self.leader_since,
         }
+        if self.revived:
+            out["revived"] = self.revived
+        return out
 
 
 def agent_pods(slug: str, pods: list[Obj]) -> dict[int, Obj]:
@@ -199,6 +218,7 @@ class Replacer:
             leader_pending=leader_pending,
             since=since,
             leader_since=(carried.get("leader_since") or now.isoformat()) if alone else None,
+            revived=dict(carried.get("revived") or {}),
         )
         settled = len(pods) == target and all(
             pod_ready(p) and not terminating(p) for p in pods.values()
@@ -227,24 +247,38 @@ class Replacer:
             agent = agents[idle[0]]
             await self._delete(session, agent, pods[idle[0]], single, rollout.revision, overdue)
             return
-        # the leader's own background work does not hold the request: the pass waits for it
-        if rollout.leader_since is None or leader is None or agents[leader]["turn_busy"]:
+        if rollout.leader_since is None or leader is None:
             return
         if _elapsed(now, rollout.leader_since) < self.settings.rollout_handover_seconds:
             return  # the leader's window to hand over on its own
-        if any(a["can_lead"] for o, a in agents.items() if o != leader):
-            await self._queue_handover(session, agents[leader]["id"])
+        lead = agents[leader]
+        peers = {o: a for o, a in agents.items() if o != leader and o in pods}  # staying ones
+        if any(a["can_lead"] for a in peers.values()):
+            # the leader's own background work does not hold the request: the pass waits for it
+            if not lead["turn_busy"]:
+                await self._queue_handover(session, lead["id"])
+            return
+        dead = [
+            o
+            for o, a in peers.items()
+            if a["dead"] and not a["turn_busy"] and str(o) not in rollout.revived
+        ]
+        if dead:
+            await self._revive(session, peers[dead[0]], pods[dead[0]], rollout, now)
+            return
 
-    async def _delete(
-        self,
-        session: Session,
-        agent: dict[str, Any],
-        pod: Obj,
-        single: bool,
-        revision: str,
-        overdue: bool,
-    ) -> None:
-        """Mark the agent unready, read its idle test again, then delete its pod."""
+        def may_lead_later(ordinal: int, agent: dict[str, Any]) -> bool:
+            at = rollout.revived.get(str(ordinal))
+            return not agent["dead"] or at is None or _elapsed(now, at) < REVIVE_GRACE_SECONDS
+
+        if any(may_lead_later(o, a) for o, a in peers.items()):
+            return  # a live peer (busy, booting) or a revived one may still take over
+        if lead["turn_busy"] or lead["background"]:
+            return  # the lone leader rolls only at an idle boundary
+        await self._delete(session, lead, pods[leader], True, rollout.revision, False)
+
+    async def _hold(self, session: Session, agent: dict[str, Any]) -> dict[str, Any] | None:
+        """Mark the agent unready, then read its busy test again (None: the agent is gone)."""
         async with self.pool.connection() as conn:
             await agents_repo.upsert_agent(
                 conn,
@@ -258,12 +292,24 @@ class Replacer:
             )
             async with conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(_HELD, (agent["id"],))
-                held = await cur.fetchone()
+                return await cur.fetchone()
+
+    async def _delete(
+        self,
+        session: Session,
+        agent: dict[str, Any],
+        pod: Obj,
+        may_delete_leader: bool,
+        revision: str,
+        overdue: bool,
+    ) -> None:
+        """Mark the agent unready, read its idle test again, then delete its pod."""
+        held = await self._hold(session, agent)
         if (
             held is None
             or held["turn_busy"]
             or (held["background"] and not overdue)
-            or (held["leads"] and not single)
+            or (held["leads"] and not may_delete_leader)
         ):
             return  # claimed meanwhile: the next converge marks it ready from its pod again
         name = pod["metadata"]["name"]
@@ -275,6 +321,18 @@ class Replacer:
             revision,
         )
         await self.kube.delete_pod(self.settings.namespace, name)
+
+    async def _revive(
+        self, session: Session, agent: dict[str, Any], pod: Obj, rollout: Rollout, now: datetime
+    ) -> None:
+        """Delete a dead member's current pod once per revision, so its agent resumes."""
+        held = await self._hold(session, agent)
+        if held is None or held["turn_busy"] or held["leads"] or not held["dead"]:
+            return  # changed meanwhile: the next converge marks it ready from its pod again
+        name = pod["metadata"]["name"]
+        log.info("session %s: reviving dead member %s (no member can lead)", session.slug, name)
+        await self.kube.delete_pod(self.settings.namespace, name)
+        rollout.revived[str(agent["ordinal"])] = now.isoformat()
 
     async def _queue_handover(self, session: Session, agent_id: Any) -> None:
         """Queue one rollout handover from the current leader, unless one is queued already."""

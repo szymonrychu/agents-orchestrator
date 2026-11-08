@@ -850,13 +850,61 @@ async def test_rollout_handover_ignores_background_when_overdue(pool):
     assert await decided(pool, fresh) == ("applied", None)
 
 
-async def test_non_rollout_handover_never_overdue(pool):
+async def test_voluntary_handover_ignores_background_past_its_deadline(pool):
+    # every handover has a deadline: a voluntary one stops waiting for background work once it
+    # is queued longer than ORCH_HANDOVER_MAX_WAIT_SECONDS (the pass policy's max wait)
     c, (a0, a1, _) = await hive(pool)
     await set_leader(pool, c["id"], a0["id"], epoch=3)
     await status(pool, a0["id"], "idle", 10, bg=True)
     rid = await request(pool, c["id"], "handover", a0["id"], a1["id"], "context", 3)
+    assert leadership.DEFAULT_POLICY.handover_max_wait_seconds == 1800
+    await age_request(pool, rid, 1800 - 60)
+    assert await lpass(pool, c["id"]) is None
+    assert (await rows(pool, "SELECT status FROM leadership_requests WHERE id = %s", (rid,)))[0][
+        "status"
+    ] == "queued"
+    await age_request(pool, rid, 1800 + 60)
+    change = await lpass(pool, c["id"])
+    assert change is not None and change.agent_id == a1["id"]
+    assert await decided(pool, rid) == ("applied", None)
+
+
+async def test_voluntary_handover_expires_mid_turn_past_its_deadline(pool):
+    c, (a0, a1, _) = await hive(pool)
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
+    await status(pool, a0["id"], "busy", 10)
+    rid = await request(pool, c["id"], "handover", a0["id"], a1["id"], "context", 3)
+    await age_request(pool, rid, 1800 - 60)
+    assert await lpass(pool, c["id"]) is None  # inside its deadline it waits for the turn
+    await age_request(pool, rid, 1800 + 60)
+    assert await lpass(pool, c["id"]) is None  # never moved mid-turn
+    assert await decided(pool, rid) == ("rejected", "expired")
+    row = await leader_row(pool, c["id"])
+    assert (row["agent_id"], row["epoch"]) == (a0["id"], 3)
+
+
+async def test_handover_deadline_is_a_policy_setting(pool):
+    c, (a0, a1, _) = await hive(pool)
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
+    await status(pool, a0["id"], "busy", 10)
+    rid = await request(pool, c["id"], "handover", a0["id"], a1["id"], "context", 3)
+    await age_request(pool, rid, 120)
+    short = leadership.PassPolicy(handover_max_wait_seconds=60)
+    async with pool.connection() as conn:
+        assert await leadership.leadership_pass(conn, c["id"], short) is None
+    assert await decided(pool, rid) == ("rejected", "expired")
+
+
+async def test_rollout_handover_never_expires_mid_turn(pool):
+    # the reconciler owns the rollout request: past its cap it waits for the turn only
+    c, (a0, a1, _) = await hive(pool)
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
+    await status(pool, a0["id"], "busy", 10, bg=True)
+    rid = await request(pool, c["id"], "handover", a0["id"], None, "rollout", 3)
     await age_request(pool, rid, 14400 + 60)
     assert await lpass(pool, c["id"]) is None
+    got = await rows(pool, "SELECT status FROM leadership_requests WHERE id = %s", (rid,))
+    assert got[0]["status"] == "queued"
 
 
 async def test_user_make_leader_never_waits(pool):

@@ -733,3 +733,22 @@ def test_rollout_cap_must_exceed_window(monkeypatch):
             Settings()
     monkeypatch.setenv("ORCH_ROLLOUT_MAX_DEFER_SECONDS", "3601")
     assert Settings().rollout_max_defer_seconds == 3601
+
+
+def test_handover_max_wait_bounds(monkeypatch):
+    assert Settings().handover_max_wait_seconds == 1800
+    for bad in ("59", "86401"):
+        monkeypatch.setenv("ORCH_HANDOVER_MAX_WAIT_SECONDS", bad)
+        with pytest.raises(SettingsError, match="ORCH_HANDOVER_MAX_WAIT_SECONDS"):
+            Settings()
+    for ok in ("60", "86400"):
+        monkeypatch.setenv("ORCH_HANDOVER_MAX_WAIT_SECONDS", ok)
+        assert Settings().handover_max_wait_seconds == int(ok)
+
+
+def test_dispatcher_pass_policy_reads_handover_max_wait(monkeypatch):
+    from agents_orchestrator.dispatcher import Dispatcher
+
+    monkeypatch.setenv("ORCH_HANDOVER_MAX_WAIT_SECONDS", "900")
+    policy = Dispatcher(None, Settings())._pass_policy
+    assert policy.handover_max_wait_seconds == 900
