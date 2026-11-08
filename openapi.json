@@ -2237,6 +2237,14 @@
             "title": "Pod Name",
             "type": "string"
           },
+          "project": {
+            "title": "Project",
+            "type": "string"
+          },
+          "projects_scope": {
+            "title": "Projects Scope",
+            "type": "string"
+          },
           "session_id": {
             "format": "uuid",
             "title": "Session Id",
@@ -2256,7 +2264,9 @@
           "epoch",
           "max_replicas",
           "static",
-          "members"
+          "members",
+          "project",
+          "projects_scope"
         ],
         "title": "Me",
         "type": "object"
@@ -11307,6 +11317,76 @@
           }
         },
         "summary": "Identity, leader and members of the caller",
+        "tags": [
+          "agent"
+        ]
+      }
+    },
+    "/agent/v1/projects": {
+      "get": {
+        "description": "Scope `project` (projects plan 3.3): the caller's own project, archived or not; a\nsuperleader session gets every active project. No counts, as on the service port.",
+        "operationId": "projects_agent_v1_projects_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ProjectView"
+                  },
+                  "title": "Response Projects Agent V1 Projects Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "The caller's project, or every active project for a superleader",
         "tags": [
           "agent"
         ]

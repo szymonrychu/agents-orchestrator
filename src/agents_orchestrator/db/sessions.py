@@ -735,22 +735,30 @@ async def discard_idle(conn: psycopg.AsyncConnection, close_grace_seconds: int) 
 
 
 async def set_init_scripts(
-    conn: psycopg.AsyncConnection, session_id: uuid.UUID, scripts: list[str]
+    conn: psycopg.AsyncConnection,
+    session_id: uuid.UUID,
+    scripts: list[str],
+    *,
+    same_project_preset: bool = False,
 ) -> tuple[Session, bool]:
     """Write the init scripts to the session spec and to its source preset, in one transaction.
 
     No generation bump: the list is never rendered into pods. Lock order is sessions, then
-    presets. Returns the updated session and whether a preset row was written.
+    presets. With `same_project_preset` (an agent's edit, projects plan 3.3) the preset is
+    written only when it is in the session's project, checked under the preset row lock, so the
+    edit never reaches a preset that is or just moved to another project; then only the session
+    is written. Returns the updated session and whether a preset row was written.
     """
     async with conn.transaction():
         async with conn.cursor() as cur:
             await cur.execute(
-                "SELECT desired, preset_id FROM sessions WHERE id = %s FOR UPDATE", (session_id,)
+                "SELECT desired, preset_id, project FROM sessions WHERE id = %s FOR UPDATE",
+                (session_id,),
             )
             locked = await cur.fetchone()
         if locked is None:
             raise SessionNotFound(str(session_id))
-        desired, preset_id = locked
+        desired, preset_id, project = locked
         if desired == "deleting":
             raise SessionBeingDeleted(str(session_id))
         listed = Jsonb(scripts)
@@ -762,8 +770,11 @@ async def set_init_scripts(
         )
         preset_written = False
         if preset_id is not None:
-            cur = await conn.execute("SELECT 1 FROM presets WHERE id = %s FOR UPDATE", (preset_id,))
-            if await cur.fetchone() is not None:
+            cur = await conn.execute(
+                "SELECT project FROM presets WHERE id = %s FOR UPDATE", (preset_id,)
+            )
+            preset = await cur.fetchone()
+            if preset is not None and (not same_project_preset or preset[0] == project):
                 await conn.execute(
                     "UPDATE presets SET spec = jsonb_set(spec, '{init_scripts}', %s),"
                     " updated_at = now() WHERE id = %s",

@@ -1360,11 +1360,20 @@ The caller's identity, the leader and the hive members.
   "max_replicas": 4, "static": false,
   "members": [
     {"pod_name": "string", "ready": true, "state": "idle", "context_pct": 12.5, "leader": true}
-  ]
+  ],
+  "project": "default", "projects_scope": "default"
 }
 ```
 
-`leader` and `epoch` come from the session's leader record and are null while there is none. `members` are the not-gone agents by ordinal; `state` is the stored agent state and `context_pct` is null when unknown.
+`leader` and `epoch` come from the session's leader record and are null while there is none. `members` are the not-gone agents by ordinal; `state` is the stored agent state and `context_pct` is null when unknown. `project` is the session's project and `projects_scope` the projects its agents may reach: `"*"` (every project) for a superleader session, else the session's project. Both are read live, so a move of the session (`PATCH /api/v1/sessions/{id}/project`) shows on the next call.
+
+### `GET /agent/v1/projects`
+
+The projects the caller's session may reach. Response 200, a list of `{slug, name, description, archived, created_at, updated_at, presets: null, sessions: null}` (no counts, as on the service port): the session's own project, archived or not, or every active project, by slug, for a superleader session. Errors: the 401 and 403 above.
+
+### Project scope of agent routes
+
+Every agent-port route is classified in `AGENT_SCOPE` (`api/scope.py`), and a test fails when a route is missing: `own` (the caller's session only: `/me`, scale, close, locks, handover, activity, labels, init scripts, `POST /agent/v1/chat/messages` and its delivery status, the leader branch of `GET|PATCH /agent/v1/admin/sessions/{slug}`, own proposals), `peers` (`GET /agent/v1/sessions`, `POST /agent/v1/sessions/{slug}/messages`), `project` (the taskboard relay, `GET /agent/v1/projects`, the other chat relay routes) and `superleader` (every other `/agent/v1/admin/*` route). The scope is `*` for a superleader session, else the session's project. The relays send it upstream as `X-Orch-Projects`, set by the orchestrator only: an inbound `X-Orch-Projects` is dropped like every inbound header. The taskboard relay sends the caller's scope; the admin relay is superleader-only and always sends `*`. The chat relay sends no scope yet.
 
 ### `GET /agent/v1/activity`
 
@@ -1390,7 +1399,7 @@ The init scripts of the caller's session and the last init run, so the agent kno
 
 ### `PUT /agent/v1/init-scripts`
 
-Replaces the caller's session init scripts. Body `{"scripts": ["<shell script>", ...]}` with the same limits as the public PUT. Writes the session's stored `spec.init_scripts` and its source preset's (when it still exists) in one transaction, with no generation bump and no pod roll; the edit applies to the next session created from the preset and never re-runs here. Response 200 with the view above and `preset_updated` true when a preset was written. Errors: 422 `invalid_request` (nothing is written), 409 `conflict` (the session is being deleted), plus the 401 and 403 above. These two routes back the plugin tools `orchestrator_init_scripts_get` and `orchestrator_init_scripts_edit`.
+Replaces the caller's session init scripts. Body `{"scripts": ["<shell script>", ...]}` with the same limits as the public PUT. Writes the session's stored `spec.init_scripts` and its source preset's (when it still exists and is in the session's project, checked under the preset row lock; a preset in another project is left alone and only the session is written) in one transaction, with no generation bump and no pod roll; the edit applies to the next session created from the preset and never re-runs here. Response 200 with the view above and `preset_updated` true when a preset was written. Errors: 422 `invalid_request` (nothing is written), 409 `conflict` (the session is being deleted), plus the 401 and 403 above. These two routes back the plugin tools `orchestrator_init_scripts_get` and `orchestrator_init_scripts_edit`.
 
 ### `POST /agent/v1/scale`
 
@@ -1475,7 +1484,7 @@ A session reaches agents-taskboard through relay routes on the agent port only: 
 3. 503 `taskboard_unconfigured`: `ORCH_TASKBOARD_URL` and `ORCH_TASKBOARD_TOKEN` are empty;
 4. 413 `payload_too_large`: a body over 256 KiB.
 
-There is no leader check and no trigger-session refusal: trigger-created sessions may keep tasks and ask decisions, but cannot answer them. The relay forwards the method, path, query string and body with only `Authorization: Bearer <ORCH_TASKBOARD_TOKEN>`, `X-Orch-Session: <caller session id>`, `X-Orch-Slug: <caller session slug>` and, for a body, `Content-Type: application/json`; every inbound header, `X-Orch-*` included, is dropped. On `GET /agent/v1/tasks`, a `labels=mine` parameter is replaced by one `label` parameter per label of the calling session (`Session.labels`); a session without labels gets `{"items": [], "next_cursor": null}` without an upstream call. The upstream status and JSON body pass through unchanged; a connection error, a timeout or a non-JSON answer is 503 `taskboard_unavailable`.
+There is no leader check and no trigger-session refusal: trigger-created sessions may keep tasks and ask decisions, but cannot answer them. The relay forwards the method, path, query string and body with only `Authorization: Bearer <ORCH_TASKBOARD_TOKEN>`, `X-Orch-Session: <caller session id>`, `X-Orch-Slug: <caller session slug>`, `X-Orch-Projects: <caller scope>` (`*` for a superleader session, else its project, see Project scope of agent routes) and, for a body, `Content-Type: application/json`; every inbound header, `X-Orch-*` included, is dropped. On `GET /agent/v1/tasks`, a `labels=mine` parameter is replaced by one `label` parameter per label of the calling session (`Session.labels`); a session without labels gets `{"items": [], "next_cursor": null}` without an upstream call. The upstream status and JSON body pass through unchanged; a connection error, a timeout or a non-JSON answer is 503 `taskboard_unavailable`.
 
 `PUT /agent/v1/session/labels` body `{labels: [..]}` (agent port only) replaces the labels of the calling session and returns `{session_id, labels}`. The session comes from the verified agent identity; there is no id in the path and an extra body field (a `session_id` included) is 422, so no other session can be targeted. Labels are trimmed, lowercased and deduplicated, 1-40 chars of `[a-z0-9-_.:]`, at most 20 (else 422), the same rules as `PATCH /api/v1/sessions/{id}/labels`. It is idempotent, needs no taskboard and has no trigger-session refusal or leader check.
 
@@ -1491,7 +1500,7 @@ Advisory locks on files, so agents claim what they edit and are warned before wr
 
 ## Admin relay (superleader)
 
-A superleader session (`session_messaging` set in its spec, whoever created the session: a user, a trigger service or the matrix connector) reaches the trigger services through `/agent/v1/admin/webhooks/*`, `/schedules/*`, `/chats/*` and `/history/*`, which map 1:1 to the upstream admin routes (`ORCH_WEBHOOK_URL`, `ORCH_SCHEDULE_URL`, `ORCH_CONNECTOR_URL`, `ORCH_HISTORY_URL` with their tokens). After the superleader gate the upstream must be configured (503 `upstream_unconfigured`) and the body is capped at 256 KiB (413). The upstream gets only its service bearer, `X-Orch-Session` and `X-Orch-Slug`; its status and JSON come back unchanged, a failed or non-JSON call is 503 `upstream_unavailable`. The proposals code reaches the same upstreams through `admin_relay.upstream_target(settings, service)` and `forward(..., extra_headers=)`: the only headers added to the fixed set are those the orchestrator itself sets (a schedule proposal's `If-Match`); an inbound header is still never forwarded.
+A superleader session (`session_messaging` set in its spec, whoever created the session: a user, a trigger service or the matrix connector) reaches the trigger services through `/agent/v1/admin/webhooks/*`, `/schedules/*`, `/chats/*` and `/history/*`, which map 1:1 to the upstream admin routes (`ORCH_WEBHOOK_URL`, `ORCH_SCHEDULE_URL`, `ORCH_CONNECTOR_URL`, `ORCH_HISTORY_URL` with their tokens). After the superleader gate the upstream must be configured (503 `upstream_unconfigured`) and the body is capped at 256 KiB (413). The upstream gets only its service bearer, `X-Orch-Session`, `X-Orch-Slug` and `X-Orch-Projects: *` (the relay is superleader-only, so the scope is always every project); its status and JSON come back unchanged, a failed or non-JSON call is 503 `upstream_unavailable`. The proposals code reaches the same upstreams through `admin_relay.upstream_target(settings, service)` and `forward(..., extra_headers=)`: the only headers added to the fixed set are those the orchestrator itself sets (a schedule proposal's `If-Match`); an inbound header is still never forwarded.
 
 The history routes are read and search only; the superleader cannot delete a stored session (deleting is for the user, through the web UI), so there is no DELETE route and any other method is 405 with nothing sent upstream:
 

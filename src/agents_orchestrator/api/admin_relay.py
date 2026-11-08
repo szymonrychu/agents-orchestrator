@@ -1,12 +1,13 @@
 """Admin relay routes of the agent port: webhooks, schedules, chats and history (D10).
 
 Each route maps 1:1 to an upstream admin route and is registered on the admin router, so the
-superleader gate and the audit cover it. The gate runs first, then the upstream must be
-configured (503 `upstream_unconfigured`), then the body is capped at 256 KiB (413
-`payload_too_large`). The forwarded request carries only the upstream's service bearer and the
-caller's `X-Orch-Session` and `X-Orch-Slug` (see `forward`). The upstream status and JSON body
-come back unchanged, except for webhook credentials (D9, `credentials` below). A failed call
-or a non-JSON answer is 503 `upstream_unavailable`. The upstream validates the bodies.
+superleader gate and the audit cover it. The gate runs first, then the upstream must be configured
+(503 `upstream_unconfigured`), then the body is capped at 256 KiB (413 `payload_too_large`). The
+forwarded request carries only the upstream's service bearer and the caller's `X-Orch-Session`,
+`X-Orch-Slug` and `X-Orch-Projects` (see `forward`). The relay is superleader-only, so
+`X-Orch-Projects` is always `*` (`scope.scope_of`, projects plan 3.3). The upstream status and JSON
+body come back unchanged, except for webhook credentials (D9, `credentials` below). A failed call or
+a non-JSON answer is 503 `upstream_unavailable`. The upstream validates the bodies.
 
 The superleader sees only objects of presets it may manage (`superleader_manageable`), except chat
 rooms (below). `GUARDS` holds one `Guard` per route: a body naming a hidden or null preset, or a
@@ -62,6 +63,7 @@ from agents_orchestrator.api import chat_requests, secret_store
 from agents_orchestrator.api import forward as forward_core
 from agents_orchestrator.api.admin import caller_of, router, touched
 from agents_orchestrator.api.errors import ApiError, not_found
+from agents_orchestrator.api.scope import projects_header
 from agents_orchestrator.api.sessions import Cfg
 from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.settings import Settings
@@ -290,6 +292,7 @@ async def _upstream_json(request: Request, settings: Settings, service: str, pat
         None,
         str(session.id),
         session.slug,
+        extra_headers=projects_header(session),
     )
     if status == 404:
         raise not_found("object")
@@ -470,7 +473,15 @@ def _handler(service: str, method: str, template: str) -> Callable[..., Awaitabl
             await chat_requests.check_task(request, settings, body)
         path = upstream_prefix + _fill(template, dict(request.path_params))
         status, content = await forward_core.forward(
-            request, target, method, path, body, str(session.id), session.slug, empty_ok=True
+            request,
+            target,
+            method,
+            path,
+            body,
+            str(session.id),
+            session.slug,
+            empty_ok=True,
+            extra_headers=projects_header(session),
         )
         if guard.ask_decision and status == 201:
             row = await chat_requests.on_created(request, settings, json.loads(content))

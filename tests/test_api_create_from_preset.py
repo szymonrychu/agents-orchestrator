@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import re
 import uuid
 
@@ -193,6 +195,7 @@ async def test_create_defaults_to_preset_project(pool, dsn):
         await _project(http, "alpha")
         await _project(http, "beta")
         r = await http.post(P, json={"name": "in-alpha", "project": "alpha"})
+        assert r.status_code == 201, r.text
         pid = r.json()["id"]
         r = await http.post(C, json={"preset_id": pid})
         assert r.status_code == 201, r.text
@@ -202,6 +205,7 @@ async def test_create_defaults_to_preset_project(pool, dsn):
         assert r.status_code == 201, r.text
         assert r.json()["project"] == "beta"
         r = await http.post(C, json={"preset_id": DEFAULT_ID})
+        assert r.status_code == 201, r.text
         assert r.json()["project"] == "default"
 
 
@@ -216,3 +220,71 @@ async def test_create_from_preset_in_archived_project_422(pool, dsn):
         r = await http.post(C, json={"preset_id": pid, "project": "default"})
         assert r.status_code == 201, r.text
         assert r.json()["project"] == "default"
+
+
+async def test_create_from_preset_waits_on_project_lock_and_sees_archive(pool, dsn):
+    """Without a body project the preset's project row is held FOR SHARE: an archive committed
+    while the create waits turns the create into 422 `project_archived`."""
+    async with app_client(pool, dsn) as http:
+        await _project(http, "alpha")
+        r = await http.post(P, json={"name": "racer", "project": "alpha"})
+        assert r.status_code == 201, r.text
+        pid = r.json()["id"]
+        async with pool.connection() as conn, conn.transaction():
+            await conn.execute("UPDATE projects SET archived_at = now() WHERE slug = 'alpha'")
+            create = asyncio.create_task(http.post(C, json={"preset_id": pid}))
+            done, _ = await asyncio.wait({create}, timeout=0.5)
+            assert not done
+        assert_error(await create, 422, "project_archived")
+
+
+async def test_create_from_preset_follows_a_move_before_the_preset_lock(pool, dsn, monkeypatch):
+    """A preset moved to another project between the unlocked read and the preset lock is read
+    again: the session goes into the project the preset is in under the lock."""
+    held = api_sessions.hold_project
+    moves = []
+
+    async def hold_then_move(conn, slug):
+        await held(conn, slug)
+        if not moves:
+            async with pool.connection() as mover:
+                await mover.execute("UPDATE presets SET project = 'beta' WHERE id = %s", (pid,))
+            moves.append("beta")
+
+    async with app_client(pool, dsn) as http:
+        await _project(http, "alpha")
+        await _project(http, "beta")
+        r = await http.post(P, json={"name": "mover", "project": "alpha"})
+        assert r.status_code == 201, r.text
+        pid = r.json()["id"]
+        monkeypatch.setattr(api_sessions, "hold_project", hold_then_move)
+        r = await http.post(C, json={"preset_id": pid})
+    assert r.status_code == 201, r.text
+    assert r.json()["project"] == "beta"
+    assert moves == ["beta"]
+
+
+async def test_create_from_preset_moving_between_projects_409(pool, dsn, monkeypatch):
+    """When every unlocked read names another project than the locked row, the create gives up
+    after the last try with 409 `conflict` and creates no session. (Once the preset row is held
+    FOR SHARE it cannot move, so the stale read is simulated.)"""
+    real_get = api_sessions.presets.get
+    peeks = []
+
+    async def stale_get(conn, preset_id):
+        found = await real_get(conn, preset_id)
+        peeks.append(preset_id)
+        return dataclasses.replace(found, project="beta") if found else found
+
+    async with app_client(pool, dsn) as http:
+        await _project(http, "alpha")
+        await _project(http, "beta")
+        r = await http.post(P, json={"name": "mover", "project": "alpha"})
+        assert r.status_code == 201, r.text
+        pid = r.json()["id"]
+        monkeypatch.setattr(api_sessions.presets, "get", stale_get)
+        assert_error(await http.post(C, json={"preset_id": pid}), 409, "conflict")
+        monkeypatch.setattr(api_sessions.presets, "get", real_get)
+        assert len(peeks) == 3
+        listed = (await http.get(C)).json()
+        assert [s for s in listed if s["preset_id"] == pid] == []

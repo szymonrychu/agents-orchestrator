@@ -754,9 +754,15 @@ def init_scripts_view(
 
 
 async def edit_init_scripts(
-    conn, session_id: uuid.UUID, scripts: list[str], settings: Settings
+    conn,
+    session_id: uuid.UUID,
+    scripts: list[str],
+    settings: Settings,
+    *,
+    same_project_preset: bool = False,
 ) -> schemas.InitScriptsView:
-    """Validate and write the scripts to the session and its source preset."""
+    """Validate and write the scripts to the session and its source preset; with
+    `same_project_preset` (the agent route) only a preset in the session's project."""
     try:
         SessionSpec.model_validate({"init_scripts": scripts})
     except ValidationError as exc:
@@ -773,7 +779,9 @@ async def edit_init_scripts(
             hint = rendering.ESCAPE_HINT
             raise ApiError(422, "invalid_request", f"init_scripts[{i}]: {error} ({hint})")
     try:
-        session, preset_updated = await repo.set_init_scripts(conn, session_id, scripts)
+        session, preset_updated = await repo.set_init_scripts(
+            conn, session_id, scripts, same_project_preset=same_project_preset
+        )
     except repo.SessionNotFound:
         raise not_found("session") from None
     except repo.SessionBeingDeleted:

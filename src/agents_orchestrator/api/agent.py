@@ -17,9 +17,11 @@ from xml.sax.saxutils import escape
 from fastapi import APIRouter, Depends, Header, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
+from agents_orchestrator.api import projects as projects_api
 from agents_orchestrator.api import schemas, session_limits
 from agents_orchestrator.api import sessions as sessions_api
 from agents_orchestrator.api.errors import ApiError
+from agents_orchestrator.api.scope import ALL_PROJECTS, scope_of
 from agents_orchestrator.api.sessions import (
     Cfg,
     Pool,
@@ -31,6 +33,7 @@ from agents_orchestrator.api.sessions import (
 from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import events as events_repo
 from agents_orchestrator.db import file_locks, leadership
+from agents_orchestrator.db import projects as projects_repo
 from agents_orchestrator.db import queue as q
 from agents_orchestrator.db import sessions as sessions_repo
 from agents_orchestrator.dispatcher import feed
@@ -60,6 +63,9 @@ class Me(BaseModel):
     max_replicas: int
     static: bool
     members: list[Member]
+    project: str
+    # "*" for a superleader session (every project), else `project` (projects plan 3.2)
+    projects_scope: str
 
 
 class CloseRequest(BaseModel):
@@ -144,6 +150,8 @@ async def me(agent: Caller, pool: Pool) -> Me:
         epoch=leader[1] if leader else None,
         max_replicas=session.spec.max_replicas or session.spec.replicas,
         static=session.spec.static,
+        project=session.project,
+        projects_scope=scope_of(session),
         members=[
             Member(
                 pod_name=m["pod_name"],
@@ -155,6 +163,25 @@ async def me(agent: Caller, pool: Pool) -> Me:
             for m in members
         ],
     )
+
+
+@router.get(
+    "/projects",
+    response_model=list[schemas.ProjectView],
+    summary="The caller's project, or every active project for a superleader",
+)
+async def projects(agent: Caller, pool: Pool) -> list[schemas.ProjectView]:
+    """Scope `project` (projects plan 3.3): the caller's own project, archived or not; a
+    superleader session gets every active project. No counts, as on the service port."""
+    async with pool.connection() as conn:
+        session = await _session(conn, agent)
+        if scope_of(session) == ALL_PROJECTS:
+            rows = await projects_repo.list_projects(conn)
+        else:
+            own = await projects_repo.get_project(conn, session.project)
+            assert own is not None  # sessions.project references projects
+            rows = [own]
+    return [projects_api.view(p) for p in rows]
 
 
 _SCALE_STATUS = {**sessions_api.SCALE_STATUS, "not_leader": 403}
@@ -246,7 +273,9 @@ async def init_scripts_put(
     body: schemas.InitScriptsIn, agent: Caller, pool: Pool, settings: Cfg
 ) -> schemas.InitScriptsView:
     async with pool.connection() as conn:
-        return await edit_init_scripts(conn, agent.session_id, body.scripts, settings)
+        return await edit_init_scripts(
+            conn, agent.session_id, body.scripts, settings, same_project_preset=True
+        )
 
 
 @router.post(

@@ -192,6 +192,31 @@ async def test_approve_all_applies_the_spec_and_promotes_the_staged_secret(
     await _assert_nowhere(pool, canary, view, done)
 
 
+async def test_an_applied_proposal_keeps_the_preset_project(
+    pool, kube, settings, boss, preset, canary
+):
+    """`project` is a column, not a spec field (projects plan 3.2): the apply writes the spec
+    through `presets_repo.update` without a project, which keeps the stored one."""
+    async with pool.connection() as conn:
+        await conn.execute("INSERT INTO projects (slug, name) VALUES ('alpha', 'Alpha')")
+        await conn.execute("UPDATE presets SET project = 'alpha' WHERE id = %s", (preset.id,))
+    view = await _filed(pool, kube, settings, boss, canary)
+    done = await _review(
+        pool,
+        kube,
+        settings,
+        view.id,
+        1,
+        {"env.TOKEN": "approve", "wrapper.mcp_servers": "approve"},
+    )
+    assert done.status == "applied"
+    [(project, spec)] = await _rows(
+        pool, "SELECT project, spec FROM presets WHERE id = %s", (preset.id,)
+    )
+    assert project == "alpha"
+    assert spec["wrapper"] == {"mcp_servers": {"grafana": GRAFANA}}
+
+
 async def test_partial_approve_applies_only_approved_paths_and_releases_the_denied_secret(
     pool, kube, settings, boss, preset, canary
 ):

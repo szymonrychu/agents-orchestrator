@@ -15,7 +15,7 @@ from agents_orchestrator.db import projects as repo
 router = APIRouter(prefix="/api/v1")
 
 
-def _view(project: repo.Project) -> schemas.ProjectView:
+def view(project: repo.Project) -> schemas.ProjectView:
     return schemas.ProjectView(
         slug=project.slug,
         name=project.name,
@@ -42,7 +42,7 @@ async def list_projects(
         rows = await repo.list_projects(
             conn, archived=archived, counts=calling_service(request) is None
         )
-    return [_view(p) for p in rows]
+    return [view(p) for p in rows]
 
 
 @router.post("/projects", response_model=schemas.ProjectView, status_code=201)
@@ -54,7 +54,7 @@ async def create_project(body: schemas.ProjectIn, pool: Pool) -> schemas.Project
         raise _invalid(exc) from None
     except repo.ProjectExists as exc:
         raise project_error(exc) from None
-    return _view(project)
+    return view(project)
 
 
 @router.get("/projects/{slug}", response_model=schemas.ProjectView)
@@ -66,7 +66,7 @@ async def get_project(slug: str, request: Request, pool: Pool) -> schemas.Projec
         if calling_service(request) is None:
             counts = await repo.project_counts(conn, slug)
             project = replace(project, **counts)
-    return _view(project)
+    return view(project)
 
 
 @router.patch("/projects/{slug}", response_model=schemas.ProjectView)
@@ -81,4 +81,4 @@ async def patch_project(slug: str, body: schemas.ProjectPatch, pool: Pool) -> sc
         raise not_found("project") from None
     except repo.DefaultProject as exc:
         raise project_error(exc) from None
-    return _view(replace(project, **counts))
+    return view(replace(project, **counts))

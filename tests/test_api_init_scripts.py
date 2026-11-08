@@ -65,6 +65,20 @@ async def test_put_writes_session_and_preset(http, pool):
         assert (await presets_repo.get(conn, uuid.UUID(cl["preset_id"]))).updated_at > before
 
 
+async def test_user_put_writes_preset_in_another_project(http, pool):
+    """The project rule of plan 3.3 limits agents only: the user's edit on the main port still
+    writes the source preset when the session is in another project."""
+    r = await http.post("/api/v1/projects", json={"slug": "b", "name": "B"})
+    assert r.status_code == 201, r.text
+    cl = await session_from_preset(http)
+    r = await http.patch(f"/api/v1/sessions/{cl['id']}/project", json={"project": "b"})
+    assert r.status_code == 200, r.text
+    r = await http.put(url(cl["id"]), json={"scripts": ["echo user"]})
+    assert r.status_code == 200, r.text
+    assert r.json()["preset_updated"] is True
+    assert (await preset_spec(pool, cl["preset_id"]))["init_scripts"] == ["echo user"]
+
+
 async def test_put_without_preset(http, pool):
     raw = (await http.post("/api/v1/sessions", json={"slug": "raw", "spec": {}})).json()
     r = await http.put(url(raw["id"]), json={"scripts": ["echo x"]})
