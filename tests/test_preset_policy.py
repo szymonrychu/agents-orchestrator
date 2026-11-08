@@ -444,3 +444,102 @@ def test_privileged_target_allows_non_security():
     }
     assert ptc(stored, new) == []
     assert ptc(stored, {**new, "cache": {"key": "x"}}) == ["cache"]
+
+
+def test_tighten_autoclose():
+    path = "autoclose_after_seconds"
+
+    def a(v):
+        return {"autoclose_after_seconds": v}
+
+    assert tighten(a(3600), a(7200)) == [path]  # raised is looser
+    assert tighten(a(3600), {}) == [path]  # cleared: no autoclose, infinite
+    assert tighten(a(3600), a(None)) == [path]
+    assert tighten(a(7200), a(3600)) == []  # lowered is tighter
+    assert tighten(a(3600), a(3600)) == []
+    assert tighten({}, a(3600)) == []  # set from unset is tighter
+    assert tighten({}, {}) == []
+
+
+def _res(requests=None, limits=None):
+    out = {}
+    if requests is not None:
+        out["requests"] = requests
+    if limits is not None:
+        out["limits"] = limits
+    return {"resources": out}
+
+
+@pytest.mark.parametrize("section", ["requests", "limits"])
+@pytest.mark.parametrize(("key", "low", "high"), [("cpu", "500m", "1"), ("memory", "1Gi", "2Gi")])
+def test_tighten_resources(section, key, low, high):
+    path = f"resources.{section}.{key}"
+
+    def r(v):
+        return _res(**{section: {key: v}})
+
+    assert tighten(r(low), r(high)) == [path]  # raised
+    assert tighten(r(high), r(low)) == []  # lowered
+    assert tighten(r(low), r(low)) == []  # equal
+    assert tighten(r(low), _res(**{section: {}})) == [path]  # removed
+    assert tighten(r(low), {}) == [path]
+    assert tighten(r(low), {"resources": None}) == [path]
+
+
+@pytest.mark.parametrize(
+    ("same", "other"),
+    [("1Gi", "1024Mi"), ("500m", "0.5"), ("1", "1000m"), ("1G", "1000M"), ("2Gi", "2147483648")],
+)
+def test_tighten_resources_compares_quantities_not_strings(same, other):
+    for section in ("requests", "limits"):
+        key = "memory" if "i" in same or "G" in same else "cpu"
+        assert tighten(_res(**{section: {key: same}}), _res(**{section: {key: other}})) == []
+        assert tighten(_res(**{section: {key: other}}), _res(**{section: {key: same}})) == []
+
+
+def test_tighten_resources_mixed_units_order():
+    assert tighten(_res(limits={"memory": "1Gi"}), _res(limits={"memory": "1025Mi"})) == [
+        "resources.limits.memory"
+    ]
+    assert tighten(_res(limits={"memory": "1Gi"}), _res(limits={"memory": "1023Mi"})) == []
+    assert tighten(_res(limits={"cpu": "0.5"}), _res(limits={"cpu": "501m"})) == [
+        "resources.limits.cpu"
+    ]
+    assert tighten(_res(limits={"cpu": "0.5"}), _res(limits={"cpu": "499m"})) == []
+
+
+def test_tighten_resources_adding_a_limit_is_tighter():
+    assert tighten({}, _res(limits={"cpu": "2"})) == []
+    assert tighten(_res(limits={"cpu": "2"}), _res(limits={"cpu": "2", "memory": "4Gi"})) == []
+
+
+def test_tighten_resources_adding_a_request():
+    """An absent request reads as the stored limit of the same key (Kubernetes defaults a
+    request to its limit), else zero: adding one above that is a raise."""
+    assert (
+        tighten(_res(limits={"cpu": "2"}), _res(requests={"cpu": "1"}, limits={"cpu": "2"})) == []
+    )
+    assert (
+        tighten(_res(limits={"cpu": "2"}), _res(requests={"cpu": "2"}, limits={"cpu": "2"})) == []
+    )
+    assert tighten({}, _res(requests={"cpu": "1"})) == ["resources.requests.cpu"]
+    assert tighten(_res(limits={"memory": "1Gi"}), _res(requests={"memory": "2Gi"})) == [
+        "resources.limits.memory",
+        "resources.requests.memory",
+    ]
+
+
+def test_tighten_resources_keys_are_independent():
+    stored = _res(requests={"cpu": "500m", "memory": "1Gi"}, limits={"cpu": "4", "memory": "8Gi"})
+    new = _res(requests={"cpu": "250m", "memory": "2Gi"}, limits={"cpu": "8", "memory": "4Gi"})
+    assert tighten(stored, new) == ["resources.limits.cpu", "resources.requests.memory"]
+
+
+def test_tighten_all_rules_together():
+    stored = {"autoclose_after_seconds": 600, **_res(limits={"cpu": "1"})}
+    new = {"usage_quota": {"five_hour_pct": 101}, **_res(limits={})}
+    assert tighten(stored, new) == [
+        "autoclose_after_seconds",
+        "resources.limits.cpu",
+        "usage_quota.five_hour_pct",
+    ]

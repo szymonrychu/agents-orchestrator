@@ -22,7 +22,7 @@ from agents_orchestrator.api.usage_gate import UsageSource
 from agents_orchestrator.cache.keys import ArchiveNameError
 from agents_orchestrator.cache.save_rule import save_skip
 from agents_orchestrator.db import agents as agents_repo
-from agents_orchestrator.db import leadership, presets, views
+from agents_orchestrator.db import leadership, presets, queue, views
 from agents_orchestrator.db import sessions as repo
 from agents_orchestrator.labels import normalize_labels
 from agents_orchestrator.secret_view import redact_spec, session_metas
@@ -365,7 +365,27 @@ async def create(
             usage_gate.check(
                 windows, session.spec.usage_quota, settings.usage_quota_default, datetime.now(UTC)
             )
+            await _queue_start_prompt(conn, session)
         return await one_view(conn, session, settings)
+
+
+async def _queue_start_prompt(conn, session: repo.Session) -> None:
+    """Queue the rendered start prompt as the session's first message (T-63).
+
+    Its own message, in the create transaction: the dispatcher claims nothing else of the
+    session until it is sent, failed or cancelled. An empty render queues nothing.
+    """
+    if session.spec.start_prompt is None:
+        return
+    context = rendering.session_context("web_chat_start", session)
+    try:
+        text = await run_in_threadpool(rendering.render_text, session.spec.start_prompt, context)
+    except TemplateError as exc:
+        raise ApiError(422, "invalid_request", f"start_prompt: {exc.message}") from exc
+    if text:
+        await queue.enqueue_message(
+            conn, session.id, text, lane="regular", carries_start_prompt=True
+        )
 
 
 @router.post("/sessions", status_code=201, response_model=schemas.SessionView)

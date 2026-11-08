@@ -16,7 +16,8 @@ and false equal:
   (decision 7 b); adding a protected variable and setting its value stay allowed.
 
 A live session adds two rules of its own: `fixed_changes` (fields that cannot change on a
-running session) and `tighten_changes` (limits a regular leader may only lower).
+running session) and `tighten_changes` (limits a regular leader may only lower: usage quota,
+inactivity, autoclose and pod resources).
 
 All functions work on JSON dicts as stored (model_dump(mode="json",
 exclude_unset=True)) and never mutate their inputs. The main port never calls
@@ -25,7 +26,10 @@ them: only the agent-facing admin routes do.
 
 import copy
 from collections.abc import Iterable
+from decimal import Decimal
 from typing import Any
+
+from agents_orchestrator.spec import parse_quantity
 
 GRANTS: tuple[str, ...] = (
     "kube_cluster_access",
@@ -210,6 +214,37 @@ def _effective(
     return float("inf") if off_is_zero and value == 0 else value
 
 
+def _autoclose(spec: dict[str, Any]) -> float:
+    """Unset means the session never autocloses, the loosest value."""
+    value = spec.get("autoclose_after_seconds")
+    return float("inf") if value is None else value
+
+
+def _resource_changes(stored: dict[str, Any], new: dict[str, Any]) -> list[str]:
+    """`resources.<requests|limits>.<key>` paths that got looser, quantities compared parsed
+    (1Gi equals 1024Mi). A removed key is looser, a raised one too. A limit added where none
+    was is tighter. An added request is compared with what the stored pod gets: the stored
+    limit of the same key (Kubernetes defaults a request to its limit), else zero."""
+    s_res, n_res = _dict(stored.get("resources")), _dict(new.get("resources"))
+    s_lim = _dict(s_res.get("limits"))
+    out: list[str] = []
+    for section in ("requests", "limits"):
+        old, cur = _dict(s_res.get(section)), _dict(n_res.get(section))
+        for key in set(old) | set(cur):
+            if key not in cur:
+                looser = True
+            elif key in old:
+                looser = parse_quantity(cur[key]) > parse_quantity(old[key])
+            elif section == "requests":
+                floor = parse_quantity(s_lim[key]) if key in s_lim else Decimal(0)
+                looser = parse_quantity(cur[key]) > floor
+            else:
+                looser = False
+            if looser:
+                out.append(f"resources.{section}.{key}")
+    return out
+
+
 def tighten_changes(
     stored: dict[str, Any],
     new: dict[str, Any],
@@ -220,8 +255,10 @@ def tighten_changes(
 ) -> list[str]:
     """The limit paths whose effective value got looser from `stored` to `new` (sorted):
     `usage_quota.five_hour_pct` and `.seven_day_pct` (unset is `quota_default`, higher is
-    looser) and `inactivity.reminder_seconds` and `.close_seconds` (unset is the default, 0 is
-    off and so infinite, longer is looser). Lowering, or keeping, a limit is never reported."""
+    looser), `inactivity.reminder_seconds` and `.close_seconds` (unset is the default, 0 is
+    off and so infinite, longer is looser), `autoclose_after_seconds` (unset is never, so
+    clearing or raising is looser) and `resources.requests.*` / `resources.limits.*` (see
+    `_resource_changes`). Lowering, or keeping, a limit is never reported."""
     defaults = {
         "five_hour_pct": quota_default,
         "seven_day_pct": quota_default,
@@ -235,6 +272,9 @@ def tighten_changes(
         new_v = _effective(new, block, key, defaults[key], off_is_zero=off_is_zero)
         if new_v > old_v:
             out.append(f"{block}.{key}")
+    if _autoclose(new) > _autoclose(stored):
+        out.append("autoclose_after_seconds")
+    out.extend(_resource_changes(stored, new))
     return sorted(out)
 
 
