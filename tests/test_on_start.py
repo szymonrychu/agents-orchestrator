@@ -40,7 +40,14 @@ TASK_TOOLS = [
 ]  # fmt: skip
 TAIL_TOOLS = [*SESSION_TOOLS, *INIT_SCRIPTS_TOOLS, *CHAT_TOOLS, *TASK_TOOLS]
 ALONE_TOOLS = ["me", *TAIL_TOOLS]
-EDIT = ["session_get", "session_patch"]  # SESSION_EDIT_TOOLS, before CLOSE
+PROPOSAL = [
+    "proposal_create",
+    "proposal_revise",
+    "proposals_list",
+    "proposal_get",
+    "proposal_withdraw",
+]
+EDIT = ["session_get", "session_patch", *PROPOSAL]  # SESSION_EDIT_TOOLS, before CLOSE
 CLOSE = ["self_close"]  # offered last to every session without session_messaging
 ADMIN_TOOLS = [
     "presets_list", "preset_get", "preset_create", "preset_replace", "preset_patch",
@@ -56,7 +63,7 @@ ADMIN_TOOLS = [
     "chat_admin_room", "chat_users", "chat_room_allow", "chat_open", "chat_open_status",
     "chat_open_confirm", "secret_set", "history_search", "history_get",
     "history_records", "usage_get",
-    "proposal_create", "proposal_revise", "proposals_list", "proposal_get", "proposal_withdraw",
+    *PROPOSAL,
 ]  # fmt: skip
 SECRET = "s3cr3t-token-value"
 PLUGINS_REPO = "https://github.com/szymonrychu/any-mcp-tatara-plugins"
@@ -500,8 +507,9 @@ def test_golden_allowlist_superleader_leader_and_service_session():
 
 
 def test_every_session_may_read_and_patch_its_own_spec():
-    """session_get and session_patch (SESSION_EDIT_TOOLS) reach every session, right before
-    self_close; a superleader has both among its admin tools, each listed exactly once."""
+    """session_get, session_patch and the five proposal tools (SESSION_EDIT_TOOLS) reach every
+    session, right before self_close; a superleader has them among its admin tools, each listed
+    exactly once."""
     assert on_start.SESSION_EDIT_TOOLS == EDIT
     for spec in (
         SessionSpec(replicas=1),
@@ -511,7 +519,7 @@ def test_every_session_may_read_and_patch_its_own_spec():
         SessionSpec(replicas=2, session_messaging=False),
     ):
         allow = on_start.orchestrator_allow(spec)
-        assert allow[-3:] == [*EDIT, *CLOSE], spec
+        assert allow[-len(EDIT) - 1 :] == [*EDIT, *CLOSE], spec
         assert [t for t in allow if t in EDIT] == EDIT, spec
     for spec in (
         SessionSpec(replicas=1, session_messaging=True),
@@ -549,16 +557,36 @@ def test_session_labels_set_in_allow_list():
     assert "session_labels_set" in on_start.orchestrator_allow(SessionSpec(replicas=2))
 
 
-def test_superleader_allowlist_has_proposal_tools():
-    """The five proposal tools are admin tools: superleaders get them, alone sessions do not."""
-    names = [
-        "proposal_create",
-        "proposal_revise",
-        "proposals_list",
-        "proposal_get",
-        "proposal_withdraw",
-    ]
-    assert [t for t in on_start.ADMIN_TOOLS if "proposal" in t] == names
-    spec = SessionSpec(replicas=1, session_messaging=True)
-    assert set(names) <= set(entries(spec)["orchestrator"]["allow"])
-    assert not set(names) & set(entries(SessionSpec(replicas=1))["orchestrator"]["allow"])
+def test_every_session_allowlist_has_proposal_tools_once():
+    """Q10 B: the five proposal tools are admin tools and session edit tools: a superleader and
+    every other session (its leader proposes for its own session) get each exactly once."""
+    assert [t for t in on_start.ADMIN_TOOLS if "proposal" in t] == PROPOSAL
+    assert [t for t in on_start.SESSION_EDIT_TOOLS if "proposal" in t] == PROPOSAL
+    for spec in (
+        SessionSpec(replicas=1, session_messaging=True),
+        SessionSpec(replicas=1),
+        SessionSpec(replicas=2),
+        SessionSpec(replicas=2, static=True),
+    ):
+        allow = entries(spec)["orchestrator"]["allow"]
+        assert [t for t in allow if t in PROPOSAL] == PROPOSAL, spec
+
+
+async def test_admin_tools_exist_in_plugin():
+    """Every ADMIN_TOOLS name, rendered for a superleader session, is offered by the pinned
+    plugin (the specs of test_allowed_tools_exist_in_plugin never enable session_messaging)."""
+    from any_mcp.testing import PluginHarness
+
+    offered: set[str] = set()
+    for spec in (
+        SessionSpec(replicas=1, session_messaging=True),
+        SessionSpec(replicas=2, max_replicas=3, session_messaging=True),
+    ):
+        entry = entries(spec)["orchestrator"]
+        assert set(ADMIN_TOOLS) <= set(entry["allow"])
+        config = {**entry["config"], "base_url": "http://orch:8080", "token": "t", "session": "1"}
+        async with PluginHarness(OrchestratorPlugin, config={**config, "agent": "a0"}) as h:
+            offered |= {t["name"].removeprefix("orchestratorplugin_") for t in await h.list_tools()}
+        missing = set(entry["allow"]) - offered
+        assert not missing, (spec, sorted(missing))
+    assert set(on_start.ADMIN_TOOLS) <= offered

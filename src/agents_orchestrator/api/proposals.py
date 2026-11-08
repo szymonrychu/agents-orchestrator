@@ -418,6 +418,15 @@ async def _insert(
     )
 
 
+def _own_session_only(superleader: bool, kind: str, own: bool) -> None:
+    """A regular leader proposes for its own session only (plan 3.3): any other target, unknown
+    and hidden ones included, answers this one body before any lookup (no existence leak)."""
+    if not superleader and not (kind == "session" and own):
+        raise ApiError(
+            403, "not_superleader", "a regular session's leader proposes for its own session only"
+        )
+
+
 async def create(
     request: Request,
     conn,
@@ -430,6 +439,7 @@ async def create(
     """File a proposal; the bool is False on a `client_key` replay (nothing staged again)."""
     _idle(conn)
     admin.touched(request, *body.secrets)
+    _own_session_only(superleader, body.kind, body.target == caller.slug)
     if body.client_key is not None:
         async with conn.transaction():
             first = await repo.by_client_key(conn, caller.id, body.client_key)
@@ -437,8 +447,6 @@ async def create(
             return await get_view(
                 conn, settings, first, proposer=caller.id, visible_only=True
             ), False
-    if not superleader:
-        raise session_spec.not_superleader()
     if body.kind == "schedule":
         return await _create_schedule(request, conn, settings, body, caller, superleader)
     _check_values(body.secrets)
@@ -493,6 +501,11 @@ async def revise(
             current = await repo.lock(conn, proposal_id)
             if current is None or current.proposer_session != caller.id:
                 raise not_found("proposal")
+            _own_session_only(
+                bool(caller.spec.session_messaging),
+                current.kind,
+                current.target_id == str(caller.id),
+            )
             if current.status not in repo.ACTIVE:
                 raise _not_open()
             if current.kind == "schedule":
