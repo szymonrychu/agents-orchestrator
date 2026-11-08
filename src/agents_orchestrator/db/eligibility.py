@@ -50,11 +50,18 @@ NOTICE_PENDING = (
 # BACKGROUND_STALE_SECONDS is ignored, so a lost stop event cannot pin a leader forever.
 # Alias `s` is a LEFT JOINed `agent_status` row.
 BACKGROUND_STALE_SECONDS = 7200
-BACKGROUND_BUSY = (
-    "coalesce((SELECT bool_or(b.value::timestamptz"
-    f" > now() - make_interval(secs => {BACKGROUND_STALE_SECONDS}))"
-    " FROM jsonb_each_text(s.background_subagents) b), false)"
-)
+
+
+def background_busy(alias: str) -> str:
+    """The background-busy SQL predicate over the `agent_status` row aliased `alias`."""
+    return (
+        f"coalesce((SELECT bool_or(b.value::timestamptz"
+        f" > now() - make_interval(secs => {BACKGROUND_STALE_SECONDS}))"
+        f" FROM jsonb_each_text({alias}.background_subagents) b), false)"
+    )
+
+
+BACKGROUND_BUSY = background_busy("s")
 
 # One successor rule (voluntary-handover 3.2), shared by every pick of the leadership pass and
 # the leader's `handover_due` candidate list, so a moved leader is always the agent the note

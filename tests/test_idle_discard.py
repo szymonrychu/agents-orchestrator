@@ -443,3 +443,20 @@ async def test_sweeper_uses_close_grace_setting(dsn, pool, monkeypatch):
                 break
             await asyncio.sleep(0.1)
     assert await _desired(pool, s["id"]) == "deleting"
+
+
+async def test_running_background_subagent_blocks_discard(pool):
+    s, a = await _closing_session(pool)
+    started = datetime.now(UTC).isoformat()
+    await set_agent_status(pool, a["id"], state="idle", background_subagents={"sa1": started})
+    await _age(pool, s["id"])
+    assert await _run(pool) == []
+    assert await _desired(pool, s["id"]) == "active"
+
+
+async def test_stale_background_subagent_does_not_block_discard(pool):
+    s, a = await _closing_session(pool)
+    stale = datetime(2020, 1, 1, tzinfo=UTC).isoformat()
+    await set_agent_status(pool, a["id"], state="idle", background_subagents={"sa1": stale})
+    await _age(pool, s["id"])
+    assert await _run(pool) == [s["id"]]
