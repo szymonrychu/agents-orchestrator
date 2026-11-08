@@ -27,7 +27,7 @@ from agents_orchestrator.db import sessions as repo
 from agents_orchestrator.db.queue import SessionBeingDeleted
 from agents_orchestrator.preset_policy import changed_paths, fixed_changes, tighten_changes
 from agents_orchestrator.settings import Settings
-from agents_orchestrator.spec import default_cache_key
+from agents_orchestrator.spec import SessionSpec, default_cache_key
 
 # A concurrent spec write (or a deadlock with a preset delete) makes the patch re-read and retry.
 _TRIES = 3
@@ -41,12 +41,25 @@ def not_leader() -> ApiError:
     return ApiError(403, "not_leader", "only the session's leader may read or edit its spec")
 
 
-def _fixed_refused(paths: list[str]) -> ApiError:
+def fixed_refused(paths: list[str]) -> ApiError:
     return ApiError(
         422,
         "session_fixed_field",
         f"cannot change on a live session: {', '.join(paths)}",
         extra={"fields": paths},
+    )
+
+
+async def validated(spec: SessionSpec, settings: Settings, session: repo.Session) -> SessionSpec:
+    """`check_spec` against the session's stored spec (models or images that left the allowlist
+    stay accepted when unchanged) and its one derived cache key; the resource defaults filled."""
+    derived = (
+        default_cache_key(session.preset_id)
+        if session.preset_id is not None
+        else (session.spec.cache.restore_key if session.spec.cache is not None else None)
+    )
+    return await run_in_threadpool(
+        check_spec, spec, settings, session.spec, derived_cache_key=derived
     )
 
 
@@ -95,7 +108,7 @@ async def patch(
             raise human_only_refused(looser)
         if fixed := fixed_changes(base, new):
             note_fields(request, fixed)
-            raise _fixed_refused(fixed)
+            raise fixed_refused(fixed)
         protected = {n for n, e in new.get("env", {}).items() if e.get("protected")}
         if unset := sorted(protected - set(versions)):
             note_fields(request, [f"env.{n}" for n in unset])
@@ -110,14 +123,7 @@ async def patch(
         spec, values = model.split()
         new = spec.model_dump(mode="json", exclude_unset=True)
         guards(stored, new, values, session.secret_versions)
-        derived = (
-            default_cache_key(session.preset_id)
-            if session.preset_id is not None
-            else (session.spec.cache.restore_key if session.spec.cache is not None else None)
-        )
-        filled = await run_in_threadpool(
-            check_spec, spec, settings, session.spec, derived_cache_key=derived
-        )
+        filled = await validated(spec, settings, session)
 
         async def recheck(
             locked: repo.LockedSession,

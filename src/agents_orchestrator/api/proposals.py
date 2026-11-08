@@ -1,14 +1,21 @@
 """Change proposals service (preset-change-proposals 3.4, 3.5): create, revise, withdraw, read
 and the human review that applies the approved items.
 
-It handles `kind: "preset"` and `kind: "schedule"` (stage B); the routes and gates live in
-`proposal_routes`. A proposal never runs the agent guards (human-only, privileged): it may carry
-any path, security, grant or not, for a human to decide; only `review` (a human) writes the target.
+It handles `kind: "preset"`, `kind: "schedule"` (stage B) and `kind: "session"` (stage C); the
+routes and gates live in `proposal_routes`. A proposal never runs the agent guards (human-only,
+privileged): it may carry any path, security, grant or not, for a human to decide; only `review`
+(a human) writes the target.
 
 A schedule lives in agents-schedule, so there is no shared transaction: its fingerprint is the
 upstream `updated_at` exactly as the schedule view spells it, and the review applies with `PUT`
 and `If-Match: "<that value>"` (412 there is stale here). Views never call the upstream, so a
 schedule proposal reads `stale: false` until a review compares.
+
+A session's fingerprint is its stored spec plus `secret_versions`; its protected values are staged
+in its preset's Secret family and bound into `secret_versions` by the review, which writes through
+`db.sessions.replace_spec` (generation + 1). Lock order of that apply: the proposal row, the preset
+FOR SHARE, the variable locks (`bind_staged`), the session row (`set_secret` takes the preset FOR
+UPDATE and then the variable lock, so any other order can deadlock with a rotation).
 
 A protected value arrives as a `SecretStr` in `secrets` and goes only into a staged Secret's
 `stringData` (`stage_secret`); no row, view, error, log line or audit entry ever holds it. The
@@ -26,7 +33,7 @@ import hashlib
 import json
 import logging
 import uuid
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -39,20 +46,23 @@ from agents_orchestrator.api import admin, admin_relay, schemas, secret_store, s
 from agents_orchestrator.api import forward as forward_core
 from agents_orchestrator.api import presets as presets_api
 from agents_orchestrator.api.errors import ApiError, not_found
+from agents_orchestrator.api.sessions import _secret_unset
 from agents_orchestrator.api.spec_edit import merged_spec_in, note_fields
 from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.db import proposals as repo
+from agents_orchestrator.db import sessions as sessions_repo
 from agents_orchestrator.db.queue import SessionBeingDeleted, enqueue_message
 from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.preset_policy import (
     changed_paths,
     classify,
     classify_schedule,
+    fixed_changes,
     merge_patch,
 )
-from agents_orchestrator.secret_view import EnvMeta, redact_spec_dict
+from agents_orchestrator.secret_view import EnvMeta, redact_spec_dict, session_metas
 from agents_orchestrator.settings import Settings
-from agents_orchestrator.spec import SessionSpecIn
+from agents_orchestrator.spec import SessionSpec, SessionSpecIn
 
 log = logging.getLogger(__name__)
 
@@ -87,12 +97,20 @@ def fingerprint_preset(preset: presets_repo.Preset, versions: dict[str, int]) ->
     return hashlib.sha256(json.dumps(doc, sort_keys=True).encode()).hexdigest()
 
 
+def fingerprint_session(stored: Mapping[str, Any], versions: Mapping[str, str]) -> str:
+    """The session as a proposal revision was based on it (Q6 B): the stored spec JSONB and the
+    bound Secret names, canonical JSON; any spec write counts, a scale included."""
+    doc = {"spec": stored, "secret_versions": versions}
+    canonical = json.dumps(doc, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
 def _not_open() -> ApiError:
     return ApiError(409, "not_open", "the proposal is closed")
 
 
-def _unsupported(kind: str) -> ApiError:
-    return ApiError(422, "invalid_request", f"kind {kind} not supported yet")
+def _deleting() -> ApiError:
+    return ApiError(409, "session_deleting", "the session is being discarded")
 
 
 def _redacted(
@@ -153,7 +171,20 @@ async def _plan(
 ) -> _Plan:
     """Merge, check and diff the patch against the locked preset, as the PATCH does, without the
     agent guards. Items carry redacted values from the stored and the merged spec only."""
-    _, spec_in = merged_spec_in(preset.spec, patch)  # 422 secret_in_spec for a value in `patch`
+    spec = _merged(preset.spec, patch, secrets)
+    new = await presets_api.validated_spec(spec, settings, preset.spec, preset.id)
+    metas = await _metas(conn, preset.id)
+    base, items = _items(preset.spec, new, metas, secrets, existing=metas)
+    versions = {n: m.version for n, m in metas.items()}
+    return _Plan(base, fingerprint_preset(preset, versions), items)
+
+
+def _merged(
+    stored: dict[str, Any], patch: dict[str, Any], secrets: Mapping[str, SecretStr]
+) -> SessionSpec:
+    """The stored spec with the patch merged in (422 `secret_in_spec` for a value in `patch`),
+    parsed; each staged value must name a protected variable of it."""
+    _, spec_in = merged_spec_in(stored, patch)
     spec, _ = spec_in.split()  # no values: secret_in_patch refused every protected one
     for name in sorted(secrets):
         entry = spec.env.get(name)
@@ -161,12 +192,24 @@ async def _plan(
             raise ApiError(
                 422, "invalid_request", f"{name} is not a protected variable of the proposed spec"
             )
-    new = await presets_api.validated_spec(spec, settings, preset.spec, preset.id)
-    paths = sorted(set(changed_paths(preset.spec, new)) | {f"env.{n}" for n in secrets})
+    return spec
+
+
+def _items(
+    stored: Mapping[str, Any],
+    new: Mapping[str, Any],
+    metas: Mapping[str, EnvMeta],
+    secrets: Mapping[str, SecretStr],
+    *,
+    existing: Collection[str],
+) -> tuple[dict[str, Any], list[repo.Item]]:
+    """The redacted base and one item per changed path plus one per staged value (`existing`
+    names the variables that already have a value: their item is `changed`, else `set`);
+    values come from the stored and the merged spec only, redacted."""
+    paths = sorted(set(changed_paths(stored, new)) | {f"env.{n}" for n in secrets})
     if not paths:
         raise ApiError(422, "nothing_changed", "the patch changes nothing")
-    metas = await _metas(conn, preset.id)
-    base = _redacted(preset.spec, metas, _BASE_KEYS)
+    base = _redacted(stored, metas, _BASE_KEYS)
     after = _redacted(new, {}, _AFTER_KEYS)
     classes = classify(paths)
     items = []
@@ -174,7 +217,7 @@ async def _plan(
         name = path.removeprefix("env.") if path.startswith("env.") else None
         secret = None
         if name is not None and name in secrets:
-            secret = "changed" if name in metas else "set"
+            secret = "changed" if name in existing else "set"
         items.append(
             repo.Item(
                 path=path,
@@ -185,15 +228,93 @@ async def _plan(
                 secret=secret,
             )
         )
-    versions = {n: m.version for n, m in metas.items()}
-    return _Plan(base, fingerprint_preset(preset, versions), items)
+    return base, items
+
+
+async def _session_plan(
+    settings: Settings,
+    session: Session,
+    stored: dict[str, Any],
+    patch: dict[str, Any],
+    secrets: Mapping[str, SecretStr],
+) -> _Plan:
+    """`_plan` for a live session: merged and checked as the session PATCH does (fixed fields,
+    `check_spec`, every protected variable with a value bound or staged), no agent guard."""
+    spec = _merged(stored, patch, secrets)
+    await session_spec.validated(spec, settings, session)
+    new = spec.model_dump(mode="json", exclude_unset=True)
+    if fixed := fixed_changes(stored, new):
+        raise session_spec.fixed_refused(fixed)
+    protected = {n for n, e in spec.env.items() if e.protected}
+    if unset := sorted(protected - set(session.secret_versions) - set(secrets)):
+        raise _secret_unset(unset)
+    metas = session_metas(session.secret_versions, session.created_at)
+    base, items = _items(stored, new, metas, secrets, existing=session.secret_versions)
+    return _Plan(base, fingerprint_session(stored, session.secret_versions), items)
+
+
+async def live_session(conn, session_id: uuid.UUID) -> tuple[Session, dict[str, Any]] | None:
+    """The session and its stored spec while it is active; None when purged or being deleted."""
+    found = await sessions_repo.get_stored(conn, session_id)
+    return found if found is not None and found[0].desired == "active" else None
+
+
+async def _visible_session(
+    conn, session_id: uuid.UUID, caller: Session, *, hidden_as: str
+) -> tuple[Session, dict[str, Any]]:
+    """The target session as stored now, if the caller may still see it (`admin._target`: its
+    own, or one of a manageable preset; else as missing as an unknown); 409 while deleting."""
+    found = await sessions_repo.get_stored(conn, session_id)
+    if found is None:
+        raise not_found(hidden_as)
+    try:
+        await admin._target(conn, found[0].slug, caller)
+    except ApiError:
+        raise not_found(hidden_as) from None
+    if found[0].desired != "active":
+        raise _deleting()
+    return found
+
+
+async def _family(conn, session: Session, secrets: Mapping[str, SecretStr]) -> uuid.UUID | None:
+    """The preset whose Secret family stages the session's values, held FOR SHARE (the lock
+    order of every stager: preset, then the variable); a session with no preset takes none."""
+    if not secrets:
+        return None
+    family = session.preset_id
+    if family is None or await presets_repo.get_for_share(conn, family) is None:
+        raise ApiError(
+            422, "invalid_request", "protected values need a session started from a preset"
+        )
+    return family
+
+
+async def _based(
+    conn,
+    settings: Settings,
+    kind: str,
+    target_id: uuid.UUID,
+    body: schemas.ProposalIn | schemas.ProposalRevise,
+    caller: Session,
+    *,
+    hidden_as: str,
+) -> tuple[uuid.UUID | None, str, _Plan]:
+    """A preset or session target read now under its locks and the revision planned against
+    it: the preset whose Secret family stages the values, the target's display name, the plan."""
+    if kind == "preset":
+        preset = await _locked(conn, target_id, hidden_as=hidden_as)
+        return preset.id, preset.name, await _plan(conn, settings, preset, body.patch, body.secrets)
+    session, stored = await _visible_session(conn, target_id, caller, hidden_as=hidden_as)
+    family = await _family(conn, session, body.secrets)
+    plan = await _session_plan(settings, session, stored, body.patch, body.secrets)
+    return family, session.slug, plan
 
 
 async def _stage(
     request: Request,
     conn,
     settings: Settings,
-    preset_id: uuid.UUID,
+    preset_id: uuid.UUID | None,
     secrets: Mapping[str, SecretStr],
     proposal_id: int,
     revision: int,
@@ -203,6 +324,8 @@ async def _stage(
     so far, for the caller to delete when the transaction rolls back."""
     if not secrets:
         return
+    if preset_id is None:
+        raise RuntimeError("protected values need the preset of their Secret family")
     kube = secret_store.kube_of(request)
     for name in sorted(secrets):  # one lock order across concurrent proposals
         full = await secret_store.stage_secret(
@@ -310,24 +433,26 @@ async def create(
             return await get_view(
                 conn, settings, first, proposer=caller.id, visible_only=True
             ), False
-    if body.kind == "session":
-        raise _unsupported(body.kind)
     if not superleader:
         raise session_spec.not_superleader()
     if body.kind == "schedule":
         return await _create_schedule(request, conn, settings, body, caller, superleader)
     _check_values(body.secrets)
     async with conn.transaction():
-        target = await admin.manageable_preset(conn, body.target)
+        if body.kind == "session":
+            target_id = (await admin._target(conn, body.target, caller)).id
+        else:
+            target_id = (await admin.manageable_preset(conn, body.target)).id
     staged: list[tuple[uuid.UUID, str, int]] = []
     try:
         async with conn.transaction():
-            preset = await _locked(conn, target.id)
-            plan = await _plan(conn, settings, preset, body.patch, body.secrets)
-            proposal_id = await _insert(
-                conn, settings, body, caller, superleader, str(preset.id), preset.name, plan
+            family, name, plan = await _based(
+                conn, settings, body.kind, target_id, body, caller, hidden_as=body.kind
             )
-            await _stage(request, conn, settings, preset.id, body.secrets, proposal_id, 1, staged)
+            proposal_id = await _insert(
+                conn, settings, body, caller, superleader, str(target_id), name, plan
+            )
+            await _stage(request, conn, settings, family, body.secrets, proposal_id, 1, staged)
     except repo.ProposalExists as exc:  # a concurrent replay won the insert; nothing staged
         view = await get_view(
             conn, settings, exc.proposal_id, proposer=caller.id, visible_only=True
@@ -373,11 +498,16 @@ async def revise(
                     raise not_found("proposal")
                 visible = await _manageable(conn, live, hidden_as="proposal")
                 plan = _schedule_plan(live, body.patch, visible)
-            elif current.kind == "preset":
-                preset = await _locked(conn, uuid.UUID(current.target_id), hidden_as="proposal")
-                plan = await _plan(conn, settings, preset, body.patch, body.secrets)
             else:
-                raise _unsupported(current.kind)
+                family, _, plan = await _based(
+                    conn,
+                    settings,
+                    current.kind,
+                    uuid.UUID(current.target_id),
+                    body,
+                    caller,
+                    hidden_as="proposal",
+                )
             previous = current.revisions[0]  # `lock` loads the current revision only
             revision = await repo.add_revision(
                 conn,
@@ -389,9 +519,9 @@ async def revise(
                 items=plan.items,
                 ttl_seconds=settings.proposal_ttl_seconds,
             )
-            if current.kind == "preset":
+            if current.kind != "schedule":
                 await _stage(
-                    request, conn, settings, preset.id, body.secrets, proposal_id, revision, staged
+                    request, conn, settings, family, body.secrets, proposal_id, revision, staged
                 )
     except secret_store.SecretStoreError:
         await _rolled_back(request, conn, settings, staged)
@@ -432,11 +562,17 @@ async def live_fingerprint(conn, preset: presets_repo.Preset) -> str:
 
 
 async def _stale(conn, proposal: repo.Proposal) -> bool:
-    """Read-only (never changes state): the live preset differs from the current revision's. A
-    schedule is never read upstream here (module docstring): the review compares."""
-    if proposal.status not in repo.ACTIVE or proposal.kind != "preset":
+    """Read-only (never changes state): the live preset or session differs from the current
+    revision's (a gone one reads stale). A schedule is never read upstream here (module
+    docstring): the review compares."""
+    if proposal.status not in repo.ACTIVE or proposal.kind == "schedule":
         return False
     current = next(r for r in proposal.revisions if r.revision == proposal.revision)
+    if proposal.kind == "session":
+        found = await live_session(conn, uuid.UUID(proposal.target_id))
+        if found is None:
+            return True
+        return fingerprint_session(found[1], found[0].secret_versions) != current.fingerprint
     preset = await presets_repo.get(conn, uuid.UUID(proposal.target_id))
     if preset is None:
         return True
@@ -807,6 +943,24 @@ def _pydantic_text(exc: ValidationError) -> str:
     )
 
 
+def _approved(current: repo.Revision, decisions: Decisions) -> list[repo.Item]:
+    return [i for i in current.items if decisions[i.path][0] == "approved"]
+
+
+def _approved_spec(stored: Mapping[str, Any], approved: list[repo.Item]) -> SessionSpec:
+    """The stored spec with each approved path set to its proposed value (or removed), parsed
+    (422 `invalid_spec` with the pydantic text, never the input)."""
+    out = copy.deepcopy(dict(stored))
+    for item in approved:
+        _put(out, item.path, item.after)
+    try:
+        spec_in = SessionSpecIn.model_validate(out)
+    except ValidationError as exc:
+        raise ApiError(422, "invalid_spec", _pydantic_text(exc)) from None
+    spec, _ = spec_in.split()  # no values: an item `after` is a redacted declaration
+    return spec
+
+
 async def _apply(
     request: Request,
     conn,
@@ -824,15 +978,8 @@ async def _apply(
     change only (the Secret was written when it was staged), so the new version goes live exactly
     when the preset write commits, and a rollback leaves the reservation staged for a retry."""
     current = p.revisions[0]
-    approved = [i for i in current.items if decisions[i.path][0] == "approved"]
-    stored = copy.deepcopy(preset.spec)
-    for item in approved:
-        _put(stored, item.path, item.after)
-    try:
-        spec_in = SessionSpecIn.model_validate(stored)
-    except ValidationError as exc:
-        raise ApiError(422, "invalid_spec", _pydantic_text(exc)) from None
-    spec, _ = spec_in.split()  # no values: an item `after` is a redacted declaration
+    approved = _approved(current, decisions)
+    spec = _approved_spec(preset.spec, approved)
     try:
         new = await presets_api.validated_spec(spec, settings, preset.spec, preset.id)
     except ApiError as exc:
@@ -896,8 +1043,8 @@ async def _review_locked(
         )
     if p.kind == "schedule":
         return await _review_schedule(request, conn, settings, p, decisions)
-    if p.kind != "preset":
-        raise _unsupported(p.kind)
+    if p.kind == "session":
+        return await _review_session(conn, settings, p, decisions)
     preset = await presets_repo.get_for_update(conn, uuid.UUID(p.target_id))
     if preset is None:
         return await _close(conn, p, "target_gone", _gone_error(p.kind))
@@ -979,6 +1126,91 @@ async def _review_schedule(
         if not 200 <= status < 300:
             raise _upstream_failed(status)
     return await _record(conn, p, decisions, to, _Done(release=[p]))
+
+
+class _SessionChanged(Exception):
+    """The locked session no longer matches the revision's fingerprint."""
+
+
+async def _review_session(
+    conn, settings: Settings, p: repo.Proposal, decisions: Decisions
+) -> _Done:
+    """Plan 3.5, sessions: the preset steps with the session row, written by `replace_spec`
+    (row lock, fingerprint recheck under it, generation + 1); a session being deleted closes
+    the proposal `target_gone` with 409 `session_deleting`."""
+    current = p.revisions[0]
+    found = await sessions_repo.get_stored(conn, uuid.UUID(p.target_id))
+    if found is None:
+        return await _close(conn, p, "target_gone", _gone_error(p.kind))
+    session, stored = found
+    if session.desired != "active":
+        return await _close(conn, p, "target_gone", _deleting())
+    if p.status == "open" and fingerprint_session(stored, session.secret_versions) != (
+        current.fingerprint
+    ):
+        return await _close(conn, p, "stale", _stale_error(p.kind))
+    to = _outcome(decisions)
+    if to == "applied":
+        try:
+            async with conn.transaction():  # a stale target undoes the binds, not the mark
+                await _apply_session(conn, settings, session, stored, p, decisions)
+        except (secret_store.StagedStale, _SessionChanged, sessions_repo.SpecChanged):
+            return await _close(conn, p, "stale", _stale_error(p.kind))
+        except SessionBeingDeleted:
+            return await _close(conn, p, "target_gone", _deleting())
+        except sessions_repo.SessionNotFound:
+            return await _close(conn, p, "target_gone", _gone_error(p.kind))
+    return await _record(conn, p, decisions, to, _Done(release=[p]))
+
+
+async def _apply_session(
+    conn,
+    settings: Settings,
+    session: Session,
+    stored: dict[str, Any],
+    p: repo.Proposal,
+    decisions: Decisions,
+) -> None:
+    """Write the approved items onto the stored session spec and bind the approved staged values
+    into `secret_versions`, one `replace_spec` (one generation bump). No agent guard: a human
+    approved. Lock order: the preset FOR SHARE before `bind_staged` takes the variable lock, then
+    the session row (`set_secret` holds the preset FOR UPDATE while it takes the variable)."""
+    current = p.revisions[0]
+    approved = _approved(current, decisions)
+    spec = _approved_spec(stored, approved)
+    try:
+        filled = await session_spec.validated(spec, settings, session)
+    except ApiError as exc:
+        raise ApiError(422, "invalid_spec", exc.message) from None
+    bound = sorted(i.path.removeprefix("env.") for i in approved if i.secret)
+    protected = {n for n, e in spec.env.items() if e.protected}
+    if undeclared := [n for n in bound if n not in protected]:  # replace_spec does not check
+        raise ApiError(
+            422,
+            "invalid_spec",
+            f"not a protected variable of the approved spec: {', '.join(undeclared)}",
+        )
+    if unset := sorted(protected - set(session.secret_versions) - set(bound)):
+        raise ApiError(
+            422, "invalid_spec", f"protected variables with no value: {', '.join(unset)}"
+        )
+    versions: dict[str, str] = {}
+    if bound:
+        family = session.preset_id
+        if family is None or await presets_repo.get_for_share(conn, family) is None:
+            raise secret_store.StagedStale("the session has no preset to bind values from")
+        for name in bound:  # one lock order across concurrent writers
+            versions[name] = await secret_store.bind_staged(
+                conn, family, name, proposal_id=p.id, revision=current.revision
+            )
+
+    async def recheck(locked: sessions_repo.LockedSession) -> None:
+        if fingerprint_session(locked.spec, locked.secret_versions) != current.fingerprint:
+            raise _SessionChanged
+
+    await sessions_repo.replace_spec(
+        conn, session.id, stored, filled, recheck, secret_versions=versions or None
+    )
 
 
 async def _after_commit(request: Request, conn, settings: Settings, done: _Done) -> None:

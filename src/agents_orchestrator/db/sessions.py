@@ -803,13 +803,17 @@ async def replace_spec(
     SessionNotFound when the row is absent, SessionBeingDeleted unless it is active, SpecChanged
     when the stored JSONB is not `expected` (dict equality, not a parsed model). Then
     `recheck(locked)` runs on the fresh row; it may raise, and nothing is written then. Lock
-    order is the session row first; `recheck` may then take `presets` FOR SHARE (sessions, then
-    presets, as `set_init_scripts`). A spec that differs from the stored one is written with
-    generation + 1 and NOTIFY session_changed; an equal one writes and notifies nothing.
+    order within this call is the session row first; `recheck` may then take `presets` FOR SHARE
+    (sessions, then presets, as `set_init_scripts`). A spec that differs from the stored one is
+    written with generation + 1 and NOTIFY session_changed; an equal one writes and notifies
+    nothing.
 
     `secret_versions` ({ENV_NAME: Secret name}, from `k8s.secrets.bind_staged` in the caller's
     transaction) is merged into the stored map in the same UPDATE; a changed map is a change on
-    its own. Returns the row and whether it was written.
+    its own. Returns the row and whether it was written. A caller that binds holds more locks
+    before this call: the preset FOR SHARE, then the variable advisory locks (`bind_staged`),
+    then this row (presets, variables, sessions), because `set_secret` takes the preset FOR
+    UPDATE and then the variable lock; binding before the preset lock can deadlock with it.
     """
     async with conn.transaction():
         row = await _lock_row(conn, session_id)
