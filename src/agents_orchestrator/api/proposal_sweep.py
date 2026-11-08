@@ -20,7 +20,8 @@ held across the other units' Kubernetes calls:
 Each proposal is handled under `FOR UPDATE SKIP LOCKED`: a proposal a
 review (or revise, withdraw) holds is left to it and seen again next pass. Every transition is
 status-guarded and notifies the proposer once; a `NotInState` (another writer won) is skipped.
-Schedule proposals have no staged values; their staleness is checked on read and review only.
+Schedule proposals have no staged values; their staleness is checked at review only (views
+read `stale: false`).
 Session proposals (stage C) add their branch to steps 2 and 3.
 
 The Kubernetes client is built only when a step has a Secret to delete.

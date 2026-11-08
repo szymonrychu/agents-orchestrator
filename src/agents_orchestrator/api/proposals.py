@@ -619,6 +619,7 @@ def _schedule_plan(live: Mapping[str, Any], patch: dict[str, Any], visible: set[
         raise RequestValidationError(errors) from None
     if new["preset_id"] != base["preset_id"] and new["preset_id"] not in visible:
         raise not_found("preset")
+    new["cron"] = " ".join(new["cron"].split())  # agents-schedule stores it normalised
     paths = [f for f in SCHEDULE_FIELDS if new[f] != base[f]]
     if not paths:
         raise ApiError(422, "nothing_changed", "the patch changes nothing")
@@ -944,11 +945,15 @@ async def _review_schedule(
     live = await _fetch_schedule(request, settings, p.target_id, p)
     if live is None:
         return await _close(conn, p, "target_gone", _gone_error(p.kind))
+    visible = {str(i) for i in await presets_repo.manageable_ids(conn)}
+    if str(live.get("preset_id")) not in visible:  # parity with the sweeper's preset branch
+        return await _close(conn, p, "target_gone", _gone_error(p.kind))
     approved = {i.path: i.after for i in current.items if decisions[i.path][0] == "approved"}
     if p.status == "open" and live["updated_at"] != current.fingerprint:
-        landed = to == "applied" and _schedule_fields(live) == _schedule_with(
-            current.base, approved
-        )
+        expected = _schedule_with(current.base, approved)
+        if expected["timezone"] is None:  # the upstream fills its default timezone
+            expected["timezone"] = live.get("timezone")
+        landed = to == "applied" and _schedule_fields(live) == expected
         if not landed:
             return await _close(conn, p, "stale", _stale_error(p.kind))
     elif to == "applied":

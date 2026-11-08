@@ -70,6 +70,8 @@ class Schedules:
         if call.headers.get("if-match") != f'"{self.obj["updated_at"]}"':
             return 412, {"error": {"code": "precondition_failed", "message": "changed"}}
         body = call.json()
+        # agents-schedule stores the cron whitespace-normalised and fills its default timezone
+        body["cron"] = " ".join(body["cron"].split())
         self.obj.update(body, timezone=body.get("timezone") or "UTC")
         self.bump()
         return 200, copy.deepcopy(self.obj)
@@ -396,3 +398,94 @@ async def test_applying_one_schedule_proposal_makes_another_on_it_stale(pool, ri
     second = await _create(pool, rig, patch={"enabled": False})
     await _review(pool, rig, first)
     assert (await _state(pool, second.id))[0] == "stale"
+
+
+# ---------------------------------------------------------------- review follow-ups (B3 review)
+
+
+async def _fail_commit_then_retry(pool, rig, view, monkeypatch):
+    """The PUT lands, the orchestrator commit fails; then the review is retried."""
+    real = proposals._notify
+
+    async def broken(conn, p, text):
+        raise RuntimeError("commit forced to fail")
+
+    monkeypatch.setattr(proposals, "_notify", broken)
+    with pytest.raises(RuntimeError):
+        await _review(pool, rig, view)
+    monkeypatch.setattr(proposals, "_notify", real)
+    return await _review(pool, rig, view)
+
+
+async def test_a_cron_with_extra_whitespace_is_normalised_and_the_retry_is_applied(
+    pool, rig, monkeypatch
+):
+    view = await _create(pool, rig, patch={"cron": "0  4 * * *"})
+    [item] = view.revisions[-1].items
+    assert item.after == "0 4 * * *"  # what agents-schedule stores
+    done = await _fail_commit_then_retry(pool, rig, view, monkeypatch)
+    assert done.status == "applied"
+    assert len(rig.sched.puts()) == 1
+    assert await _state(pool, view.id) == ("applied", {"cron": "approved"})
+
+
+async def test_an_approved_null_timezone_matches_the_default_the_upstream_fills(
+    pool, rig, monkeypatch
+):
+    view = await _create(pool, rig, patch={"timezone": None})
+    done = await _fail_commit_then_retry(pool, rig, view, monkeypatch)
+    assert done.status == "applied"
+    assert len(rig.sched.puts()) == 1
+    assert await _state(pool, view.id) == ("applied", {"timezone": "approved"})
+
+
+async def test_a_schedule_whose_preset_became_hidden_is_target_gone_at_review(pool, rig):
+    view = await _create(pool, rig)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE presets SET superleader_manageable = false WHERE id = %s", (rig.vis,)
+        )
+    with pytest.raises(proposals.ApiError) as exc:
+        await _review(pool, rig, view)
+    _error(exc, 409, "target_gone")
+    assert rig.sched.puts() == []
+    assert (await _state(pool, view.id))[0] == "target_gone"
+
+
+async def test_an_upstream_409_is_invalid_spec_and_the_proposal_stays_open(pool, rig):
+    view = await _create(pool, rig)
+    rig.sched.put_answer = (409, {"error": {"code": "name_taken", "message": "name taken"}})
+    with pytest.raises(proposals.ApiError) as exc:
+        await _review(pool, rig, view)
+    assert _error(exc, 422, "invalid_spec").message == "name taken"
+    assert await _state(pool, view.id) == ("open", {"cron": "pending", "prompt": "pending"})
+
+
+async def test_an_upstream_503_is_503_and_the_proposal_stays_open(pool, rig):
+    view = await _create(pool, rig)
+    rig.sched.put_answer = (503, {"error": {"code": "down", "message": "down"}})
+    with pytest.raises(proposals.ApiError) as exc:
+        await _review(pool, rig, view)
+    _error(exc, 503, "upstream_unavailable")
+    assert await _state(pool, view.id) == ("open", {"cron": "pending", "prompt": "pending"})
+    assert await _notices(pool, rig.boss.id) == []
+
+
+async def test_revise_is_404_when_the_schedule_is_deleted_or_its_preset_hidden(pool, rig):
+    view = await _create(pool, rig)
+    body = schemas.ProposalRevise.model_validate({"patch": {"cron": "0 5 * * *"}})
+
+    async def revise():
+        async with pool.connection() as conn:
+            await proposals.revise(
+                _request(rig), conn, rig.settings, view.id, body, caller=rig.boss
+            )
+
+    rig.sched.obj["preset_id"] = rig.hid
+    with pytest.raises(proposals.ApiError) as exc:
+        await revise()
+    _error(exc, 404, "not_found")
+    rig.sched.gone = True
+    with pytest.raises(proposals.ApiError) as exc:
+        await revise()
+    _error(exc, 404, "not_found")
