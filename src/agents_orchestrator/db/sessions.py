@@ -312,25 +312,26 @@ SELECT c.*,
                  FROM agents a WHERE a.session_id = c.id AND a.gone_at IS NULL
                    AND a.start_failure IS NOT NULL), '[]'::jsonb) AS start_failures
 FROM sessions c
-WHERE c.desired = 'active' AND c.id <> %s
+WHERE c.desired = 'active' AND c.id <> %(caller)s
+  AND (%(project)s::text IS NULL OR c.project = %(project)s
+       OR COALESCE((c.spec->>'session_messaging')::boolean, false))
 ORDER BY c.slug
 """
 
 
 async def list_messaging_peers(
-    conn: psycopg.AsyncConnection, caller_session_id: uuid.UUID, *, superleaders_only: bool
+    conn: psycopg.AsyncConnection, caller_session_id: uuid.UUID, *, project: str | None
 ) -> list[MessagingPeer]:
-    """The sessions the caller may message (D6, D7): every other active session, or only the
-    other active superleader sessions, ordered by slug."""
+    """The sessions the caller may message (D6, D7, projects Q5 C), ordered by slug: every other
+    active session with `project` None (a superleader caller), else the other active sessions
+    of `project` plus every active superleader session."""
     async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(_PEERS, (caller_session_id,))
+        await cur.execute(_PEERS, {"caller": caller_session_id, "project": project})
         rows = await cur.fetchall()
     out = []
     for row in rows:
         spec = _from_row(row).spec
         superleader = bool(spec.session_messaging)
-        if superleaders_only and not superleader:
-            continue
         failures = row["start_failures"]
         state = start_state(row["ready_agents"], failures)
         out.append(

@@ -16,9 +16,13 @@ PAIR_WINDOW_SECONDS = 3600
 
 
 async def may_message(conn: Any, own: Session, target: Session, settings: Settings) -> bool:
-    """True when either end is a superleader, or the target messaged `own` within the reply
-    window (an answer needs a question, so only target -> own opens the right)."""
+    """True, in this order, when either end is a superleader, when both sessions are in the
+    same project (projects Q5 C; both rows are read by the caller's request, so a move revokes
+    it on the next one), or when the target messaged `own` within the reply window (an answer
+    needs a question, so only target -> own opens the right)."""
     if own.spec.session_messaging or target.spec.session_messaging:
+        return True
+    if own.project == target.project:
         return True
     return await session_messaging.sent_to_within(
         conn,

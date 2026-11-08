@@ -11603,7 +11603,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Sessions the caller's session may message (superleaders, or all for a superleader)",
+        "summary": "Sessions the caller may message (superleaders, own project; all for a superleader)",
         "tags": [
           "agent"
         ]

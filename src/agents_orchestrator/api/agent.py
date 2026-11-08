@@ -459,13 +459,15 @@ class SessionMessageQueued(BaseModel):
 @router.get(
     "/sessions",
     response_model=SessionPeers,
-    summary="Sessions the caller's session may message (superleaders, or all for a superleader)",
+    summary="Sessions the caller may message (superleaders, own project; all for a superleader)",
 )
 async def sessions_list(agent: Caller, pool: Pool) -> SessionPeers:
     async with pool.connection() as conn:
         session = await _session(conn, agent)
         peers = await sessions_repo.list_messaging_peers(
-            conn, agent.session_id, superleaders_only=not session.spec.session_messaging
+            conn,
+            agent.session_id,
+            project=None if session.spec.session_messaging else session.project,
         )
     return SessionPeers(
         sessions=[
@@ -511,14 +513,16 @@ async def session_send(
         if target.id == own.id:
             raise ApiError(422, "self_send", "a session cannot send a message to itself")
         if not await session_limits.may_message(conn, own, target, settings):
+            # may_message allows every same-project pair, so a refusal is always cross-project
             window = settings.session_reply_window_seconds
-            message = f"session {slug} is not a superleader and neither is the caller's session"
+            message = f"session {slug} is in another project and neither session is a superleader"
             if window > 0:
                 message = (
-                    f"session {slug} is not a superleader, neither is the caller's session,"
-                    f" and it has not messaged it in the last {window // 3600} hours"
+                    f"session {slug} is in another project, neither session is a superleader,"
+                    f" and it has not messaged the caller's session in the last"
+                    f" {window // 3600} hours"
                 )
-            raise ApiError(403, "target_not_superleader", message)
+            raise ApiError(403, "project_forbidden", message)
         if target.desired == "deleting":
             raise ApiError(409, "session_deleting", f"session {slug} is being discarded")
         hop = await session_limits.check_limits(conn, agent.id, own, target, settings)

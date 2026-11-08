@@ -1,6 +1,7 @@
 """Cross-session messaging agent routes (D6, D7, D10): GET /agent/v1/sessions and
 POST /agent/v1/sessions/{slug}/messages. A superleader session (`session_messaging` true) lists
-and messages every other session; every other session lists and messages only superleaders."""
+and messages every other session; every other session lists and messages the superleaders and
+the sessions of its own project (projects plan Q5 C)."""
 
 from __future__ import annotations
 
@@ -10,12 +11,19 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
-from factories import insert_agent, insert_message, insert_session, set_agent_status
+from factories import (
+    insert_agent,
+    insert_message,
+    insert_session,
+    set_agent_status,
+    two_project_fixture,
+)
 from psycopg.rows import dict_row
 from test_api_agent import AGENT_PORT, client_for, headers, make_settings, set_ip, token
 from test_api_sessions import assert_error
 
 from agents_orchestrator.api.app import create_app
+from agents_orchestrator.db import sessions as sessions_repo
 
 _ips = itertools.count(1)
 
@@ -50,9 +58,26 @@ async def _exec(pool, query: str, params: tuple = ()) -> None:
         await conn.execute(query, params)
 
 
-async def alone(pool, slug: str, *, superleader: bool = False, desired: str = "active") -> Sess:
+async def other_project(pool, slug: str = "other") -> str:
+    """A second project, so two sessions can sit in different projects."""
+    await _exec(pool, "INSERT INTO projects (slug, name) VALUES (%s, %s)", (slug, slug))
+    return slug
+
+
+async def alone(
+    pool,
+    slug: str,
+    *,
+    superleader: bool = False,
+    desired: str = "active",
+    project: str = "default",
+) -> Sess:
     row = await insert_session(
-        pool, slug=slug, spec=_spec({"replicas": 1}, superleader), desired=desired
+        pool,
+        slug=slug,
+        spec=_spec({"replicas": 1}, superleader),
+        desired=desired,
+        project=project,
     )
     a0 = await insert_agent(pool, row["id"], ordinal=0, ready=True)
     ip = _ip()
@@ -61,10 +86,16 @@ async def alone(pool, slug: str, *, superleader: bool = False, desired: str = "a
 
 
 async def hive(
-    pool, slug: str, *, superleader: bool = False, leader: bool = True, desired: str = "active"
+    pool,
+    slug: str,
+    *,
+    superleader: bool = False,
+    leader: bool = True,
+    desired: str = "active",
+    project: str = "default",
 ) -> Sess:
     spec = _spec({"replicas": 2, "max_replicas": 2}, superleader)
-    row = await insert_session(pool, slug=slug, spec=spec, desired=desired)
+    row = await insert_session(pool, slug=slug, spec=spec, desired=desired, project=project)
     a0 = await insert_agent(pool, row["id"], ordinal=0, ready=True)
     a1 = await insert_agent(pool, row["id"], ordinal=1, ready=True)
     ip0, ip1 = _ip(), _ip()
@@ -163,9 +194,10 @@ async def test_superleader_lists_all_sessions(pool, dsn):
 
 
 async def test_plain_session_lists_only_superleaders(pool, dsn):
+    """Each caller is alone in its project, so only the superleaders (of any project) show."""
     app = _app(pool, dsn)
     lonely = await alone(pool, "p-lonely")
-    lonely_hive = await hive(pool, "p-lonely-hive")
+    lonely_hive = await hive(pool, "p-lonely-hive", project=await other_project(pool))
     for caller in (lonely, lonely_hive):
         r = await _list(app, caller)
         assert r.status_code == 200, r.text
@@ -259,18 +291,19 @@ async def test_send_refusals_for_target(pool, dsn):
     app = _app(pool, dsn)
     boss = await hive(pool, "t-boss", superleader=True)
     plain = await hive(pool, "t-plain")
-    lone = await alone(pool, "t-lone")
-    deleting = await alone(pool, "t-deleting", desired="deleting")
+    other = await other_project(pool)
+    lone = await alone(pool, "t-lone", project=other)
+    deleting = await alone(pool, "t-deleting", desired="deleting", project=other)
     deleting_boss = await alone(pool, "t-deleting-boss", superleader=True, desired="deleting")
 
     assert_error(await _send(app, boss, "t-nobody"), 404, "not_found")
     assert_error(await _send(app, plain, "t-nobody"), 404, "not_found")
     assert_error(await _send(app, boss, boss.slug), 422, "self_send")
     assert_error(await _send(app, plain, plain.slug), 422, "self_send")
-    assert_error(await _send(app, plain, lone.slug), 403, "target_not_superleader")
-    assert_error(await _send(app, lone, plain.slug), 403, "target_not_superleader")
-    # target_not_superleader comes before session_deleting
-    assert_error(await _send(app, plain, deleting.slug), 403, "target_not_superleader")
+    assert_error(await _send(app, plain, lone.slug), 403, "project_forbidden")
+    assert_error(await _send(app, lone, plain.slug), 403, "project_forbidden")
+    # project_forbidden comes before session_deleting
+    assert_error(await _send(app, plain, deleting.slug), 403, "project_forbidden")
     assert_error(await _send(app, boss, deleting.slug), 409, "session_deleting")
     assert_error(await _send(app, plain, deleting_boss.slug), 409, "session_deleting")
     assert_error(await _send(app, boss, plain.slug, ""), 422, "invalid_request")
@@ -415,8 +448,8 @@ async def _said(pool, sender: Sess, receiver: Sess, *, hours_ago: float = 0) -> 
 async def test_reply_right_allows_answer_within_window(pool, dsn):
     app = _app(pool, dsn)
     a = await hive(pool, "rr-a")
-    b = await alone(pool, "rr-b")
-    assert_error(await _send(app, a, b.slug), 403, "target_not_superleader")
+    b = await alone(pool, "rr-b", project=await other_project(pool))
+    assert_error(await _send(app, a, b.slug), 403, "project_forbidden")
     await _said(pool, b, a)
     r = await _send(app, a, b.slug)
     assert r.status_code == 202, r.text
@@ -425,39 +458,39 @@ async def test_reply_right_allows_answer_within_window(pool, dsn):
 async def test_reply_right_expires(pool, dsn):
     app = _app(pool, dsn)
     a = await hive(pool, "re-a")
-    b = await alone(pool, "re-b")
+    b = await alone(pool, "re-b", project=await other_project(pool))
     await _said(pool, b, a, hours_ago=25)
     r = await _send(app, a, b.slug)
-    assert_error(r, 403, "target_not_superleader")
+    assert_error(r, 403, "project_forbidden")
     assert "24 hours" in r.json()["error"]["message"]
 
 
 async def test_reply_right_off_with_zero(pool, dsn):
     app = _app(pool, dsn, session_reply_window_seconds=0)
     a = await hive(pool, "rz-a")
-    b = await alone(pool, "rz-b")
+    b = await alone(pool, "rz-b", project=await other_project(pool))
     await _said(pool, b, a)
     r = await _send(app, a, b.slug)
-    assert_error(r, 403, "target_not_superleader")
+    assert_error(r, 403, "project_forbidden")
     assert "hours" not in r.json()["error"]["message"]
 
 
 async def test_reply_right_is_not_granted_by_own_message(pool, dsn):
     app = _app(pool, dsn)
     a = await hive(pool, "ro-a")
-    b = await alone(pool, "ro-b")
+    b = await alone(pool, "ro-b", project=await other_project(pool))
     await _said(pool, a, b)
-    assert_error(await _send(app, a, b.slug), 403, "target_not_superleader")
+    assert_error(await _send(app, a, b.slug), 403, "project_forbidden")
 
 
 async def test_reply_right_respects_limits(pool, dsn):
     a = await hive(pool, "rl-a")
-    b = await alone(pool, "rl-b")
+    b = await alone(pool, "rl-b", project=await other_project(pool))
     await _said(pool, b, a)
     app = _app(pool, dsn, session_message_pair_max_per_hour=1)
     assert_error(await _send(app, a, b.slug), 429, "pair_budget")
     c = await hive(pool, "rl-c")
-    d = await alone(pool, "rl-d")
+    d = await alone(pool, "rl-d", project=b.row["project"])
     await _said(pool, d, c)
     app = _app(pool, dsn, session_message_queued_max=1)
     other = await alone(pool, "rl-e")
@@ -496,3 +529,103 @@ async def test_session_tools_parity(pool, dsn):
     assert row["text"] == "from the plugin"
     assert row["sender_session_id"] == plain.id
     assert row["status"] == "queued"
+
+
+# Projects plan Q5 C, on the section 8 fixture: A1 (a, hive), A2 (a), B1 (b), S (superleader, a).
+
+
+async def _seat_list(app, seat):
+    async with client_for(app, seat.ip) as http:
+        return await http.get("/agent/v1/sessions", headers=headers(seat.id))
+
+
+async def _seat_send(app, seat, slug: str, ip: str | None = None):
+    async with client_for(app, ip or seat.ip) as http:
+        return await http.post(
+            f"/agent/v1/sessions/{slug}/messages",
+            json={"text": "hello"},
+            headers=headers(seat.id),
+        )
+
+
+def _slugs(r) -> list[str]:
+    assert r.status_code == 200, r.text
+    return [p["slug"] for p in r.json()["sessions"]]
+
+
+async def test_b1_sees_superleaders_only(pool, dsn):
+    seats = await two_project_fixture(pool)
+    app = _app(pool, dsn)
+    assert _slugs(await _seat_list(app, seats["B1"])) == [seats["S"].slug]
+
+
+async def test_a1_sees_s_a2_and_self(pool, dsn):
+    """A1 sees its project (A2) and the superleader S; its own session is never listed (it
+    cannot send to itself), and A2 sees A1 the same way. The superleader sees all."""
+    seats = await two_project_fixture(pool)
+    app = _app(pool, dsn)
+    a1, a2, b1, s = (seats[n].slug for n in ("A1", "A2", "B1", "S"))
+    assert _slugs(await _seat_list(app, seats["A1"])) == [a2, s]
+    assert _slugs(await _seat_list(app, seats["A2"])) == [a1, s]
+    assert _slugs(await _seat_list(app, seats["S"])) == [a1, a2, b1]
+
+
+async def test_a1_leader_messages_a2_leader(pool, dsn):
+    seats = await two_project_fixture(pool)
+    app = _app(pool, dsn)
+    for target in ("A2", "S"):
+        r = await _seat_send(app, seats["A1"], seats[target].slug)
+        assert r.status_code == 202, r.text
+    r = await _seat_send(app, seats["A2"], seats["A1"].slug)
+    assert r.status_code == 202, r.text
+    rows = await _rows(pool)
+    assert [(m["session_id"], m["sender_session_id"]) for m in rows] == [
+        (seats["A2"].id, seats["A1"].id),
+        (seats["S"].id, seats["A1"].id),
+        (seats["A1"].id, seats["A2"].id),
+    ]
+
+
+async def test_a1_to_b1_403_project_forbidden(pool, dsn):
+    seats = await two_project_fixture(pool)
+    app = _app(pool, dsn)
+    assert_error(await _seat_send(app, seats["A1"], seats["B1"].slug), 403, "project_forbidden")
+    assert_error(await _seat_send(app, seats["B1"], seats["A1"].slug), 403, "project_forbidden")
+    assert await _rows(pool) == []
+
+
+async def test_b1_messages_s(pool, dsn):
+    seats = await two_project_fixture(pool)
+    app = _app(pool, dsn)
+    r = await _seat_send(app, seats["B1"], seats["S"].slug)
+    assert r.status_code == 202, r.text
+    r = await _seat_send(app, seats["S"], seats["B1"].slug)
+    assert r.status_code == 202, r.text
+
+
+async def test_non_leader_member_refused_as_today(pool, dsn):
+    seats = await two_project_fixture(pool)
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT id FROM agents WHERE session_id = %s AND ordinal = 1", (seats["A1"].id,)
+        )
+        (member_id,) = await cur.fetchone()
+    await set_ip(pool, member_id, "10.9.201.1")
+    app = _app(pool, dsn)
+    for target in ("A2", "S", "B1"):
+        r = await _seat_send(app, seats["A1"], seats[target].slug, ip="10.9.201.1")
+        assert_error(r, 403, "not_leader")
+    assert await _rows(pool) == []
+
+
+async def test_moving_a2_to_b_revokes_on_next_request(pool, dsn):
+    seats = await two_project_fixture(pool)
+    app = _app(pool, dsn)
+    a1, a2 = seats["A1"], seats["A2"]
+    assert (await _seat_send(app, a1, a2.slug)).status_code == 202
+    assert a2.slug in _slugs(await _seat_list(app, a1))
+    async with pool.connection() as conn:
+        await sessions_repo.set_project(conn, a2.id, "b")
+    assert_error(await _seat_send(app, a1, a2.slug), 403, "project_forbidden")
+    assert a2.slug not in _slugs(await _seat_list(app, a1))
+    assert len(await _rows(pool)) == 1
