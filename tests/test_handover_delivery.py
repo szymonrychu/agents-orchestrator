@@ -252,3 +252,155 @@ async def test_transcript_rows_empty_without_events(pool):
     s, (a0, _, _) = await _hive(pool)
     async with pool.connection() as conn:
         assert await handover.transcript_rows(conn, a0["id"], datetime.now(UTC)) == []
+
+
+async def test_transcript_rows_start_after_latest_clear(pool):
+    # Q13: an ex-leader is cleared after a voluntary move and keeps its wrapper session; when it
+    # leads again, its next successor gets only the post-clear history.
+    s, (a0, _, _) = await _hive(pool)
+    now = datetime.now(UTC)
+    t = now - timedelta(minutes=10)
+
+    async def ev(type_, data, minutes, wrapper="w0"):
+        return await insert_event(
+            pool,
+            s["id"],
+            a0["id"],
+            wrapper_session_id=wrapper,
+            type=type_,
+            data=data,
+            ts=t + timedelta(minutes=minutes),
+            created_at=t + timedelta(minutes=minutes),
+        )
+
+    # a clear in an older wrapper session, or after the change, does not move the start
+    await ev("session_cleared", {}, 0, wrapper="older")
+    await ev("user_message", {"text": "first lead"}, 0)
+    await ev("session_cleared", {}, 1)
+    await ev("user_message", {"text": "second lead"}, 2)
+    await ev("session_cleared", {}, 3)
+    third = await ev("user_message", {"text": "third lead"}, 4)
+    await ev("session_cleared", {}, 20)
+
+    async with pool.connection() as conn:
+        got = await handover.transcript_rows(conn, a0["id"], now)
+    assert [r["id"] for r in got] == [third["id"]]
+
+
+async def test_transcript_rows_cleared_with_nothing_after(pool):
+    s, (a0, _, _) = await _hive(pool)
+    t = datetime.now(UTC) - timedelta(minutes=10)
+    await insert_event(
+        pool,
+        s["id"],
+        a0["id"],
+        wrapper_session_id="w0",
+        type="user_message",
+        data={"text": "old"},
+        ts=t,
+    )
+    await insert_event(
+        pool,
+        s["id"],
+        a0["id"],
+        wrapper_session_id="w0",
+        type="session_cleared",
+        data={},
+        ts=t + timedelta(minutes=1),
+        created_at=t + timedelta(minutes=1),
+    )
+    async with pool.connection() as conn:
+        assert await handover.transcript_rows(conn, a0["id"], datetime.now(UTC)) == []
+
+
+async def test_transcript_unaffected_by_reset(pool):
+    # the ex-leader's clear lands after the change: the notice still carries its pre-change
+    # history, and the clear marker never enters the body
+    s, (a0, a1, _) = await _hive(pool)
+    since = datetime.now(UTC) - timedelta(minutes=5)
+    await insert_event(
+        pool,
+        s["id"],
+        a0["id"],
+        wrapper_session_id="w0",
+        type="user_message",
+        data={"text": "led before the change"},
+        ts=since - timedelta(minutes=1),
+    )
+    await insert_event(
+        pool,
+        s["id"],
+        a0["id"],
+        wrapper_session_id="w0",
+        type="session_cleared",
+        data={},
+        ts=since + timedelta(seconds=10),
+        created_at=since + timedelta(seconds=10),
+    )
+    await _lead(pool, s["id"], a1["id"], 2, "handover: done", previous=a0["id"], since=since)
+    await _deliver(pool)
+    [msg] = await _messages(pool, s["id"])
+    [att] = await _attachments(pool, msg["id"])
+    body = att.data.decode()
+    assert "led before the change" in body
+    assert "session_cleared" not in body
+
+
+async def test_transcript_keeps_body_when_pod_clock_lags_db_clock(pool):
+    # the clear this handover triggers is ingested after the change (DB clock) but carries a pod
+    # `ts` slightly before `since` (lagging pod clock): it must not count, the body is kept
+    s, (a0, a1, _) = await _hive(pool)
+    since = datetime.now(UTC) - timedelta(minutes=5)
+    await insert_event(
+        pool,
+        s["id"],
+        a0["id"],
+        wrapper_session_id="w0",
+        type="user_message",
+        data={"text": "led before the change"},
+        ts=since - timedelta(seconds=30),
+        created_at=since - timedelta(seconds=30),
+    )
+    await insert_event(
+        pool,
+        s["id"],
+        a0["id"],
+        wrapper_session_id="w0",
+        type="session_cleared",
+        data={},
+        ts=since - timedelta(seconds=3),
+        created_at=since + timedelta(seconds=2),
+    )
+    await _lead(pool, s["id"], a1["id"], 2, "handover: done", previous=a0["id"], since=since)
+    await _deliver(pool)
+    [msg] = await _messages(pool, s["id"])
+    [att] = await _attachments(pool, msg["id"])
+    assert "led before the change" in att.data.decode()
+
+
+async def test_ex_leader_leading_again_omits_pre_clear_history(pool):
+    s, (a0, a1, _) = await _hive(pool)
+    since = datetime.now(UTC) - timedelta(minutes=1)
+    t = since - timedelta(minutes=30)
+    for minutes, type_, data in (
+        (0, "user_message", {"text": "pre-clear work"}),
+        (1, "session_cleared", {}),
+        (2, "user_message", {"text": "post-clear work"}),
+    ):
+        await insert_event(
+            pool,
+            s["id"],
+            a0["id"],
+            wrapper_session_id="w0",
+            type=type_,
+            data=data,
+            ts=t + timedelta(minutes=minutes),
+            created_at=t + timedelta(minutes=minutes),
+        )
+    await _lead(pool, s["id"], a1["id"], 5, "handover: done", previous=a0["id"], since=since)
+    await _deliver(pool)
+    [msg] = await _messages(pool, s["id"])
+    [att] = await _attachments(pool, msg["id"])
+    body = att.data.decode()
+    assert "post-clear work" in body
+    assert "pre-clear work" not in body

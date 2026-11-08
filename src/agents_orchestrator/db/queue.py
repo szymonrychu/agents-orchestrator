@@ -23,7 +23,7 @@ from psycopg.types.json import Jsonb
 from agents_orchestrator.db.eligibility import ELIGIBLE, HANDOVER_TRIGGER, NOTICE_PENDING
 from agents_orchestrator.db.pool import notify
 
-COMMAND_KINDS = frozenset({"interrupt", "compact", "restart", "rebootstrap"})
+COMMAND_KINDS = frozenset({"interrupt", "compact", "restart", "rebootstrap", "clear"})
 COMMAND_FINAL = frozenset({"done", "failed", "cancelled"})
 CHECK_FINAL = frozenset({"passed", "failed", "cancelled"})
 

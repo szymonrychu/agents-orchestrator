@@ -750,7 +750,7 @@ def test_wrapper_settings_mapped():
     assert s["turn_stall_seconds"] == 90
     assert s["max_restarts"] == 3
     assert s["restart_continue_prompt"] == "continue please"
-    assert s["commands"] == {"agent": ["compact", "context"]}
+    assert s["commands"] == {"client": ["compact", "clear"], "agent": ["compact", "context"]}
     assert (s["max_sessions"], s["resume_on_start"], s["idle_timeout_seconds"]) == (1, True, 0)
     assert s["ask_user_question"] == "deny"
     assert cfg["limits"]["turn_max_seconds"] == 600
@@ -793,6 +793,7 @@ def test_no_wrapper_block_renders_unchanged():
         "ask_user_question": "deny",
         "restart_continue_prompt": "Claude was restarted. Continue the task where you left off.",
         "interrupt_settle_seconds": 20,
+        "commands": {"client": ["compact", "clear"]},
     }
     assert cfg["claude"]["permissions"] == {
         "deny": ["EnterPlanMode", "ExitPlanMode", "AskUserQuestion"]
@@ -853,7 +854,15 @@ def test_hive_with_agent_commands_validates(tmp_path, monkeypatch):
         monkeypatch.setenv(k, v)
     path = tmp_path / "config.yaml"
     path.write_text(by_kind(objs)["ConfigMap"]["data"]["config.yaml"])
-    assert load_config(path).sessions.commands.agent == ["compact"]
+    commands = load_config(path).sessions.commands
+    assert commands.agent == ["compact"]
+    assert commands.client == ["compact", "clear"]
+
+
+def test_client_commands_rendered_without_agent_commands():
+    # the orchestrator's own `compact` and `clear` commands need the client allowlist
+    cfg = wrapper_cfg({})
+    assert cfg["sessions"]["commands"] == {"client": ["compact", "clear"]}
 
 
 def test_interrupt_settle_comes_from_the_orchestrator_setting():

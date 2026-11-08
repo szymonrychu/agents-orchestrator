@@ -47,6 +47,10 @@ STARTUP_SLACK = 12
 KUBE_PASSTHROUGH_ENV = ("KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT")
 DOCKER_PASSTHROUGH_ENV = ("DOCKER_HOST",)
 DOCKER_CONFIG_DIR = "/docker-config"
+# The wrapper commands the orchestrator itself sends (`sessions.commands.client`): `compact`
+# (api and dispatcher) and `clear`, the ex-leader reset after a voluntary handover
+# (claude-code-wrapper >= 0.10.0; an older wrapper refuses it with 403 command_denied).
+CLIENT_COMMANDS = ("compact", "clear")
 AGENT_PASSTHROUGH_ENV = ("ORCH_AGENT_TOKEN", "ORCH_AGENT_URL", "ORCH_SESSION_ID", "POD_NAME")
 
 AGENT_USAGE_TOKEN_ENV = "CCW_USAGE_TOKEN"
@@ -407,7 +411,7 @@ def _apply_wrapper(cfg: dict[str, Any], wrapper: WrapperSettings, session: Sessi
         if key in user:
             sessions[key] = user[key]
     if "agent_commands" in user:
-        sessions["commands"] = {"agent": user["agent_commands"]}
+        sessions["commands"]["agent"] = user["agent_commands"]
     if "turn_max_seconds" in user:
         cfg["limits"]["turn_max_seconds"] = user["turn_max_seconds"]
     if "plugins" in user:
@@ -470,6 +474,7 @@ def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
             "restart_continue_prompt": _escape(settings.default_restart_continue_prompt),
             # the priority send timeout is derived from it (Settings.priority_send_timeout_seconds)
             "interrupt_settle_seconds": settings.wrapper_interrupt_settle_seconds,
+            "commands": {"client": list(CLIENT_COMMANDS)},
         },
         "prompts": {"system_append": ASK_IN_WRITING_PROMPT},
         "limits": {

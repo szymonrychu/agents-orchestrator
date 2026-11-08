@@ -14,7 +14,9 @@ leader record: the api the agents' handovers and the user overrides, the reconci
 (`reconciler/rollout.py`).
 `session_leaders` and every request decision belong to the dispatcher, through
 `leadership_pass`, which runs under the per-session claim lock of `db/queue.py` so a leader
-change and a message claim never interleave.
+change and a message claim never interleave. A voluntary handover (an agent `handover` other
+than `rollout`) also queues a `clear` command for the ex-leader in the same transaction (Q13);
+forced moves and user overrides never do.
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ from agents_orchestrator.db.eligibility import (
     THRESHOLD,
 )
 from agents_orchestrator.db.pool import notify
-from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE
+from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE, enqueue_command
 
 CHANNEL = "leadership_requested"
 LEADER_CHANGED_CHANNEL = "leader_changed"
@@ -319,6 +321,11 @@ def _waits_for_boundary(req: dict, leader: dict | None) -> bool:
     return bool(leader["background_busy"]) and not (req["reason"] == "rollout" and req["overdue"])
 
 
+def _voluntary(req: dict) -> bool:
+    """The leader chose to hand over: a `handover` other than the reconciler's `rollout`."""
+    return req["kind"] == "handover" and req["reason"] != "rollout"
+
+
 async def leadership_pass(
     conn: psycopg.AsyncConnection, session_id: uuid.UUID, policy: PassPolicy = DEFAULT_POLICY
 ) -> LeaderChange | None:
@@ -375,6 +382,9 @@ async def leadership_pass(
                 previous = leader["agent_id"] if leader else None
                 change = await _set_leader(conn, session_id, target, reason, previous)
                 leader = await _leader(conn, session_id)
+                if previous is not None and _voluntary(req):
+                    # Q13: the ex-leader starts clean (`/clear`) at its true boundary.
+                    await enqueue_command(conn, previous, "clear")
 
         # 3. Scale-down: a leader whose ordinal a scale-down removes moves at once (no turn
         # boundary: a leaving agent is already out of routing), to the successor among the

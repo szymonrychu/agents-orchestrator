@@ -35,6 +35,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.requests import HTTPConnection
 
+from agents_orchestrator.k8s.render import CLIENT_COMMANDS
+
 MAX_SESSIONS = 4
 REPLAY = 100
 MAX_PAGE = 1000
@@ -322,6 +324,9 @@ class FakeWrapper:
         self.notes_max_chars = 2000
         self._notes_delay = 0.0
         self.requests: list[tuple[str, str]] = []  # (method, path) of every authenticated call
+        # `sessions.commands.client` as the orchestrator renders it: a client command outside it
+        # is 403 command_not_allowed, as in the wrapper
+        self.client_commands: list[str] = list(CLIENT_COMMANDS)
         self.app = self._build_app()
 
     # ------------------------------------------------------------------ lifecycle
@@ -811,8 +816,8 @@ class FakeWrapper:
             self._get(session_id)
             body = await self._json_body(request)
             name = body.get("name") or body.get("command")
-            if name not in ("compact", "context", "mcp", "reload-plugins", "reload-skills"):
-                raise _Err(422, "invalid_request", f"unknown command {name}")
+            if name not in self.client_commands:
+                raise _Err(403, "command_not_allowed", f"command {name} is not allowed")
             self.emit("command_queued", {"name": name}, session_id)
             return {"command_id": self._new_id("cmd-"), "state": "queued"}
 
