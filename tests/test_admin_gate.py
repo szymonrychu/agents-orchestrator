@@ -34,6 +34,7 @@ ROUTERS = (admin.router, admin.session_router, proposal_routes.proposal_router)
 EDITOR_ROUTES = {
     ("GET", f"{ADMIN_PREFIX}/sessions/{{slug}}"),
     ("PATCH", f"{ADMIN_PREFIX}/sessions/{{slug}}"),
+    ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/leadership/withdraw"),
 }
 PROPOSER_ROUTES = {
     ("POST", f"{ADMIN_PREFIX}/proposals"),
@@ -76,8 +77,8 @@ async def mark_trigger(pool, session_id, service="agents-webhook"):
 
 async def test_every_admin_route_carries_its_gate(pool, dsn):
     """Each route carries exactly the gate of its router: the session editor gate on the two
-    session spec routes, the proposer gate on the proposal routes, the superleader gate on every
-    other."""
+    session spec routes and the handover withdraw, the proposer gate on the proposal routes, the
+    superleader gate on every other."""
     app = create_app(make_settings(dsn), pool)
     routes = admin_routes(app)
     assert len(routes) >= 7

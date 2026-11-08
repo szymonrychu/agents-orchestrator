@@ -2,9 +2,10 @@
 
 One gate covers `router`: `require_superleader` (a live agent of a session with
 `session_messaging` set, whoever created the session). `session_router` (GET and PATCH
-`/sessions/{slug}`) carries `require_session_editor` on each route instead, which also admits
-any other session's leader on its own slug. Every admitted call is audited without values or bodies
-(D15): one log line and one `events` row the UI feed shows.
+`/sessions/{slug}`, POST `/sessions/{slug}/leadership/withdraw`) carries
+`require_session_editor` on each route instead, which also admits any other session's leader on
+its own slug. Every admitted call is audited without values or bodies (D15): one log line and
+one `events` row the UI feed shows.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.sessions import Cfg, Pool, Usage
 from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import events as events_repo
+from agents_orchestrator.db import leadership
 from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.db import queue as q
 from agents_orchestrator.db import sessions as sessions_repo
@@ -185,6 +187,7 @@ ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("PUT", f"{ADMIN_PREFIX}/presets/{{ref}}/secrets/{{name}}"): "preset",
     ("GET", f"{ADMIN_PREFIX}/sessions/{{slug}}"): "session",
     ("PATCH", f"{ADMIN_PREFIX}/sessions/{{slug}}"): "session",
+    ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/leadership/withdraw"): "session",
     ("POST", f"{ADMIN_PREFIX}/sessions"): "create",
     ("DELETE", f"{ADMIN_PREFIX}/sessions/{{slug}}"): "session",
     ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/restart"): "session",
@@ -333,6 +336,34 @@ async def patch_session(
             caller_agent=agent,
             superleader=superleader,
         )
+
+
+@session_router.post(
+    "/sessions/{slug}/leadership/withdraw",
+    response_model=schemas.Withdrawn,
+    dependencies=[SessionEditor],
+)
+async def withdraw_handover(
+    slug: str, body: schemas.WithdrawIn, request: Request, pool: Pool
+) -> schemas.Withdrawn:
+    """Withdraw a pending handover request (`request_id`), or every one of the session when it
+    is omitted: the session's own leader, or a superleader on its own or a manageable session.
+    A withdrawn request is rejected with reason `withdrawn` and never applied. The reconciler's
+    `rollout` request is never withdrawn (409 `rollout_request` by id, left queued without)."""
+    _, caller = caller_of(request)
+    async with pool.connection() as conn:
+        target = await _target(conn, slug, caller) if caller.spec.session_messaging else caller
+        withdrawn = await leadership.withdraw_handovers(conn, target.id, body.request_id)
+        if body.request_id is not None and not withdrawn:
+            reason = await leadership.handover_reason(conn, target.id, body.request_id)
+            if reason is None:
+                raise not_found("handover request")
+            if reason == "rollout":
+                raise ApiError(
+                    409, "rollout_request", "a rollout handover request cannot be withdrawn"
+                )
+            raise ApiError(409, "not_pending", "the handover request is already decided")
+    return schemas.Withdrawn(withdrawn=withdrawn)
 
 
 @router.post("/sessions", status_code=201, response_model=schemas.SessionView)

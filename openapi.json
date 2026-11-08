@@ -5791,6 +5791,40 @@
         "title": "WebhookHook",
         "type": "object"
       },
+      "WithdrawIn": {
+        "additionalProperties": false,
+        "properties": {
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Id"
+          }
+        },
+        "title": "WithdrawIn",
+        "type": "object"
+      },
+      "Withdrawn": {
+        "properties": {
+          "withdrawn": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Withdrawn",
+            "type": "array"
+          }
+        },
+        "required": [
+          "withdrawn"
+        ],
+        "title": "Withdrawn",
+        "type": "object"
+      },
       "WorkspaceCache": {
         "additionalProperties": false,
         "description": "`restore_key` and `save_key` are Jinja templates (surface `archive_name`).\n\nNone is unset: a preset-derived session gets `default_cache_key` for both when both are None.\nAn empty string is explicit: empty `restore_key` is a fresh start, empty `save_key` is\nrestore-only. A restore_key ending in `/` restores the newest archive under that prefix.",
@@ -9085,6 +9119,91 @@
           }
         },
         "summary": "Restart Agent",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/agent/v1/admin/sessions/{slug}/leadership/withdraw": {
+      "post": {
+        "description": "Withdraw a pending handover request (`request_id`), or every one of the session when it\nis omitted: the session's own leader, or a superleader on its own or a manageable session.\nA withdrawn request is rejected with reason `withdrawn` and never applied. The reconciler's\n`rollout` request is never withdrawn (409 `rollout_request` by id, left queued without).",
+        "operationId": "withdraw_handover_agent_v1_admin_sessions__slug__leadership_withdraw_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WithdrawIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Withdrawn"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Withdraw Handover",
         "tags": [
           "admin"
         ]

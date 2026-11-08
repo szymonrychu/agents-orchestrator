@@ -50,7 +50,9 @@ class Dispatcher:
         self.hive = hive.HiveState()
         self._push_wake = asyncio.Event()
         self._pass_policy = leadership.PassPolicy(
-            settings.default_auto_compact_pct, settings.rollout_max_defer_seconds
+            settings.default_auto_compact_pct,
+            settings.rollout_max_defer_seconds,
+            settings.handover_max_wait_seconds,
         )
 
     # ------------------------------------------------------------------ lifecycle

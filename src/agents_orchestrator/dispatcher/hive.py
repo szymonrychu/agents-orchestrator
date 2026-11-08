@@ -23,8 +23,10 @@ is evaluated on every push tick, outside the hash and claim path above, and reme
 session in `HiveState`.
 
 The leader's keyed `rollout_due` note (voluntary handover 3.7) tells it a rollout waits on it: sent
-once per (leader, epoch, revision) while the reconciler's `status.rollout.leader_since` is set,
-retried on the next tick when the push fails, forgotten once the window closes.
+once per (leader, epoch, revision) while the reconciler's `status.rollout.leader_since` is set and
+the current leader's own ordinal is in `status.rollout.pending` (the stored status may still name
+a previous leader's pod), retried on the next tick when the push fails, forgotten once the window
+closes or the leader's pod is current.
 
 The other keyed note is the requester's `leadership_request` outcome (hive-decoupling D6): each
 `handover` request an agent made that the dispatcher decided (applied or rejected) within the
@@ -257,6 +259,7 @@ class _Plan:
     static: bool
     leader: str
     leader_id: uuid.UUID
+    leader_ordinal: int
     epoch: int
     hashes: dict[str, str]  # per agent, the state hash it last accepted
     members: list[dict[str, Any]]
@@ -292,7 +295,7 @@ async def _read(
     threshold = handover_threshold(spec, settings)
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "SELECT a.pod_name AS leader, l.agent_id, l.epoch, l.state_hash"
+            "SELECT a.pod_name AS leader, a.ordinal, l.agent_id, l.epoch, l.state_hash"
             " FROM session_leaders l JOIN agents a ON a.id = l.agent_id WHERE l.session_id = %s",
             (cid,),
         )
@@ -330,6 +333,7 @@ async def _read(
         static=bool(spec.get("static")),
         leader=leader["leader"],
         leader_id=leader["agent_id"],
+        leader_ordinal=leader["ordinal"],
         epoch=leader["epoch"],
         hashes=_load_hashes(leader["state_hash"]),
         members=members,
@@ -420,11 +424,11 @@ async def _push_rollout(
 ) -> int:
     """Tell the leader a rollout waits on it, once per (leader, epoch, revision).
 
-    Runs on every tick while `status.rollout.leader_since` is set; when it is not (or there is
-    no leader to tell) the key is forgotten. A failed push is not remembered: the next tick
+    Runs on every tick while `status.rollout.leader_since` is set and the leader's own pod is
+    pending; otherwise the key is forgotten. A failed push is not remembered: the next tick
     retries it.
     """
-    if plan.rollout is None:
+    if plan.rollout is None or plan.leader_ordinal not in plan.rollout.get("pending", []):
         state.rollout_sent.pop(plan.session_id, None)
         return 0
     leader = next((m for m in plan.receivers if m["pod_name"] == plan.leader), None)

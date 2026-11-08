@@ -26,6 +26,7 @@ HIVE_TOOLS = [
     "me",
     "activity",
     "leadership_handover",
+    "leadership_withdraw",
     "lock_claim",
     "lock_release",
     "lock_list",
@@ -52,7 +53,7 @@ CLOSE = ["self_close"]  # offered last to every session without session_messagin
 ADMIN_TOOLS = [
     "presets_list", "preset_get", "preset_create", "preset_replace", "preset_patch",
     "preset_delete", "preset_copy", "session_get", "session_patch", "session_create",
-    "session_discard", "session_restart",
+    "session_discard", "session_restart", "leadership_withdraw",
     "agent_restart", "command_get", "webhooks_list", "webhook_get_meta", "webhook_create",
     "webhook_update", "webhook_clone", "webhook_rotate", "webhook_delete",
     "webhook_filters_set", "webhook_events", "webhook_event", "webhook_template_preview",
@@ -136,7 +137,10 @@ def test_hive_session_tools(messaging, spec_fields, hive_allow):
     then the admin tools only with session_messaging."""
     spec = SessionSpec(session_messaging=messaging, **spec_fields)
     allow = on_start.orchestrator_allow(spec)
-    assert allow == [*hive_allow, *TAIL_TOOLS, *(ADMIN_TOOLS if messaging else [*EDIT, *CLOSE])]
+    # a superleader hive lists leadership_withdraw once, among its hive tools
+    admin = [t for t in ADMIN_TOOLS if t != "leadership_withdraw"]
+    assert allow == [*hive_allow, *TAIL_TOOLS, *(admin if messaging else [*EDIT, *CLOSE])]
+    assert len(allow) == len(set(allow))
     assert entries(spec)["orchestrator"]["allow"] == allow
 
 
@@ -496,12 +500,13 @@ def test_golden_allowlist_superleader_leader_and_service_session():
     """Golden rendered allowlists: the admin tools and secret_set exactly when session_messaging
     is on, whoever created the session; a plain leader never gets them."""
     hive = [*HIVE_TOOLS, "scale", *TAIL_TOOLS]
-    assert rendered_allow(None, replicas=2, session_messaging=True) == [*hive, *ADMIN_TOOLS]
+    admin = [t for t in ADMIN_TOOLS if t != "leadership_withdraw"]  # listed once, as a hive tool
+    assert rendered_allow(None, replicas=2, session_messaging=True) == [*hive, *admin]
     assert rendered_allow(None, replicas=2) == [*hive, *EDIT, *CLOSE]
     assert rendered_allow(None, replicas=2, session_messaging=False) == [*hive, *EDIT, *CLOSE]
     assert rendered_allow("agents-webhook", replicas=2, session_messaging=True) == [
         *hive,
-        *ADMIN_TOOLS,
+        *admin,
     ]
     assert rendered_allow("agents-webhook", replicas=2) == [*hive, *EDIT, *CLOSE]
 
@@ -590,3 +595,10 @@ async def test_admin_tools_exist_in_plugin():
         missing = set(entry["allow"]) - offered
         assert not missing, (spec, sorted(missing))
     assert set(on_start.ADMIN_TOOLS) <= offered
+
+
+def test_withdraw_offered_to_hives_and_superleaders():
+    """A leader withdraws its own pending handover; a superleader any manageable session's."""
+    assert "leadership_withdraw" in on_start.orchestrator_allow(SessionSpec(replicas=2))
+    assert "leadership_withdraw" in on_start.orchestrator_allow(SessionSpec(session_messaging=True))
+    assert "leadership_withdraw" not in on_start.orchestrator_allow(SessionSpec())

@@ -27,6 +27,7 @@ from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.k8s.kube import KubeError
 from agents_orchestrator.k8s.render import HASH_ANNOTATION, render_session
 from agents_orchestrator.reconciler import Reconciler
+from agents_orchestrator.reconciler import rollout as replacer
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import SessionSpec
 from agents_orchestrator.tokens import tokens_for
@@ -661,11 +662,11 @@ async def test_leader_held_without_idle_eligible_member(eager):
     assert env.pod_deletes() == ["agent-alpha-1"]
     env.ready(1)
 
-    for state in ("busy", "dead"):  # a busy or a dead peer cannot take the lead
-        await set_agent_status(env.pool, agents[1].id, state=state)
-        await env.tick(3)
-        assert await env.handovers(c.id) == []
-        assert env.pod_deletes() == ["agent-alpha-1"]
+    # a busy peer cannot take the lead (a dead one is revived: test_dead_current_peer_revived)
+    await set_agent_status(env.pool, agents[1].id, state="busy")
+    await env.tick(3)
+    assert await env.handovers(c.id) == []
+    assert env.pod_deletes() == ["agent-alpha-1"]
     rollout = await env.rollout(c.id)
     assert rollout is not None and rollout["leader_pending"] is True
     assert rollout["pending"] == [0]
@@ -906,3 +907,137 @@ async def test_voluntary_move_in_window_rolls_old_leader_as_member(env):
     await env.tick()
     assert env.pod_deletes() == ["agent-alpha-1", "agent-alpha-0"]
     assert await env.handovers(c.id) == []  # no forced handover was needed
+
+
+# ---------------------------------------------------------- a dead peer on the current revision
+
+
+async def _age_revived(env: Env, session_id, ordinal: int, seconds: float) -> None:
+    """Move `status.rollout.revived.<ordinal>` `seconds` into the past (the database clock)."""
+    await env.execute(
+        "UPDATE sessions SET status = jsonb_set(status, ARRAY['rollout', 'revived', %s],"
+        " to_jsonb((now() - make_interval(secs => %s))::text)) WHERE id = %s",
+        (str(ordinal), seconds, session_id),
+    )
+
+
+async def _leader_alone_with_dead_peer(env: Env):
+    """Two agents, the leader 0 the last outdated pod, peer 1 current but dead."""
+    c, agents, _ = await rolling(env, replicas=2)
+    await lead(env, c.id, agents[0].id)
+    await env.tick()
+    assert env.pod_deletes() == ["agent-alpha-1"]
+    env.ready(1)
+    await set_agent_status(env.pool, agents[1].id, state="dead")
+    return c, agents
+
+
+async def test_dead_current_peer_revived(eager):
+    env = eager
+    c, agents = await _leader_alone_with_dead_peer(env)
+    await env.tick()
+    # the dead peer can never lead: its pod is replaced so its agent resumes, the leader's kept
+    assert env.pod_deletes() == ["agent-alpha-1", "agent-alpha-1"]
+    assert await env.handovers(c.id) == []
+    rollout = await env.rollout(c.id)
+    assert rollout["leader_pending"] is True and list(rollout["revived"]) == ["1"]
+
+    # once per revision: still dead after its new pod is Ready, it is not replaced again
+    env.ready(1)
+    await env.tick(3)
+    assert env.pod_deletes() == ["agent-alpha-1", "agent-alpha-1"]
+    assert list((await env.rollout(c.id))["revived"]) == ["1"]
+
+    # it comes back eligible: the forced handover proceeds as usual
+    await set_agent_status(env.pool, agents[1].id, state="idle")
+    await env.tick()
+    assert [r["reason"] for r in await env.handovers(c.id)] == ["rollout"]
+    assert env.pod_deletes() == ["agent-alpha-1", "agent-alpha-1"]
+
+
+async def test_dead_peer_revived_only_after_the_leader_window(env):
+    c, agents = await _leader_alone_with_dead_peer(env)
+    await env.tick(2)
+    assert env.pod_deletes() == ["agent-alpha-1"]
+    await _age(env, c.id, "leader_since", env.settings.rollout_handover_seconds + 1)
+    await env.tick()
+    assert env.pod_deletes() == ["agent-alpha-1", "agent-alpha-1"]
+
+
+async def test_lone_leader_pod_swapped_at_an_idle_boundary(eager):
+    env = eager
+    c, agents = await _leader_alone_with_dead_peer(env)
+    await env.tick()
+    env.ready(1)
+    await env.tick(2)  # revived, still dead, inside the revive grace: the leader is kept
+    assert env.pod_deletes() == ["agent-alpha-1", "agent-alpha-1"]
+    await _age_revived(env, c.id, 1, replacer.REVIVE_GRACE_SECONDS + 1)
+
+    # the leader is the only live member: its own pod rolls, but never in an open turn ...
+    await set_agent_status(env.pool, agents[0].id, state="busy")
+    await env.tick(2)
+    held = await insert_message(env.pool, c.id, status="dispatching", agent_id=agents[0].id)
+    await set_agent_status(env.pool, agents[0].id, state="idle")
+    await env.tick(2)
+    await env.execute("UPDATE messages SET status = 'sent' WHERE id = %s", (held["id"],))
+    # ... nor with a background subagent inside the BACKGROUND_BUSY bound, even past the cap
+    await set_agent_status(env.pool, agents[0].id, state="idle", background_subagents=_running())
+    await _age(env, c.id, "since", env.settings.rollout_max_defer_seconds + 1)
+    await env.tick(2)
+    assert env.pod_deletes() == ["agent-alpha-1", "agent-alpha-1"]
+
+    await set_agent_status(env.pool, agents[0].id, state="idle")
+    await env.tick()
+    assert env.pod_deletes() == ["agent-alpha-1", "agent-alpha-1", "agent-alpha-0"]
+    assert await env.handovers(c.id) == []  # no successor exists: no request
+    # the pass finds no successor and keeps the leader row for the recreated pod
+    async with env.pool.connection() as conn:
+        assert await leadership.leadership_pass(conn, c.id) is None
+    rows = await env.rows("SELECT agent_id FROM session_leaders WHERE session_id = %s", (c.id,))
+    assert rows == [{"agent_id": agents[0].id}]
+    env.ready(0)
+    await env.tick()
+    assert await env.rollout(c.id) is None
+
+
+async def test_peer_dead_mid_turn_revived_then_lone_leader_swapped(eager):
+    # the peer died in a turn it had accepted (busy -> dead, no idle transition): its dispatch
+    # reservation stays, yet a dead agent is in no turn, so it neither blocks its revive nor
+    # the lone-leader swap
+    env = eager
+    c, agents = await _leader_alone_with_dead_peer(env)
+    await _dispatched_at(env, agents[1].id, "1 microsecond")
+    await env.tick()
+    assert env.pod_deletes() == ["agent-alpha-1", "agent-alpha-1"]
+    assert list((await env.rollout(c.id))["revived"]) == ["1"]
+
+    env.ready(1)
+    await env.tick(2)  # still dead inside the revive grace: the leader is kept
+    assert env.pod_deletes() == ["agent-alpha-1", "agent-alpha-1"]
+    await _age_revived(env, c.id, 1, replacer.REVIVE_GRACE_SECONDS + 1)
+    await env.tick()
+    assert env.pod_deletes() == ["agent-alpha-1", "agent-alpha-1", "agent-alpha-0"]
+    assert await env.handovers(c.id) == []
+
+
+async def test_dead_peer_with_inflight_message_not_revived(eager):
+    # a message still `dispatching` to the dead peer holds its revive until verify settles it
+    env = eager
+    c, agents = await _leader_alone_with_dead_peer(env)
+    held = await insert_message(env.pool, c.id, status="dispatching", agent_id=agents[1].id)
+    await env.tick(2)
+    assert env.pod_deletes() == ["agent-alpha-1"]
+    await env.execute("UPDATE messages SET status = 'sent' WHERE id = %s", (held["id"],))
+    await env.tick()
+    assert env.pod_deletes() == ["agent-alpha-1", "agent-alpha-1"]
+
+
+async def test_lone_leader_kept_while_a_live_peer_is_busy(eager):
+    env = eager
+    c, agents, _ = await rolling(env, replicas=2)
+    await lead(env, c.id, agents[0].id)
+    await env.tick()
+    env.ready(1)
+    await set_agent_status(env.pool, agents[1].id, state="busy")
+    await env.tick(3)
+    assert env.pod_deletes() == ["agent-alpha-1"]  # a live peer will take over: no swap

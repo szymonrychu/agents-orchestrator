@@ -23,6 +23,7 @@ HIVE_TOOLS = [
     "me",
     "activity",
     "leadership_handover",
+    "leadership_withdraw",
     "lock_claim",
     "lock_release",
     "lock_list",
@@ -54,7 +55,7 @@ TASK_TOOLS = [
 ADMIN_TOOLS = [
     "presets_list", "preset_get", "preset_create", "preset_replace", "preset_patch",
     "preset_delete", "preset_copy", "session_get", "session_patch", "session_create",
-    "session_discard", "session_restart",
+    "session_discard", "session_restart", "leadership_withdraw",
     "agent_restart", "command_get", "webhooks_list", "webhook_get_meta", "webhook_create",
     "webhook_update", "webhook_clone", "webhook_rotate", "webhook_delete",
     "webhook_filters_set", "webhook_events", "webhook_event", "webhook_template_preview",
@@ -78,7 +79,8 @@ def orchestrator_allow(spec: SessionSpec) -> list[str]:
     `secret_set` are listed exactly when `session_messaging` is enabled, whoever created the
     session; every other session gets `SESSION_EDIT_TOOLS` (its spec and its proposals) and
     `self_close` last instead (a superleader is never offered `self_close`; it has the edit tools
-    as admin tools).
+    as admin tools). A tool in two groups (`leadership_withdraw`, a hive and an admin tool) is
+    listed once.
     """
     shared = [
         *SESSION_TOOLS,
@@ -90,7 +92,7 @@ def orchestrator_allow(spec: SessionSpec) -> list[str]:
     if not spec.hive:
         return ["me", *shared]
     scale = [SCALE_TOOL] if spec.scalable else []
-    return [*HIVE_TOOLS, *scale, *shared]
+    return list(dict.fromkeys([*HIVE_TOOLS, *scale, *shared]))
 
 
 def _orchestrator_entry(
