@@ -14,7 +14,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from agents_orchestrator.db import leadership
-from agents_orchestrator.db.eligibility import ELIGIBLE
+from agents_orchestrator.db.eligibility import ELIGIBLE, background_busy
 from agents_orchestrator.db.pool import notify
 from agents_orchestrator.db.queue import SessionBeingDeleted, enqueue_message
 from agents_orchestrator.db.start_state import start_reason, start_state
@@ -652,7 +652,7 @@ _IDLE_PREDICATE = f"""
         SELECT 1 FROM agents a LEFT JOIN agent_status st ON st.agent_id = a.id
         WHERE a.session_id = s.id AND a.gone_at IS NULL
           AND (st.state IS DISTINCT FROM 'idle' OR st.current_turn_id IS NOT NULL
-               OR st.waiting_since IS NOT NULL))
+               OR st.waiting_since IS NOT NULL OR {background_busy("st")}))
     AND NOT EXISTS (
         SELECT 1 FROM messages m
         WHERE m.session_id = s.id AND m.status IN ('queued', 'dispatching', 'verifying'))
