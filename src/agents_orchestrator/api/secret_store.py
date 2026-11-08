@@ -16,14 +16,24 @@ from agents_orchestrator.k8s.secrets import (
     SecretMeta,
     SecretStoreError,
     SecretUnset,
+    StagedStale,
+    bind_staged,
+    collect_bound,
     delete_webhook_credential,
+    forget_unsaved,
     gc,
     has_rows,
     list_metas,
+    promote_staged,
     put_webhook_credential,
+    reap_unreserved,
+    releasable,
+    release,
     secret_name,
+    secret_version,
     set_secret,
     snapshot_versions,
+    stage_secret,
     sync_declared,
 )
 
@@ -33,23 +43,40 @@ __all__ = [
     "SecretMeta",
     "SecretStoreError",
     "SecretUnset",
+    "StagedStale",
+    "bind_staged",
     "close_kube",
+    "collect_bound",
     "delete_webhook_credential",
+    "forget_unsaved",
     "gc",
     "secret_name",
+    "secret_version",
     "has_rows",
     "kube_of",
+    "kube_of_app",
     "list_metas",
+    "promote_staged",
     "put_webhook_credential",
+    "reap_unreserved",
+    "releasable",
+    "release",
     "set_secret",
     "snapshot_versions",
+    "stage_secret",
     "sync_declared",
 ]
 
 
 def kube_of(request: Request) -> KubeApi:
-    """The app's Kubernetes client: the one given to `create_app`, else one built on first use."""
-    state = request.app.state
+    """The Kubernetes client of the request's app (`kube_of_app`)."""
+    return kube_of_app(request.app)
+
+
+def kube_of_app(app: FastAPI) -> KubeApi:
+    """The app's Kubernetes client: the one given to `create_app`, else one built on first use.
+    Routes reach it through `kube_of`; the proposals sweeper, which has no request, directly."""
+    state = app.state
     if state.kube is None:
         state.kube = LightkubeApi()
         state.kube_owned = True

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -71,6 +70,18 @@ async def _validated(
     if human_only_base is not None:
         dumped = spec.model_dump(mode="json", exclude_unset=True)
         guard_agent_edit(human_only_base, dumped, values, request, privileged=True)
+    return await validated_spec(spec, settings, stored, preset_id), values
+
+
+async def validated_spec(
+    spec: SessionSpec,
+    settings: Settings,
+    stored: dict[str, Any] | None = None,
+    preset_id: uuid.UUID | None = None,
+) -> dict[str, Any]:
+    """`check_spec` with the stored spec's exemptions (a model or image that left the allowlist
+    stays accepted while unchanged) and the preset's derived cache key; returns the spec as it is
+    stored (no defaults filled). No agent guard runs here."""
     stored_spec = None
     if stored is not None:
         try:
@@ -79,18 +90,24 @@ async def _validated(
             stored_spec = None
     derived = default_cache_key(preset_id) if preset_id is not None else None
     await run_in_threadpool(check_spec, spec, settings, stored_spec, derived_cache_key=derived)
-    return spec.model_dump(mode="json", exclude_unset=True), values
+    return spec.model_dump(mode="json", exclude_unset=True)
 
 
-def _store_failed() -> ApiError:
+def check_secret_size(value: SecretStr) -> None:
+    """413 when a value does not fit one Kubernetes Secret."""
+    if len(value.get_secret_value().encode()) > SECRET_MAX_BYTES:
+        raise ApiError(413, "secret_too_large", f"a secret holds at most {SECRET_MAX_BYTES} bytes")
+
+
+def store_failed() -> ApiError:
     return ApiError(502, "secret_store_failed", "could not store a protected variable")
 
 
-async def _forget(kube, namespace: str, names: list[str]) -> None:
-    """Best effort: delete Secret versions written for a save that did not stick."""
-    for name in names:
-        with contextlib.suppress(Exception):
-            await kube.delete("Secret", namespace, name)
+async def forget(conn, kube, namespace: str, versions: list[tuple[uuid.UUID, str, int]]) -> None:
+    """Best effort: delete the (preset id, name, version) Secrets written for a save that did not
+    stick, never one a concurrent writer has made live since (`forget_unsaved`)."""
+    if versions:
+        await secret_store.forget_unsaved(conn, kube, namespace, versions)
 
 
 async def _save(
@@ -110,7 +127,7 @@ async def _save(
     left as it is.
     """
     declared = sorted(n for n, e in spec.get("env", {}).items() if e.get("protected"))
-    created: list[str] = []
+    created: list[tuple[uuid.UUID, str, int]] = []
     kube = None
     try:
         async with conn.transaction():
@@ -121,18 +138,18 @@ async def _save(
                     meta = await secret_store.set_secret(
                         conn, kube, settings.namespace, preset.id, name, value, collect=False
                     )
-                    created.append(secret_store.secret_name(preset.id, name, meta.version))
+                    created.append((preset.id, name, meta.version))
                 await secret_store.sync_declared(
                     conn, kube, settings.namespace, preset.id, declared, collect=False
                 )
     except secret_store.SecretStoreError as exc:
-        await _forget(kube, settings.namespace, created)
+        await forget(conn, kube, settings.namespace, created)
         if isinstance(exc, secret_store.PresetNotFound):
             raise not_found("preset") from None
-        raise _store_failed() from None
+        raise store_failed() from None
     except BaseException:
         if kube is not None:
-            await _forget(kube, settings.namespace, created)
+            await forget(conn, kube, settings.namespace, created)
         raise
     if kube is not None:
         await secret_store.gc(conn, kube, settings.namespace, preset_id=preset.id)
@@ -478,9 +495,7 @@ async def put_secret(
     """Set the value of a protected variable (a new version). The value is never echoed.
 
     The superleader may not set one on a privileged preset (403 `privileged_target`)."""
-    value = body.value.get_secret_value()
-    if len(value.encode()) > SECRET_MAX_BYTES:
-        raise ApiError(413, "secret_too_large", f"a secret holds at most {SECRET_MAX_BYTES} bytes")
+    check_secret_size(body.value)
     found = await by_ref(conn, preset)
 
     def refuse_privileged(spec: dict) -> None:
@@ -515,7 +530,7 @@ async def put_secret(
     except secret_store.PresetNotFound:
         raise not_found("preset") from None
     except secret_store.SecretStoreError:
-        raise _store_failed() from None
+        raise store_failed() from None
     return schemas.SecretView(
         name=meta.name, set=meta.set, version=meta.version, updated_at=meta.updated_at
     )

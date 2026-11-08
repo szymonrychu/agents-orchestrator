@@ -172,7 +172,8 @@ def _sent_secrets(body: schemas.PresetIn) -> list[str]:
 
 
 # What each non-relay admin route hides from the superleader: "preset" and "session" routes
-# answer 404 for a target outside its remit, "list" and "create" are filtered or forced.
+# answer 404 for a target outside its remit, "list" and "create" are filtered or forced,
+# "proposal" routes see only the caller's own proposals on targets it may manage (404 otherwise).
 ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("GET", f"{ADMIN_PREFIX}/presets"): "list",
     ("POST", f"{ADMIN_PREFIX}/presets"): "create",
@@ -190,13 +191,18 @@ ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/agents/{{pod}}/restart"): "session",
     ("GET", f"{ADMIN_PREFIX}/commands/{{command_id}}"): "none",
     ("GET", f"{ADMIN_PREFIX}/usage"): "none",
+    ("POST", f"{ADMIN_PREFIX}/proposals"): "proposal",
+    ("GET", f"{ADMIN_PREFIX}/proposals"): "proposal",
+    ("GET", f"{ADMIN_PREFIX}/proposals/{{proposal_id}}"): "proposal",
+    ("POST", f"{ADMIN_PREFIX}/proposals/{{proposal_id}}/revise"): "proposal",
+    ("POST", f"{ADMIN_PREFIX}/proposals/{{proposal_id}}/withdraw"): "proposal",
 }
 
 
 # ---------------------------------------------------------------- presets (O6)
 
 
-async def _manageable_preset(conn, ref: str) -> presets_repo.Preset:
+async def manageable_preset(conn, ref: str) -> presets_repo.Preset:
     """A preset by id or name; one the superleader may not manage is as missing as an unknown."""
     found = await presets_api.by_ref(conn, ref)
     if not found.superleader_manageable:
@@ -222,7 +228,7 @@ async def create_preset(
 @router.get("/presets/{ref}", response_model=schemas.PresetView)
 async def get_preset(ref: str, pool: Pool) -> schemas.PresetView:
     async with pool.connection() as conn:
-        found = await _manageable_preset(conn, ref)
+        found = await manageable_preset(conn, ref)
         return await presets_api.get_one(conn, found.id)
 
 
@@ -232,7 +238,7 @@ async def replace_preset(
 ) -> schemas.PresetView:
     touched(request, *_sent_secrets(body))
     async with pool.connection() as conn:
-        found = await _manageable_preset(conn, ref)
+        found = await manageable_preset(conn, ref)
         return await presets_api.replace(request, conn, settings, found.id, body, superleader=True)
 
 
@@ -241,14 +247,14 @@ async def patch_preset(
     ref: str, body: schemas.PresetPatch, request: Request, pool: Pool, settings: Cfg
 ) -> schemas.PresetView:
     async with pool.connection() as conn:
-        found = await _manageable_preset(conn, ref)
+        found = await manageable_preset(conn, ref)
         return await presets_api.patch(request, conn, settings, found.id, body)
 
 
 @router.delete("/presets/{ref}", status_code=204, response_model=None)
 async def delete_preset(ref: str, request: Request, pool: Pool, settings: Cfg) -> Response:
     async with pool.connection() as conn:
-        found = await _manageable_preset(conn, ref)
+        found = await manageable_preset(conn, ref)
         await presets_api.remove(request, conn, settings, found.id, superleader=True)
     return Response(status_code=204)
 
@@ -258,7 +264,7 @@ async def copy_preset(
     ref: str, request: Request, pool: Pool, body: schemas.CopyPreset | None = None
 ) -> schemas.PresetView:
     async with pool.connection() as conn:
-        found = await _manageable_preset(conn, ref)
+        found = await manageable_preset(conn, ref)
         return await presets_api.copy(
             conn, found.id, body.name if body else None, superleader=True, request=request
         )
@@ -270,7 +276,7 @@ async def set_preset_secret(
 ) -> schemas.SecretView:
     touched(request, name)
     async with pool.connection() as conn:
-        found = await _manageable_preset(conn, ref)
+        found = await manageable_preset(conn, ref)
         return await presets_api.put_secret(
             request, conn, settings, str(found.id), name, body, superleader=True
         )

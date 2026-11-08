@@ -125,6 +125,9 @@ async def _refused(
     if fields is not None:
         assert request.state.preset_fields == fields
         assert exc.extra["fields"] == fields
+    if code in ("human_only_field", "privileged_target"):
+        assert exc.extra["proposable"] is True
+        assert exc.message.endswith("; send it as a proposal: proposal_create")
     assert await _row(pool, target.id) == before
     return exc
 
@@ -316,11 +319,20 @@ async def test_foreign_privileged_target_refused(pool, settings, boss, flag):
         settings,
         target,
         boss,
-        {"peers": False, "max_attempts": 3},
+        {"start_prompt": "p", "init_scripts": ["x"]},
         403,
         "privileged_target",
-        ["max_attempts", "peers"],
+        ["init_scripts", "start_prompt"],
     )
+
+
+@pytest.mark.parametrize("flag", FLAGS)
+async def test_foreign_privileged_target_non_security_passes(pool, settings, boss, flag):
+    target, _, _ = await _managed(pool, settings, "svc-priv-nonsec", {flag: True})
+    patch = {"peers": False, "max_attempts": 3, "inactivity": {"close_seconds": 120}}
+    view = await _patch(pool, settings, target, boss, patch)
+    assert view.spec.peers is False and view.spec.max_attempts == 3
+    assert view.spec.inactivity.close_seconds == 120
 
 
 @pytest.mark.parametrize("flag", FLAGS)
@@ -570,7 +582,14 @@ async def test_race_grant_turned_on_refuses_foreign_edit(pool, settings, boss, m
 
     calls = _between_read_and_write(monkeypatch, grant)
     await _refused_after_change(
-        pool, settings, target, boss, {"peers": False}, 403, "privileged_target", ["peers"]
+        pool,
+        settings,
+        target,
+        boss,
+        {"start_prompt": "p"},
+        403,
+        "privileged_target",
+        ["start_prompt"],
     )
     assert len(calls) == 1  # SpecChanged, then the re-read refuses before any lock
     assert (await _row(pool, target.id))["spec"]["kube_cluster_access"] is True

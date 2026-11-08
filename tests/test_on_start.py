@@ -56,6 +56,7 @@ ADMIN_TOOLS = [
     "chat_admin_room", "chat_users", "chat_room_allow", "chat_open", "chat_open_status",
     "chat_open_confirm", "secret_set", "history_search", "history_get",
     "history_records", "usage_get",
+    "proposal_create", "proposal_revise", "proposals_list", "proposal_get", "proposal_withdraw",
 ]  # fmt: skip
 SECRET = "s3cr3t-token-value"
 PLUGINS_REPO = "https://github.com/szymonrychu/any-mcp-tatara-plugins"
@@ -546,3 +547,18 @@ def test_trigger_session_gets_task_tools_and_chat():
 def test_session_labels_set_in_allow_list():
     assert "session_labels_set" in on_start.orchestrator_allow(SessionSpec(replicas=1))
     assert "session_labels_set" in on_start.orchestrator_allow(SessionSpec(replicas=2))
+
+
+def test_superleader_allowlist_has_proposal_tools():
+    """The five proposal tools are admin tools: superleaders get them, alone sessions do not."""
+    names = [
+        "proposal_create",
+        "proposal_revise",
+        "proposals_list",
+        "proposal_get",
+        "proposal_withdraw",
+    ]
+    assert [t for t in on_start.ADMIN_TOOLS if "proposal" in t] == names
+    spec = SessionSpec(replicas=1, session_messaging=True)
+    assert set(names) <= set(entries(spec)["orchestrator"]["allow"])
+    assert not set(names) & set(entries(SessionSpec(replicas=1))["orchestrator"]["allow"])

@@ -60,6 +60,7 @@ ADMIN_TOOLS = [
     "chat_admin_room", "chat_users", "chat_room_allow", "chat_open", "chat_open_status",
     "chat_open_confirm", "secret_set", "history_search", "history_get",
     "history_records", "usage_get",
+    "proposal_create", "proposal_revise", "proposals_list", "proposal_get", "proposal_withdraw",
 ]  # fmt: skip
 
 
