@@ -287,7 +287,14 @@ def test_fixed_changes_null_equals_absent():
     assert fixed_changes({"cache": {"save_key": "a"}}, {"cache": None}) == ["cache"]
 
 
-DEFAULTS = {"quota_default": 100, "reminder_default": 0, "close_default": 0}
+DEFAULTS = {
+    "quota_default": 100,
+    "reminder_default": 0,
+    "close_default": 0,
+    "docker_cpu_default": "4",
+    "docker_memory_default": "8Gi",
+    "docker_storage_default": "30Gi",
+}
 
 
 def tighten(stored, new, **defaults):
@@ -543,3 +550,82 @@ def test_tighten_all_rules_together():
         "resources.limits.cpu",
         "usage_quota.five_hour_pct",
     ]
+
+
+def _dk(**sizes):
+    return {"docker": True, **sizes}
+
+
+@pytest.mark.parametrize(
+    ("field", "low", "high"),
+    [
+        ("docker_cpu", "2", "6"),
+        ("docker_memory", "4Gi", "12Gi"),
+        ("docker_storage", "10Gi", "50Gi"),
+    ],
+)
+def test_tighten_docker_sizes(field, low, high):
+    assert tighten(_dk(**{field: low}), _dk(**{field: high})) == [field]  # raised
+    assert tighten(_dk(**{field: high}), _dk(**{field: low})) == []  # lowered
+    assert tighten(_dk(**{field: low}), _dk(**{field: low})) == []  # kept
+    assert tighten(_dk(), _dk(**{field: low})) == []  # unset -> lower than default
+    assert tighten(_dk(), _dk(**{field: high})) == [field]  # unset -> above the default
+    assert tighten(_dk(), _dk()) == []
+
+
+@pytest.mark.parametrize(
+    ("field", "same", "other"),
+    [
+        ("docker_cpu", "1", "1000m"),
+        ("docker_cpu", "500m", "0.5"),
+        ("docker_memory", "1Gi", "1024Mi"),
+        ("docker_storage", "2Gi", "2048Mi"),
+    ],
+)
+def test_tighten_docker_sizes_compare_quantities_not_strings(field, same, other):
+    assert tighten(_dk(**{field: same}), _dk(**{field: other})) == []
+    assert tighten(_dk(**{field: other}), _dk(**{field: same})) == []
+
+
+@pytest.mark.parametrize(
+    ("field", "default", "below", "above"),
+    [
+        ("docker_cpu", "4", "2", "6"),
+        ("docker_memory", "8Gi", "4Gi", "12Gi"),
+        ("docker_storage", "30Gi", "10Gi", "50Gi"),
+    ],
+)
+def test_tighten_docker_clearing_reads_as_the_deploy_default(field, default, below, above):
+    key = f"{field}_default"
+    # Cleared (absent or null): the default applies, looser only when it is higher.
+    assert tighten(_dk(**{field: below}), _dk(), **{key: default}) == [field]
+    assert tighten(_dk(**{field: below}), _dk(**{field: None}), **{key: default}) == [field]
+    assert tighten(_dk(**{field: above}), _dk(), **{key: default}) == []
+    assert tighten(_dk(**{field: default}), _dk(), **{key: default}) == []
+    # An unset stored value reads as the default too, so a changed default moves the line.
+    assert tighten(_dk(), _dk(**{field: below}), **{key: default}) == []
+    assert tighten(_dk(), _dk(**{field: above}), **{key: default}) == [field]
+    assert tighten(_dk(), _dk(**{field: default}), **{key: default}) == []
+
+
+def test_tighten_docker_sizes_are_independent():
+    stored = _dk(docker_cpu="2", docker_memory="8Gi", docker_storage="20Gi")
+    new = _dk(docker_cpu="4", docker_memory="4Gi", docker_storage="40Gi")
+    assert tighten(stored, new) == ["docker_cpu", "docker_storage"]
+
+
+def test_tighten_docker_off_drops_the_sizes_and_is_tighter():
+    stored = _dk(docker_cpu="2", docker_memory="4Gi", docker_storage="10Gi")
+    assert tighten(stored, {}) == []
+    assert tighten(stored, {"docker": None}) == []
+    assert tighten(stored, {"docker": False}) == []
+
+
+def test_tighten_docker_ignores_sizes_unless_both_sides_have_docker():
+    # Turning docker on is the human-only grant guard's business, not this rule's.
+    assert tighten({}, _dk(docker_cpu="64")) == []
+    assert tighten({"docker": False}, _dk(docker_memory="64Gi")) == []
+    # Without docker on the new side the sizes are not read at all.
+    assert tighten(_dk(docker_cpu="2"), {"docker_cpu": "64"}) == []
+    # Without docker on the stored side nothing is compared.
+    assert tighten({"docker_cpu": "2"}, _dk(docker_cpu="64")) == []

@@ -17,7 +17,7 @@ and false equal:
 
 A live session adds two rules of its own: `fixed_changes` (fields that cannot change on a
 running session) and `tighten_changes` (limits a regular leader may only lower: usage quota,
-inactivity, autoclose and pod resources).
+inactivity, autoclose, pod resources and docker sizes).
 
 All functions work on JSON dicts as stored (model_dump(mode="json",
 exclude_unset=True)) and never mutate their inputs. The main port never calls
@@ -256,6 +256,22 @@ def _resource_changes(stored: dict[str, Any], new: dict[str, Any]) -> list[str]:
     return out
 
 
+def _docker_changes(
+    stored: dict[str, Any], new: dict[str, Any], defaults: dict[str, str]
+) -> list[str]:
+    """`docker_cpu`, `docker_memory` and `docker_storage` whose effective size got looser. The
+    effective size is the spec value, else the deploy default the renderer uses (`defaults`);
+    quantities are compared parsed (1Gi equals 1024Mi). Only when both specs have docker on:
+    turning it off drops the sizes (tighter) and turning it on is the human-only grant guard's."""
+    if not (stored.get("docker") and new.get("docker")):
+        return []
+    return [
+        field
+        for field, default in defaults.items()
+        if parse_quantity(new.get(field) or default) > parse_quantity(stored.get(field) or default)
+    ]
+
+
 def tighten_changes(
     stored: dict[str, Any],
     new: dict[str, Any],
@@ -263,13 +279,18 @@ def tighten_changes(
     quota_default: int,
     reminder_default: int,
     close_default: int,
+    docker_cpu_default: str,
+    docker_memory_default: str,
+    docker_storage_default: str,
 ) -> list[str]:
     """The limit paths whose effective value got looser from `stored` to `new` (sorted):
     `usage_quota.five_hour_pct` and `.seven_day_pct` (unset is `quota_default`, higher is
     looser), `inactivity.reminder_seconds` and `.close_seconds` (unset is the default, 0 is
     off and so infinite, longer is looser), `autoclose_after_seconds` (unset is never, so
     clearing or raising is looser) and `resources.requests.*` / `resources.limits.*` (see
-    `_resource_changes`). Lowering, or keeping, a limit is never reported."""
+    `_resource_changes`) and `docker_cpu` / `docker_memory` / `docker_storage` (unset is the
+    deploy default, higher is looser; see `_docker_changes`). Lowering, or keeping, a limit is
+    never reported."""
     defaults = {
         "five_hour_pct": quota_default,
         "seven_day_pct": quota_default,
@@ -286,6 +307,17 @@ def tighten_changes(
     if _autoclose(new) > _autoclose(stored):
         out.append("autoclose_after_seconds")
     out.extend(_resource_changes(stored, new))
+    out.extend(
+        _docker_changes(
+            stored,
+            new,
+            {
+                "docker_cpu": docker_cpu_default,
+                "docker_memory": docker_memory_default,
+                "docker_storage": docker_storage_default,
+            },
+        )
+    )
     return sorted(out)
 
 
