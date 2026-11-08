@@ -308,3 +308,19 @@ async def test_internal_routes_not_relayed(rig):
     assert ADMIN_PREFIX + "/chats/room-requests/{request_id}/confirm" in paths
     assert (await rig.call("PUT", URL + "/5/decision", json={})).status_code in (404, 405)
     assert not rig.fakes["connector"].calls
+
+
+# ------------------------------------------------------------------- X-Orch-Projects
+
+
+async def test_every_taskboard_call_sends_all_projects_scope(rig):
+    """check_task (GET), ensure_decision (POST) and confirm (GET) all send `X-Orch-Projects: *`."""
+    Connector(rig)
+    r = await rig.call("POST", URL, json=BODY)
+    assert r.status_code == 201, r.text
+    r = await rig.call("POST", confirm_url())
+    assert r.status_code in (200, 409), r.text
+    calls = rig.app.state.fake_taskboard.calls
+    assert {c.method for c in calls} == {"GET", "POST"}
+    assert len(calls) >= 3
+    assert all(c.headers.get_list("x-orch-projects") == ["*"] for c in calls)
