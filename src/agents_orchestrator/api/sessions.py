@@ -193,9 +193,23 @@ def agent_view(r: dict) -> schemas.AgentView:
         if r["waiting_reason"]
         else None,
         bootstrap=_bootstrap_view(r["bootstrap_step"]),
-        bootstrap_failure=_bootstrap_view(r["bootstrap_failure"]),
+        bootstrap_failure=_bootstrap_view(r["bootstrap_failure"])
+        or _start_failure_view(r["start_failure"]),
         permission_mode_state=r["permission_mode_state"],
         permission_mode_reason=r["permission_mode_reason"],
+    )
+
+
+def _start_failure_view(failure: dict | None) -> schemas.AgentBootstrapStep | None:
+    if not failure:
+        return None
+    return schemas.AgentBootstrapStep(
+        step=failure["step"],
+        status="failed",
+        message=failure.get("message"),
+        started_at=None,
+        finished_at=None,
+        log_tail=failure.get("log_tail"),
     )
 
 

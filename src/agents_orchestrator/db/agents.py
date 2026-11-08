@@ -16,12 +16,14 @@ from typing import Any
 
 import psycopg
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 from agents_orchestrator.db.pool import notify
 
 _COLUMNS = (
     "id, session_id, ordinal, pod_name, url, pod_phase, ready, wrapper_session_id,"
-    " wrapper_session_created_at, gone_at, last_dispatched_at, pod_ip, wrapper_resumed_at"
+    " wrapper_session_created_at, gone_at, last_dispatched_at, pod_ip, wrapper_resumed_at,"
+    " start_failure"
 )
 
 
@@ -40,6 +42,7 @@ class Agent:
     last_dispatched_at: datetime | None
     pod_ip: str | None = None
     wrapper_resumed_at: datetime | None = None
+    start_failure: dict[str, Any] | None = None  # {step, message, log_tail}, see set_start_failure
 
 
 async def _one(conn: psycopg.AsyncConnection, query: str, params: Any) -> dict | None:
@@ -129,9 +132,37 @@ async def set_wrapper_session(
             conn,
             "UPDATE agents SET wrapper_session_id = %s,"
             " wrapper_session_created_at = coalesce(%s, now()),"
-            " wrapper_resumed_at = CASE WHEN %s THEN clock_timestamp() END"
+            " wrapper_resumed_at = CASE WHEN %s THEN clock_timestamp() END,"
+            " start_failure = NULL"
             " WHERE id = %s RETURNING session_id",
             (wrapper_session_id, created_at, resumed, agent_id),
+        )
+        if row is None:
+            return False
+        await _status(conn, row["session_id"])
+        return True
+
+
+async def set_start_failure(
+    conn: psycopg.AsyncConnection,
+    agent_id: uuid.UUID,
+    failure: dict[str, Any],
+    *,
+    keep_other_step: bool = False,
+) -> bool:
+    """Record why the agent's wrapper session failed to start: `{step, message, log_tail}`.
+
+    `keep_other_step` leaves a recorded failure of another step alone (a failed create must not
+    replace the log tail of the failed session that preceded it). A session recorded later by
+    `set_wrapper_session` clears it.
+    """
+    async with conn.transaction():
+        row = await _one(
+            conn,
+            "UPDATE agents SET start_failure = %s WHERE id = %s"
+            " AND (NOT %s OR start_failure IS NULL OR start_failure->>'step' = %s)"
+            " RETURNING session_id",
+            (Jsonb(failure), agent_id, keep_other_step, failure.get("step")),
         )
         if row is None:
             return False

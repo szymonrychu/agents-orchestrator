@@ -39,11 +39,21 @@ class Bootstrap(_Model):
     steps: list[BootstrapStep] = Field(default_factory=list)
 
 
+class SnapshotError(_Model):
+    """The wrapper's failure of a session: the step it failed at and a redacted message."""
+
+    step: str | None = None
+    message: str | None = None
+
+
 class Snapshot(_Model):
     # the wrapper sends `session_id`; the orchestrator calls it wrapper_session_id (D3)
     wrapper_session_id: str = Field(validation_alias="session_id")
     name: str | None = None
     state: str
+    # the bootstrap step the session is at, and why it failed (state "failed")
+    step: str | None = None
+    error: SnapshotError | None = None
     current_turn_id: str | None = None
     idle_since: datetime | None = None
     context: Context | None = None
@@ -181,3 +191,22 @@ class WrapperError(Exception):
 
 class WrapperUnreachable(Exception):
     """No usable answer: connect error, timeout or reset."""
+
+
+class WrapperTimeout(WrapperUnreachable):
+    """The wrapper did not answer within `timeout` seconds."""
+
+    def __init__(self, message: str, timeout: float) -> None:
+        super().__init__(message)
+        self.timeout = timeout
+
+
+def describe_exception(exc: BaseException, context: str = "") -> str:
+    """The text of `exc`, never empty: its type name (and `context`) when it carries none.
+
+    httpx timeouts have an empty `str()`, which used to surface as "ReadTimeout:".
+    """
+    text = str(exc).strip()
+    if text:
+        return text
+    return f"{type(exc).__name__} ({context})" if context else type(exc).__name__

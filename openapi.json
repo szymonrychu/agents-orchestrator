@@ -88,6 +88,17 @@
             ],
             "title": "Finished At"
           },
+          "log_tail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Log Tail"
+          },
           "message": {
             "anyOf": [
               {
@@ -563,6 +574,41 @@
           "bytes"
         ],
         "title": "BackupRun",
+        "type": "object"
+      },
+      "BootstrapFailure": {
+        "description": "Why one agent's wrapper session failed to start: the step, a one-line message and the\nredacted log tail (cut like check logs). `step` is \"create\" when the create itself failed.",
+        "properties": {
+          "log_tail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Log Tail"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "pod": {
+            "title": "Pod",
+            "type": "string"
+          },
+          "step": {
+            "title": "Step",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pod",
+          "step",
+          "message"
+        ],
+        "title": "BootstrapFailure",
         "type": "object"
       },
       "CheckAccepted": {
@@ -4023,6 +4069,26 @@
             "title": "Slug",
             "type": "string"
           },
+          "start_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Reason"
+          },
+          "start_state": {
+            "enum": [
+              "booting",
+              "ready",
+              "bootstrap_failed"
+            ],
+            "title": "Start State",
+            "type": "string"
+          },
           "superleader": {
             "title": "Superleader",
             "type": "boolean"
@@ -4032,7 +4098,9 @@
           "slug",
           "preset_name",
           "superleader",
-          "leader_present"
+          "leader_present",
+          "start_state",
+          "start_reason"
         ],
         "title": "SessionPeer",
         "type": "object"
@@ -4778,6 +4846,13 @@
             "title": "Bootstrap Failed Agents",
             "type": "integer"
           },
+          "bootstrap_failures": {
+            "items": {
+              "$ref": "#/components/schemas/BootstrapFailure"
+            },
+            "title": "Bootstrap Failures",
+            "type": "array"
+          },
           "context_pct_max": {
             "anyOf": [
               {
@@ -4821,6 +4896,15 @@
             "title": "Replicas",
             "type": "integer"
           },
+          "start_state": {
+            "enum": [
+              "booting",
+              "ready",
+              "bootstrap_failed"
+            ],
+            "title": "Start State",
+            "type": "string"
+          },
           "state": {
             "enum": [
               "working",
@@ -4835,6 +4919,8 @@
         },
         "required": [
           "state",
+          "start_state",
+          "bootstrap_failures",
           "ready",
           "replicas",
           "context_pct_max",

@@ -9,6 +9,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from agents_orchestrator.db.sessions import Session, quiet_clock_sql
+from agents_orchestrator.db.start_state import start_state
 from agents_orchestrator.dispatcher.hive import compact_pct
 from agents_orchestrator.settings import Settings
 
@@ -19,7 +20,13 @@ SELECT c.id AS session_id,
        count(s.agent_id) FILTER (
            WHERE a.gone_at IS NULL AND s.waiting_reason IS NOT NULL) AS attention_agents,
        count(s.agent_id) FILTER (
-           WHERE a.gone_at IS NULL AND s.bootstrap_failure IS NOT NULL) AS bootstrap_failed_agents,
+           WHERE a.gone_at IS NULL
+             AND (s.bootstrap_failure IS NOT NULL OR a.start_failure IS NOT NULL)
+       ) AS bootstrap_failed_agents,
+       coalesce(jsonb_agg(jsonb_build_object('pod', a.pod_name) || a.start_failure
+                          ORDER BY a.ordinal)
+                FILTER (WHERE a.gone_at IS NULL AND a.start_failure IS NOT NULL),
+                '[]'::jsonb) AS bootstrap_failures,
        count(s.agent_id) FILTER (
            WHERE a.gone_at IS NULL AND s.permission_mode_state IS NOT NULL
        ) AS permission_unavailable_agents,
@@ -46,7 +53,7 @@ SELECT a.id, a.ordinal, a.pod_name, a.ready, a.gone_at,
        s.state, s.free_since, s.current_turn_id, s.context_used_tokens,
        s.context_window_tokens, s.context_pct, s.peers,
        s.waiting_reason, s.waiting_since, s.bootstrap_step, s.bootstrap_failure,
-       s.permission_mode_state, s.permission_mode_reason,
+       a.start_failure, s.permission_mode_state, s.permission_mode_reason,
        (l.agent_id IS NOT NULL) AS leader
 FROM agents a
 LEFT JOIN session_leaders l ON l.agent_id = a.id
@@ -78,8 +85,11 @@ def summarize(session: Session, agg: dict[str, Any] | None, settings: Settings) 
         state = "booting"
     else:
         state = "waiting"
+    failures = list(agg.get("bootstrap_failures") or [])
     return {
         "state": state,
+        "start_state": start_state(ready, failures),
+        "bootstrap_failures": failures,
         "ready": ready,
         "replicas": session.spec.replicas,
         "context_pct_max": agg.get("context_pct_max"),

@@ -213,6 +213,8 @@ async def test_session_summary_state_and_gauge_max(http, pool):
     assert datetime.fromisoformat(summary.pop("oldest_queued_at")) == first["created_at"]
     assert summary == {
         "state": "waiting",
+        "start_state": "ready",
+        "bootstrap_failures": [],
         "ready": 2,
         "replicas": 3,
         "context_pct_max": 62.5,

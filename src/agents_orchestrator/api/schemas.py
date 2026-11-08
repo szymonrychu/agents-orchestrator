@@ -215,8 +215,22 @@ class ProposalView(BaseModel):
     revisions: list[ProposalRevisionView]
 
 
+class BootstrapFailure(BaseModel):
+    """Why one agent's wrapper session failed to start: the step, a one-line message and the
+    redacted log tail (cut like check logs). `step` is "create" when the create itself failed."""
+
+    pod: str
+    step: str
+    message: str
+    log_tail: str | None = None
+
+
 class SessionSummary(BaseModel):
     state: Literal["working", "waiting", "booting", "error", "deleting"]
+    # booting: no pod ready yet; ready: a pod is ready and no agent failed to start; a recorded
+    # start failure of any live agent makes it bootstrap_failed until that agent has a session
+    start_state: Literal["booting", "ready", "bootstrap_failed"]
+    bootstrap_failures: list[BootstrapFailure]
     ready: int
     replicas: int
     context_pct_max: float | None
@@ -357,6 +371,8 @@ class AgentBootstrapStep(BaseModel):
     message: str | None
     started_at: datetime | None
     finished_at: datetime | None
+    # redacted tail of the failing step's log; set on a start failure the orchestrator recorded
+    log_tail: str | None = None
 
 
 class AgentView(BaseModel):
