@@ -1000,6 +1000,38 @@ async def test_lone_leader_pod_swapped_at_an_idle_boundary(eager):
     assert await env.rollout(c.id) is None
 
 
+async def test_peer_dead_mid_turn_revived_then_lone_leader_swapped(eager):
+    # the peer died in a turn it had accepted (busy -> dead, no idle transition): its dispatch
+    # reservation stays, yet a dead agent is in no turn, so it neither blocks its revive nor
+    # the lone-leader swap
+    env = eager
+    c, agents = await _leader_alone_with_dead_peer(env)
+    await _dispatched_at(env, agents[1].id, "1 microsecond")
+    await env.tick()
+    assert env.pod_deletes() == ["agent-alpha-1", "agent-alpha-1"]
+    assert list((await env.rollout(c.id))["revived"]) == ["1"]
+
+    env.ready(1)
+    await env.tick(2)  # still dead inside the revive grace: the leader is kept
+    assert env.pod_deletes() == ["agent-alpha-1", "agent-alpha-1"]
+    await _age_revived(env, c.id, 1, replacer.REVIVE_GRACE_SECONDS + 1)
+    await env.tick()
+    assert env.pod_deletes() == ["agent-alpha-1", "agent-alpha-1", "agent-alpha-0"]
+    assert await env.handovers(c.id) == []
+
+
+async def test_dead_peer_with_inflight_message_not_revived(eager):
+    # a message still `dispatching` to the dead peer holds its revive until verify settles it
+    env = eager
+    c, agents = await _leader_alone_with_dead_peer(env)
+    held = await insert_message(env.pool, c.id, status="dispatching", agent_id=agents[1].id)
+    await env.tick(2)
+    assert env.pod_deletes() == ["agent-alpha-1"]
+    await env.execute("UPDATE messages SET status = 'sent' WHERE id = %s", (held["id"],))
+    await env.tick()
+    assert env.pod_deletes() == ["agent-alpha-1", "agent-alpha-1"]
+
+
 async def test_lone_leader_kept_while_a_live_peer_is_busy(eager):
     env = eager
     c, agents, _ = await rolling(env, replicas=2)

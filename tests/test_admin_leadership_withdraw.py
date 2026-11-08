@@ -67,15 +67,41 @@ async def test_leader_withdraws_its_pending_handover(app, pool):
     assert rows[-1]["status"] == 200 and rows[-1]["path"] == f"{S}/{me.slug}/leadership/withdraw"
 
 
-async def test_without_an_id_every_pending_handover_is_withdrawn(app, pool):
+async def test_without_an_id_every_voluntary_handover_is_withdrawn(app, pool):
+    # spec changed by review ruling (T-83 I2): the reconciler's `rollout` request is not the
+    # leader's to withdraw, or a leader could defer a rollout forever (each re-queue restarts
+    # its cap); it stays queued while every voluntary handover is withdrawn
     me = await hive(pool, "lw-all")
     first = await queue(pool, me)
-    second = await queue(pool, me, reason="rollout")
+    rollout = await queue(pool, me, reason="rollout")
+    third = await queue(pool, me, reason="other")
     r = await withdraw(app, me, me.slug)
     assert r.status_code == 200, r.text
-    assert r.json() == {"withdrawn": [first, second]}
+    assert r.json() == {"withdrawn": [first, third]}
+    assert await state(pool, rollout) == ("queued", None, False)
     again = await withdraw(app, me, me.slug)
     assert again.status_code == 200 and again.json() == {"withdrawn": []}
+
+
+async def test_a_rollout_request_is_refused(app, pool):
+    # spec changed by review ruling (T-83 I2): withdrawing the reconciler's request by its id
+    # is a 409, and the request stays queued
+    me = await hive(pool, "lw-rollout")
+    rid = await queue(pool, me, reason="rollout")
+    r = await withdraw(app, me, me.slug, request_id=rid)
+    assert_error(r, 409, "rollout_request")
+    assert await state(pool, rid) == ("queued", None, False)
+
+
+async def test_a_voluntary_request_beside_a_rollout_one_is_withdrawn(app, pool):
+    me = await hive(pool, "lw-beside")
+    rollout = await queue(pool, me, reason="rollout")
+    rid = await queue(pool, me, reason="context")
+    r = await withdraw(app, me, me.slug, request_id=rid)
+    assert r.status_code == 200, r.text
+    assert r.json() == {"withdrawn": [rid]}
+    assert await state(pool, rid) == ("rejected", "withdrawn", True)
+    assert (await state(pool, rollout))[0] == "queued"
 
 
 async def test_a_decided_request_is_not_pending(app, pool):

@@ -348,14 +348,20 @@ async def withdraw_handover(
 ) -> schemas.Withdrawn:
     """Withdraw a pending handover request (`request_id`), or every one of the session when it
     is omitted: the session's own leader, or a superleader on its own or a manageable session.
-    A withdrawn request is rejected with reason `withdrawn` and never applied."""
+    A withdrawn request is rejected with reason `withdrawn` and never applied. The reconciler's
+    `rollout` request is never withdrawn (409 `rollout_request` by id, left queued without)."""
     _, caller = caller_of(request)
     async with pool.connection() as conn:
         target = await _target(conn, slug, caller) if caller.spec.session_messaging else caller
         withdrawn = await leadership.withdraw_handovers(conn, target.id, body.request_id)
         if body.request_id is not None and not withdrawn:
-            if not await leadership.handover_exists(conn, target.id, body.request_id):
+            reason = await leadership.handover_reason(conn, target.id, body.request_id)
+            if reason is None:
                 raise not_found("handover request")
+            if reason == "rollout":
+                raise ApiError(
+                    409, "rollout_request", "a rollout handover request cannot be withdrawn"
+                )
             raise ApiError(409, "not_pending", "the handover request is already decided")
     return schemas.Withdrawn(withdrawn=withdrawn)
 

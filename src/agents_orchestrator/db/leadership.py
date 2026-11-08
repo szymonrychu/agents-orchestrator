@@ -13,8 +13,9 @@ The api and the reconciler only insert `leadership_requests` rows (status `queue
 leader record: the api the agents' handovers and the user overrides, the reconciler one
 `handover` with reason `rollout` from an idle leader whose pod a rollout replaces next
 (`reconciler/rollout.py`). The one exception is `withdraw_handovers`: the api rejects a still
-queued `handover` with reason `withdrawn`, through the same status-guarded update the pass
-decides with, so a request is decided exactly once by whichever commits first.
+queued voluntary `handover` (never a `rollout` one) with reason `withdrawn`, through the
+same status-guarded update the pass decides with, so a request is decided exactly once by
+whichever commits first.
 `session_leaders` and every other request decision belong to the dispatcher, through
 `leadership_pass`, which runs under the per-session claim lock of `db/queue.py` so a leader
 change and a message claim never interleave. A voluntary handover (an agent `handover` other
@@ -83,27 +84,32 @@ async def insert_request(
 async def withdraw_handovers(
     conn: psycopg.AsyncConnection, session_id: uuid.UUID, request_id: int | None = None
 ) -> list[int]:
-    """Reject the session's still queued `handover` requests (only `request_id` when given) with
-    reason `withdrawn`; the ids withdrawn, ascending. Status-guarded like the pass's decisions,
-    so a request the pass decided first is left alone."""
+    """Reject the session's still queued voluntary `handover` requests (only `request_id` when
+    given) with reason `withdrawn`; the ids withdrawn, ascending. The reconciler's `rollout`
+    request is never withdrawn: a re-queue would restart its cap, so a leader could defer the
+    rollout forever. Status-guarded like the pass's decisions, so a request the pass decided
+    first is left alone."""
     cur = await conn.execute(
         "UPDATE leadership_requests SET status = 'rejected', reject_reason = 'withdrawn',"
         " decided_at = now() WHERE session_id = %s AND kind = 'handover' AND status = 'queued'"
-        " AND (%s::bigint IS NULL OR id = %s) RETURNING id",
+        " AND reason IS DISTINCT FROM 'rollout' AND (%s::bigint IS NULL OR id = %s) RETURNING id",
         (session_id, request_id, request_id),
     )
     return sorted(r[0] for r in await cur.fetchall())
 
 
-async def handover_exists(
+async def handover_reason(
     conn: psycopg.AsyncConnection, session_id: uuid.UUID, request_id: int
-) -> bool:
-    """A `handover` request with this id belongs to the session, whatever its status."""
+) -> str | None:
+    """The reason of the session's `handover` request with this id, whatever its status; None
+    when there is no such request."""
     cur = await conn.execute(
-        "SELECT 1 FROM leadership_requests WHERE id = %s AND session_id = %s AND kind = 'handover'",
+        "SELECT reason FROM leadership_requests WHERE id = %s AND session_id = %s"
+        " AND kind = 'handover'",
         (request_id, session_id),
     )
-    return await cur.fetchone() is not None
+    row = await cur.fetchone()
+    return None if row is None else row[0]
 
 
 async def current_leader(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Leader | None:

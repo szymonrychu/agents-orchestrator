@@ -24,14 +24,16 @@ session, which the controller recreates on the new template:
   older than the cap), so leadership never moves mid-turn for a rollout; the old leader's pod
   is deleted only once `session_leaders` names another agent. A session of one agent rolls
   its pod when idle.
-- a dead peer never takes the lead (`ELIGIBLE` excludes `DEAD`), and nothing else revives a
-  dead agent whose pod is on the current revision. So once the window is over and no member
-  can lead, a dead member's pod is deleted (at most one per tick, once per revision and
-  ordinal, recorded in `revived`): the recreated pod resumes the agent. When the leader is then
-  the only live member (every peer dead and revived over `REVIVE_GRACE_SECONDS` ago), the
-  leader's own pod is replaced at an idle boundary: no open turn (`TURN_BUSY`) and no
-  background subagent within the `BACKGROUND_BUSY` bound. No request is queued: the pass finds
-  no successor and keeps the leader row, and the recreated pod resumes the same leader.
+- a dead peer never takes the lead (`ELIGIBLE` excludes `DEAD`), and nothing else revives a dead
+  agent whose pod is on the current revision. So once the window is over and no member can lead,
+  a dead member's pod is deleted (at most one per tick, once per revision and ordinal, recorded
+  in `revived`): the recreated pod resumes the agent. Only a message still `dispatching` or
+  `verifying` to it (`IN_FLIGHT`) holds the revive: the dispatch reservation of the turn it died
+  in is ignored, since only its next idle transition releases it. When the leader is then the
+  only live member (every peer dead and revived over `REVIVE_GRACE_SECONDS` ago), the leader's
+  own pod is replaced at an idle boundary: no open turn (`TURN_BUSY`) and no background subagent
+  within the `BACKGROUND_BUSY` bound. No request is queued: the pass finds no successor and
+  keeps the leader row, and the recreated pod resumes the same leader.
 
 Before the delete the agent is marked unready, so the dispatcher stops picking it, and its idle
 test is read again; a message claimed between that read and the delete is retried by the
@@ -79,13 +81,15 @@ REVIVE_GRACE_SECONDS = 300
 # exact negation of the dispatcher's idle test (`db/queue.py` `_PICK`: `free_since >
 # last_dispatched_at`), so a pod just handed a turn is never removed before the wrapper reports
 # busy.
+# A message dispatched to the agent that the verify path has not settled yet.
+IN_FLIGHT = (
+    "EXISTS (SELECT 1 FROM messages m WHERE m.session_id = a.session_id"
+    " AND m.agent_id = a.id AND m.status IN ('dispatching', 'verifying'))"
+)
 TURN_BUSY = (
     "COALESCE(s.state = 'busy', false)"
     " OR (a.last_dispatched_at IS NOT NULL"
-    " AND NOT COALESCE(s.free_since > a.last_dispatched_at, false))"
-    " OR EXISTS ("
-    "SELECT 1 FROM messages m WHERE m.session_id = a.session_id"
-    " AND m.agent_id = a.id AND m.status IN ('dispatching', 'verifying'))"
+    f" AND NOT COALESCE(s.free_since > a.last_dispatched_at, false)) OR {IN_FLIGHT}"
 )
 # Busy: in a turn or running background subagents (the drain; the replacer reads both apart).
 BUSY = f"({TURN_BUSY}) OR {BACKGROUND_BUSY}"
@@ -97,14 +101,14 @@ LEADS = "EXISTS (SELECT 1 FROM session_leaders l WHERE l.agent_id = a.id)"
 _AGENTS = (
     "SELECT a.id, a.ordinal, a.pod_name, a.url, a.pod_phase, a.pod_ip,"
     f" ({TURN_BUSY}) AS turn_busy, {BACKGROUND_BUSY} AS background, ({LEADS}) AS leads,"
-    f" {DEAD} AS dead,"
+    f" {DEAD} AS dead, {IN_FLIGHT} AS in_flight,"
     f" ({ELIGIBLE}) AND COALESCE(s.state = 'idle', false) AND NOT ({TURN_BUSY}) AS can_lead"
     " FROM agents a LEFT JOIN agent_status s ON s.agent_id = a.id"
     " WHERE a.session_id = %s AND a.gone_at IS NULL ORDER BY a.ordinal"
 )
 _HELD = (
     f"SELECT ({TURN_BUSY}) AS turn_busy, {BACKGROUND_BUSY} AS background, ({LEADS}) AS leads,"
-    f" {DEAD} AS dead"
+    f" {DEAD} AS dead, {IN_FLIGHT} AS in_flight"
     " FROM agents a LEFT JOIN agent_status s ON s.agent_id = a.id WHERE a.id = %s"
 )
 _QUEUED = (
@@ -258,10 +262,13 @@ class Replacer:
             if not lead["turn_busy"]:
                 await self._queue_handover(session, lead["id"])
             return
+        # a dead agent is in no turn: a reservation it kept from the turn it died in (released
+        # only by its next idle transition) does not hold it, a message the verify path has
+        # not settled does
         dead = [
             o
             for o, a in peers.items()
-            if a["dead"] and not a["turn_busy"] and str(o) not in rollout.revived
+            if a["dead"] and not a["in_flight"] and str(o) not in rollout.revived
         ]
         if dead:
             await self._revive(session, peers[dead[0]], pods[dead[0]], rollout, now)
@@ -327,7 +334,7 @@ class Replacer:
     ) -> None:
         """Delete a dead member's current pod once per revision, so its agent resumes."""
         held = await self._hold(session, agent)
-        if held is None or held["turn_busy"] or held["leads"] or not held["dead"]:
+        if held is None or held["in_flight"] or held["leads"] or not held["dead"]:
             return  # changed meanwhile: the next converge marks it ready from its pod again
         name = pod["metadata"]["name"]
         log.info("session %s: reviving dead member %s (no member can lead)", session.slug, name)

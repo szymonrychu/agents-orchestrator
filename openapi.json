@@ -9126,7 +9126,7 @@
     },
     "/agent/v1/admin/sessions/{slug}/leadership/withdraw": {
       "post": {
-        "description": "Withdraw a pending handover request (`request_id`), or every one of the session when it\nis omitted: the session's own leader, or a superleader on its own or a manageable session.\nA withdrawn request is rejected with reason `withdrawn` and never applied.",
+        "description": "Withdraw a pending handover request (`request_id`), or every one of the session when it\nis omitted: the session's own leader, or a superleader on its own or a manageable session.\nA withdrawn request is rejected with reason `withdrawn` and never applied. The reconciler's\n`rollout` request is never withdrawn (409 `rollout_request` by id, left queued without).",
         "operationId": "withdraw_handover_agent_v1_admin_sessions__slug__leadership_withdraw_post",
         "parameters": [
           {
