@@ -306,6 +306,14 @@ A `kube_cluster_access` agent is cluster-admin. Its pods run as its own ServiceA
 
 `PATCH /agent/v1/admin/sessions/{slug}` lets a session's leader edit its own spec, executable fields included: `wrapper.hooks`, `wrapper.mcp_servers` (stdio commands), `wrapper.plugins`, `init_scripts`, `any_mcp_*`, `start_prompt` and `wrapper.system_append`. These apply with the same guards as the preset PATCH (human-only fields toward safe only, protected values never accepted, fixed fields, tighten-only limits for a regular leader) but the own-session exemption from `privileged_target` stays: the pod already runs with its grants, so the edit adds none. The residual risk is `wrapper.permission_mode: auto`: a hook or a stdio MCP command runs outside the permission classifier, so a prompt-injected leader can widen what its own session runs unclassified. It is confined to that session (the preset is never written, and `kube_cluster_access`, `kube_namespace_access`, `session_messaging`, `docker` and looser permissions cannot be turned on), takes effect only after the pod roll, and every call is audited with the changed paths. Treat a session in `auto` mode that takes untrusted input (webhook, chat) as able to rewrite its own tooling, and keep the grants off such presets. The edit surface for other sessions is the superleader's, bounded by `privileged_target` and `superleader_manageable`.
 
+### Change proposals (known risks)
+
+Proposals turn a refused change into a human decision, so they are an escalation path if the human rubber-stamps them. Every refusal of the preset PATCH and PUT, the secret route and the session PATCH (`privileged_target`, `human_only_field` and the tighten-only rule of a regular leader) carries `error.proposable: true`; the agent files it explicitly with `proposal_create`. A superleader may change directly, on a privileged preset, only the paths in `preset_policy.NON_SECURITY` (sizing, model, image, limits, `inactivity` and the like); every other path is a security item, and the grant fields (`kube_cluster_access`, `kube_namespace_access`, `session_messaging`, `docker`, `discard_hook_url`, `wrapper.permission_mode`, `wrapper.permissions`) are proposable but marked `grant`. Anything not listed is security (fail closed), and a test enumerates every spec field so a new one fails CI until classified.
+
+- Risk 1, rubber-stamping: the review shows full values, security and grant items first, never offers "approve all" on a stale proposal, shows the proposer and whether it is a superleader, and caps open proposals per proposer (soft). Every apply is recorded and notified. The api sees no reviewer identity: the record says `user`.
+- Risk 2, staged secrets: a value sits in Kubernetes before any human reviewed the proposal. It is bounded by the immutable Secret, no `get` or `list` for the api, release on every non-apply outcome, sweeper retries, the 7 day expiry, at most 20 secrets per revision and 20 open proposals per proposer. The residual orphan gap is described under Change proposals.
+- A proposal can only change the spec of a preset: the review is main port only, and no agent credential reaches it.
+
 ### Origin allowlist
 
 Browsers apply no CORS to WebSocket upgrades, so any web page opened on a LAN machine could otherwise open a terminal shell against the api. The api therefore checks the `Origin` header of every WebSocket upgrade against `ORCH_ALLOWED_ORIGINS`, beside the source allowlist (which is unchanged):
@@ -1486,6 +1494,7 @@ Each preset has a `superleader_manageable` switch (default false, main port only
   - The security list (every refused change and every change that must pass, on create, replace, patch, copy and the secret route) is pinned by `tests/test_admin_presets_guard.py`; a new human-only field or privileged path needs a case there.
 - Sending `superleader_manageable` through the admin API is 422 `manageable_main_port_only` when false; the admin API cannot hide a preset.
 - Relay (`/agent/v1/admin/webhooks`, `/schedules`, `/chats`, `/history`): a body naming a hidden or null preset, or a stored object on one, is 404 and never forwarded. Lists (endpoints, events, schedules, runs, history sessions) are filtered after the upstream page, so a page of `events` or `runs` full of hidden items comes back short or empty; a single event or run of a hidden preset is 404. Objects with a null preset are hidden (chat rooms excepted). A list answer that is not a JSON list is 502 `upstream_shape`.
+- Proposals (`/agent/v1/admin/proposals`, class `proposal`): a superleader sees only its own proposals, and only while the target preset is manageable; anything else is the same 404 as an unknown id (see Change proposals).
 - Cross-session messaging (`/agent/v1/sessions`) is not filtered by this switch.
 
 ### Chat rooms and room requests (superleader)
@@ -1530,6 +1539,51 @@ Guards, in order, all before any write and repeated on the row under its lock; e
 - The write is one transaction on the session row: the stored spec is re-read and compared with the one the patch was built on (a concurrent scale, init-scripts, permission-mode or other PATCH makes it re-read and retry, three tries, so disjoint edits both survive), the guards run again on the locked row, and a superleader on a foreign session also locks the preset `FOR SHARE` and re-checks `superleader_manageable` (lock order sessions, then presets).
 
 Pickup: nothing is hot-reloaded. The write wakes the reconciler, which re-renders the ConfigMap and the StatefulSet template in one pass (the config hash changes) and the Replacer then replaces each pod once it is idle, the hive leader last, after a handover; a one-agent session rolls when idle. The new pod loads the new config. A busy pod finishes its turn first, so the edit takes effect on the next restart, which comes by itself. A superleader may restart sooner with `session_restart` (cooldown applies to its own session). Fields read live take effect at once: `inactivity`, `autoclose_after_seconds`, `usage_quota`, and `session_messaging` turned off (the admin gate reads it live). `replicas` and `init_scripts` keep their own routes.
+
+### Change proposals (presets)
+
+A session that may not change something directly can ask a human to do it: it files a proposal (a spec patch plus a reason), the human reviews it item by item in the web UI, and an approved change is applied by the api. Stage A covers presets. Schedules and session specs answer 422 `invalid_request` ("kind ... not supported yet") until their stages land.
+
+Who may file: a superleader (`session_messaging`) for a `superleader_manageable` preset; any other caller is 403 `not_superleader`. The agent routes are the five `proposal_*` tools of the superleader allowlist and are audited like every admin call (`fields` and `secrets` carry paths and names, never values). A proposer sees and changes only its own proposals, and only while the target preset is manageable: another session's proposal, an unknown id and a hidden target answer the same 404 `not_found`; a deleted target stays readable. The review exists on the main port only (`/api/v1/proposals`): no agent route, no MCP tool and no service-port route reaches it (the service port answers 403, the agent port 404).
+
+| Route | Success | Errors |
+|---|---|---|
+| `POST /agent/v1/admin/proposals` body `{kind: "preset", target, patch, secrets?, reason, client_key?}` | 201 view (200 on a `client_key` replay: nothing is staged again) | 403 `not_superleader`, 404 `not_found` (hidden or unknown target), 409 `too_many_proposals`, 413 `secret_too_large`, 422 `invalid_request`, `secret_in_spec`, `nothing_changed`, 502 `secret_store_failed` |
+| `GET /agent/v1/admin/proposals?status=&limit=` | 200 the caller's own proposals (default `active`, limit 1 to 200) | 403 |
+| `GET /agent/v1/admin/proposals/{id}` | 200 view with every revision | 403, 404 |
+| `POST /agent/v1/admin/proposals/{id}/revise` | 200 view | as create, plus 404, 409 `not_open` |
+| `POST /agent/v1/admin/proposals/{id}/withdraw` | 200 view | 403, 404, 409 `not_open` |
+
+`patch` is an RFC 7396 merge patch of the stored spec; `secrets` maps a protected variable name to its new value (at most 20 per revision, 1 MiB each). A value inside `patch` is 422 `secret_in_spec`; a `secrets` name that is not protected in the merged spec is 422 naming the variable. The merged spec is validated as a preset save is, and an empty diff is 422 `nothing_changed`. Any spec path may be proposed; the preset columns (`name`, `labels`, `superleader_manageable`, `project`) are never items, and an apply leaves them as stored.
+
+Lifecycle (`change_proposals.status`):
+
+| From | Event | To | Staged secrets |
+|---|---|---|---|
+| - | create | `open`, revision 1 | staged for revision 1 |
+| `open` | review: approve or deny every item, at least one approve, apply commits | `applied` | promoted to live |
+| `open` | review: every item denied | `denied` | released |
+| `open`, `stale` | review: at least one item marked rework (a stale proposal takes only rework or deny) | `rework` | released |
+| `open` | review or sweeper finds the target changed | `stale` (review: 409 `proposal_stale`) | released |
+| `open`, `rework`, `stale` | revise (proposer) | `open`, next revision, re-based | old released, new staged |
+| `open`, `rework`, `stale` | withdraw (proposer) | `withdrawn` | released |
+| `open`, `rework`, `stale` | `expires_at` passed | `expired` | released |
+| `open`, `rework`, `stale` | target deleted or no longer manageable | `target_gone` | released |
+
+- One item per changed spec path, plus one per staged secret. Each item carries `before` and `after` (protected entries cut to `{protected, expand, set, version}` and `{protected, expand}`), `security`, `grant` and, for a secret, `secret` = `set` or `changed`; never a value.
+- Fingerprint rule: every revision records a fingerprint, the sha256 of the preset's `updated_at` plus each protected variable's live Secret version. Any preset write or secret rotation after the base was read makes the whole proposal stale. A review compares it under the preset row lock; the view's `stale` flag is the same check, read only. The proposer recovers by revising (the revision re-reads the target), not by refiling.
+- A review submit is final or a rework request. Final: every item approve or deny, the approved set applied all or nothing in one transaction on the preset row (a failing check_spec or schema parse is 422 `invalid_spec`: nothing written, the proposal stays open and its staged values stay). Rework request: at least one item marked rework with a note; nothing is applied, every verdict and note is recorded on that revision, and the proposal waits for the proposer's next revision (a revision bumps the number and resends its values; the old values are released). A review of a revision that is no longer current is 409 `revision_changed`.
+- Review errors: 404 `not_found`, 409 `not_open`, `proposal_expired`, `revision_changed`, `target_gone`, `proposal_stale`, 422 `invalid_request` (missing, duplicate or unknown item, rework without a note, approve on a stale proposal), `invalid_spec`, 502 `secret_store_failed`. There is no audit row for the human review (as for the other main-port mutations); the proposer gets a `proposal` notice for every outcome (applied, denied, rework, stale, expired, target_gone).
+- Expiry is decided by the database clock (`clock_timestamp()`), never the api pod's. `expires_at` is the latest revision plus `ORCH_PROPOSAL_TTL_SECONDS`.
+- `ORCH_PROPOSALS_OPEN_MAX` is a soft cap: the count and the insert are not under one lock, so concurrent creates can overshoot it by a few.
+- Migration `0038_change_proposals.sql` (0037 is reserved for another feature); its `messages.notice` CHECK is the union of the handover and proposal values.
+
+Staged secrets. A value for a protected variable is written at filing time as a new immutable Secret version (`<preset secret name>-v<N>`) and a row in `change_proposal_reservations` reserves the version number under the variable's advisory lock, so a staged version can never collide with a live one. The value lives only in that Secret: never in a proposal row, view, log, event, notice or the review UI. The api Role has `create`, `patch` and `delete` on Secrets and no `get` or `list`, so nothing in the api can read a value back. An approve promotes the reserved version to live inside the apply transaction; every other outcome releases it. Cleanup:
+
+- create, revise and a failed save delete the Secrets they staged when their transaction does not commit (under the variable lock, and only a version above every stored and reserved one that no session names);
+- the proposals sweeper (`ORCH_PROPOSAL_SWEEP_SECONDS`; one transaction per unit, `FOR UPDATE SKIP LOCKED`) expires, marks stale and target_gone, releases the reservations of non-open proposals and superseded revisions, and collects bound reservations whose session is gone;
+- reaping orphans: on its first pass and then hourly the sweeper probes the deterministic names of the three versions above the highest known one for every variable named by a row, reservation, spec or proposal item, and deletes the unreserved ones that no session references. It does not list Secrets, because `list` on Secrets would expose every value in the namespace.
+- Residual gap: a crash between staging and the rollback cleanup, for a variable that is newly declared and named by no row or spec, leaves an orphan Secret that nothing finds. It is never readable by the api and is overwritten by a later stage of the same name; remove it by hand if needed (`kubectl delete secret`).
 
 ### Admin relay: secrets, cooldown and known risks
 
