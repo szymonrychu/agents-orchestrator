@@ -8,6 +8,10 @@ not, for a human to decide; only `review` (a human) writes the target.
 A protected value arrives as a `SecretStr` in `secrets` and goes only into a staged Secret's
 `stringData` (`stage_secret`); no row, view, error, log line or audit entry ever holds it. The
 staged Secrets are written before the transaction commits and deleted again when it rolls back.
+
+Every write runs in a real transaction (the connection is idle when it starts, `_idle`), so the
+work after it, releasing a superseded revision's staged Secrets, runs after the commit: a request
+that fails late never deletes the Secret of a revision that is still current.
 """
 
 from __future__ import annotations
@@ -118,13 +122,11 @@ async def _metas(conn, preset_id: uuid.UUID) -> dict[str, EnvMeta]:
 
 
 async def _locked(conn, preset_id: uuid.UUID, *, hidden_as: str = "preset") -> presets_repo.Preset:
-    """The target preset under a share lock (it cannot change until the commit); one the
-    superleader may not manage is as missing as an unknown (`hidden_as` names what the 404
-    says is missing)."""
+    """The target preset under a share lock (it cannot change until the commit); one deleted or
+    one the superleader may not manage is as missing as an unknown (`hidden_as` names what the
+    404 says is missing)."""
     preset = await presets_repo.get_for_share(conn, preset_id)
-    if preset is None:
-        raise not_found("preset")
-    if not preset.superleader_manageable:
+    if preset is None or not preset.superleader_manageable:
         raise not_found(hidden_as)
     return preset
 
@@ -203,6 +205,32 @@ async def _stage(
         staged.append((preset_id, name, secret_store.secret_version(full)))
 
 
+def _idle(conn) -> None:
+    """Refuse a connection inside a transaction: psycopg's `conn.transaction()` would open a
+    savepoint there, so "after the commit" work would run before the real commit, with this
+    write's row and advisory locks still held."""
+    if conn.info.transaction_status != psycopg.pq.TransactionStatus.IDLE:
+        raise RuntimeError("proposal writes need a connection outside a transaction")
+
+
+async def _release(
+    request: Request, conn, settings: Settings, proposal_id: int, revision: int | None = None
+) -> None:
+    """Best effort, after the commit: drop the staged values of the proposal (one revision, or
+    all) in their own committed transaction; the sweeper retries what fails here."""
+    try:
+        async with conn.transaction():
+            await secret_store.release(
+                conn,
+                secret_store.kube_of(request),
+                settings.namespace,
+                proposal_id=proposal_id,
+                revision=revision,
+            )
+    except Exception as exc:  # the write committed; never turn it into an error
+        log.warning("proposal %d: staged value release failed: %s", proposal_id, type(exc).__name__)
+
+
 async def _rolled_back(
     request: Request, conn, settings: Settings, staged: list[tuple[uuid.UUID, str, int]]
 ) -> None:
@@ -226,17 +254,22 @@ async def create(
     superleader: bool,
 ) -> tuple[schemas.ProposalView, bool]:
     """File a proposal; the bool is False on a `client_key` replay (nothing staged again)."""
+    _idle(conn)
     admin.touched(request, *body.secrets)
     if body.client_key is not None:
-        first = await repo.by_client_key(conn, caller.id, body.client_key)
+        async with conn.transaction():
+            first = await repo.by_client_key(conn, caller.id, body.client_key)
         if first is not None:
-            return await get_view(conn, settings, first, proposer=caller.id), False
+            return await get_view(
+                conn, settings, first, proposer=caller.id, visible_only=True
+            ), False
     if body.kind != "preset":
         raise _unsupported(body.kind)
     if not superleader:
         raise session_spec.not_superleader()
     _check_values(body.secrets)
-    target = await admin.manageable_preset(conn, body.target)
+    async with conn.transaction():
+        target = await admin.manageable_preset(conn, body.target)
     staged: list[tuple[uuid.UUID, str, int]] = []
     try:
         async with conn.transaction():
@@ -266,7 +299,10 @@ async def create(
             )
             await _stage(request, conn, settings, preset.id, body.secrets, proposal_id, 1, staged)
     except repo.ProposalExists as exc:  # a concurrent replay won the insert; nothing staged
-        return await get_view(conn, settings, exc.proposal_id, proposer=caller.id), False
+        view = await get_view(
+            conn, settings, exc.proposal_id, proposer=caller.id, visible_only=True
+        )
+        return view, False
     except secret_store.SecretStoreError:
         await _rolled_back(request, conn, settings, staged)
         raise presets_api.store_failed() from None
@@ -287,7 +323,9 @@ async def revise(
     caller: Session,
 ) -> schemas.ProposalView:
     """A new revision against the target read now (D2): re-based, open, expiry reset; the old
-    revision's staged values are released after the commit (D4)."""
+    revision's staged values are released after the commit (D4), never while this revision's
+    locks are held (one lock order with every stager)."""
+    _idle(conn)
     admin.touched(request, *body.secrets)
     _check_values(body.secrets)
     staged: list[tuple[uuid.UUID, str, int]] = []
@@ -324,13 +362,7 @@ async def revise(
         raise
     note_fields(request, [i.path for i in plan.items])
     if any(i.secret for i in previous.items):
-        await secret_store.release(
-            conn,
-            secret_store.kube_of(request),
-            settings.namespace,
-            proposal_id=proposal_id,
-            revision=previous.revision,
-        )
+        await _release(request, conn, settings, proposal_id, previous.revision)
     return await get_view(conn, settings, proposal_id, proposer=caller.id)
 
 
@@ -338,19 +370,19 @@ async def withdraw(
     request: Request, conn, settings: Settings, proposal_id: int, *, caller: Session
 ) -> schemas.ProposalView:
     """The proposer closes its own proposal; every staged value is released after the commit."""
-    found = await repo.get(conn, proposal_id, caller.id)
-    if found is None:
-        raise not_found("proposal")
-    try:
-        await repo.transition(
-            conn, proposal_id, from_states=repo.ACTIVE, to="withdrawn", outcome="withdrawn"
-        )
-    except repo.NotInState:
-        raise _not_open() from None
+    _idle(conn)
+    async with conn.transaction():
+        found = await repo.get(conn, proposal_id, caller.id)
+        if found is None:
+            raise not_found("proposal")
+        try:
+            await repo.transition(
+                conn, proposal_id, from_states=repo.ACTIVE, to="withdrawn", outcome="withdrawn"
+            )
+        except repo.NotInState:
+            raise _not_open() from None
     if any(i.secret for r in found.revisions for i in r.items):
-        await secret_store.release(
-            conn, secret_store.kube_of(request), settings.namespace, proposal_id=proposal_id
-        )
+        await _release(request, conn, settings, proposal_id)
     return await get_view(conn, settings, proposal_id, proposer=caller.id)
 
 
@@ -391,10 +423,16 @@ async def _view(conn, proposal: repo.Proposal) -> schemas.ProposalView:
 
 
 async def get_view(
-    conn, settings: Settings, proposal_id: int, *, proposer: uuid.UUID | None
+    conn,
+    settings: Settings,
+    proposal_id: int,
+    *,
+    proposer: uuid.UUID | None,
+    visible_only: bool = False,
 ) -> schemas.ProposalView:
-    """One proposal with every revision; with `proposer`, only that session's (else 404)."""
-    found = await repo.get(conn, proposal_id, proposer)
+    """One proposal with every revision; with `proposer`, only that session's, and with
+    `visible_only`, only on a target the proposer may still see (else 404)."""
+    found = await repo.get(conn, proposal_id, proposer, visible_only=visible_only)
     if found is None:
         raise not_found("proposal")
     return await _view(conn, found)
@@ -482,7 +520,8 @@ _CLOSED_TEXT = {
     " Revise it against the current preset with proposal_revise {id}.",
     "expired": "expired before it was reviewed; nothing was applied."
     " File it again with proposal_create if it is still needed.",
-    "target_gone": "was closed: the preset no longer exists; nothing was applied.",
+    "target_gone": "was closed: the preset no longer exists or is no longer open to superleader"
+    " changes; nothing was applied.",
 }
 
 
@@ -678,25 +717,16 @@ async def _after_commit(request: Request, conn, settings: Settings, done: _Done)
 
     Its own transaction: the pooled connection is not autocommit, so without it the row deletes
     would roll back with the connection when the review answers an error (stale, expired)."""
-    held = [p for p in done.release if any(i.secret for i in p.revisions[0].items)]
-    if not held and done.gc is None:
-        return
-    try:
-        kube = secret_store.kube_of(request)
-    except Exception as exc:  # the review committed; never turn it into an error
-        log.warning("proposal cleanup after review failed: %s", type(exc).__name__)
-        return
-    for p in held:  # one transaction each: a failure leaves the others untouched
-        try:
-            async with conn.transaction():
-                await secret_store.release(conn, kube, settings.namespace, proposal_id=p.id)
-        except Exception as exc:
-            log.warning("proposal cleanup after review failed: %s", type(exc).__name__)
+    for p in done.release:  # one transaction each: a failure leaves the others untouched
+        if any(i.secret for i in p.revisions[0].items):
+            await _release(request, conn, settings, p.id)
     if done.gc is not None:
         try:
             async with conn.transaction():
-                await secret_store.gc(conn, kube, settings.namespace, preset_id=done.gc)
-        except Exception as exc:
+                await secret_store.gc(
+                    conn, secret_store.kube_of(request), settings.namespace, preset_id=done.gc
+                )
+        except Exception as exc:  # the review committed; never turn it into an error
             log.warning("proposal cleanup after review failed: %s", type(exc).__name__)
 
 
@@ -706,6 +736,7 @@ async def review(
     """The human review of the current revision (plan 3.5): a rework request records verdicts
     only; a final submit applies the approved items all or nothing on an unchanged target (Q6 B,
     Q14 A) or closes the proposal denied. Every outcome notifies the proposer."""
+    _idle(conn)
     async with conn.transaction():
         done = await _review_locked(request, conn, settings, proposal_id, body)
     await _after_commit(request, conn, settings, done)

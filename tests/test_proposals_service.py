@@ -360,6 +360,16 @@ async def test_client_key_replay_returns_the_same_proposal_and_stages_once(
     assert len(await _rows(pool, "SELECT id FROM change_proposals")) == 1
 
 
+async def test_client_key_replay_on_a_hidden_target_is_404(pool, kube, settings, boss, preset):
+    """Minor 3 (final review A-O): a replay follows the one visibility rule, as `GET` does."""
+    await _create(pool, kube, settings, boss, patch={"replicas": 2}, client_key="k1")
+    async with pool.connection() as conn:
+        await presets_repo.update(conn, preset.id, "infra", preset.spec, False)
+    with pytest.raises(ApiError) as exc:
+        await _create(pool, kube, settings, boss, patch={"replicas": 2}, client_key="k1")
+    _error(exc, 404, "not_found")
+
+
 async def test_kinds_schedule_and_session_are_not_supported_yet(pool, kube, settings, boss):
     for kind in ("schedule", "session"):
         with pytest.raises(ApiError) as exc:
@@ -517,6 +527,53 @@ async def test_revise_after_the_target_became_non_manageable_is_404(
     assert (stored.status, stored.revision) == ("open", 1)
     assert await _reservations(pool, preset.id) == before
     await _assert_nowhere(pool, canary + "2")
+
+
+async def test_revise_after_the_target_was_deleted_is_the_unknown_proposal_404(
+    pool, kube, settings, boss, preset
+):
+    """Minor 4 (final review A-O): a deleted target answers like a hidden one, the uniform
+    unknown-proposal 404, and changes nothing (the sweeper closes it `target_gone`)."""
+    view, _, _ = await _create(pool, kube, settings, boss, patch={"replicas": 2})
+    with pytest.raises(ApiError) as unknown:
+        await _revise(pool, kube, settings, boss, 999999, patch={"replicas": 3})
+    async with pool.connection() as conn:
+        await conn.execute("DELETE FROM presets WHERE id = %s", (preset.id,))
+    with pytest.raises(ApiError) as exc:
+        await _revise(pool, kube, settings, boss, view.id, patch={"replicas": 3})
+    assert _error(exc, 404, "not_found").message == unknown.value.message
+    assert (await _get(pool, settings, view.id, boss.id)).revision == 1
+
+
+async def test_writes_refuse_a_connection_inside_a_transaction(pool, kube, settings, boss, preset):
+    """Inside an open transaction `conn.transaction()` is only a savepoint, so the release after
+    it would run before the real commit: every write refuses such a connection up front."""
+    view, _, _ = await _create(pool, kube, settings, boss, patch={"replicas": 2})
+    async with pool.connection() as conn:
+        await conn.execute("SELECT 1")
+        with pytest.raises(RuntimeError, match="outside a transaction"):
+            await proposals.revise(
+                _request(kube),
+                conn,
+                settings,
+                view.id,
+                schemas.ProposalRevise.model_validate({"patch": {"replicas": 3}}),
+                caller=boss,
+            )
+        with pytest.raises(RuntimeError, match="outside a transaction"):
+            await proposals.withdraw(_request(kube), conn, settings, view.id, caller=boss)
+        with pytest.raises(RuntimeError, match="outside a transaction"):
+            await proposals.create(
+                _request(kube),
+                conn,
+                settings,
+                schemas.ProposalIn.model_validate(
+                    {"kind": "preset", "target": "infra", "patch": {"replicas": 3}, "reason": "r"}
+                ),
+                caller=boss,
+                superleader=True,
+            )
+    assert (await _get(pool, settings, view.id, boss.id)).revision == 1
 
 
 async def test_a_kube_failure_while_revising_keeps_revision_one_and_stages_nothing(

@@ -45,8 +45,11 @@ main_router = APIRouter(prefix="/api/v1", tags=["proposals"])
 
 
 async def _own(conn, proposal_id: int, caller: sessions_repo.Session) -> None:
-    """404 unless the caller filed the proposal and may still see its target."""
-    if await repo.get(conn, proposal_id, caller.id, visible_only=True) is None:
+    """404 unless the caller filed the proposal and may still see its target. Its own committed
+    read: the service's write that follows then opens a real transaction, not a savepoint."""
+    async with conn.transaction():
+        found = await repo.get(conn, proposal_id, caller.id, visible_only=True)
+    if found is None:
         raise not_found("proposal")
 
 
