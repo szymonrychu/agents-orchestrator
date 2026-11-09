@@ -22,7 +22,6 @@ BODIES = {
     ("PATCH", "/agent/v1/admin/presets/{ref}"): {},
     ("PATCH", "/agent/v1/admin/sessions/{slug}"): {"spec": {}},
     ("POST", "/agent/v1/admin/sessions/{slug}/leadership/withdraw"): {},
-    ("PUT", "/agent/v1/admin/presets/{ref}/secrets/{name}"): {"value": "v"},
     ("PUT", "/agent/v1/admin/presets/{ref}/vault/{entry_id}"): {},
 }
 

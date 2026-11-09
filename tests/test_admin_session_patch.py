@@ -192,14 +192,17 @@ async def test_fixed_field_refusal_is_audited_with_fields(app, pool, settings):
     assert [(a["status"], a["fields"]) for a in rows] == [(422, ["pvc_size", "workdir"])]
 
 
-async def test_secret_unset_refusal_carries_fields(app, pool, settings):
+async def test_protected_flag_is_422_and_never_echoed(app, pool, settings):
+    """O10: `protected` is an unknown env field; the value next to it is never echoed."""
     me = await alone(pool, "sp-unset")
     await _seed(pool, settings, me, {})
-    r = await call(app, me, "PATCH", me.slug, json={"spec": {"env": {"B": {"protected": True}}}})
-    assert_error(r, 422, "secret_unset")
-    assert r.json()["error"]["fields"] == ["env.B"]
+    canary = "CANARY-sp-protected-flag"
+    body = {"spec": {"env": {"B": {"value": canary, "protected": True}}}}
+    r = await call(app, me, "PATCH", me.slug, json=body)
+    assert_error(r, 422, "invalid_request")
+    assert canary not in r.text
     rows = await audits(pool, me.id)
-    assert [(a["status"], a["fields"]) for a in rows] == [(422, ["env.B"])]
+    assert [a["status"] for a in rows] == [422] and canary not in str(rows)
 
 
 async def test_body_validation_422_is_audited(app, pool, settings):
@@ -213,14 +216,15 @@ async def test_body_validation_422_is_audited(app, pool, settings):
 # ---------------------------------------------------------------- GET by a regular leader
 
 
-async def test_regular_leader_reads_its_own_session_redacted(app, pool, settings):
+async def test_regular_leader_reads_its_own_session(app, pool, settings):
     me = await hive(pool, "sp-get-own")
-    await _seed(pool, settings, me, {"env": {"K": {"protected": True}}}, versions={"K": "s-1"})
+    pins = {"L": "ps-00000000-0a0b0c-v1"}  # a legacy pin is never shown
+    await _seed(pool, settings, me, {"env": {"K": {"value": "v"}}}, versions=pins)
     r = await call(app, me, "GET", me.slug)
     assert r.status_code == 200, r.text
     assert r.json()["slug"] == me.slug
-    env = r.json()["spec"]["env"]["K"]
-    assert env["protected"] is True and env.get("value") is None
+    assert r.json()["spec"]["env"] == {"K": {"value": "v", "expand": False}}
+    assert "ps-00000000" not in r.text
     assert [a["status"] for a in await audits(pool, me.id)] == [200]
 
 

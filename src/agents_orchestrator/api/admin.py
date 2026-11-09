@@ -175,10 +175,6 @@ def touched(request: Request, *names: str) -> None:
     request.state.admin_secrets.extend(names)
 
 
-def _sent_secrets(body: schemas.PresetIn) -> list[str]:
-    return [n for n, e in body.spec.env.items() if e.protected and e.value is not None]
-
-
 # What each non-relay admin route hides from the superleader: "preset" and "session" routes
 # answer 404 for a target outside its remit, "list" and "create" are filtered or forced,
 # "proposal" routes see only the caller's own proposals on targets it may manage (404 otherwise).
@@ -191,7 +187,6 @@ ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("PATCH", f"{ADMIN_PREFIX}/presets/{{ref}}"): "preset",
     ("DELETE", f"{ADMIN_PREFIX}/presets/{{ref}}"): "preset",
     ("POST", f"{ADMIN_PREFIX}/presets/{{ref}}/copy"): "preset",
-    ("PUT", f"{ADMIN_PREFIX}/presets/{{ref}}/secrets/{{name}}"): "preset",
     ("PUT", f"{ADMIN_PREFIX}/presets/{{ref}}/vault/{{entry_id}}"): "preset",
     ("DELETE", f"{ADMIN_PREFIX}/presets/{{ref}}/vault/{{entry_id}}"): "preset",
     ("GET", f"{ADMIN_PREFIX}/sessions/{{slug}}"): "session",
@@ -232,7 +227,6 @@ async def list_presets(pool: Pool) -> list[schemas.PresetView]:
 async def create_preset(
     body: schemas.PresetIn, request: Request, pool: Pool, settings: Cfg
 ) -> schemas.PresetView:
-    touched(request, *_sent_secrets(body))
     async with pool.connection() as conn:
         return await presets_api.create(request, conn, settings, body, superleader=True)
 
@@ -248,7 +242,6 @@ async def get_preset(ref: str, pool: Pool) -> schemas.PresetView:
 async def replace_preset(
     ref: str, body: schemas.PresetIn, request: Request, pool: Pool, settings: Cfg
 ) -> schemas.PresetView:
-    touched(request, *_sent_secrets(body))
     async with pool.connection() as conn:
         found = await manageable_preset(conn, ref)
         return await presets_api.replace(request, conn, settings, found.id, body, superleader=True)
@@ -264,10 +257,10 @@ async def patch_preset(
 
 
 @router.delete("/presets/{ref}", status_code=204, response_model=None)
-async def delete_preset(ref: str, request: Request, pool: Pool, settings: Cfg) -> Response:
+async def delete_preset(ref: str, request: Request, pool: Pool) -> Response:
     async with pool.connection() as conn:
         found = await manageable_preset(conn, ref)
-        await presets_api.remove(request, conn, settings, found.id, superleader=True)
+        await presets_api.remove(request, conn, found.id, superleader=True)
     return Response(status_code=204)
 
 
@@ -280,18 +273,6 @@ async def copy_preset(
         body = body or schemas.CopyPreset()
         return await presets_api.copy(
             conn, found.id, body.name, superleader=True, request=request, project=body.project
-        )
-
-
-@router.put("/presets/{ref}/secrets/{name}", response_model=schemas.SecretView)
-async def set_preset_secret(
-    ref: str, name: str, body: schemas.SecretIn, request: Request, pool: Pool, settings: Cfg
-) -> schemas.SecretView:
-    touched(request, name)
-    async with pool.connection() as conn:
-        found = await manageable_preset(conn, ref)
-        return await presets_api.put_secret(
-            request, conn, settings, str(found.id), name, body, superleader=True
         )
 
 

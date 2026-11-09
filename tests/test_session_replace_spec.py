@@ -7,13 +7,10 @@ import uuid
 import psycopg
 import pytest
 from factories import attach_preset
-from fakes.fake_kube import FakeKube
 from psycopg.types.json import Jsonb
-from test_k8s_secrets import NS, stage
 
 from agents_orchestrator.db import sessions
 from agents_orchestrator.db.queue import SessionBeingDeleted
-from agents_orchestrator.k8s import secrets as store
 from agents_orchestrator.spec import SessionSpec
 
 BASE = SessionSpec(replicas=2, max_replicas=4, image="img:1", model="m1")
@@ -244,118 +241,16 @@ async def test_concurrent_scale_waits_and_applies_on_top(pool):
     assert gen2 == gen + 1
 
 
-# ------------------------------------------- binding staged secrets (preset-change-proposals 3.6)
-
-PROTECTED = SessionSpec.model_validate(
-    {**BASE.model_dump(exclude_none=True), "env": {"TOK": {"protected": True}}}
-)
-
-
-async def _versions(pool, session_id):
-    async with pool.connection() as conn:
-        cur = await conn.execute(
-            "SELECT secret_versions FROM sessions WHERE id = %s", (session_id,)
-        )
-        return (await cur.fetchone())[0]
-
-
-async def _states(pool, preset_id):
-    async with pool.connection() as conn:
-        cur = await conn.execute(
-            "SELECT name, version, state FROM change_proposal_secrets WHERE preset_id = %s"
-            " ORDER BY name, version",
-            (preset_id,),
-        )
-        return await cur.fetchall()
-
-
-async def _staged_session(pool, versions=None):
-    """A session of its own preset, naming `versions`, and one value of TOK staged for it."""
+async def test_a_spec_write_leaves_the_pins_as_they_are(pool):
     s = await _created(pool)
-    preset_id = await attach_preset(pool, s.id)
-    if versions is not None:
-        async with pool.connection() as conn:
-            await conn.execute(
-                "UPDATE sessions SET secret_versions = %s WHERE id = %s", (Jsonb(versions), s.id)
-            )
-    staged = await stage(pool, FakeKube(namespace=NS), preset_id, "TOK", "unused-value")
-    return s, preset_id, staged
-
-
-async def _bind_and_replace(conn, s, preset_id, stored, spec, recheck=_noop):
-    """The session apply of a proposal: bind the staged value, then replace spec and binding."""
-    async with conn.transaction():
-        bound = await store.bind_staged(conn, preset_id, "TOK", proposal_id=7, revision=1)
-        return await sessions.replace_spec(
-            conn, s.id, stored, spec, recheck, secret_versions={"TOK": bound}
-        )
-
-
-async def test_bind_writes_declaration_and_secret_name_with_one_bump(pool, dsn):
-    s, preset_id, staged = await _staged_session(pool, {"OLD": "ps-old-v1"})
-    stored, gen, _ = await _row(pool, s.id)
-    async with _Listener(dsn) as lis, pool.connection() as conn:
-        out, written = await _bind_and_replace(conn, s, preset_id, stored, PROTECTED)
-        got = await lis.payloads()
-    assert written is True
-    assert out.spec == PROTECTED and out.generation == gen + 1
-    assert out.secret_versions == {"TOK": staged}  # OLD is not declared protected: pruned
-    assert got == [json.dumps({"session_id": str(s.id)})]
-    spec, gen2, _ = await _row(pool, s.id)
-    assert spec == PROTECTED.model_dump(mode="json", exclude_none=True) and gen2 == gen + 1
-    assert await _versions(pool, s.id) == {"TOK": staged}
-    assert await _states(pool, preset_id) == [("TOK", 1, "bound")]
-
-
-async def test_a_changed_binding_alone_is_a_change(pool, dsn):
-    s, preset_id, staged = await _staged_session(pool)
+    pins = {"OLD": "ps-00000000-0a0b0c-v1", "X": {"value": "v"}}
     async with pool.connection() as conn:
         await conn.execute(
-            "UPDATE sessions SET spec = %s, secret_versions = %s WHERE id = %s",
-            (Jsonb(PROTECTED.model_dump(mode="json", exclude_none=True)), Jsonb({}), s.id),
+            "UPDATE sessions SET secret_versions = %s WHERE id = %s", (Jsonb(pins), s.id)
         )
-    stored, gen, _ = await _row(pool, s.id)
-    async with _Listener(dsn) as lis, pool.connection() as conn:
-        out, written = await _bind_and_replace(conn, s, preset_id, stored, PROTECTED)
-        got = await lis.payloads()
-    assert written is True and out.generation == gen + 1
-    assert got == [json.dumps({"session_id": str(s.id)})]
-    assert await _versions(pool, s.id) == {"TOK": staged}
-
-
-async def test_an_equal_binding_and_spec_write_nothing(pool, dsn):
-    s, _, staged = await _staged_session(pool, {})
+    stored = (await _row(pool, s.id))[0]
     async with pool.connection() as conn:
-        await conn.execute(
-            "UPDATE sessions SET spec = %s, secret_versions = %s WHERE id = %s",
-            (
-                Jsonb(PROTECTED.model_dump(mode="json", exclude_none=True)),
-                Jsonb({"TOK": staged}),
-                s.id,
-            ),
+        out, written = await sessions.replace_spec(
+            conn, s.id, stored, BASE.model_copy(update={"image": "img:2"}), _noop
         )
-    before = await _row(pool, s.id)
-    async with _Listener(dsn) as lis, pool.connection() as conn:
-        _, written = await sessions.replace_spec(
-            conn, s.id, before[0], PROTECTED, _noop, secret_versions={"TOK": staged}
-        )
-        got = await lis.payloads()
-    assert written is False and got == []
-    assert await _row(pool, s.id) == before
-
-
-async def test_recheck_raise_writes_neither_spec_nor_binding(pool, dsn):
-    s, preset_id, _ = await _staged_session(pool, {"OLD": "ps-old-v1"})
-    before = await _row(pool, s.id)
-
-    async def recheck(_locked):
-        raise RuntimeError("refused")
-
-    async with _Listener(dsn) as lis, pool.connection() as conn:
-        with pytest.raises(RuntimeError, match="refused"):
-            await _bind_and_replace(conn, s, preset_id, before[0], PROTECTED, recheck)
-        got = await lis.payloads()
-    assert got == []
-    assert await _row(pool, s.id) == before
-    assert await _versions(pool, s.id) == {"OLD": "ps-old-v1"}
-    assert await _states(pool, preset_id) == [("TOK", 1, "staged")]
+    assert written is True and out.secret_versions == pins

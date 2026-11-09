@@ -7,9 +7,8 @@ tables do. Times come from the database clock (`now()`).
 Transactions: each writing function runs in `conn.transaction()`. On an idle connection that is
 its own transaction; inside a caller's open transaction it is a savepoint and the caller commits.
 
-No value is ever stored here: an `env.NAME` item carries the redacted declaration or a vault
-reference (entry id and entry env) only. The `secret` column of the items is no longer written;
-the destructive migration step (O10) drops it.
+No secret value is ever stored here: an `env.NAME` item carries a plain variable or a vault
+reference (entry id and entry env) only.
 """
 
 from __future__ import annotations

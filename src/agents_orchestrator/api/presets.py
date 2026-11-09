@@ -9,15 +9,15 @@ from typing import Any
 
 from fastapi import APIRouter, Request, Response
 from fastapi.concurrency import run_in_threadpool
-from pydantic import SecretStr, ValidationError
+from pydantic import ValidationError
 
-from agents_orchestrator.api import schemas, secret_store, vault_client
+from agents_orchestrator.api import schemas, vault_client
 from agents_orchestrator.api.errors import ApiError, not_found, project_error
 from agents_orchestrator.api.sessions import Cfg, Pool, check_spec, hold_project
 from agents_orchestrator.api.spec_edit import (
     guard_agent_edit,
     human_only_refused,
-    merged_spec_in,
+    merged_spec,
     note_fields,
 )
 from agents_orchestrator.api.vault_refs import (
@@ -36,11 +36,8 @@ from agents_orchestrator.preset_policy import (
     privileged,
     strip_grants,
 )
-from agents_orchestrator.secret_view import EnvMeta, redact_spec_dict
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import Ref, SessionSpec, default_cache_key
-
-SECRET_MAX_BYTES = 1024 * 1024  # F1.9: a Kubernetes Secret holds at most 1 MiB
 
 router = APIRouter(prefix="/api/v1")
 
@@ -49,10 +46,7 @@ _COPY_TRIES = 5
 _PATCH_TRIES = 3
 
 
-def _view(
-    preset: repo.Preset, secrets: list[secret_store.SecretMeta] | None = None
-) -> schemas.PresetView:
-    metas = {m.name: EnvMeta(m.version, m.updated_at) for m in secrets or []}
+def _view(preset: repo.Preset) -> schemas.PresetView:
     return schemas.PresetView(
         id=preset.id,
         name=preset.name,
@@ -62,7 +56,7 @@ def _view(
         project=preset.project,
         privileged=privileged(preset.spec),
         vault_reattach=preset.vault_reattach,
-        spec=redact_spec_dict(preset.spec, metas),
+        spec=preset.spec,
         created_at=preset.created_at,
         updated_at=preset.updated_at,
     )
@@ -83,20 +77,20 @@ async def _validated(
     human_only_base: dict[str, Any] | None = None,
     request: Request | None = None,
     plain_to_ref: bool = False,
-) -> tuple[dict[str, Any], dict[str, SecretStr], SessionSpec]:
-    """Check name and spec; return the spec as the caller sent it (no defaults filled), the
-    protected values it carried, which never go into the spec, and the parsed spec.
+) -> tuple[dict[str, Any], SessionSpec]:
+    """Check name and spec; return the spec as the caller sent it (no defaults filled) and the
+    parsed spec.
 
     With `human_only_base` (the stored spec, `{}` on create) the human-only fields may only move
     toward safe, else 403 before anything is written."""
     _checked_name(body.name)
-    spec, values = body.spec.split()
+    spec = body.spec
     if human_only_base is not None:
         dumped = spec.model_dump(mode="json", exclude_unset=True)
         guard_agent_edit(
-            human_only_base, dumped, values, request, privileged=True, plain_to_ref=plain_to_ref
+            human_only_base, dumped, request, privileged=True, plain_to_ref=plain_to_ref
         )
-    return await validated_spec(spec, settings, stored, preset_id), values, spec
+    return await validated_spec(spec, settings, stored, preset_id), spec
 
 
 async def validated_spec(
@@ -117,12 +111,6 @@ async def validated_spec(
     derived = default_cache_key(preset_id) if preset_id is not None else None
     await run_in_threadpool(check_spec, spec, settings, stored_spec, derived_cache_key=derived)
     return spec.model_dump(mode="json", exclude_unset=True)
-
-
-def check_secret_size(value: SecretStr) -> None:
-    """413 when a value does not fit one Kubernetes Secret."""
-    if len(value.get_secret_value().encode()) > SECRET_MAX_BYTES:
-        raise ApiError(413, "secret_too_large", f"a secret holds at most {SECRET_MAX_BYTES} bytes")
 
 
 def _refuse_column_moves(request: Request, stored: repo.Preset, new: dict[str, Any]) -> None:
@@ -178,70 +166,25 @@ def _actor(request: Request, superleader: bool) -> str:
     return "user" if caller is None else caller[1].slug
 
 
-def store_failed() -> ApiError:
-    return ApiError(502, "secret_store_failed", "could not store a protected variable")
-
-
-async def forget(conn, kube, namespace: str, versions: list[tuple[uuid.UUID, str, int]]) -> None:
-    """Best effort: delete the (preset id, name, version) Secrets written for a save that did not
-    stick, never one a concurrent writer has made live since (`forget_unsaved`)."""
-    if versions:
-        await secret_store.forget_unsaved(conn, kube, namespace, versions)
-
-
 async def _save(
     request: Request,
     conn,
-    settings: Settings,
     spec: dict[str, Any],
-    values: dict[str, SecretStr],
     project: str,
     save: Callable[[], Awaitable[repo.Preset]],
     actor: str = "user",
     old_refs: dict[str, Ref] | None = None,
-) -> tuple[repo.Preset, list[secret_store.SecretMeta]]:
-    """Save the preset row and its secrets as one step; a failure leaves the old state.
-
-    In the same transaction: the names the new spec defines leave the preset's re-attach list,
-    and the vault refs attached or detached against `old_refs` are recorded as events by `actor`.
-
-    The preset's `project` is checked and held first (`hold_project`). The row save, the new
-    Secret versions and the retirement of dropped variables share one transaction. The new
-    versions are written to Kubernetes before it commits, so when anything fails the transaction
-    rolls back and the versions written so far are deleted. The previous versions are collected
-    only after the commit. A protected variable sent without a value is left as it is.
+) -> repo.Preset:
+    """Save the preset row in one transaction, the preset's `project` checked and held first
+    (`hold_project`). In the same transaction: the names the new spec defines leave the preset's
+    re-attach list, and the vault refs attached or detached against `old_refs` are recorded as
+    events by `actor`.
     """
-    declared = sorted(n for n, e in spec.get("env", {}).items() if e.get("protected"))
-    created: list[tuple[uuid.UUID, str, int]] = []
-    kube = None
-    try:
-        async with conn.transaction():
-            await hold_project(conn, project)
-            preset = await save()
-            preset = await _after_save(conn, preset, spec, actor, old_refs or {})
-            if values or await secret_store.has_rows(conn, preset.id):
-                kube = secret_store.kube_of(request)
-                for name, value in values.items():
-                    meta = await secret_store.set_secret(
-                        conn, kube, settings.namespace, preset.id, name, value, collect=False
-                    )
-                    created.append((preset.id, name, meta.version))
-                await secret_store.sync_declared(
-                    conn, kube, settings.namespace, preset.id, declared, collect=False
-                )
-        note_vault(request, *ref_diff(old_refs or {}, refs_in(spec)))
-    except secret_store.SecretStoreError as exc:
-        await forget(conn, kube, settings.namespace, created)
-        if isinstance(exc, secret_store.PresetNotFound):
-            raise not_found("preset") from None
-        raise store_failed() from None
-    except BaseException:
-        if kube is not None:
-            await forget(conn, kube, settings.namespace, created)
-        raise
-    if kube is not None:
-        await secret_store.gc(conn, kube, settings.namespace, preset_id=preset.id)
-    return preset, (await secret_store.list_metas(conn, [preset.id])).get(preset.id, [])
+    async with conn.transaction():
+        await hold_project(conn, project)
+        preset = await _after_save(conn, await save(), spec, actor, old_refs or {})
+    note_vault(request, *ref_diff(old_refs or {}, refs_in(spec)))
+    return preset
 
 
 async def _after_save(
@@ -293,8 +236,7 @@ async def list_all(
     presets = await repo.list_presets(conn, project=project)
     if only_manageable:
         presets = [p for p in presets if p.superleader_manageable]
-    metas = await secret_store.list_metas(conn, [p.id for p in presets])
-    return [_view(p, metas.get(p.id)) for p in presets]
+    return [_view(p) for p in presets]
 
 
 async def create(
@@ -306,19 +248,17 @@ async def create(
 ) -> schemas.PresetView:
     if superleader and body.superleader_manageable is False:
         raise manageable_main_port_only()
-    spec, values, model = await _validated(
+    spec, model = await _validated(
         body, settings, human_only_base={} if superleader else None, request=request
     )
     manageable = superleader or bool(body.superleader_manageable)
     project = projects.DEFAULT if body.project is None else body.project
     await check_vault(request, model, body.labels or [], project)
     try:
-        preset, metas = await _save(
+        preset = await _save(
             request,
             conn,
-            settings,
             spec,
-            values,
             project,
             lambda: repo.create(conn, body.name, spec, manageable, body.labels, project),
             _actor(request, superleader),
@@ -330,15 +270,14 @@ async def create(
             ["project"] if project != projects.DEFAULT else []
         )
         note_fields(request, changed_paths({}, spec) + ["name"] + extra)
-    return _view(preset, metas)
+    return _view(preset)
 
 
 async def get_one(conn, preset_id: uuid.UUID) -> schemas.PresetView:
     preset = await repo.get(conn, preset_id)
     if preset is None:
         raise not_found("preset")
-    secrets = (await secret_store.list_metas(conn, [preset_id])).get(preset_id)
-    return _view(preset, secrets)
+    return _view(preset)
 
 
 async def replace(
@@ -359,7 +298,7 @@ async def replace(
     project = stored.project if body.project is None else body.project
     if superleader:
         _refuse_column_moves(request, stored, {**body.model_dump(), "project": project})
-    spec, values, model = await _validated(
+    spec, model = await _validated(
         body,
         settings,
         stored.spec,
@@ -372,12 +311,10 @@ async def replace(
     recheck = _unchanged_since(stored, labels=body.labels is None, project=body.project is None)
     expected = stored.updated_at if superleader else None
     try:
-        preset, metas = await _save(
+        preset = await _save(
             request,
             conn,
-            settings,
             spec,
-            values,
             project,
             lambda: repo.update(
                 conn, preset_id, body.name, spec, flag, body.labels, expected, project, recheck
@@ -400,7 +337,7 @@ async def replace(
         if body.labels is not None and body.labels != stored.labels:
             paths.append("labels")
         note_fields(request, paths)
-    return _view(preset, metas)
+    return _view(preset)
 
 
 async def _entry_envs(request: Request, entry_id: uuid.UUID) -> list[str]:
@@ -508,9 +445,9 @@ async def _edit_refs(
         if stored is None or not stored.superleader_manageable:
             raise not_found("preset")
         env, conflicts = edit(dict(stored.spec.get("env") or {}))
-        _, spec_in = merged_spec_in({**stored.spec, "env": env}, {})
-        body = schemas.PresetIn(name=stored.name, spec=spec_in, project=stored.project)
-        spec, values, model = await _validated(
+        _, merged = merged_spec({**stored.spec, "env": env}, {})
+        body = schemas.PresetIn(name=stored.name, spec=merged, project=stored.project)
+        spec, model = await _validated(
             body,
             settings,
             stored.spec,
@@ -529,12 +466,10 @@ async def _edit_refs(
             )
         recheck = _unchanged_since(stored, labels=True, project=True)
         try:
-            preset, metas = await _save(
+            preset = await _save(
                 request,
                 conn,
-                settings,
                 spec,
-                values,
                 stored.project,
                 lambda st=stored, sp=spec, rc=recheck: repo.update(
                     conn, preset_id, st.name, sp, None, None, st.updated_at, st.project, rc
@@ -547,13 +482,13 @@ async def _edit_refs(
         except repo.PresetChanged:
             continue
         note_fields(request, changed_paths(stored.spec, spec))
-        return _view(preset, metas)
+        return _view(preset)
     raise ApiError(409, "conflict", "the preset changed since it was read; retry")
 
 
 def _merged_body(stored: repo.Preset, body: schemas.PresetPatch) -> schemas.PresetIn:
     """The stored spec with the patch merged in, as the body a PUT would carry."""
-    _, spec = merged_spec_in(stored.spec, body.spec or {})
+    _, spec = merged_spec(stored.spec, body.spec or {})
     return schemas.PresetIn(
         name=stored.name if body.name is None else body.name,
         spec=spec,
@@ -566,7 +501,7 @@ async def patch(
     request: Request, conn, settings: Settings, preset_id: uuid.UUID, body: schemas.PresetPatch
 ) -> schemas.PresetView:
     """Merge-patch a preset for the superleader: the patch is applied to the stored spec, so
-    what it does not name (a stored protected variable, a grant) is kept; a concurrent edit makes
+    what it does not name (a grant, a vault ref) is kept; a concurrent edit makes
     it re-read and retry."""
     for _ in range(_PATCH_TRIES):
         stored = await repo.get(conn, preset_id)
@@ -574,7 +509,7 @@ async def patch(
             raise not_found("preset")
         merged = _merged_body(stored, body)
         _refuse_column_moves(request, stored, merged.model_dump())
-        spec, values, model = await _validated(
+        spec, model = await _validated(
             merged,
             settings,
             stored.spec,
@@ -586,12 +521,10 @@ async def patch(
         await check_vault(request, model, labels, merged.project)
         recheck = _unchanged_since(stored, labels=merged.labels is None, project=True)
         try:
-            preset, metas = await _save(
+            preset = await _save(
                 request,
                 conn,
-                settings,
                 spec,
-                values,
                 merged.project,
                 lambda m=merged, sp=spec, at=stored.updated_at, rc=recheck: repo.update(
                     conn, preset_id, m.name, sp, None, m.labels, at, m.project, rc
@@ -613,7 +546,7 @@ async def patch(
         if merged.labels is not None and merged.labels != stored.labels:
             paths.append("labels")
         note_fields(request, paths)
-        return _view(preset, metas)
+        return _view(preset)
     raise ApiError(409, "conflict", "the preset changed since it was read; retry")
 
 
@@ -627,18 +560,12 @@ def privileged_delete_refused(flags: list[str]) -> ApiError:
     )
 
 
-async def remove(
-    request: Request,
-    conn,
-    settings: Settings,
-    preset_id: uuid.UUID,
-    superleader: bool = False,
-) -> None:
-    """Delete a preset and retire its Secret rows.
+async def remove(request: Request, conn, preset_id: uuid.UUID, superleader: bool = False) -> None:
+    """Delete a preset.
 
     The superleader may not delete a privileged preset (403 `privileged_target`, `fields` the
-    flags that are on). The check runs on the spec read under the row lock, before the delete
-    and before any Secret cleanup, so a human turning a flag on concurrently cannot be raced."""
+    flags that are on). The check runs on the spec read under the row lock, before the delete,
+    so a human turning a flag on concurrently cannot be raced."""
 
     def recheck(spec: dict) -> None:
         if superleader and (flags := privileged(spec)):
@@ -646,18 +573,7 @@ async def remove(
             raise privileged_delete_refused(flags)
 
     try:
-        async with conn.transaction():
-            await repo.delete(conn, preset_id, recheck=recheck)
-            # no FK: the rows outlive the preset, so retire them here; gc then treats them
-            # as dead and deletes the versions no live session names
-            collect = await secret_store.has_rows(conn, preset_id)
-            if collect:
-                kube = secret_store.kube_of(request)
-                await secret_store.sync_declared(
-                    conn, kube, settings.namespace, preset_id, [], collect=False
-                )
-        if collect:
-            await secret_store.gc(conn, kube, settings.namespace, preset_id=preset_id)
+        await repo.delete(conn, preset_id, recheck=recheck)
     except repo.PresetNotFound:
         raise not_found("preset") from None
     except repo.PresetDefault as exc:
@@ -695,11 +611,9 @@ async def replace_preset(
 
 
 @router.delete("/presets/{preset_id}", status_code=204, response_model=None)
-async def delete_preset(
-    preset_id: uuid.UUID, request: Request, pool: Pool, settings: Cfg
-) -> Response:
+async def delete_preset(preset_id: uuid.UUID, request: Request, pool: Pool) -> Response:
     async with pool.connection() as conn:
-        await remove(request, conn, settings, preset_id)
+        await remove(request, conn, preset_id)
     return Response(status_code=204)
 
 
@@ -780,69 +694,3 @@ async def by_ref(conn, ref: str) -> repo.Preset:
     if found is None:
         raise not_found("preset")
     return found
-
-
-async def put_secret(
-    request: Request,
-    conn,
-    settings: Settings,
-    preset: str,
-    name: str,
-    body: schemas.SecretIn,
-    superleader: bool = False,
-) -> schemas.SecretView:
-    """Set the value of a protected variable (a new version). The value is never echoed.
-
-    The superleader may not set one on a privileged preset (403 `privileged_target`)."""
-    check_secret_size(body.value)
-    found = await by_ref(conn, preset)
-
-    def refuse_privileged(spec: dict) -> None:
-        guard_agent_edit(spec, spec, [name], request, privileged=True)
-
-    def refuse_undeclared(spec: dict) -> None:
-        entry = spec.get("env", {}).get(name)
-        if not (isinstance(entry, dict) and entry.get("protected")):
-            raise ApiError(
-                422, "invalid_request", f"{name!r} is not a protected variable of this preset"
-            )
-
-    def recheck(spec: dict) -> None:
-        # runs on the spec read under the preset row lock, so a concurrent unprotect or removal
-        # of the entry (or a grant turned on) cannot slip a write through
-        if superleader:
-            refuse_privileged(spec)
-        refuse_undeclared(spec)
-
-    recheck(found.spec)
-    kube = secret_store.kube_of(request)
-    try:
-        meta = await secret_store.set_secret(
-            conn,
-            kube,
-            settings.namespace,
-            found.id,
-            name,
-            body.value,
-            recheck=recheck,
-        )
-    except secret_store.PresetNotFound:
-        raise not_found("preset") from None
-    except secret_store.SecretStoreError:
-        raise store_failed() from None
-    return schemas.SecretView(
-        name=meta.name, set=meta.set, version=meta.version, updated_at=meta.updated_at
-    )
-
-
-@router.put("/presets/{preset}/secrets/{name}", response_model=schemas.SecretView)
-async def set_preset_secret(
-    preset: str,
-    name: str,
-    body: schemas.SecretIn,
-    request: Request,
-    pool: Pool,
-    settings: Cfg,
-) -> schemas.SecretView:
-    async with pool.connection() as conn:
-        return await put_secret(request, conn, settings, preset, name, body)

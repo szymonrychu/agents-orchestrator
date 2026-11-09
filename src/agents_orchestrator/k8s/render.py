@@ -387,7 +387,7 @@ def _apply_wrapper(cfg: dict[str, Any], wrapper: WrapperSettings, session: Sessi
     _render_texts(user, session)
     raw = copy.deepcopy(user)
     user = _escape(user)
-    names = frozenset(session.spec.env)
+    names = frozenset(session.spec.env) | frozenset(_legacy_pins(session))
     for event, actions in raw.get("hooks", {}).items():
         for action, escaped in zip(actions, user["hooks"][event], strict=True):
             if action.get("type") == "webhook":
@@ -517,8 +517,12 @@ def _meta(slug: str, kind_name: str, settings: Settings) -> dict[str, Any]:
     }
 
 
-_PIN_SECRET_RE = re.compile(r"^(vault-[0-9a-f-]{36}-v\d+|ps-[0-9a-f]{8}-[0-9a-f]{6}-v\d+)$")
+_PIN_SECRET_RE = re.compile(r"^vault-[0-9a-f-]{36}-v\d+$")
 _PIN_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
+# A legacy pin: the ps-* Secret of a protected variable, snapshotted at a create before migration
+# 0041; its value sits under the key `value`.
+_LEGACY_SECRET_RE = re.compile(r"^ps-[0-9a-f]{8}-[0-9a-f]{6}-v\d+$")
+_LEGACY_KEY = "value"
 
 
 def _pins(session: Session) -> dict[str, dict[str, Any]]:
@@ -543,10 +547,27 @@ def _pins(session: Session) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _legacy_pins(session: Session) -> dict[str, str]:
+    """The legacy pins that render: a session created before migration 0041 keeps the ps-*
+    Secret its protected variable was snapshotted to (0041 removed the variable from the spec
+    and left the pin as it was), so its pods render unchanged. An env of the same name in the
+    spec, set since, wins. The Secret name is checked against the ps-* grammar before it reaches
+    a pod spec; a mismatch raises with the env name only.
+    """
+    out: dict[str, str] = {}
+    for name, pin in session.secret_versions.items():
+        if not isinstance(pin, str) or name in session.spec.env:
+            continue
+        if not _LEGACY_SECRET_RE.fullmatch(pin):
+            raise ValueError(f"variable {name} has an invalid legacy pin")
+        out[name] = pin
+    return out
+
+
 def secret_env_names(session: Session) -> list[str]:
-    """Env names the wrapper redacts by value: Secret pins plus legacy protected variables."""
+    """Env names the wrapper redacts by value: Secret pins and legacy pins."""
     names = {name for name, pin in _pins(session).items() if "secret" in pin}
-    names.update(name for name, var in session.spec.env.items() if var.protected)
+    names.update(_legacy_pins(session))
     return sorted(names)
 
 
@@ -558,22 +579,19 @@ def env_entries(session: Session) -> list[dict[str, Any]]:
     """The session's own env variables as container env, sorted by name.
 
     Vault pins in `secret_versions` render by shape: `{secret, key}` is a `secretKeyRef`,
-    `{value}` is a readable value with `$` doubled (a readable value never expands). A protected
-    variable (until it is migrated to a vault ref) is a `secretKeyRef` to its Secret version
-    snapshotted at create. A plain one with `expand` false has its `$` doubled (the kubelet reads
-    `$$` as a literal `$`, so `$(VAR)` stays text); with `expand` true it is emitted as is. A vault
-    ref in the spec without a pin is refused; a pin renders only for a vault ref in the spec.
+    `{value}` is a readable value with `$` doubled (a readable value never expands). A legacy
+    pin (`_legacy_pins`) is a `secretKeyRef` to its ps-* Secret. A plain variable with `expand`
+    false has its `$` doubled (the kubelet reads `$$` as a literal `$`, so `$(VAR)` stays text);
+    with `expand` true it is emitted as is. A vault ref in the spec without a pin is refused; a
+    pin renders only for a vault ref in the spec.
     """
-    out: dict[str, dict[str, Any]] = {}
+    out: dict[str, dict[str, Any]] = {
+        name: _secret_ref(secret, _LEGACY_KEY) for name, secret in _legacy_pins(session).items()
+    }
     for name, var in session.spec.env.items():
         if var.is_ref:
             if not isinstance(session.secret_versions.get(name), dict):
                 raise ValueError(f"vault variable {name} has no pin")
-        elif var.protected:
-            secret = session.secret_versions.get(name)
-            if not isinstance(secret, str):
-                raise ValueError(f"protected variable {name} has no stored secret")
-            out[name] = _secret_ref(secret, "value")
         else:
             value = var.value or ""
             out[name] = {"value": value if var.expand else value.replace("$", "$$")}

@@ -37,12 +37,12 @@ from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 
-from agents_orchestrator.api import admin, admin_relay, schemas, secret_store, session_spec
+from agents_orchestrator.api import admin, admin_relay, schemas, session_spec
 from agents_orchestrator.api import forward as forward_core
 from agents_orchestrator.api import presets as presets_api
 from agents_orchestrator.api.errors import ApiError, not_found
-from agents_orchestrator.api.sessions import PLACE_ATTEMPTS, _secret_unset, hold_project
-from agents_orchestrator.api.spec_edit import merged_spec_in, note_fields
+from agents_orchestrator.api.sessions import PLACE_ATTEMPTS, hold_project
+from agents_orchestrator.api.spec_edit import merged_spec, note_fields
 from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.db import proposals as repo
 from agents_orchestrator.db import sessions as sessions_repo
@@ -55,9 +55,8 @@ from agents_orchestrator.preset_policy import (
     fixed_changes,
     merge_patch,
 )
-from agents_orchestrator.secret_view import EnvMeta, redact_spec_dict, session_metas
 from agents_orchestrator.settings import Settings
-from agents_orchestrator.spec import SessionSpec, SessionSpecIn
+from agents_orchestrator.spec import SessionSpec, legacy_context
 
 log = logging.getLogger(__name__)
 
@@ -68,31 +67,29 @@ STATUSES: dict[str, tuple[str, ...]] = {
     "all": repo.ACTIVE + repo.TERMINAL,
 }
 
-# what a protected env entry keeps: in a revision's base (plan 3.2) and in an item's `after`
-_BASE_KEYS = ("protected", "expand", "set", "version")
-_AFTER_KEYS = ("protected", "expand")
 SCHEDULE_FIELDS = tuple(schemas.ScheduleIn.model_fields)
 
 
 @dataclass(frozen=True)
 class _Plan:
-    """One revision as it will be stored: redacted base, fingerprint and items."""
+    """One revision as it will be stored: base, fingerprint and items."""
 
     base: dict[str, Any]
     fingerprint: str
     items: list[repo.Item]
 
 
-def fingerprint_preset(preset: presets_repo.Preset, versions: dict[str, int]) -> str:
+def fingerprint_preset(preset: presets_repo.Preset) -> str:
     """The preset as a proposal revision was based on it (Q6 B): every row write bumps
-    `updated_at`, and a value rotation bumps a live secret version without touching the row."""
-    doc = {"updated_at": preset.updated_at.isoformat(), "secrets": versions}
+    `updated_at`. The empty `secrets` map stays in the document so a revision fingerprinted
+    before migration 0041, on a preset without protected variables, still matches."""
+    doc = {"updated_at": preset.updated_at.isoformat(), "secrets": {}}
     return hashlib.sha256(json.dumps(doc, sort_keys=True).encode()).hexdigest()
 
 
 def fingerprint_session(stored: Mapping[str, Any], versions: Mapping[str, str]) -> str:
-    """The session as a proposal revision was based on it (Q6 B): the stored spec JSONB and the
-    bound Secret names, canonical JSON; any spec write counts, a scale included."""
+    """The session as a proposal revision was based on it (Q6 B): the stored spec JSONB and its
+    pins, canonical JSON; any spec write counts, a scale included."""
     doc = {"spec": stored, "secret_versions": versions}
     canonical = json.dumps(doc, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()
@@ -106,22 +103,6 @@ def _deleting() -> ApiError:
     return ApiError(409, "session_deleting", "the session is being discarded")
 
 
-def _redacted(
-    spec: Mapping[str, Any], metas: Mapping[str, EnvMeta], keys: tuple[str, ...]
-) -> dict[str, Any]:
-    """`redact_spec_dict`, each protected entry cut to `keys` (JSON-safe, no timestamps)."""
-    out = redact_spec_dict(spec, metas)
-    env = out.get("env")
-    if isinstance(env, dict):
-        out["env"] = {
-            name: {k: e[k] for k in keys if k in e}
-            if isinstance(e, dict) and e.get("protected")
-            else e
-            for name, e in env.items()
-        }
-    return out
-
-
 def _at(spec: Mapping[str, Any], path: str) -> Any:
     """The value at a `changed_paths` path (`env.X`, `wrapper.X` one level deep); None = absent."""
     head, _, sub = path.partition(".")
@@ -129,11 +110,6 @@ def _at(spec: Mapping[str, Any], path: str) -> Any:
     if not sub:
         return value
     return value.get(sub) if isinstance(value, dict) else None
-
-
-async def _metas(conn, preset_id: uuid.UUID) -> dict[str, EnvMeta]:
-    found = (await secret_store.list_metas(conn, [preset_id])).get(preset_id, [])
-    return {m.name: EnvMeta(m.version, m.updated_at) for m in found}
 
 
 async def _locked(conn, preset_id: uuid.UUID, *, hidden_as: str = "preset") -> presets_repo.Preset:
@@ -155,34 +131,31 @@ async def _plan(
 ) -> _Plan:
     """Merge, check and diff the patch against the locked preset, as the PATCH does, without the
     agent guards; the vault checks the references. Items carry the stored and the merged spec
-    only, protected declarations redacted."""
+    only."""
     spec = _merged(preset.spec, patch)
     new = await presets_api.validated_spec(spec, settings, preset.spec, preset.id)
     await presets_api.check_vault(request, spec, preset.labels, preset.project)
-    metas = await _metas(conn, preset.id)
-    base, items = _items(preset.spec, new, metas)
-    versions = {n: m.version for n, m in metas.items()}
-    return _Plan(base, fingerprint_preset(preset, versions), items)
+    base, items = _items(preset.spec, new)
+    return _Plan(base, fingerprint_preset(preset), items)
 
 
-def _merged(stored: dict[str, Any], patch: dict[str, Any]) -> SessionSpec:
-    """The stored spec with the patch merged in (422 `secret_in_spec` for a value in `patch`),
-    parsed."""
-    _, spec_in = merged_spec_in(stored, patch)
-    spec, _ = spec_in.split()  # no values: secret_in_patch refused every protected one
-    return spec
+def _merged(
+    stored: dict[str, Any], patch: dict[str, Any], context: dict[str, Any] | None = None
+) -> SessionSpec:
+    """The stored spec with the patch merged in, parsed (`context`: a session's
+    `legacy_context`)."""
+    return merged_spec(stored, patch, context)[1]
 
 
 def _items(
-    stored: Mapping[str, Any], new: Mapping[str, Any], metas: Mapping[str, EnvMeta]
+    stored: Mapping[str, Any], new: Mapping[str, Any]
 ) -> tuple[dict[str, Any], list[repo.Item]]:
-    """The redacted base and one item per changed path; values come from the stored and the
-    merged spec only, redacted."""
+    """The base and one item per changed path; values come from the stored and the merged spec
+    only (a spec holds no secret value: a vault ref names its entry)."""
     paths = sorted(changed_paths(stored, new))
     if not paths:
         raise ApiError(422, "nothing_changed", "the patch changes nothing")
-    base = _redacted(stored, metas, _BASE_KEYS)
-    after = _redacted(new, {}, _AFTER_KEYS)
+    base, after = copy.deepcopy(dict(stored)), copy.deepcopy(dict(new))
     classes = classify(paths)
     items = [
         repo.Item(
@@ -204,19 +177,14 @@ async def _session_plan(
     patch: dict[str, Any],
 ) -> _Plan:
     """`_plan` for a live session: merged and checked in the session PATCH's order (fixed fields,
-    reference changes, then `check_spec`, then every protected variable with a value bound), no
-    agent guard."""
-    spec = _merged(stored, patch)
+    reference changes, then `check_spec`), no agent guard."""
+    spec = _merged(stored, patch, legacy_context(session.secret_versions))
     new = spec.model_dump(mode="json", exclude_unset=True)
     if fixed := fixed_changes(stored, new):
         raise session_spec.fixed_refused(fixed)
     session_spec.refuse_ref_changes(stored, new)
     await session_spec.validated(spec, settings, session)
-    protected = {n for n, e in spec.env.items() if e.protected}
-    if unset := sorted(protected - set(session.secret_versions)):
-        raise _secret_unset(unset)
-    metas = session_metas(session.secret_versions, session.created_at)
-    base, items = _items(stored, new, metas)
+    base, items = _items(stored, new)
     return _Plan(base, fingerprint_session(stored, session.secret_versions), items)
 
 
@@ -431,12 +399,6 @@ async def withdraw(
     return await get_view(conn, settings, proposal_id, proposer=caller.id)
 
 
-async def live_fingerprint(conn, preset: presets_repo.Preset) -> str:
-    """`fingerprint_preset` of the preset row as given and its live secret versions now."""
-    versions = {n: m.version for n, m in (await _metas(conn, preset.id)).items()}
-    return fingerprint_preset(preset, versions)
-
-
 async def _stale(conn, proposal: repo.Proposal) -> bool:
     """Read-only (never changes state): the live preset or session differs from the current
     revision's (a gone one reads stale). A schedule is never read upstream here (module
@@ -452,11 +414,11 @@ async def _stale(conn, proposal: repo.Proposal) -> bool:
     preset = await presets_repo.get(conn, uuid.UUID(proposal.target_id))
     if preset is None:
         return True
-    return await live_fingerprint(conn, preset) != current.fingerprint
+    return fingerprint_preset(preset) != current.fingerprint
 
 
 async def _view(conn, proposal: repo.Proposal) -> schemas.ProposalView:
-    """The view: no client_key, no base or fingerprint (values stay redacted either way)."""
+    """The view: no client_key, no base or fingerprint (a spec holds no secret value)."""
     data = {
         name: getattr(proposal, name)
         for name in schemas.ProposalView.model_fields
@@ -681,10 +643,9 @@ Decisions = dict[str, tuple[str, str | None]]
 @dataclass
 class _Done:
     """What a review transaction leaves for after its commit: the error to answer (a refusal
-    whose state change must stick) and the preset whose old protected versions to `gc`."""
+    whose state change must stick)."""
 
     error: ApiError | None = None
-    gc: uuid.UUID | None = None
 
 
 def _stale_error(kind: str) -> ApiError:
@@ -811,18 +772,19 @@ def _approved(current: repo.Revision, decisions: Decisions) -> list[repo.Item]:
     return [i for i in current.items if decisions[i.path][0] == "approved"]
 
 
-def _approved_spec(stored: Mapping[str, Any], approved: list[repo.Item]) -> SessionSpec:
+def _approved_spec(
+    stored: Mapping[str, Any], approved: list[repo.Item], context: dict[str, Any] | None = None
+) -> SessionSpec:
     """The stored spec with each approved path set to its proposed value (or removed), parsed
-    (422 `invalid_spec` with the pydantic text, never the input)."""
+    (422 `invalid_spec` with the pydantic text, never the input; `context`: a session's
+    `legacy_context`)."""
     out = copy.deepcopy(dict(stored))
     for item in approved:
         _put(out, item.path, item.after)
     try:
-        spec_in = SessionSpecIn.model_validate(out)
+        return SessionSpec.model_validate(out, context=context)
     except ValidationError as exc:
         raise ApiError(422, "invalid_spec", _pydantic_text(exc)) from None
-    spec, _ = spec_in.split()  # no values: an item `after` is a redacted declaration
-    return spec
 
 
 async def _apply(
@@ -832,9 +794,8 @@ async def _apply(
     preset: presets_repo.Preset,
     p: repo.Proposal,
     decisions: Decisions,
-) -> bool:
-    """Write the approved items onto the locked stored spec (step 5-6); True when the secret store
-    was touched (the caller runs `gc` after the commit).
+) -> None:
+    """Write the approved items onto the locked stored spec (step 5-6).
 
     The name, labels and manageable flag (and any other column) are passed through unchanged
     (F8): items are spec paths only. No agent guard runs: a human approved. The vault checks the
@@ -851,13 +812,6 @@ async def _apply(
     await presets_repo.update(
         conn, preset.id, preset.name, new, expected_updated_at=preset.updated_at
     )
-    if not await secret_store.has_rows(conn, preset.id):
-        return False
-    declared = sorted(n for n, e in new.get("env", {}).items() if e.get("protected"))
-    await secret_store.sync_declared(
-        conn, secret_store.kube_of(request), settings.namespace, preset.id, declared, collect=False
-    )
-    return True
 
 
 async def _stale_others(conn, p: repo.Proposal) -> None:
@@ -923,14 +877,12 @@ async def _review_locked(
     preset = await _locked_target(conn, uuid.UUID(p.target_id), hold=to == "applied")
     if preset is None:
         return await _close(conn, p, "target_gone", _gone_error(p.kind))
-    if p.status == "open" and await live_fingerprint(conn, preset) != current.fingerprint:
+    if p.status == "open" and fingerprint_preset(preset) != current.fingerprint:
         return await _close(conn, p, "stale", _stale_error(p.kind))
-    done = _Done()
     if to == "applied":
         async with conn.transaction():
-            touched = await _apply(request, conn, settings, preset, p, decisions)
-        done.gc = preset.id if touched else None
-    return await _record(conn, p, decisions, to, done)
+            await _apply(request, conn, settings, preset, p, decisions)
+    return await _record(conn, p, decisions, to, _Done())
 
 
 def _outcome(decisions: Decisions) -> str:
@@ -1047,17 +999,12 @@ async def _apply_session(
     here (`vault_ref_not_allowed`)."""
     current = p.revisions[0]
     approved = _approved(current, decisions)
-    spec = _approved_spec(stored, approved)
+    spec = _approved_spec(stored, approved, legacy_context(session.secret_versions))
     session_spec.refuse_ref_changes(stored, spec.model_dump(mode="json", exclude_unset=True))
     try:
         filled = await session_spec.validated(spec, settings, session)
     except ApiError as exc:
         raise ApiError(422, "invalid_spec", exc.message) from None
-    protected = {n for n, e in spec.env.items() if e.protected}
-    if unset := sorted(protected - set(session.secret_versions)):
-        raise ApiError(
-            422, "invalid_spec", f"protected variables with no value: {', '.join(unset)}"
-        )
 
     async def recheck(locked: sessions_repo.LockedSession) -> None:
         if fingerprint_session(locked.spec, locked.secret_versions) != current.fingerprint:
@@ -1075,14 +1022,6 @@ async def review(
     _idle(conn)
     async with conn.transaction():
         done = await _review_locked(request, conn, settings, proposal_id, body)
-    if done.gc is not None:
-        try:
-            async with conn.transaction():
-                await secret_store.gc(
-                    conn, secret_store.kube_of(request), settings.namespace, preset_id=done.gc
-                )
-        except Exception as exc:  # the review committed; never turn it into an error
-            log.warning("proposal cleanup after review failed: %s", type(exc).__name__)
     if done.error is not None:
         raise done.error
     return await get_view(conn, settings, proposal_id, proposer=None)

@@ -15,14 +15,14 @@ from agents_orchestrator.settings import (
     SWEEP_KEEP_NEWEST_MAX,
     SWEEP_RETENTION_DAYS_MAX,
 )
-from agents_orchestrator.spec import SessionSpec, SessionSpecIn
+from agents_orchestrator.spec import SessionSpec
 
 
 class CreateSession(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     slug: str | None = None
-    spec: SessionSpecIn | None = None
+    spec: SessionSpec | None = None
     preset_id: uuid.UUID | None = None
     # None: the preset's project, or the default project for a spec-only session
     project: str | None = None
@@ -32,7 +32,7 @@ class PresetIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
-    spec: SessionSpecIn = SessionSpecIn()
+    spec: SessionSpec = SessionSpec()
     superleader_manageable: bool | None = None
     # None keeps the stored labels on PUT and means none on POST
     labels: list[str] | None = None
@@ -114,23 +114,6 @@ class AgentTokenIn(BaseModel):
 
 class AgentTokenVerified(BaseModel):
     session_id: uuid.UUID
-
-
-class SecretIn(BaseModel):
-    """The new value of one protected variable; it is never echoed."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    value: SecretStr = Field(min_length=1)
-
-
-class SecretView(BaseModel):
-    """Metadata of a protected variable's stored value; the value is never returned."""
-
-    name: str
-    set: bool
-    version: int
-    updated_at: datetime
 
 
 class CopyPreset(BaseModel):

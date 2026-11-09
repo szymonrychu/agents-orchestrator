@@ -1181,7 +1181,7 @@
           "spec": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/SessionSpecIn"
+                "$ref": "#/components/schemas/SessionSpec-Input"
               },
               {
                 "type": "null"
@@ -1241,13 +1241,9 @@
         "title": "DeleteArchives",
         "type": "object"
       },
-      "EnvVar": {
-        "additionalProperties": true,
-        "type": "object"
-      },
-      "EnvVarIn": {
+      "EnvVar-Input": {
         "additionalProperties": false,
-        "description": "The request form of an env variable: a protected one may carry its new value, and a\nvariable may be a vault reference `{vault, env}` as in `EnvVar`.\n\nOnly the api sees it; `SessionSpecIn.split` moves the value out so a `SessionSpec` never holds\none. Without a value a protected variable keeps its stored one.",
+        "description": "One session env variable, GitLab CI style: `{value, expand}`, or a vault reference.\n\nA plain variable carries its value; `expand` gates `$` handling of it. A vault reference\n`{vault, env}` names an agents-vault entry and its env; the entry's value is resolved by the\nvault at session create. A reference carries nothing else.",
         "properties": {
           "env": {
             "anyOf": [
@@ -1265,17 +1261,10 @@
             "title": "Expand",
             "type": "boolean"
           },
-          "protected": {
-            "default": false,
-            "title": "Protected",
-            "type": "boolean"
-          },
           "value": {
             "anyOf": [
               {
-                "format": "password",
-                "type": "string",
-                "writeOnly": true
+                "type": "string"
               },
               {
                 "type": "null"
@@ -1296,7 +1285,11 @@
             "title": "Vault"
           }
         },
-        "title": "EnvVarIn",
+        "title": "EnvVar",
+        "type": "object"
+      },
+      "EnvVar-Output": {
+        "additionalProperties": true,
         "type": "object"
       },
       "EventView": {
@@ -3279,7 +3272,7 @@
             "title": "Project"
           },
           "spec": {
-            "$ref": "#/components/schemas/SessionSpecIn",
+            "$ref": "#/components/schemas/SessionSpec-Input",
             "default": {
               "env": {},
               "init_scripts": [],
@@ -4090,54 +4083,6 @@
         "title": "ScaleResult",
         "type": "object"
       },
-      "SecretIn": {
-        "additionalProperties": false,
-        "description": "The new value of one protected variable; it is never echoed.",
-        "properties": {
-          "value": {
-            "format": "password",
-            "minLength": 1,
-            "title": "Value",
-            "type": "string",
-            "writeOnly": true
-          }
-        },
-        "required": [
-          "value"
-        ],
-        "title": "SecretIn",
-        "type": "object"
-      },
-      "SecretView": {
-        "description": "Metadata of a protected variable's stored value; the value is never returned.",
-        "properties": {
-          "name": {
-            "title": "Name",
-            "type": "string"
-          },
-          "set": {
-            "title": "Set",
-            "type": "boolean"
-          },
-          "updated_at": {
-            "format": "date-time",
-            "title": "Updated At",
-            "type": "string"
-          },
-          "version": {
-            "title": "Version",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "name",
-          "set",
-          "version",
-          "updated_at"
-        ],
-        "title": "SecretView",
-        "type": "object"
-      },
       "SessionBackup": {
         "description": "What a discard would save now; each flag is true only when that save would really run.\n\n`reason` is null when both run, else `no_session_cache` (no `spec.cache`),\n`cache_not_configured` (no S3 cache configured) or the save's skip reason, the workdir's first.",
         "properties": {
@@ -4339,7 +4284,7 @@
         "title": "SessionRestartAccepted",
         "type": "object"
       },
-      "SessionSpec": {
+      "SessionSpec-Input": {
         "additionalProperties": false,
         "properties": {
           "any_mcp_config": {
@@ -4475,7 +4420,7 @@
           },
           "env": {
             "additionalProperties": {
-              "$ref": "#/components/schemas/EnvVar"
+              "$ref": "#/components/schemas/EnvVar-Input"
             },
             "default": {},
             "title": "Env",
@@ -4678,9 +4623,8 @@
         "title": "SessionSpec",
         "type": "object"
       },
-      "SessionSpecIn": {
+      "SessionSpec-Output": {
         "additionalProperties": false,
-        "description": "A spec as the api receives it: protected variables may carry a value (`EnvVarIn`).",
         "properties": {
           "any_mcp_config": {
             "anyOf": [
@@ -4815,7 +4759,7 @@
           },
           "env": {
             "additionalProperties": {
-              "$ref": "#/components/schemas/EnvVarIn"
+              "$ref": "#/components/schemas/EnvVar-Output"
             },
             "default": {},
             "title": "Env",
@@ -5015,7 +4959,7 @@
             ]
           }
         },
-        "title": "SessionSpecIn",
+        "title": "SessionSpec",
         "type": "object"
       },
       "SessionSpecPatch": {
@@ -5399,7 +5343,7 @@
             "type": "string"
           },
           "spec": {
-            "$ref": "#/components/schemas/SessionSpec"
+            "$ref": "#/components/schemas/SessionSpec-Output"
           },
           "static": {
             "title": "Static",
@@ -7933,99 +7877,6 @@
           }
         },
         "summary": "Copy Preset",
-        "tags": [
-          "admin"
-        ]
-      }
-    },
-    "/agent/v1/admin/presets/{ref}/secrets/{name}": {
-      "put": {
-        "operationId": "set_preset_secret_agent_v1_admin_presets__ref__secrets__name__put",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "ref",
-            "required": true,
-            "schema": {
-              "title": "Ref",
-              "type": "string"
-            }
-          },
-          {
-            "in": "path",
-            "name": "name",
-            "required": true,
-            "schema": {
-              "title": "Name",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          },
-          {
-            "in": "header",
-            "name": "x-orch-session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Orch-Session"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SecretIn"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SecretView"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Set Preset Secret",
         "tags": [
           "admin"
         ]
@@ -13612,64 +13463,6 @@
           }
         },
         "summary": "Copy Preset"
-      }
-    },
-    "/api/v1/presets/{preset}/secrets/{name}": {
-      "put": {
-        "operationId": "set_preset_secret_api_v1_presets__preset__secrets__name__put",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "preset",
-            "required": true,
-            "schema": {
-              "title": "Preset",
-              "type": "string"
-            }
-          },
-          {
-            "in": "path",
-            "name": "name",
-            "required": true,
-            "schema": {
-              "title": "Name",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SecretIn"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SecretView"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Set Preset Secret"
       }
     },
     "/api/v1/projects": {

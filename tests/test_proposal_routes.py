@@ -2,8 +2,8 @@
 gate, own proposals on visible targets only, `AdminRoute` audit) and the human-only main-port
 routes (list, read, review), which neither the agent port nor the service port serves.
 
-A proposal carries no value: a body with `secrets` is a 422, and the canary (the preset's live
-protected value) never reaches a response, a table row, an `events` row or the log."""
+A proposal carries no secret value: a body with `secrets` is a 422, and a canary sent in a
+refused body never reaches a response, a table row, an `events` row or the log."""
 
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ import uuid
 import httpx
 import pytest
 from fakes.fake_kube import FakeKube
-from pydantic import SecretStr
 from test_admin_session_patch import audits
 from test_agent_session_messaging import Sess, alone, hive
 from test_api_agent import client_for, headers, make_settings
@@ -28,7 +27,6 @@ from agents_orchestrator.api.admin import ADMIN_PREFIX
 from agents_orchestrator.api.app import create_app
 from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.k8s import on_start
-from agents_orchestrator.k8s import secrets as store
 
 NS = "agents"
 P = f"{ADMIN_PREFIX}/proposals"
@@ -78,11 +76,10 @@ async def other_boss(pool):
 
 @pytest.fixture
 async def preset(pool, kube, canary):
-    """A privileged manageable preset with a protected TOKEN whose value is set (version 1)."""
-    spec = {"docker": True, "env": {"TOKEN": {"protected": True}, "PLAIN": {"value": "plain"}}}
+    """A privileged manageable preset with a plain TOKEN."""
+    spec = {"docker": True, "env": {"TOKEN": {"value": "token"}, "PLAIN": {"value": "plain"}}}
     async with pool.connection() as conn:
         found = await presets_repo.create(conn, "infra", spec, superleader_manageable=True)
-        await store.set_secret(conn, kube, NS, found.id, "TOKEN", SecretStr(canary + "-live"))
     return found
 
 
@@ -184,7 +181,7 @@ async def test_create_201_audited_with_fields_only(app, pool, kube, boss, preset
         f"admin POST {P} -> 201 session={boss.slug} secrets=[]"
         " fields=['env.PLAIN', 'wrapper.mcp_servers']"
     ]
-    assert kube.names("Secret") == [store.secret_name(preset.id, "TOKEN", 1)]
+    assert kube.names("Secret") == []  # filing writes nothing to Kubernetes
     await assert_nowhere(pool, canary, r.text, caplog.text)
 
 
@@ -610,7 +607,7 @@ async def test_regular_leader_proposes_a_grant_for_its_own_session(
     items = {i["path"]: i for i in view["revisions"][0]["items"]}
     assert sorted(items) == ["env.PLAIN", "session_messaging"]
     assert items["session_messaging"]["grant"] is True
-    assert kube.names("Secret") == [store.secret_name(preset.id, "TOKEN", 1)]
+    assert kube.names("Secret") == []  # filing writes nothing to Kubernetes
     after = await _rows(pool, q, (lead.id,))
     assert "session_messaging" not in after[0][0]  # filing applies nothing
     assert after == before

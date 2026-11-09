@@ -4,8 +4,8 @@ bumps the generation once, the session's pins untouched. A proposal holds no val
 vault reference changes (refs enter and leave a session only through its preset). Service level:
 real Postgres, a fake kube, a fake vault.
 
-The `canary` fixture checks on teardown that the preset's live protected value never reaches the
-log; the tests check it never reaches a view, a table row or a notice."""
+The `canary` fixture checks on teardown that a canary never reaches the log; the tests check it
+never reaches a view, a table row or a notice."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import secrets as stdlib_secrets
 
 import pytest
 from fakes.fake_kube import FakeKube
-from pydantic import SecretStr
+from fastapi.exceptions import RequestValidationError
 from test_agent_session_messaging import alone, hive
 from test_api_agent import make_settings
 from test_proposals_review import _review
@@ -38,12 +38,12 @@ from agents_orchestrator.api import proposal_sweep, proposals
 from agents_orchestrator.api.errors import ApiError
 from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.db import sessions as sessions_repo
-from agents_orchestrator.k8s import secrets as store
 
 SLUG = "infra-1"
+LEGACY_PINS = {"OLD_KEY": "ps-00000000-0a0b0c-v1"}
 EXTRA = {
     "kube_cluster_access": True,
-    "env": {"TOKEN": {"protected": True}, "PLAIN": {"value": "plain"}},
+    "env": {"TOKEN": {"value": "token"}, "PLAIN": {"value": "plain"}},
 }
 
 
@@ -72,12 +72,11 @@ async def boss(pool):
 
 @pytest.fixture
 async def preset(pool, kube, canary):
-    """A manageable preset with a protected TOKEN whose value is set (version 1)."""
+    """A manageable preset with a plain TOKEN."""
     async with pool.connection() as conn:
         found = await presets_repo.create(
-            conn, "infra", {"env": {"TOKEN": {"protected": True}}}, superleader_manageable=True
+            conn, "infra", {"env": {"TOKEN": {"value": "token"}}}, superleader_manageable=True
         )
-        await store.set_secret(conn, kube, NS, found.id, "TOKEN", SecretStr(canary + "-live"))
     kube.reset_records()
     return found
 
@@ -91,11 +90,10 @@ async def _attach(pool, session_id, preset_id) -> None:
 
 @pytest.fixture
 async def target(pool, settings, preset):
-    """A foreign privileged hive (2 replicas) of the manageable preset, running TOKEN v1."""
+    """A foreign privileged hive (2 replicas) of the manageable preset, created before 0041: it
+    still holds a legacy pin."""
     sess = await hive(pool, SLUG)
-    await _seed(
-        pool, settings, sess, EXTRA, versions={"TOKEN": store.secret_name(preset.id, "TOKEN", 1)}
-    )
+    await _seed(pool, settings, sess, EXTRA, versions=LEGACY_PINS)
     await _attach(pool, sess.id, preset.id)
     return sess
 
@@ -243,24 +241,31 @@ async def test_a_vault_ref_change_is_refused(pool, kube, settings, boss, preset,
     assert await _rows(pool, "SELECT id FROM change_proposals") == []
 
 
-async def test_a_new_protected_declaration_is_secret_unset(
-    pool, kube, settings, boss, preset, target, canary
-):
-    """Protected variables stay until the destructive migration step; a proposal has no way to
-    give one a value any more, so declaring one on a live session is refused."""
-    with pytest.raises(ApiError) as exc:
-        await _filed(pool, kube, settings, boss, patch={"env": {"NEW": {"protected": True}}})
-    err = _error(exc, 422, "secret_unset")
-    assert err.extra["fields"] == ["env.NEW"]
+async def test_a_protected_flag_is_refused(pool, kube, settings, boss, preset, target, canary):
+    """O10: `protected` is an unknown env field; nothing is filed, the value is never kept."""
+    patch = {"env": {"TOKEN": {"value": canary, "protected": True}}}
+    with pytest.raises(RequestValidationError):
+        await _filed(pool, kube, settings, boss, patch=patch)
     assert await _rows(pool, "SELECT id FROM change_proposals") == []
-
-
-async def test_secret_in_patch_is_422(pool, kube, settings, boss, preset, target, canary):
-    with pytest.raises(ApiError) as exc:
-        await _filed(pool, kube, settings, boss, patch={"env": {"TOKEN": {"value": canary}}})
-    err = _error(exc, 422, "secret_in_spec")
-    assert canary not in err.message
     await _assert_nowhere(pool, canary)
+
+
+async def test_a_session_naming_its_legacy_pin_takes_a_proposal(
+    pool, kube, settings, boss, preset, target
+):
+    """A hook of a session created before 0041 may name its legacy pin (`${OLD_KEY}`); the
+    proposal merge and the review apply validate it with the session's pins."""
+    hook = {"type": "webhook", "url": "http://h/x", "secret": "${OLD_KEY}"}
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE sessions SET spec = jsonb_set(spec, '{wrapper}', %s) WHERE id = %s",
+            (json.dumps({"hooks": {"onStart": [hook]}}), target.id),
+        )
+    view = await _filed(pool, kube, settings, boss)
+    done = await _review(pool, kube, settings, view.id, 1, APPROVE_ALL)
+    assert done.status == "applied"
+    spec, versions, *_ = await _row(pool, target.id)
+    assert spec["wrapper"]["hooks"]["onStart"] == [hook] and versions == LEGACY_PINS
 
 
 async def test_deleting_session_is_409_at_create(
@@ -293,14 +298,11 @@ async def test_approve_writes_the_spec_and_bumps_generation_once(
     assert spec["kube_cluster_access"] is True and spec["replicas"] == spec_before["replicas"]
     assert versions == versions_before  # the pins are untouched
     assert kube.applied("Secret") == []
-    # the preset and its live version are untouched
+    # the preset is untouched
     assert (
         await _rows(pool, "SELECT spec, updated_at FROM presets WHERE id = %s", (preset.id,))
         == preset_before
     )
-    async with pool.connection() as conn:
-        live = await store.list_secrets(conn, preset.id)
-    assert [(m.name, m.version) for m in live] == [("TOKEN", 1)]
     [text] = await _notices(pool, boss.id)
     assert text.startswith(f"Proposal P-{view.id} r1 (session {SLUG}) was reviewed: applied ")
     assert "env.PLAIN" in text and "wrapper.mcp_servers" in text

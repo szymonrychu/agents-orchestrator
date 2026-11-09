@@ -50,16 +50,34 @@ def test_render_entries_sorted_across_plain_and_pins():
 
 
 def test_render_legacy_pin_unchanged():
+    """A session created before 0041: the protected entry left its spec, the str pin stayed."""
     old = dataclasses.replace(
-        make_session(env={"API_KEY": {"protected": True}}),
-        secret_versions={"API_KEY": "ps-00000000-0a0b0c-v2"},
+        make_session(env={}), secret_versions={"API_KEY": "ps-00000000-0a0b0c-v2"}
     )
     want = {
         "name": "API_KEY",
         "valueFrom": {"secretKeyRef": {"name": "ps-00000000-0a0b0c-v2", "key": "value"}},
     }
     assert render.env_entries(old) == [want]
+    assert render.secret_env_names(old) == ["API_KEY"]
     assert sts_of(render.render_session(old, make_settings(), TOKENS))
+
+
+def test_a_spec_entry_set_since_wins_over_a_legacy_pin():
+    s = dataclasses.replace(
+        make_session(env={"API_KEY": {"value": "plain"}}),
+        secret_versions={"API_KEY": "ps-00000000-0a0b0c-v2"},
+    )
+    assert render.env_entries(s) == [{"name": "API_KEY", "value": "plain"}]
+    assert render.secret_env_names(s) == []
+
+
+@pytest.mark.parametrize("pin", ["other-secret", f"vault-{ENTRY}-v3", "ps-0000-0a0b0c-v2"])
+def test_invalid_legacy_pin_raises_with_env_name_only(pin):
+    s = dataclasses.replace(make_session(env={}), secret_versions={"API_KEY": pin})
+    with pytest.raises(ValueError) as exc:
+        render.env_entries(s)
+    assert str(exc.value) == "variable API_KEY has an invalid legacy pin"
 
 
 def test_init_job_gets_the_pins_too():
@@ -88,6 +106,7 @@ def test_pin_without_vault_ref_in_spec_is_ignored():
         {"secret": f"vault-{ENTRY}-v3"},
         {"secret": "vault-x-v3", "key": "TOKEN"},
         {"secret": 5, "key": "TOKEN"},
+        {"secret": "ps-00000000-0a0b0c-v2", "key": "value"},
     ],
 )
 def test_invalid_pin_raises_with_env_name_only(pin):
@@ -96,12 +115,10 @@ def test_invalid_pin_raises_with_env_name_only(pin):
     assert str(exc.value) == "vault variable X has an invalid pin"
 
 
-def test_secret_env_lists_secret_pins_and_legacy_protected():
-    s = dataclasses.replace(
-        sess(
-            {"Z": REF, "R": REF, "A": {"protected": True}, "P": {"value": "1"}},
-            {"Z": SECRET_PIN, "R": {"value": "v"}, "A": "ps-00000000-0a0b0c-v2"},
-        )
+def test_secret_env_lists_secret_pins_and_legacy_pins():
+    s = sess(
+        {"Z": REF, "R": REF, "P": {"value": "1"}},
+        {"Z": SECRET_PIN, "R": {"value": "v"}, "A": "ps-00000000-0a0b0c-v2"},
     )
     assert render.secret_env_names(s) == ["A", "Z"]
     cfg = config_of(render.render_session(s, make_settings(), TOKENS))

@@ -91,7 +91,7 @@ async def _live(conn: AsyncConnection, p: repo.Proposal) -> str | None:
     preset = await presets_repo.get(conn, uuid.UUID(p.target_id))
     if preset is None or not preset.superleader_manageable:
         return None
-    return await proposals.live_fingerprint(conn, preset)
+    return proposals.fingerprint_preset(preset)
 
 
 async def _ids(conn: AsyncConnection, statuses: tuple[str, ...]) -> list[int]:

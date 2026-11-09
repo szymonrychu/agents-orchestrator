@@ -59,6 +59,7 @@ def test_migration_applies_twice(dsn):
                 "SELECT indexname FROM pg_indexes WHERE tablename = 'change_proposals'"
             )
         }
+    # the re-run of 0038 alone creates again the table 0041 dropped
     assert tables == {
         "change_proposals",
         "change_proposal_revisions",
@@ -436,7 +437,7 @@ async def test_notice_check_accepts_proposal_and_handover_refuses_unknown(dsn):
             )
 
 
-async def test_checks_refuse_unknown_kind_status_decision_and_secret(pool):
+async def test_checks_refuse_unknown_kind_status_and_decision(pool):
     async with pool.connection() as conn:
         pid = await _insert(conn)
         for stmt in (
@@ -444,20 +445,11 @@ async def test_checks_refuse_unknown_kind_status_decision_and_secret(pool):
             "UPDATE change_proposals SET status = 'other' WHERE id = %s",
             "UPDATE change_proposal_revisions SET outcome = 'other' WHERE proposal_id = %s",
             "UPDATE change_proposal_items SET decision = 'other' WHERE proposal_id = %s",
-            "UPDATE change_proposal_items SET secret = 'other' WHERE proposal_id = %s",
             "UPDATE change_proposal_revisions SET reason = '' WHERE proposal_id = %s",
         ):
             with pytest.raises(psycopg.errors.CheckViolation):
                 async with conn.transaction():
                     await conn.execute(stmt, (pid,))
-        with pytest.raises(psycopg.errors.CheckViolation):
-            async with conn.transaction():
-                await conn.execute(
-                    "INSERT INTO change_proposal_secrets"
-                    " (preset_id, name, version, proposal_id, revision, state)"
-                    " VALUES (gen_random_uuid(), 'X', 1, %s, 1, 'other')",
-                    (pid,),
-                )
 
 
 async def test_deleting_a_proposal_cascades_to_revisions_and_items(pool):

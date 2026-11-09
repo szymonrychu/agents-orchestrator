@@ -60,12 +60,10 @@ FAKE_TURN_ENV = {
     "PATH": {
         "value": "/opt/agent-test:/opt/mise/shims:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin"
         ":/sbin:/bin",
-        "protected": False,
         "expand": False,
     },
     "FAKE_CLAUDE_SCENARIO": {
         "value": "/opt/agent-test/scenario.json",
-        "protected": False,
         "expand": False,
     },
 }
@@ -2771,27 +2769,15 @@ def test_busy_pod_deleted_by_hand_returns_on_the_new_revision(
 #
 # A superleader is a session whose spec enables `session_messaging` (whoever created it). Its
 # agent pod calls /agent/v1/admin/* with its own agent token, like the plugin's local tools do.
-# The two canaries below are protected-variable values: they must reach the target pod's env and
-# nothing else (no API view, event, log or pod spec).
+# (Protected preset variables are gone since migration 0041: secrets come from agents-vault.)
 
-CANARY_ENV = "canary-from-env-7f3a91c2"
-CANARY_FILE = "canary-from-file-5b8d04e6"
-SECRET_SOURCE_FILE = "~/.agent-secrets/e2e-canary"  # to_file is confined to ~/.agent-secrets
 SUPERLEADER_SLUG = "e2e-superleader"
 TARGET_SLUG = "e2e-sl-target"
-SUPERLEADER_ENV_VAR = "E2E_SRC"
-ORCH_COMPONENT_LOGS = ("api", "dispatcher", "ingester", "reconciler")
 
-# Run inside the superleader pod: one admin call. argv: method, path, JSON body or "", and a
-# value source "" | "env:NAME" | "file:PATH" which sends {"value": <that value>} read in the pod
-# (the way the plugin's secret_set reads it), so the value never travels in the exec argv.
+# Run inside the superleader pod: one admin call. argv: method, path, JSON body or "".
 ADMIN_CALL = (
     "import json, os, sys, urllib.request, urllib.error\n"
-    "method, path, body, source = sys.argv[1:5]\n"
-    "if source.startswith('env:'):\n"
-    "    body = json.dumps({'value': os.environ[source[4:]]})\n"
-    "elif source.startswith('file:'):\n"
-    "    body = json.dumps({'value': open(os.path.expanduser(source[5:])).read()})\n"
+    "method, path, body = sys.argv[1:4]\n"
     "headers = {'X-Orch-Session': os.environ['ORCH_SESSION_ID'],\n"
     "           'Authorization': 'Bearer ' + os.environ['ORCH_AGENT_TOKEN']}\n"
     "data = None\n"
@@ -2814,7 +2800,6 @@ def admin_call(
     method: str,
     path: str,
     body: dict[str, Any] | None = None,
-    source: str = "",
     prefix: str = "/agent/v1/admin",
 ) -> tuple[int, Any]:
     out = pod_exec(
@@ -2825,7 +2810,6 @@ def admin_call(
         method,
         prefix + path,
         json.dumps(body) if body is not None else "",
-        source,
     )
     line = next(ln for ln in out.splitlines() if ln.startswith("RESULT "))
     status, text = json.loads(line.removeprefix("RESULT "))
@@ -2845,39 +2829,18 @@ def only_agent(api: httpx.Client, cid: str) -> dict[str, Any]:
 
 @pytest.fixture(scope="module")
 def superleader(api: httpx.Client) -> Iterator[dict[str, Any]]:
-    """A one-pod superleader whose env holds a protected variable (the 'from env' source) and a
-    file under ~/.agent-secrets (the 'from file' source)."""
-    spec = {
-        "replicas": 1,
-        "static": True,
-        "session_messaging": True,
-        "env": {**FAKE_TURN_ENV, SUPERLEADER_ENV_VAR: {"protected": True}},
-    }
+    """A one-pod superleader."""
+    spec = {"replicas": 1, "static": True, "session_messaging": True, "env": FAKE_TURN_ENV}
     resp = api.post("/presets", json={"name": "E2E superleader", "spec": spec})
     assert resp.status_code == 201, resp.text
     preset_id = resp.json()["id"]
     created: dict[str, Any] | None = None
     try:
-        resp = api.put(
-            f"/presets/{preset_id}/secrets/{SUPERLEADER_ENV_VAR}", json={"value": CANARY_ENV}
-        )
-        assert resp.status_code == 200, resp.text
         resp = api.post("/sessions", json={"preset_id": preset_id, "slug": SUPERLEADER_SLUG})
         assert resp.status_code == 201, resp.text
         created = resp.json()
         agent = only_agent(api, created["id"])
         pod = pod_name_of(agent)
-        subprocess.run(
-            [
-                "kubectl", "-n", NAMESPACE, "exec", "-i", pod, "-c", "ccw", "--",
-                "sh", "-c", f"mkdir -p ~/.agent-secrets && cat > {SECRET_SOURCE_FILE}",
-            ],
-            input=CANARY_FILE,
-            text=True,
-            check=True,
-            capture_output=True,
-            timeout=60,
-        )  # fmt: skip
         yield {"session": created, "agent": agent, "pod": pod, "preset_id": preset_id}
     finally:
         if created:
@@ -2895,12 +2858,10 @@ TARGET_SPEC = {
     "static": True,
     "env": {
         **FAKE_TURN_ENV,
-        "E2E_BASE": {"value": "plain-ok", "protected": False, "expand": False},
+        "E2E_BASE": {"value": "plain-ok", "expand": False},
         # the kubelet expands $(VAR) only from variables listed earlier, and env is sorted by name
-        "E2E_EXPANDED": {"value": "$(E2E_BASE)-tail", "protected": False, "expand": True},
-        "E2E_LITERAL": {"value": "$(E2E_BASE)-tail", "protected": False, "expand": False},
-        "E2E_FROM_ENV": {"protected": True},
-        "E2E_FROM_FILE": {"protected": True},
+        "E2E_EXPANDED": {"value": "$(E2E_BASE)-tail", "expand": True},
+        "E2E_LITERAL": {"value": "$(E2E_BASE)-tail", "expand": False},
     },
     # ${NAME} references to the session's own variables survive rendering in webhook hook
     # secret/headers and MCP env/headers (the wrapper and any-mcp expand them from the pod env)
@@ -2925,23 +2886,14 @@ TARGET_SPEC = {
 @pytest.fixture(scope="module")
 def target(api: httpx.Client, superleader: dict[str, Any]) -> Iterator[dict[str, Any]]:
     """A session the superleader built end to end through the admin API: a preset with plain,
-    expanded, literal and protected variables, the protected values set from env and from file,
-    then a session from that preset."""
+    expanded and literal variables, then a session from that preset."""
     pod = superleader["pod"]
     status, preset = admin_call(
         pod, "POST", "/presets", {"name": "E2E admin target", "spec": TARGET_SPEC}
     )
     assert status == 201, preset
     pid = preset["id"]
-    secrets = f"/presets/{pid}/secrets"
     try:
-        status, view = admin_call(pod, "PUT", f"{secrets}/E2E_FROM_ENV", source="env:E2E_SRC")
-        assert status == 200 and view["set"] is True and view["version"] == 1, view
-        assert "value" not in view, view
-        status, view = admin_call(
-            pod, "PUT", f"{secrets}/E2E_FROM_FILE", source=f"file:{SECRET_SOURCE_FILE}"
-        )
-        assert status == 200 and view["set"] is True, view
         status, created = admin_call(
             pod, "POST", "/sessions", {"preset_id": pid, "slug": TARGET_SLUG}
         )
@@ -2958,43 +2910,11 @@ def target(api: httpx.Client, superleader: dict[str, Any]) -> Iterator[dict[str,
         admin_call(pod, "DELETE", f"/presets/{pid}")
 
 
-def test_superleader_sets_protected_variables(
-    api: httpx.Client, superleader: dict[str, Any], target: dict[str, Any]
-) -> None:
-    pod = superleader["pod"]
-    pid = target["preset"]["id"]
-    # a variable that is not protected has no secret route
-    status, body = admin_call(pod, "PUT", f"/presets/{pid}/secrets/E2E_BASE", {"value": "nope"})
-    assert status == 422, (status, body)
-    # the preset view shows set/version/updated_at, never a value
-    status, view = admin_call(pod, "GET", f"/presets/{pid}")
-    assert status == 200, view
-    for name in ("E2E_FROM_ENV", "E2E_FROM_FILE"):
-        entry = view["spec"]["env"][name]
-        assert entry["protected"] is True and entry["set"] is True, entry
-        assert "value" not in entry, entry
-    # an overwrite from the file source is a new version
-    status, again = admin_call(
-        pod,
-        "PUT",
-        f"/presets/{pid}/secrets/E2E_FROM_FILE",
-        source=f"file:{SECRET_SOURCE_FILE}",
-    )
-    assert status == 200 and again["version"] == 2, again
-
-
 def test_session_from_preset_sees_variables(target: dict[str, Any]) -> None:
     pod = target["pod"]
-    assert pod_env(pod, "E2E_FROM_ENV") == CANARY_ENV
-    assert pod_env(pod, "E2E_FROM_FILE") == CANARY_FILE
     assert pod_env(pod, "E2E_BASE") == "plain-ok"
     assert pod_env(pod, "E2E_EXPANDED") == "plain-ok-tail"
     assert pod_env(pod, "E2E_LITERAL") == "$(E2E_BASE)-tail"
-    # protected values reach the pod only as secretKeyRef
-    spec = kube_json("get", "pod", pod)["spec"]["containers"]
-    env = {e["name"]: e for c in spec for e in c.get("env", [])}
-    for name in ("E2E_FROM_ENV", "E2E_FROM_FILE"):
-        assert "value" not in env[name] and "secretKeyRef" in env[name]["valueFrom"], env[name]
     # the ${NAME} references reach the wrapper config unescaped, so the wrapper expands them
     config = yaml.safe_load(
         kube_json("get", "configmap", f"agent-{TARGET_SLUG}-config")["data"]["config.yaml"]
@@ -3002,45 +2922,6 @@ def test_session_from_preset_sees_variables(target: dict[str, Any]) -> None:
     hook = config["hooks"]["onTurnComplete"][-1]
     assert hook["headers"]["X-E2E"] == "${E2E_BASE}", hook
     assert config["claude"]["mcp_servers"]["e2e"]["env"] == {"E2E_REF": "${E2E_BASE}"}, config
-
-
-def test_canary_absent_from_api_events_and_logs(
-    api: httpx.Client, superleader: dict[str, Any], target: dict[str, Any]
-) -> None:
-    pod = superleader["pod"]
-    texts: dict[str, str] = {}
-    for sid in (target["session"]["id"], superleader["session"]["id"]):
-        texts[f"session {sid}"] = api.get(f"/sessions/{sid}").text
-        texts[f"agents {sid}"] = api.get(f"/sessions/{sid}/agents").text
-        texts[f"events {sid}"] = json.dumps(all_events(api, sid))
-    texts["presets"] = api.get("/presets").text
-    texts["target preset"] = api.get(f"/presets/{target['preset']['id']}").text
-    texts["admin preset"] = json.dumps(
-        admin_call(pod, "GET", f"/presets/{target['preset']['id']}")[1]
-    )
-    texts["admin session"] = json.dumps(admin_call(pod, "GET", f"/sessions/{TARGET_SLUG}")[1])
-    for component in ORCH_COMPONENT_LOGS:
-        texts[f"log {component}"] = kubectl(
-            "logs", f"deployment/{RELEASE}-{component}", "--all-containers", "--tail=-1",
-            check=False,
-        ).stdout  # fmt: skip
-    for p in (pod, target["pod"]):
-        texts[f"pod log {p}"] = kubectl("logs", p, "--all-containers", check=False).stdout
-        texts[f"pod spec {p}"] = json.dumps(kube_json("get", "pod", p))
-    texts["target configmap"] = json.dumps(
-        kube_json("get", "configmap", f"agent-{TARGET_SLUG}-config")
-    )
-    for where, text in texts.items():
-        for canary in (CANARY_ENV, CANARY_FILE):
-            assert canary not in text, f"{canary} leaked into {where}"
-    # every admin call left an audit row naming the variables, never their values
-    audited = [
-        e
-        for page in all_events(api, superleader["session"]["id"])
-        for e in page
-        if e["type"] == "admin_call"
-    ]
-    assert any("E2E_FROM_ENV" in e["data"]["secrets"] for e in audited), audited
 
 
 def test_admin_preset_crud(superleader: dict[str, Any]) -> None:

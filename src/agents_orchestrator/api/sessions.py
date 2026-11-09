@@ -15,7 +15,7 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import ValidationError
 
 from agents_orchestrator import inactivity, rendering
-from agents_orchestrator.api import schemas, secret_store, usage_gate, vault_client, vault_refs
+from agents_orchestrator.api import schemas, usage_gate, vault_client, vault_refs
 from agents_orchestrator.api.errors import ApiError, not_found, project_error
 from agents_orchestrator.api.service_auth import calling_service
 from agents_orchestrator.api.usage_gate import UsageSource
@@ -26,7 +26,6 @@ from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import leadership, presets, projects, queue, views
 from agents_orchestrator.db import sessions as repo
 from agents_orchestrator.labels import normalize_labels
-from agents_orchestrator.secret_view import redact_spec, session_metas
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import (
     HOOK_EVENT_SPECS,
@@ -133,7 +132,7 @@ def session_backup(session: repo.Session, settings: Settings) -> schemas.Session
 def _vault_views(session: repo.Session) -> dict[str, schemas.VaultPinView]:
     out = {}
     for name, pin in session.secret_versions.items():
-        if not isinstance(pin, dict):  # a protected variable's Secret name, not a vault pin
+        if not isinstance(pin, dict):  # a legacy pin (ps-* Secret name), not a vault pin
             continue
         var = session.spec.env.get(name)
         out[name] = schemas.VaultPinView(
@@ -152,7 +151,7 @@ def _view(session: repo.Session, agg: dict | None, settings: Settings) -> schema
     return schemas.SessionView(
         id=session.id,
         slug=session.slug,
-        spec=redact_spec(session.spec, session_metas(session.secret_versions, session.created_at)),
+        spec=session.spec,
         vault=_vault_views(session),
         desired=session.desired,
         status=session.status,
@@ -393,7 +392,7 @@ async def create(
     if body.spec is not None:
         if body.slug is None:
             raise ApiError(422, "invalid_request", "slug is required with spec")
-        body_spec, _ignored = body.spec.split()  # a value has no preset to live in: refused below
+        body_spec = body.spec
         if body_spec.vault_refs:
             raise vault_refs_not_allowed(sorted(body_spec.vault_refs))
         cache = body_spec.cache
@@ -422,8 +421,6 @@ async def create(
                         f"at most {settings.max_sessions} sessions are allowed",
                     )
                 if body.preset_id is None:
-                    if spec.protected_env:
-                        raise _secret_unset(spec.protected_env)
                     project = body.project or projects.DEFAULT
                     await hold_project(conn, project)
                     session = await _insert(
@@ -538,17 +535,6 @@ async def _pin_preset(
     labels = vault_client.effective_labels(preset)
     pins = await vault_refs.pin_refs(client, session_id, refs, labels)
     return Pinned(session_id, refs, labels, pins)
-
-
-def _secret_unset(names: list[str]) -> ApiError:
-    """422 naming the protected variables that have no value; `fields` are their paths."""
-    ordered = sorted(names)
-    return ApiError(
-        422,
-        "secret_unset",
-        "protected variables with no value: " + ", ".join(ordered),
-        extra={"fields": [f"env.{n}" for n in ordered]},
-    )
 
 
 def check_archive_names(
@@ -667,17 +653,11 @@ async def _create_from_preset(
         derived = default_cache_key(preset.id)
         cache = spec.cache.model_copy(update={"restore_key": derived, "save_key": derived})
         spec = spec.model_copy(update={"cache": cache})
-    try:
-        versions = await secret_store.snapshot_versions(conn, preset.id, spec.protected_env)
-    except secret_store.SecretUnset as exc:
-        raise _secret_unset(exc.names) from None
     provenance = {
         "preset_id": preset.id,
         "preset_name": preset.name,
         "created_by_service": created_by_service,
-        "secret_versions": {**versions, **{e: p.to_json() for e, p in pinned.pins.items()}}
-        if pinned
-        else versions,
+        "secret_versions": {e: p.to_json() for e, p in pinned.pins.items()} if pinned else {},
         "session_id": pinned.session_id if pinned else None,
         "created_by_session": created_by_session,
         "labels": preset.labels,

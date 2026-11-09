@@ -294,31 +294,42 @@ async def test_list_shows_flag(http):
     assert rows and all(r["superleader_manageable"] is False for r in rows)
 
 
-async def test_put_flag_roundtrip_keeps_spec(pool, dsn):
-    from fakes.fake_kube import FakeKube
-
-    app = create_app(make_settings(dsn, max_replicas=4), pool, kube=FakeKube(namespace="agents"))
-    spec = {"env": {"API_KEY": {"protected": True, "value": "s3cret"}}}
-    async with client_for(app) as http:
-        r = await http.post(P, json={"name": "p", "spec": spec})
-        assert r.status_code == 201, r.text
-        first = (await http.get(f"{P}/{r.json()['id']}")).json()
-        # the read-only metadata of a protected variable is not accepted back as input
-        sent = {
-            "env": {
-                k: {f: v for f, v in e.items() if f not in ("set", "version", "updated_at")}
-                for k, e in first["spec"]["env"].items()
-            }
-        }
-        r = await http.put(
-            f"{P}/{first['id']}",
-            json={"name": first["name"], "spec": sent, "superleader_manageable": True},
-        )
-        assert r.status_code == 200, r.text
-        again = (await http.get(f"{P}/{first['id']}")).json()
-    assert again["spec"] == first["spec"]
-    assert again["spec"]["env"]["API_KEY"]["version"] == 1
+async def test_put_flag_roundtrip_keeps_spec(http):
+    spec = {"env": {"API_KEY": {"value": "plain", "expand": False}}}
+    first = await make(http, "p", spec)
+    r = await http.put(
+        f"{P}/{first['id']}",
+        json={"name": first["name"], "spec": first["spec"], "superleader_manageable": True},
+    )
+    assert r.status_code == 200, r.text
+    again = (await http.get(f"{P}/{first['id']}")).json()
+    assert again["spec"] == first["spec"] == spec
     assert again["superleader_manageable"] is True
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [{"protected": True}, {"value": "v", "protected": False}, {"value": "v", "set": True}],
+)
+async def test_protected_field_refused(http, entry):
+    """`protected` and the old read-only metadata are unknown fields (O10, no shim)."""
+    target = await make(http, "p")
+    r = await http.put(f"{P}/{target['id']}", json={"name": "p", "spec": {"env": {"K": entry}}})
+    assert_error(r, 422, "invalid_request")
+    assert "extra" in r.text.lower() or "not permitted" in r.text.lower()
+    r = await http.post(P, json={"name": "q", "spec": {"env": {"K": entry}}})
+    assert_error(r, 422, "invalid_request")
+
+
+async def test_secret_routes_gone(pool, dsn):
+    app = create_app(make_settings(dsn, max_replicas=4), pool)
+    paths = app.openapi()["paths"]
+    assert not [p for p in paths if "/secrets" in p]
+    async with client_for(app) as http:
+        r = await http.put(f"{P}/{DEFAULT_ID}/secrets/K", json={"value": "v"})
+        assert r.status_code in (404, 405)
+        r = await http.put("/agent/v1/admin/presets/Default/secrets/K", json={"value": "v"})
+        assert r.status_code in (404, 405)
 
 
 # ---------------------------------------------------------------- projects (T-19 P3)

@@ -880,8 +880,8 @@ def test_escape_template_tokens_migration(empty_dsn, tmp_path):
             )
         ]
     for got in stored:
-        # not a template field (0019 then wraps the plaintext value)
-        assert got["env"] == {"A": {"value": "{{keep}}", "protected": False, "expand": False}}
+        # not a template field (0019 then wraps the plaintext value, 0041 drops `protected`)
+        assert got["env"] == {"A": {"value": "{{keep}}", "expand": False}}
         assert got["init_scripts"][2] == "plain"
         assert got["wrapper"]["restart_continue_prompt"] == "go"
         ctx = {}
@@ -1067,10 +1067,16 @@ def test_self_restart_migration_adds_nullable_column_idempotently(empty_dsn, tmp
 
 
 def test_preset_secrets_migration_adds_table_and_snapshot_column(empty_dsn, tmp_path):
+    """0018 adds the table and the column; 0041 drops the table again and keeps the column."""
+    before, upto = tmp_path / "before", tmp_path / "upto"
+    before.mkdir()
+    upto.mkdir()
     for path in MIGRATIONS_DIR.glob("*.sql"):
         if path.name < "0018":
-            shutil.copy(path, tmp_path)
-    run_migrations(empty_dsn, tmp_path)
+            shutil.copy(path, before)
+        if path.name < "0041":
+            shutil.copy(path, upto)
+    run_migrations(empty_dsn, before)
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         c.execute("INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), 'old', '{}')")
     assert run_migrations(empty_dsn) == [
@@ -1095,13 +1101,16 @@ def test_preset_secrets_migration_adds_table_and_snapshot_column(empty_dsn, tmp_
         "0038",
         "0039",
         "0040",
-        "0041", "0042",
+        "0041", "0041", "0042",
     ]
     assert _columns(empty_dsn, "preset_secrets") == {
         "preset_id", "name", "version", "swept", "retired_at", "updated_at",
     }  # fmt: skip
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         assert c.execute("SELECT secret_versions FROM sessions").fetchall() == [(None,)]
+    assert run_migrations(empty_dsn) == ["0041"]
+    assert _columns(empty_dsn, "preset_secrets") == set()
+    assert "secret_versions" in _columns(empty_dsn, "sessions")
 
 
 def test_env_entries_migration_wraps_plaintext_values(empty_dsn, tmp_path):
@@ -1124,8 +1133,8 @@ def test_env_entries_migration_wraps_plaintext_values(empty_dsn, tmp_path):
                     (slug, json.dumps(spec)),
                 )
 
-    def entry(value):
-        return {"value": value, "protected": False, "expand": False}
+    def entry(value):  # 0041 then drops the `protected` key
+        return {"value": value, "expand": False}
 
     expected = {
         "plain": {
@@ -1134,7 +1143,7 @@ def test_env_entries_migration_wraps_plaintext_values(empty_dsn, tmp_path):
         },
         "none": fixture["none"],
         "emptyenv": fixture["emptyenv"],
-        "done": fixture["done"],
+        "done": {"env": {"A": {"value": "x", "expand": True}}},
         "mixed": {"env": {"A": entry("one"), "B": entry("y")}},
     }
     assert run_migrations(empty_dsn) == [
@@ -1248,13 +1257,13 @@ def test_cache_sweep_tables_apply_after_a_database_already_at_0027(empty_dsn, tm
 
 def test_session_close_columns_apply_after_a_database_already_at_0027(empty_dsn, tmp_path):
     # 0030 backfills close_kind from close_requested_at, so it waits for 0026 as well; 0035 and
-    # 0038 need the messages.notice column of 0030
+    # 0038 need the messages.notice column of 0030, and 0041 the proposal tables of 0038
     for path in MIGRATIONS_DIR.glob("*.sql"):
-        if not path.name.startswith(("0026_", "0030_", "0035_", "0038_")):
+        if not path.name.startswith(("0026_", "0030_", "0035_", "0038_", "0041_")):
             shutil.copy(path, tmp_path)
     run_migrations(empty_dsn, tmp_path)
     assert _columns(empty_dsn, "sessions") & {"close_requested_at", "close_reason"} == set()
-    assert run_migrations(empty_dsn) == ["0026", "0030", "0035", "0038"]
+    assert run_migrations(empty_dsn) == ["0026", "0030", "0035", "0038", "0041"]
     assert {"close_requested_at", "close_reason"} <= _columns(empty_dsn, "sessions")
 
 

@@ -14,7 +14,6 @@ import secrets as stdlib_secrets
 
 import pytest
 from fakes.fake_kube import FakeKube
-from pydantic import SecretStr
 from test_api_agent import make_settings
 from test_proposals_review import _review
 from test_proposals_service import (
@@ -30,7 +29,6 @@ from agents_orchestrator.api import proposal_sweep
 from agents_orchestrator.api.app import create_app
 from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.db import proposals as proposals_repo
-from agents_orchestrator.k8s import secrets as store
 
 
 @pytest.fixture
@@ -58,11 +56,10 @@ async def boss(pool):
 
 @pytest.fixture
 async def preset(pool, kube, canary):
-    """A manageable preset with a protected TOKEN whose value is set (version 1)."""
-    spec = {"docker": True, "env": {"TOKEN": {"protected": True}, "PLAIN": {"value": "plain"}}}
+    """A manageable preset with a plain TOKEN."""
+    spec = {"docker": True, "env": {"TOKEN": {"value": "token"}, "PLAIN": {"value": "plain"}}}
     async with pool.connection() as conn:
         found = await presets_repo.create(conn, "infra", spec, superleader_manageable=True)
-        await store.set_secret(conn, kube, NS, found.id, "TOKEN", SecretStr(canary + "-live"))
     kube.reset_records()
     return found
 

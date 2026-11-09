@@ -29,7 +29,7 @@ def run(dsn, settings=None):
 
 
 def test_valid_presets_pass(dsn):
-    seed(dsn, "good", {"env": {"A": {"value": "1"}, "K": {"protected": True}}})
+    seed(dsn, "good", {"env": {"A": {"value": "1"}}})
     code, text = run(dsn)
     assert code == 0, text
     assert "0 would fail" in text

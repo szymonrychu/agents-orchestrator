@@ -289,8 +289,8 @@ def _imports(path: Path) -> set[str]:
 def test_api_never_imports_k8s_or_wrapper():
     """Only api/workspace.py (the proxy seam, N1) may call wrappers; it, api/agent.py and
     api/sessions.py (agent-token verify for services) may derive tokens. Nothing in api imports
-    k8s or the reconciler, except api/secret_store.py, the seam to the preset secret store
-    (superleader-crud D5)."""
+    k8s or the reconciler, except api/secret_store.py, the seam that stores webhook endpoint
+    credentials (superleader-crud D9)."""
     always = ("agents_orchestrator.k8s", "agents_orchestrator.reconciler")
     k8s_seam = "secret_store.py"
     wrapper = "agents_orchestrator.wrapper"

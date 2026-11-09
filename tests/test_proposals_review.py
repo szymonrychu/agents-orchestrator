@@ -5,8 +5,8 @@ revision was based (Q6 B); any rework writes nothing (D1). A proposal holds no v
 checks vault references again before the preset write. Service level: real Postgres, a fake kube,
 a fake vault.
 
-The `canary` fixture checks on teardown that the preset's live protected value never reaches the
-log; the tests check it never reaches a view, a table row or a notice."""
+The `canary` fixture checks on teardown that a canary never reaches the log; the tests check it
+never reaches a view, a table row or a notice."""
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from fakes.fake_kube import FakeKube
-from pydantic import SecretStr
 from test_api_agent import make_settings
 from test_proposals_service import (  # noqa: F401  (`vault` is an autouse fixture)
     GRAFANA,
@@ -39,7 +38,6 @@ from test_proposals_service import (  # noqa: F401  (`vault` is an autouse fixtu
 from agents_orchestrator.api import proposals, schemas
 from agents_orchestrator.api.errors import ApiError
 from agents_orchestrator.db import presets as presets_repo
-from agents_orchestrator.k8s import secrets as store
 
 PLAIN_PATCH = {"env": {"PLAIN": {"value": "changed"}}}
 
@@ -69,18 +67,16 @@ async def boss(pool):
 
 @pytest.fixture
 async def preset(pool, kube, canary):
-    """A privileged manageable labelled preset with docker sizes and a protected TOKEN whose value
-    is set (version 1)."""
+    """A privileged manageable labelled preset with docker sizes and a plain TOKEN."""
     spec = {
         "docker": True,
         "docker_memory": "2Gi",
-        "env": {"TOKEN": {"protected": True}, "PLAIN": {"value": "plain"}},
+        "env": {"TOKEN": {"value": "token"}, "PLAIN": {"value": "plain"}},
     }
     async with pool.connection() as conn:
         found = await presets_repo.create(
             conn, "infra", spec, superleader_manageable=True, labels=["team-a"]
         )
-        await store.set_secret(conn, kube, NS, found.id, "TOKEN", SecretStr(canary + "-live"))
     kube.reset_records()
     return found
 
@@ -113,15 +109,6 @@ async def _notices(pool, session_id) -> list[tuple[str, str, str]]:
         "SELECT text, notice, lane FROM messages WHERE session_id = %s ORDER BY id",
         (session_id,),
     )
-
-
-async def _live(pool, preset_id) -> dict[str, int]:
-    rows = await _rows(
-        pool,
-        "SELECT name, version FROM preset_secrets WHERE preset_id = %s AND retired_at IS NULL",
-        (preset_id,),
-    )
-    return dict(rows)
 
 
 async def _status(pool, proposal_id) -> tuple[str, list]:
@@ -176,10 +163,9 @@ async def test_approve_all_applies_the_spec(pool, kube, settings, boss, preset, 
     spec, _, name, labels, manageable = await _spec(pool, preset.id)
     assert spec["wrapper"] == {"mcp_servers": {"grafana": GRAFANA}}
     assert spec["env"]["PLAIN"] == {"value": "changed"}
-    assert spec["env"]["TOKEN"] == {"protected": True}
+    assert spec["env"]["TOKEN"] == {"value": "token"}
     # F8: the columns are passed through unchanged
     assert (name, labels, manageable) == ("infra", ["team-a"], True)
-    assert await _live(pool, preset.id) == {"TOKEN": 1}
     assert kube.applied("Secret") == []
     [(text, notice, lane)] = await _notices(pool, boss.id)
     assert (notice, lane) == ("proposal", "regular")
@@ -231,7 +217,6 @@ async def test_approving_a_preset_in_an_archived_project_is_422_and_writes_nothi
         await _review(pool, kube, settings, view.id, 1, decisions)
     _error(exc, 422, "project_archived")
     assert await _spec(pool, preset.id) == before
-    assert await _live(pool, preset.id) == {"TOKEN": 1}
     status, items = await _status(pool, view.id)
     assert status == "open" and {i[2] for i in items} == {"pending"}
     assert await _notices(pool, boss.id) == []
@@ -279,7 +264,6 @@ async def test_partial_approve_applies_only_approved_paths(
     spec, *_ = await _spec(pool, preset.id)
     assert spec["wrapper"] == {"mcp_servers": {"grafana": GRAFANA}}
     assert spec["env"]["PLAIN"] == {"value": "plain"}
-    assert await _live(pool, preset.id) == {"TOKEN": 1}
     [(text, _, _)] = await _notices(pool, boss.id)
     assert "applied wrapper.mcp_servers" in text
     assert "denied env.PLAIN: keep the old token" in text
@@ -308,7 +292,6 @@ async def test_any_rework_writes_nothing_and_records_every_verdict(
         "wrapper.mcp_servers": ("rework", "pin the version"),
     }
     assert await _spec(pool, preset.id) == before
-    assert await _live(pool, preset.id) == {"TOKEN": 1}
     [(text, notice, _)] = await _notices(pool, boss.id)
     assert notice == "proposal"
     assert text.startswith(f"Proposal P-{view.id} r1 (preset infra) needs rework: ")
@@ -332,28 +315,21 @@ async def test_all_deny_closes_denied(pool, kube, settings, boss, preset, canary
     assert "applied" not in text
 
 
-async def test_an_applied_new_declaration_without_a_value_is_declared_unset(
-    pool, kube, settings, boss, preset
-):
-    view, _, _ = await _create(
-        pool, kube, settings, boss, patch={"env": {"NEW": {"protected": True}}}
-    )
+async def test_an_applied_vault_ref_is_stored_as_the_ref(pool, kube, settings, boss, preset):
+    ref = {"vault": OTHER, "env": "TOKEN"}
+    view, _, _ = await _create(pool, kube, settings, boss, patch={"env": {"NEW": ref}})
     done = await _review(pool, kube, settings, view.id, 1, {"env.NEW": "approve"})
     assert done.status == "applied"
     spec, *_ = await _spec(pool, preset.id)
-    assert spec["env"]["NEW"] == {"protected": True, "expand": False}
-    assert await _live(pool, preset.id) == {"TOKEN": 1}
+    assert spec["env"]["NEW"] == ref
 
 
-async def test_an_approved_removal_retires_the_dropped_protected_variable(
-    pool, kube, settings, boss, preset
-):
+async def test_an_approved_removal_drops_the_variable(pool, kube, settings, boss, preset):
     view, _, _ = await _create(pool, kube, settings, boss, patch={"env": {"TOKEN": None}})
     done = await _review(pool, kube, settings, view.id, 1, {"env.TOKEN": "approve"})
     assert done.status == "applied"
     spec, *_ = await _spec(pool, preset.id)
     assert "TOKEN" not in spec["env"]
-    assert await _live(pool, preset.id) == {}
 
 
 # ---------------------------------------------------------------- body checks
@@ -448,7 +424,6 @@ async def test_a_failing_check_spec_keeps_the_revision_and_the_same_revision_sti
             {"docker": "approve", "docker_memory": "deny", "env.PLAIN": "approve"},
         )
     _error(exc, 422, "invalid_spec")
-    assert await _live(pool, preset.id) == {"TOKEN": 1}
     assert (await _status(pool, view.id))[0] == "open"
     # the human fixes the selection: the same revision still applies
     done = await _review(
@@ -485,7 +460,6 @@ async def test_the_notice_exists_iff_the_apply_committed(
         )
     assert await _notices(pool, boss.id) == []
     assert await _spec(pool, preset.id) == before
-    assert await _live(pool, preset.id) == {"TOKEN": 1}
     status, items = await _status(pool, view.id)
     assert status == "open" and {i[2] for i in items} == {"pending"}
 
@@ -523,31 +497,22 @@ async def _unrelated_write(pool, preset):
         await presets_repo.update(conn, preset.id, "infra", spec)
 
 
-async def _rotate(pool, kube, preset, canary):
-    async with pool.connection() as conn:
-        await store.set_secret(conn, kube, NS, preset.id, "TOKEN", SecretStr(canary + "-rot"))
-
-
-@pytest.mark.parametrize("change", ["unrelated_path", "label", "rotation"])
+@pytest.mark.parametrize("change", ["unrelated_path", "label"])
 async def test_any_change_to_the_target_makes_approve_409_stale_then_revise_applies(
     pool, kube, settings, boss, preset, canary, change
 ):
     view = await _filed(pool, kube, settings, boss)
     if change == "unrelated_path":
         await _unrelated_write(pool, preset)
-    elif change == "label":
-        await _relabel(pool, preset)
     else:
-        await _rotate(pool, kube, preset, canary)
+        await _relabel(pool, preset)
     before = await _spec(pool, preset.id)
-    live = await _live(pool, preset.id)
     approve = {"env.PLAIN": "approve", "wrapper.mcp_servers": "approve"}
     with pytest.raises(ApiError) as exc:
         await _review(pool, kube, settings, view.id, 1, approve)
     err = _error(exc, 409, "proposal_stale")
     assert err.extra == {"fields": []}
     assert await _spec(pool, preset.id) == before
-    assert await _live(pool, preset.id) == live
     status, items = await _status(pool, view.id)
     assert status == "stale" and {i[2] for i in items} == {"pending"}
     [(outcome,)] = await _rows(
@@ -565,7 +530,6 @@ async def test_any_change_to_the_target_makes_approve_409_stale_then_revise_appl
     assert done.status == "applied"
     spec, *_ = await _spec(pool, preset.id)
     assert spec["wrapper"] == {"mcp_servers": {"grafana": GRAFANA}}
-    assert await _live(pool, preset.id) == live  # an apply writes no protected version
     await _assert_nowhere(pool, canary, done)
 
 

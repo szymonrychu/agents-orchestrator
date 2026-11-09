@@ -4,7 +4,6 @@ the same guards re-run on the locked row. Paths only, never values, in errors an
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from typing import Any
 
 import psycopg
@@ -15,7 +14,6 @@ from agents_orchestrator.api import schemas
 from agents_orchestrator.api.agent import _leads
 from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.sessions import (
-    _secret_unset,
     check_spec,
     one_view,
     vault_refs_not_allowed,
@@ -23,7 +21,7 @@ from agents_orchestrator.api.sessions import (
 from agents_orchestrator.api.spec_edit import (
     guard_agent_edit,
     human_only_refused,
-    merged_spec_in,
+    merged_spec,
     note_fields,
 )
 from agents_orchestrator.api.vault_refs import refs_in
@@ -33,16 +31,10 @@ from agents_orchestrator.db import sessions as repo
 from agents_orchestrator.db.queue import SessionBeingDeleted
 from agents_orchestrator.preset_policy import changed_paths, fixed_changes, tighten_changes
 from agents_orchestrator.settings import Settings
-from agents_orchestrator.spec import SessionSpec, default_cache_key
+from agents_orchestrator.spec import SessionSpec, default_cache_key, legacy_context
 
 # A concurrent spec write (or a deadlock with a preset delete) makes the patch re-read and retry.
 _TRIES = 3
-
-
-def _proposable(exc: ApiError) -> ApiError:
-    """The refusal marked as one a proposal can carry (a protected value or declaration)."""
-    exc.extra = {**(exc.extra or {}), "proposable": True}
-    return exc
 
 
 def not_superleader() -> ApiError:
@@ -107,16 +99,14 @@ async def patch(
         `session_messaging` off mid-patch); on another one only a superleader got here."""
         return bool(base.get("session_messaging")) if own else superleader
 
-    def guards(
-        base: dict[str, Any], new: dict[str, Any], values: Iterable[str], versions: dict[str, str]
-    ) -> None:
+    def guards(base: dict[str, Any], new: dict[str, Any]) -> None:
         """Plan 3.3 steps 3 to 7 on `base` (the stored spec); each refusal notes its paths."""
         try:
             refuse_ref_changes(base, new)
         except ApiError as exc:
             note_fields(request, [f"env.{e}" for e in exc.extra["envs"]])
             raise
-        guard_agent_edit(base, new, values, request, privileged=not own)
+        guard_agent_edit(base, new, request, privileged=not own)
         if not as_superleader(base) and (
             looser := tighten_changes(
                 base,
@@ -134,35 +124,21 @@ async def patch(
         if fixed := fixed_changes(base, new):
             note_fields(request, fixed)
             raise fixed_refused(fixed)
-        protected = {n for n, e in new.get("env", {}).items() if e.get("protected")}
-        if unset := sorted(protected - set(versions)):
-            note_fields(request, [f"env.{n}" for n in unset])
-            raise _proposable(_secret_unset(unset))
 
     for _ in range(_TRIES):
         found = await repo.get_stored(conn, target.id)
         if found is None:
             raise not_found("session")
         session, stored = found
-        try:
-            _, model = merged_spec_in(stored, body.spec)
-        except ApiError as exc:
-            if exc.code != "secret_in_spec":
-                raise
-            raise _proposable(exc) from None
-        spec, values = model.split()
+        _, spec = merged_spec(stored, body.spec, legacy_context(session.secret_versions))
         new = spec.model_dump(mode="json", exclude_unset=True)
-        guards(stored, new, values, session.secret_versions)
+        guards(stored, new)
         filled = await validated(spec, settings, session)
 
-        async def recheck(
-            locked: repo.LockedSession,
-            new: dict[str, Any] = new,
-            values: Iterable[str] = values,
-        ) -> None:
+        async def recheck(locked: repo.LockedSession, new: dict[str, Any] = new) -> None:
             """The same guards on the fresh locked row, then who may still edit it: the
             preset is held FOR SHARE (lock order sessions, then presets)."""
-            guards(locked.spec, new, values, locked.secret_versions)
+            guards(locked.spec, new)
             if not own:
                 preset = (
                     await presets_repo.get_for_share(conn, locked.preset_id)

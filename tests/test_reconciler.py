@@ -14,7 +14,6 @@ import pytest
 import pytest_asyncio
 import yaml
 from factories import (
-    attach_preset,
     insert_agent,
     insert_check,
     insert_command,
@@ -27,13 +26,10 @@ from fakes.fake_kube import FakeKube
 from lightkube import AsyncClient, KubeConfig
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
-from pydantic import SecretStr
-from test_render import container_of
 
 from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import queue, sessions
 from agents_orchestrator.db.pool import listen
-from agents_orchestrator.k8s import secrets as secret_store
 from agents_orchestrator.k8s.kube import (
     FIELD_MANAGER,
     Forbidden,
@@ -1315,37 +1311,3 @@ async def test_spec_patch_is_applied_once_by_reconcile(env):
     await env.rec.reconcile_once()
     assert env.kube.applied() == []
     assert env.kube.deletes == []
-
-
-async def test_spec_patch_binding_a_staged_secret_renders_its_secret_name(env):
-    """A session apply that binds a staged value: the rendered StatefulSet names the bound
-    Secret version for the newly declared protected variable."""
-    c = await env.session("alpha", replicas=1, image="img:1")
-    preset_id = await attach_preset(env.pool, c.id)
-    async with env.pool.connection() as conn:
-        staged = await secret_store.stage_secret(
-            conn,
-            env.kube,
-            "agents",
-            preset_id,
-            "TOK",
-            SecretStr("unused-value"),
-            proposal_id=7,
-            revision=1,
-        )
-    (row,) = await env.rows("SELECT spec FROM sessions WHERE id = %s", (c.id,))
-    spec = SessionSpec.model_validate({**row["spec"], "env": {"TOK": {"protected": True}}})
-
-    async def recheck(locked) -> None:
-        return None
-
-    async with env.pool.connection() as conn, conn.transaction():
-        bound = await secret_store.bind_staged(conn, preset_id, "TOK", proposal_id=7, revision=1)
-        _, written = await sessions.replace_spec(
-            conn, c.id, row["spec"], spec, recheck, secret_versions={"TOK": bound}
-        )
-    assert written and bound == staged
-
-    patched = await env.get(c.id)
-    env_vars = {e["name"]: e for e in container_of(_rendered(env, patched))["env"]}
-    assert env_vars["TOK"]["valueFrom"]["secretKeyRef"] == {"name": bound, "key": "value"}

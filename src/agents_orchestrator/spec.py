@@ -8,9 +8,8 @@ import re
 import secrets
 import string
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Annotated, Any, Literal, NamedTuple
 from urllib.parse import urlparse
@@ -19,7 +18,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    SecretStr,
+    PrivateAttr,
     ValidationInfo,
     field_validator,
     model_serializer,
@@ -199,7 +198,6 @@ def source_plugin_name(source: str) -> str:
 
 
 INIT_SCRIPTS_MAX = 20
-PROTECTED_MAX = 50
 VAULT_REFS_MAX = 50
 _VAULT_ENV_RE = re.compile(r"[A-Z_][A-Z0-9_]{0,127}")
 
@@ -309,6 +307,19 @@ class _HookAction(_Strict):
         return v
 
 
+_LEGACY_ENV = "legacy_env"
+
+
+def legacy_context(pins: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The validation context of a stored session's spec: the env names of its legacy pins.
+
+    Migration 0041 removed the protected variables from session specs and kept their pins (a
+    ps-* Secret name, str), which still render into the pod env; a `${NAME}` reference to one
+    stays valid. Pass it as `SessionSpec.model_validate(raw, context=...)`.
+    """
+    return {_LEGACY_ENV: sorted(k for k, v in (pins or {}).items() if isinstance(v, str))}
+
+
 class Ref(NamedTuple):
     """A vault reference: the entry id and the entry's env name."""
 
@@ -317,25 +328,15 @@ class Ref(NamedTuple):
 
 
 class EnvVar(_Strict):
-    """One session env variable, GitLab CI style: `{value, protected, expand}`.
+    """One session env variable, GitLab CI style: `{value, expand}`, or a vault reference.
 
-    A variable may instead be a vault reference `{vault, env}`: the entry's value is resolved by
-    the vault at session create; a reference carries nothing else.
-
-    A protected variable is write-only: it carries no value here (the value lives in a
-    Kubernetes Secret and is rendered as `secretKeyRef`). `expand` gates `$` handling of a plain
-    value; a protected variable ignores it because the kubelet does not expand `secretKeyRef`, so
-    `protected` with `expand` is refused rather than silently ignored.
+    A plain variable carries its value; `expand` gates `$` handling of it. A vault reference
+    `{vault, env}` names an agents-vault entry and its env; the entry's value is resolved by the
+    vault at session create. A reference carries nothing else.
     """
 
     value: str | None = None
-    protected: bool = Field(default=False, strict=True)
     expand: bool = Field(default=False, strict=True)
-    # Output only, set on reads of a protected variable (never stored, never accepted as input):
-    # whether a value exists, its Secret version and when it was written.
-    set: bool | None = None
-    version: int | None = None
-    updated_at: datetime | None = None
     vault: uuid.UUID | None = None
     env: str | None = None
 
@@ -350,72 +351,20 @@ class EnvVar(_Strict):
                 raise ValueError("a vault reference needs both vault and env")
             if not _VAULT_ENV_RE.fullmatch(self.env):
                 raise ValueError("a vault reference env must match [A-Z_][A-Z0-9_]{0,127}")
-            if (
-                self.value is not None
-                or self.expand
-                or self.protected
-                or self.set is not None
-                or self.version is not None
-                or self.updated_at is not None
-            ):
+            if self.value is not None or self.expand:
                 raise ValueError("a vault reference carries only vault and env")
-            return self
-        if self.protected:
-            if self.value is not None:
-                raise ValueError(
-                    "a protected variable holds no value in the spec; set it through the "
-                    "secret route"
-                )
-            if self.expand:
-                raise ValueError("a protected variable ignores expand (not expanded); set it false")
         elif self.value is None:
-            raise ValueError("a variable that is not protected needs a value")
+            raise ValueError("a variable needs a value or a vault reference")
         return self
 
     @model_serializer(mode="wrap")
     def _sparse(self, handler: Any) -> dict[str, Any]:
-        data = handler(self)
         if self.is_ref:
             return {"vault": str(self.vault), "env": self.env}
-        for key in ("value", "set", "version", "updated_at", "vault", "env"):
-            if data.get(key) is None:
-                data.pop(key, None)
+        data = handler(self)
+        for key in ("vault", "env"):
+            data.pop(key, None)
         return data
-
-
-class EnvVarIn(_Strict):
-    """The request form of an env variable: a protected one may carry its new value, and a
-    variable may be a vault reference `{vault, env}` as in `EnvVar`.
-
-    Only the api sees it; `SessionSpecIn.split` moves the value out so a `SessionSpec` never holds
-    one. Without a value a protected variable keeps its stored one.
-    """
-
-    value: SecretStr | None = None
-    protected: bool = Field(default=False, strict=True)
-    expand: bool = Field(default=False, strict=True)
-    vault: uuid.UUID | None = None
-    env: str | None = None
-
-    @property
-    def is_ref(self) -> bool:
-        return self.vault is not None
-
-    @model_validator(mode="after")
-    def _shape(self) -> EnvVarIn:
-        if self.vault is not None or self.env is not None:
-            if self.vault is None or self.env is None:
-                raise ValueError("a vault reference needs both vault and env")
-            if not _VAULT_ENV_RE.fullmatch(self.env):
-                raise ValueError("a vault reference env must match [A-Z_][A-Z0-9_]{0,127}")
-            if self.value is not None or self.expand or self.protected:
-                raise ValueError("a vault reference carries only vault and env")
-        elif self.protected:
-            if self.expand:
-                raise ValueError("a protected variable ignores expand (not expanded); set it false")
-        elif self.value is None:
-            raise ValueError("a variable that is not protected needs a value")
-        return self
 
 
 _REF_RE = re.compile(r"\$\$|\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?P<default>:-[^}]*)?\}")
@@ -757,6 +706,8 @@ class SessionSpec(BaseModel):
     docker_memory: Quantity | None = None
     # Workspace cache in S3; presence enables it. Sparse: unset is not stored or dumped.
     cache: WorkspaceCache | None = None
+    # env names of a stored session's legacy pins (`legacy_context`); never input or output
+    _legacy_env: frozenset[str] = PrivateAttr(default_factory=frozenset)
 
     @model_validator(mode="after")
     def _cap(self) -> SessionSpec:
@@ -770,7 +721,7 @@ class SessionSpec(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _references(self) -> SessionSpec:
+    def _references(self, info: ValidationInfo) -> SessionSpec:
         used: set[str] = set()
         wrapper = self.wrapper
         if wrapper is not None:
@@ -780,8 +731,14 @@ class SessionSpec(BaseModel):
                         used |= _refs(action.secret) | _refs(action.headers)
             for server in (wrapper.mcp_servers or {}).values():
                 used |= _refs(server.env if isinstance(server, McpStdio) else server.headers)
-        # names the platform puts in the pod itself are always set
-        missing = {n for n in used - set(self.env) if not _reserved_env_name(n)}
+        # names the platform puts in the pod itself are always set, and so are a stored
+        # session's legacy pins (`legacy_context`); kept on the instance, so a model that holds
+        # this spec (a view) validates it again with the same names
+        legacy = (info.context or {}).get(_LEGACY_ENV)
+        if legacy is not None:
+            self._legacy_env = frozenset(legacy)
+        defined = set(self.env) | self._legacy_env
+        missing = {n for n in used - defined if not _reserved_env_name(n)}
         if missing:
             raise ValueError(
                 "${NAME} references with no env variable of that name: "
@@ -791,12 +748,8 @@ class SessionSpec(BaseModel):
 
     @property
     def plain_env(self) -> dict[str, str]:
-        """The non-protected variables and their values."""
-        return {
-            k: v.value
-            for k, v in self.env.items()
-            if not v.protected and not v.is_ref and v.value is not None
-        }
+        """The plain variables and their values."""
+        return {k: v.value for k, v in self.env.items() if v.value is not None}
 
     @property
     def vault_refs(self) -> dict[str, Ref]:
@@ -806,11 +759,6 @@ class SessionSpec(BaseModel):
             for k, v in sorted(self.env.items())
             if v.vault is not None and v.env is not None
         }
-
-    @property
-    def protected_env(self) -> list[str]:
-        """Names of the protected variables, sorted."""
-        return sorted(k for k, v in self.env.items() if v.protected)
 
     @property
     def hive(self) -> bool:
@@ -911,9 +859,6 @@ class SessionSpec(BaseModel):
                 "env keys must match [A-Z_][A-Z0-9_]* and must not be POD_NAME, CCW_*, CLAUDE_*, "
                 "ANTHROPIC_*, ORCH_*, *_PROXY or *_BASE_URL: " + ", ".join(sorted(bad))
             )
-        protected = sum(1 for e in v.values() if e.protected)
-        if protected > PROTECTED_MAX:
-            raise ValueError(f"env has {protected} protected variables, at most {PROTECTED_MAX}")
         refs = sum(1 for e in v.values() if e.is_ref)
         if refs > VAULT_REFS_MAX:
             raise ValueError(f"env has {refs} vault references, at most {VAULT_REFS_MAX}")
@@ -1027,38 +972,6 @@ def _template_problems(spec: SessionSpec) -> list[str]:
         if error is not None:
             errors.append(f"{name}: {error}")
     return errors
-
-
-class SessionSpecIn(SessionSpec):
-    """A spec as the api receives it: protected variables may carry a value (`EnvVarIn`)."""
-
-    env: dict[str, EnvVarIn] = {}  # type: ignore[assignment]
-
-    def split(self) -> tuple[SessionSpec, dict[str, SecretStr]]:
-        """The storable spec (no protected value in it) and the protected values that were sent."""
-        values: dict[str, SecretStr] = {}
-        env: dict[str, EnvVar] = {}
-        for name, entry in self.env.items():
-            if entry.vault is not None:
-                env[name] = EnvVar(vault=entry.vault, env=entry.env)
-                continue
-            given = {k: getattr(entry, k) for k in entry.model_fields_set if k != "value"}
-            if entry.protected:
-                if entry.value is not None:
-                    values[name] = entry.value
-                env[name] = EnvVar(**given)
-            else:
-                assert entry.value is not None
-                env[name] = EnvVar(value=entry.value.get_secret_value(), **given)
-        fields = {
-            k: getattr(self, k)
-            for k in SessionSpec.model_fields
-            if k in self.model_fields_set and k != "env"
-        }
-        spec = SessionSpec.model_construct(
-            _fields_set=set(self.model_fields_set), **fields, env=env
-        )
-        return spec, values
 
 
 def validate_spec(spec: SessionSpec, settings: Settings, stored: SessionSpec | None = None) -> None:
