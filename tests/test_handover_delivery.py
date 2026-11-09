@@ -4,6 +4,7 @@ transcript and queues it as an attached `handover` notice to the new leader, onc
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import UTC, datetime, timedelta
 
 from factories import insert_agent, insert_event, insert_session, set_agent_status
@@ -575,3 +576,29 @@ async def test_handover_log_forced_without_tenure(pool):
     await _deliver(pool)
     [log] = await _rows(pool, "SELECT * FROM handover_log WHERE session_id = %s", (s["id"],))
     assert (log["kind"], log["tenure_seconds"]) == ("scale_down", None)
+
+
+async def test_slow_taskboard_does_not_stall_the_sweep(pool, monkeypatch):
+    monkeypatch.setattr(handover, "FETCH_TIMEOUT_SECONDS", 0.5)
+    slow, fast = [], []
+    for bucket in (slow, fast):
+        s, (a0, a1, _) = await _hive(pool)
+        await _lead(pool, s["id"], a1["id"], 2, "handover: x", previous=a0["id"])
+        bucket.append(s)
+
+    async def decisions(session_id, slug, projects):
+        if session_id == slow[0]["id"]:
+            await asyncio.sleep(60)
+        return [OpenDecision("T-5", "9", "merge now?")]
+
+    started = time.monotonic()
+    served = await _deliver(pool, decisions)
+    assert time.monotonic() - started < 5
+    assert sorted(served) == sorted([slow[0]["id"], fast[0]["id"]])
+    texts = {}
+    for s in (slow[0], fast[0]):
+        [msg] = await _messages(pool, s["id"])
+        [att] = await _attachments(pool, msg["id"])
+        texts[s["id"]] = att.data.decode()
+    assert "taskboard unavailable" in texts[slow[0]["id"]]
+    assert "- T-5 decision 9: merge now?" in texts[fast[0]["id"]]

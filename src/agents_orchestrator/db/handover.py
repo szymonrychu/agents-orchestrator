@@ -6,6 +6,7 @@ leader, in the transaction that records the epoch."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
@@ -77,6 +78,10 @@ _PENDING = (
 )
 _COLUMNS = "s.slug, l.agent_id, l.epoch, l.since, l.reason, l.previous_agent_id, l.previous_since"
 
+# All sessions' taskboard calls run concurrently and share this overall bound; a session whose
+# call has not finished by then counts as unavailable.
+FETCH_TIMEOUT_SECONDS = 10.0
+
 # (session id, slug, project scope) -> open decisions, or None when the taskboard cannot say.
 DecisionsFetcher = Callable[[uuid.UUID, str, str], Awaitable[list[OpenDecision] | None]]
 
@@ -110,20 +115,32 @@ async def _fetch_decisions(
     conn: psycopg.AsyncConnection, decisions: DecisionsFetcher
 ) -> dict[uuid.UUID, list[OpenDecision] | None]:
     """Open decisions of every session a notice is pending for, asked outside any transaction
-    (the fetcher bounds the time). A fetcher that raises counts as unavailable."""
+    concurrently under one overall timeout. A fetcher that raises counts as unavailable."""
     async with conn.transaction():
         cur = await conn.execute(f"SELECT s.id FROM {_SOURCE} WHERE {_PENDING}")
         ids = [row[0] for row in await cur.fetchall()]
         sessions = [s for s in [await sessions_repo.get(conn, i) for i in ids] if s is not None]
-    fetched: dict[uuid.UUID, list[OpenDecision] | None] = {}
-    for session in sessions:
+
+    async def one(session: sessions_repo.Session) -> list[OpenDecision] | None:
         try:
-            fetched[session.id] = await decisions(session.id, session.slug, scope_of(session))
+            return await decisions(session.id, session.slug, scope_of(session))
         except Exception as exc:
             log.warning(
                 "handover: open decisions of %s unavailable: %s", session.id, type(exc).__name__
             )
-            fetched[session.id] = None
+            return None
+
+    tasks = {s.id: asyncio.ensure_future(one(s)) for s in sessions}
+    if tasks:
+        await asyncio.wait(tasks.values(), timeout=FETCH_TIMEOUT_SECONDS)
+    fetched: dict[uuid.UUID, list[OpenDecision] | None] = {}
+    for session_id, task in tasks.items():
+        if task.done():
+            fetched[session_id] = task.result()
+        else:
+            task.cancel()
+            log.warning("handover: open decisions of %s timed out", session_id)
+            fetched[session_id] = None
     return fetched
 
 
