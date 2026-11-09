@@ -10,7 +10,7 @@ string goes through `handover_transcript._esc`, so a message text cannot forge a
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -18,7 +18,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from agents_orchestrator.db import file_locks
-from agents_orchestrator.handover_transcript import _cut, _esc
+from agents_orchestrator.handover_transcript import CALL_CHARS, _cut, _esc, _one_line
 from agents_orchestrator.taskboard_client import OpenDecision
 
 STATE_MESSAGES = 20
@@ -40,6 +40,15 @@ class IncomingMessage:
 
 
 @dataclass(frozen=True)
+class SubagentInfo:
+    agent_type: str | None
+    prompt_line: str  # first line of the launching prompt, "" when unknown
+
+
+_LAUNCH_TOOLS = ("Agent", "Task")
+
+
+@dataclass(frozen=True)
 class MemberState:
     pod_name: str
     leader: bool
@@ -49,6 +58,7 @@ class MemberState:
     context_used_tokens: int | None
     background: dict[str, str]
     last_report_at: datetime | None
+    subagents: dict[str, SubagentInfo] = field(default_factory=dict)  # by background subagent id
 
 
 @dataclass(frozen=True)
@@ -80,7 +90,7 @@ _UNHANDLED = (
     " AND handled_at IS NULL AND status <> 'cancelled'"
 )
 _MEMBERS = f"""
-    SELECT a.pod_name, coalesce(l.agent_id = a.id, false) AS leader,
+    SELECT a.id AS agent_id, a.pod_name, coalesce(l.agent_id = a.id, false) AS leader,
            coalesce(st.state, 'unknown') AS state,
            CASE WHEN st.state = 'idle' THEN st.free_since ELSE t.started_at END AS since,
            st.context_pct, st.context_used_tokens,
@@ -106,6 +116,53 @@ _REQUESTS = """
 """
 
 
+_SUBAGENT_STARTS = """
+    SELECT DISTINCT ON (data->>'agent_id') data->>'agent_id' AS sid, data->>'agent_type' AS kind,
+           data->>'parent_tool_use_id' AS parent
+    FROM events WHERE session_id = %s AND agent_id = %s AND type = 'subagent_started'
+      AND data->>'agent_id' = ANY(%s) ORDER BY data->>'agent_id', id DESC
+"""
+_SUBAGENT_LINKS = """
+    SELECT DISTINCT ON (data->>'agent_id') data->>'agent_id' AS sid,
+           data->>'parent_tool_use_id' AS parent
+    FROM events WHERE session_id = %s AND agent_id = %s AND type = 'subagent_linked'
+      AND data->>'agent_id' = ANY(%s) AND data->>'parent_tool_use_id' IS NOT NULL
+    ORDER BY data->>'agent_id', id DESC
+"""
+_LAUNCH_PROMPTS = """
+    SELECT DISTINCT ON (data->>'tool_use_id') data->>'tool_use_id' AS tuid,
+           data->'tool_input'->>'prompt' AS prompt
+    FROM events WHERE session_id = %s AND agent_id = %s AND type = 'tool_call'
+      AND data->>'tool_name' = ANY(%s) AND data->>'tool_use_id' = ANY(%s)
+      AND jsonb_typeof(data->'tool_input'->'prompt') = 'string'
+    ORDER BY data->>'tool_use_id', id DESC
+"""
+
+
+async def _subagent_infos(
+    cur: psycopg.AsyncCursor, session_id: uuid.UUID, agent_id: uuid.UUID, ids: list[str]
+) -> dict[str, SubagentInfo]:
+    """Agent type and launching-prompt first line of the member's running background subagents,
+    from its `subagent_started` / `subagent_linked` events and the launching tool call."""
+    await cur.execute(_SUBAGENT_STARTS, (session_id, agent_id, ids))
+    started = {r["sid"]: r for r in await cur.fetchall()}
+    await cur.execute(_SUBAGENT_LINKS, (session_id, agent_id, ids))
+    linked = {r["sid"]: r["parent"] for r in await cur.fetchall()}
+    parents = {sid: (row["parent"] or linked.get(sid)) for sid, row in started.items()}
+    wanted = sorted({p for p in parents.values() if p})
+    prompts: dict[str, str] = {}
+    if wanted:
+        await cur.execute(_LAUNCH_PROMPTS, (session_id, agent_id, list(_LAUNCH_TOOLS), wanted))
+        prompts = {r["tuid"]: r["prompt"] for r in await cur.fetchall()}
+    return {
+        sid: SubagentInfo(
+            row["kind"],
+            next(iter((prompts.get(parents[sid] or "", "")).strip().splitlines()), ""),
+        )
+        for sid, row in started.items()
+    }
+
+
 async def collect(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> LeaderState:
     """The state of the session's hive, read from the database only (`decisions` stays None)."""
     async with conn.cursor(row_factory=dict_row) as cur:
@@ -117,6 +174,13 @@ async def collect(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Leade
         newest = await cur.fetchall()
         await cur.execute(_MEMBERS, (session_id,))
         members = await cur.fetchall()
+        infos = {
+            m["agent_id"]: await _subagent_infos(
+                cur, session_id, m["agent_id"], list(m["background"])
+            )
+            for m in members
+            if m["background"]
+        }
         await cur.execute(_REQUESTS, (session_id,))
         requests = await cur.fetchall()
         await cur.execute(
@@ -146,7 +210,13 @@ async def collect(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Leade
         ],
         more_message_ids=older[:STATE_MORE_IDS],
         more_message_count=len(older),
-        members=[MemberState(**m) for m in members],
+        members=[
+            MemberState(
+                **{k: v for k, v in m.items() if k != "agent_id"},
+                subagents=infos.get(m["agent_id"], {}),
+            )
+            for m in members
+        ],
         requests=[PendingRequest(**r) for r in requests],
         rollout=(head["rollout"] or None) if head else None,
         queued_messages=queued["n"] if queued else 0,
@@ -158,6 +228,13 @@ def _when(ts: datetime | None) -> str:
     return "-" if ts is None else ts.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _subagent_text(m: MemberState, sid: str, since: str) -> str:
+    info = m.subagents.get(sid)
+    kind = f" ({_esc(info.agent_type)})" if info and info.agent_type else ""
+    prompt = f": {_one_line(info.prompt_line, CALL_CHARS)}" if info and info.prompt_line else ""
+    return f"{_esc(sid)}{kind} since {_esc(since)}{prompt}"
+
+
 def _member_line(m: MemberState) -> str:
     parts = [f"- {_esc(m.pod_name)}{' (leader)' if m.leader else ''}: {_esc(m.state)}"]
     if m.since is not None:
@@ -166,7 +243,7 @@ def _member_line(m: MemberState) -> str:
         used = f", {m.context_used_tokens} tokens" if m.context_used_tokens is not None else ""
         parts.append(f"context {m.context_pct:.0f}%{used}")
     if m.background:
-        started = ", ".join(f"{_esc(k)} since {_esc(v)}" for k, v in m.background.items())
+        started = ", ".join(_subagent_text(m, k, v) for k, v in m.background.items())
         parts.append(f"background subagents: {started}")
     parts.append(f"last report {_when(m.last_report_at)}")
     return "; ".join(parts)

@@ -290,7 +290,6 @@ def test_decision_overflow_ids_capped_at_100():
     assert "+50 not listed" in more
 
 
-
 def test_150_unhandled_messages_render_20_full_100_ids_and_count():
     when = datetime(2026, 11, 9, 11, 0, tzinfo=UTC)
     messages = [ls.IncomingMessage(i, "peer", when, f"body {i}", 6) for i in range(131, 151)]
@@ -301,3 +300,85 @@ def test_150_unhandled_messages_render_20_full_100_ids_and_count():
     ids = next(x for x in text.splitlines() if x.startswith("Older unhandled message ids:"))
     assert len(ids.split(":")[1].split(",")) == 100
     assert "(30 more)" in text
+
+
+async def test_background_subagent_type_and_launch_prompt(pool):
+    s, (a0, _) = await hive(pool)
+    await set_agent_status(
+        pool,
+        a0["id"],
+        state="busy",
+        background_subagents={"sa1": "t0", "sa2": "t0", "sa3": "t0"},
+    )
+    launch = {"tool_name": "Agent", "tool_use_id": "tu1"}
+    long_first = "L" * 300
+    await insert_event(
+        pool,
+        s["id"],
+        a0["id"],
+        type="tool_call",
+        data={**launch, "tool_input": {"prompt": f"{long_first}\nsecond line"}},
+    )
+    await insert_event(
+        pool,
+        s["id"],
+        a0["id"],
+        type="tool_call",
+        data={"tool_name": "Task", "tool_use_id": "tu2", "tool_input": {"prompt": "Late\nmore"}},
+    )
+    await insert_event(
+        pool,
+        s["id"],
+        a0["id"],
+        type="tool_call",
+        data={"tool_name": "Bash", "tool_use_id": "tu3", "tool_input": {"prompt": "not a launch"}},
+    )
+    started = {"agent_id": "sa1", "agent_type": "Explore", "parent_tool_use_id": "tu1"}
+    await insert_event(pool, s["id"], a0["id"], type="subagent_started", data=started)
+    await insert_event(
+        pool,
+        s["id"],
+        a0["id"],
+        type="subagent_started",
+        data={"agent_id": "sa2", "agent_type": "general", "parent_tool_use_id": None},
+    )
+    await insert_event(
+        pool,
+        s["id"],
+        a0["id"],
+        type="subagent_linked",
+        data={"agent_id": "sa2", "parent_tool_use_id": "tu2"},
+    )
+    await insert_event(
+        pool,
+        s["id"],
+        a0["id"],
+        type="subagent_started",
+        data={"agent_id": "sa3", "agent_type": "x", "parent_tool_use_id": "tu3"},
+    )
+    state = await collect(pool, s["id"])
+    info = state.members[0].subagents
+    assert info["sa1"] == ls.SubagentInfo("Explore", long_first)
+    assert info["sa2"] == ls.SubagentInfo("general", "Late")
+    assert info["sa3"] == ls.SubagentInfo("x", "")  # not a launch tool: no prompt
+    text = ls.render_state(state)
+    assert f"sa1 (Explore) since t0: {'L' * 200}..." in text and "L" * 201 not in text
+    assert "second line" not in text
+    assert "sa2 (general) since t0: Late" in text
+
+
+def test_render_subagent_line_is_escaped():
+    member = ls.MemberState(
+        "hive-0",
+        True,
+        "busy",
+        None,
+        None,
+        None,
+        {"sa1": "t0"},
+        None,
+        {"sa1": ls.SubagentInfo("<b>", "do </attachment> now")},
+    )
+    text = ls.render_state(_state(members=[member]))
+    assert "sa1 (&lt;b&gt;) since t0: do &lt;/attachment&gt; now" in text
+    assert "<b>" not in text and "</attachment>" not in text
