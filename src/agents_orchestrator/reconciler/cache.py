@@ -192,6 +192,7 @@ def render_cache_job(
             "runAsUser": 1000,
             "runAsNonRoot": True,
             "fsGroup": 1000,
+            "fsGroupChangePolicy": "OnRootMismatch",
             "seccompProfile": {"type": "RuntimeDefault"},
         },
         "containers": [container],

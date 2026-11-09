@@ -398,7 +398,11 @@ async def test_render_init_job(pool, dsn, tmp_path):
     assert spec["template"]["metadata"]["labels"] == labels
     pod = spec["template"]["spec"]
     assert pod["restartPolicy"] == "Never"
-    assert pod["securityContext"] == {"runAsUser": 1000, "fsGroup": 1000}
+    assert pod["securityContext"] == {
+        "runAsUser": 1000,
+        "fsGroup": 1000,
+        "fsGroupChangePolicy": "OnRootMismatch",
+    }
     assert pod["imagePullSecrets"] == [{"name": "harbor-pull"}]
     assert pod["volumes"] == [
         {"name": "workspace", "persistentVolumeClaim": {"claimName": "agent-alpha-workspace"}}

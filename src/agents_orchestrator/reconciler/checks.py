@@ -47,7 +47,11 @@ def render_job(session: Session, check: queue.Check, settings: Settings) -> Obj:
     pod_spec: dict[str, Any] = {
         "restartPolicy": "Never",
         **agent_identity(settings),
-        "securityContext": {"runAsUser": 1000, "fsGroup": 1000},
+        "securityContext": {
+            "runAsUser": 1000,
+            "fsGroup": 1000,
+            "fsGroupChangePolicy": "OnRootMismatch",
+        },
         "containers": [
             {
                 "name": "check",

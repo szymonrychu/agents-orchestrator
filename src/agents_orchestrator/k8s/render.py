@@ -688,7 +688,11 @@ def render_session(
     }
     pod_spec: dict[str, Any] = {
         **pod_identity(session, settings),
-        "securityContext": {"runAsUser": 1000, "fsGroup": 1000},
+        "securityContext": {
+            "runAsUser": 1000,
+            "fsGroup": 1000,
+            "fsGroupChangePolicy": "OnRootMismatch",
+        },
         "terminationGracePeriodSeconds": settings.agent_termination_grace_seconds,
         "containers": [_container(session, settings, names)],
         "volumes": [

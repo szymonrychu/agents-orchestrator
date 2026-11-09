@@ -117,6 +117,7 @@
         securityContext:
           runAsUser: 1000
           fsGroup: 1000
+          fsGroupChangePolicy: OnRootMismatch
         terminationGracePeriodSeconds: 90
         containers:
         - name: ccw

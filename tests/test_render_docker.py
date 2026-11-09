@@ -77,7 +77,11 @@ def test_init_container_order_and_sidecar_shape() -> None:
 
 def test_only_dind_is_privileged_root() -> None:
     pod = docker_pod()
-    assert pod["securityContext"] == {"runAsUser": 1000, "fsGroup": 1000}
+    assert pod["securityContext"] == {
+        "runAsUser": 1000,
+        "fsGroup": 1000,
+        "fsGroupChangePolicy": "OnRootMismatch",
+    }
     dind = by_name(pod["initContainers"], "dind")
     assert dind["securityContext"] == {"privileged": True, "runAsUser": 0}
     others = [by_name(pod["initContainers"], "docker-cli"), *pod["containers"]]

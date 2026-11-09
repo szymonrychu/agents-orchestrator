@@ -25,6 +25,7 @@
         securityContext:
           runAsUser: 1000
           fsGroup: 1000
+          fsGroupChangePolicy: OnRootMismatch
         containers:
         - name: init
           image: harbor.example/containers/claude-code-wrapper:ca2ddf3

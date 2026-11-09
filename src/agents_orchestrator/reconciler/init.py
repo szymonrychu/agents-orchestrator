@@ -130,7 +130,11 @@ def render_init_job(session: Session, settings: Settings, scripts: list[str] | N
     pod_spec: dict[str, Any] = {
         "restartPolicy": "Never",
         **agent_identity(settings),
-        "securityContext": {"runAsUser": 1000, "fsGroup": 1000},
+        "securityContext": {
+            "runAsUser": 1000,
+            "fsGroup": 1000,
+            "fsGroupChangePolicy": "OnRootMismatch",
+        },
         "containers": [container],
         "volumes": [
             {
