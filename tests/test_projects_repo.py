@@ -41,7 +41,7 @@ def test_existing_presets_and_sessions_land_in_default(empty_dsn, tmp_path):
             "INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), 'old', %s)",
             (json.dumps({"replicas": 1}),),
         )
-    assert run_migrations(empty_dsn) == ["0037", "0038", "0039", "0040"]
+    assert run_migrations(empty_dsn) == ["0037", "0038", "0039", "0040", "0041"]
     with psycopg.connect(empty_dsn) as c:
         assert {r[0] for r in c.execute("SELECT project FROM presets")} == {"default"}
         assert c.execute("SELECT project FROM sessions").fetchall() == [("default",)]

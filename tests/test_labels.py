@@ -43,3 +43,14 @@ def test_more_than_twenty_labels_rejected():
 
 def test_cap_counts_after_dedupe():
     assert len(normalize_labels([f"l{i}" for i in range(20)] + ["L0", " l1 "])) == 20
+
+
+@pytest.mark.parametrize("bad", ["project:a", " Project:B ", "project:", "PROJECT:x:y"])
+def test_reserved_project_prefix_rejected(bad):
+    with pytest.raises(ValueError, match="project:"):
+        normalize_labels(["ok", bad])
+
+
+def test_reserved_prefix_allowed_for_filters_and_only_as_prefix():
+    assert normalize_labels(["project:a"], allow_reserved=True) == ["project:a"]
+    assert normalize_labels(["x-project:a", "myproject:b"]) == ["x-project:a", "myproject:b"]

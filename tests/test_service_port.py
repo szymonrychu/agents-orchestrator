@@ -692,3 +692,68 @@ async def test_service_list_presets_passes_project_filter(app):
         assert_error(
             await c.get("/api/v1/presets", params={"project": "nope"}), 422, "unknown_project"
         )
+
+
+VAULT_SCOPE = {"agents-webhook": ["GET /api/v1/presets", "GET /api/v1/sessions"]}
+
+
+@pytest_asyncio.fixture
+async def scoped_app(pool, dsn):
+    return create_app(make_settings(dsn, service_tokens=TOKENS, service_scopes=VAULT_SCOPE), pool)
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "scoped_status"),
+    [
+        ("GET", "/api/v1/presets", 200),
+        ("GET", "/api/v1/sessions", 200),
+        ("GET", "/api/v1/meta", "service_scope"),
+        ("GET", f"/api/v1/presets/{DEFAULT_ID}", "service_scope"),
+        ("POST", "/api/v1/sessions", "service_scope"),
+        ("DELETE", f"/api/v1/sessions/{DEFAULT_ID}", "service_scope"),
+        ("GET", "/api/v1/stream", "service_scope"),
+        ("GET", "/api/v1/not-served", "forbidden"),
+    ],
+)
+async def test_scoped_service_is_limited_to_its_routes(scoped_app, method, path, scoped_status):
+    async with client(scoped_app, 8002) as c:
+        r = await c.request(method, path)
+    if scoped_status == 200:
+        assert r.status_code == 200, r.text
+    else:
+        assert_error(r, 403, scoped_status)
+
+
+async def test_unlisted_service_keeps_every_route(scoped_app):
+    async with client(scoped_app, 8002, token=OTHER_TOKEN) as c:
+        assert (await c.get("/api/v1/meta")).status_code == 200
+        r = await c.post("/api/v1/sessions", json={"preset_id": DEFAULT_ID, "slug": "sch-scope"})
+        assert r.status_code == 201, r.text
+
+
+async def test_empty_scope_denies_every_route(pool, dsn):
+    app = create_app(
+        make_settings(dsn, service_tokens=TOKENS, service_scopes={"agents-webhook": []}), pool
+    )
+    async with client(app, 8002) as c:
+        assert_error(await c.get("/api/v1/presets"), 403, "service_scope")
+
+
+async def test_scope_does_not_apply_on_the_main_port(scoped_app):
+    async with client(scoped_app, 8000, peer=INSIDE, token=None) as c:
+        assert (await c.get("/api/v1/meta")).status_code == 200
+
+
+def test_service_scopes_validation(monkeypatch):
+    assert Settings().service_scopes == {}
+    monkeypatch.setenv("ORCH_SERVICE_TOKENS", TOKENS)
+    monkeypatch.setenv("ORCH_SERVICE_SCOPES", '{"agents-webhook": ["GET /api/v1/presets"]}')
+    assert Settings().service_scopes == {"agents-webhook": ["GET /api/v1/presets"]}
+    monkeypatch.setenv("ORCH_SERVICE_SCOPES", '{"agents-webhook": ["GET /api/v1/other"]}')
+    with pytest.raises(SettingsError) as e:
+        Settings()
+    assert "ORCH_SERVICE_SCOPES" in e.value.problems
+    monkeypatch.setenv("ORCH_SERVICE_SCOPES", '{"nobody": ["GET /api/v1/presets"]}')
+    with pytest.raises(SettingsError) as e:
+        Settings()
+    assert "ORCH_SERVICE_SCOPES" in e.value.problems

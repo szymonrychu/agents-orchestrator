@@ -160,6 +160,9 @@ class Settings(BaseSettings):
     service_port: int = 8002
     service_tokens_file: str = ""
     service_tokens: CsvList = Field(default=[], validate_default=True)
+    # JSON object: service name to the route names ("<METHOD> <path template>") it may call on
+    # the service port; a service without an entry may call every route of the service list
+    service_scopes: dict[str, list[str]] = {}
     agent_api_url: str | None = None
     dispatch_poll_seconds: float = 2
     reconcile_poll_seconds: float = 10
@@ -402,6 +405,23 @@ class Settings(BaseSettings):
             if match.group(1) in seen:
                 raise _Bad(f"entry {n} repeats a service name")
             seen.add(match.group(1))
+        return v
+
+    @field_validator("service_scopes")
+    @classmethod
+    def _check_service_scopes(
+        cls, v: dict[str, list[str]], info: ValidationInfo
+    ) -> dict[str, list[str]]:
+        from agents_orchestrator.api.service_auth import ROUTE_NAMES
+
+        tokened = {entry.split(":", 1)[0] for entry in info.data.get("service_tokens", [])}
+        untokened = sorted(set(v) - tokened)
+        if untokened:
+            raise _Bad("names a service without a token: " + ", ".join(untokened))
+        for name, routes in v.items():
+            unknown = [r for r in routes if r not in ROUTE_NAMES]
+            if unknown:
+                raise _Bad(f"scope of {name!r} lists routes the service port does not serve")
         return v
 
     @field_validator("allowed_cidrs")
@@ -776,6 +796,11 @@ class Settings(BaseSettings):
             self.check_image = self.agent_image
         if self.cache_sweep_grace_seconds is None:
             self.cache_sweep_grace_seconds = self.cache_timeout_seconds + 600
+        unknown = sorted(set(self.service_scopes) - set(self.service_token_hashes()))
+        if unknown:
+            raise _Bad(
+                "ORCH_SERVICE_SCOPES::names a service without a token: " + ", ".join(unknown)
+            )
         return self
 
     def require_master_key(self) -> str:

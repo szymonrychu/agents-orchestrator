@@ -96,3 +96,11 @@ async def test_sessions_list_label_filter_excludes_ended(http, pool):
     got = await http.get(S, params={"label": "x"})
     assert [s["slug"] for s in got.json()] == ["live"]
     assert sorted(s["slug"] for s in (await http.get(S)).json()) == ["ended", "live"]
+
+
+async def test_reserved_project_label_refused_on_session_labels(http):
+    sid = (await http.post(S, json={"preset_id": await _preset(http, "rsv", ["a"])})).json()["id"]
+    r = await http.patch(f"{S}/{sid}/labels", json={"labels": ["a", "project:other"]})
+    assert_error(r, 422, "invalid_request")
+    assert (await http.get(f"{S}/{sid}")).json()["labels"] == ["a"]
+    assert (await http.get(S, params={"label": "project:other"})).status_code == 200

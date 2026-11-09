@@ -101,6 +101,10 @@ env:
         name: {{ include "agents-orchestrator.serviceTokensSecretName" . }}
         key: {{ .Values.serviceApi.existingSecretKey | default "service-tokens" }}
 {{- end }}
+{{- if .Values.serviceApi.scopes }}
+  - name: ORCH_SERVICE_SCOPES
+    value: {{ .Values.serviceApi.scopes | toJson | quote }}
+{{- end }}
 {{- end }}
 
 {{/* Name of the Secret holding ORCH_SERVICE_TOKENS: existingSecret wins over the chart Secret. */}}
