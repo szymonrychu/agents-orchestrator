@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hmac
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 
@@ -15,10 +15,11 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import ValidationError
 
 from agents_orchestrator import inactivity, rendering
-from agents_orchestrator.api import schemas, secret_store, usage_gate
+from agents_orchestrator.api import schemas, secret_store, usage_gate, vault_client, vault_refs
 from agents_orchestrator.api.errors import ApiError, not_found, project_error
 from agents_orchestrator.api.service_auth import calling_service
 from agents_orchestrator.api.usage_gate import UsageSource
+from agents_orchestrator.api.vault_client import Pin, VaultClient
 from agents_orchestrator.cache.keys import ArchiveNameError
 from agents_orchestrator.cache.save_rule import save_skip
 from agents_orchestrator.db import agents as agents_repo
@@ -32,6 +33,7 @@ from agents_orchestrator.spec import (
     INIT_DIR,
     PERMISSION_MODES,
     WORKDIR_ROOT,
+    Ref,
     SessionSpec,
     SpecInvalid,
     check_caller_cache_key,
@@ -355,13 +357,19 @@ async def create(
     created_by_session: uuid.UUID | None = None,
     *,
     usage: UsageSource | None,
+    vault: VaultClient | None,
 ) -> schemas.SessionView:
     """Create a session from a spec or a preset; shared by the main port and the admin routes.
     `creator` is the trigger service on the service port; `created_by_session` the superleader
     that created it through the admin routes. `usage` is the usage gate's source (None: gate
     off), keyword-only with no default so no caller can skip the gate: the usage is read before
     the create lock (no network I/O under it) and judged against the resolved spec's quota
-    inside the transaction, so a refusal (409 `usage_quota`) rolls the insert back."""
+    inside the transaction, so a refusal (409 `usage_quota`) rolls the insert back.
+
+    A preset with vault refs is pinned through the vault first (`vault`, also before and outside
+    the create lock): the session id is generated here and given to the row, the pins land in
+    `secret_versions`, and any failure after the pin releases them again. A spec body may not
+    carry refs (422 `vault_ref_not_allowed`)."""
     if (body.spec is None) == (body.preset_id is None):
         raise ApiError(422, "invalid_request", "exactly one of spec or preset_id")
     if created_by_session is not None and body.spec is not None:
@@ -370,6 +378,8 @@ async def create(
         if body.slug is None:
             raise ApiError(422, "invalid_request", "slug is required with spec")
         body_spec, _ignored = body.spec.split()  # a value has no preset to live in: refused below
+        if body_spec.vault_refs:
+            raise vault_refs_not_allowed(sorted(body_spec.vault_refs))
         cache = body_spec.cache
         if cache is not None and cache.restore_key is None and cache.save_key is None:
             raise ApiError(
@@ -384,40 +394,53 @@ async def create(
         except ValueError as exc:
             raise ApiError(422, "invalid_request", str(exc)) from None
     windows = await usage.current() if usage is not None else None
+    pinned = await _pin_preset(pool, vault, body.preset_id, created_by_session)
     async with pool.connection() as conn:
-        async with conn.transaction():
-            await conn.execute("SELECT pg_advisory_xact_lock(%s)", (_CREATE_LOCK,))
-            if await repo.count_active(conn) >= settings.max_sessions:
-                raise ApiError(
-                    409, "session_limit", f"at most {settings.max_sessions} sessions are allowed"
+        try:
+            async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock(%s)", (_CREATE_LOCK,))
+                if await repo.count_active(conn) >= settings.max_sessions:
+                    raise ApiError(
+                        409,
+                        "session_limit",
+                        f"at most {settings.max_sessions} sessions are allowed",
+                    )
+                if body.preset_id is None:
+                    if spec.protected_env:
+                        raise _secret_unset(spec.protected_env)
+                    project = body.project or projects.DEFAULT
+                    await hold_project(conn, project)
+                    session = await _insert(
+                        conn,
+                        body.slug,
+                        spec,
+                        created_by_service=creator,
+                        created_by_session=created_by_session,
+                        project=project,
+                    )
+                else:
+                    session = await _create_from_preset(
+                        conn,
+                        body.preset_id,
+                        body.slug,
+                        settings,
+                        creator,
+                        created_by_session,
+                        project=body.project,
+                        pinned=pinned,
+                    )
+                usage_gate.check(
+                    windows,
+                    session.spec.usage_quota,
+                    settings.usage_quota_default,
+                    datetime.now(UTC),
                 )
-            if body.preset_id is None:
-                if spec.protected_env:
-                    raise _secret_unset(spec.protected_env)
-                project = body.project or projects.DEFAULT
-                await hold_project(conn, project)
-                session = await _insert(
-                    conn,
-                    body.slug,
-                    spec,
-                    created_by_service=creator,
-                    created_by_session=created_by_session,
-                    project=project,
-                )
-            else:
-                session = await _create_from_preset(
-                    conn,
-                    body.preset_id,
-                    body.slug,
-                    settings,
-                    creator,
-                    created_by_session,
-                    project=body.project,
-                )
-            usage_gate.check(
-                windows, session.spec.usage_quota, settings.usage_quota_default, datetime.now(UTC)
-            )
-            await _queue_start_prompt(conn, session)
+                await _queue_start_prompt(conn, session)
+        except Exception:
+            # the transaction has rolled back: no row names the pins, so free them now
+            if pinned is not None and vault is not None:
+                await vault.release(pinned.session_id)
+            raise
         return await one_view(conn, session, settings)
 
 
@@ -448,10 +471,57 @@ async def create_session(
     settings: Cfg,
     usage: Usage,
 ) -> schemas.SessionView:
-    return await create(pool, settings, body, calling_service(request), usage=usage)
+    return await create(
+        pool, settings, body, calling_service(request), usage=usage, vault=request.app.state.vault
+    )
 
 
 _SLUG_ATTEMPTS = 5
+
+
+def vault_refs_not_allowed(envs: list[str]) -> ApiError:
+    """422 for a vault ref a session may not carry: refs enter a session only from its preset."""
+    return ApiError(
+        422,
+        "vault_ref_not_allowed",
+        "vault references come from the preset only: " + ", ".join(envs),
+        extra={"envs": envs},
+    )
+
+
+@dataclass(frozen=True)
+class Pinned:
+    """What was pinned at the vault for a session about to be created, and what it was pinned
+    against: the locked preset must still say the same (`_create_from_preset`)."""
+
+    session_id: uuid.UUID
+    refs: dict[str, Ref]
+    labels: list[str]
+    pins: dict[str, Pin]
+
+
+async def _pin_preset(
+    pool,
+    vault: VaultClient | None,
+    preset_id: uuid.UUID | None,
+    created_by_session: uuid.UUID | None,
+) -> Pinned | None:
+    """Read the preset unlocked and, when its spec has vault refs, pin them under a fresh session
+    id. No lock is held here: the vault is a network call. None without refs (no vault call)."""
+    if preset_id is None:
+        return None
+    async with pool.connection() as conn:
+        preset = await presets.get(conn, preset_id)
+    if not _visible(preset, created_by_session):
+        return None  # the transaction answers 404
+    refs = vault_refs.refs_in(preset.spec)
+    if not refs:
+        return None
+    client = vault_client.vault_of_client(vault)
+    session_id = uuid.uuid4()
+    labels = vault_client.effective_labels(preset)
+    pins = await vault_refs.pin_refs(client, session_id, refs, labels)
+    return Pinned(session_id, refs, labels, pins)
 
 
 def _secret_unset(names: list[str]) -> ApiError:
@@ -553,10 +623,17 @@ async def _create_from_preset(
     created_by_session: uuid.UUID | None = None,
     *,
     project: str | None = None,
+    pinned: Pinned | None = None,
 ) -> repo.Session:
     """Snapshot the preset's spec, filled and validated against the current settings. The
-    session goes into `project`, else the preset's project (`_placed_preset`)."""
+    session goes into `project`, else the preset's project (`_placed_preset`). `pinned` is what
+    the vault pinned for it; a preset whose refs or effective labels moved since is 409."""
     preset, project = await _placed_preset(conn, preset_id, project, created_by_session)
+    refs = vault_refs.refs_in(preset.spec)
+    if refs != (pinned.refs if pinned else {}) or (
+        pinned is not None and vault_client.effective_labels(preset) != pinned.labels
+    ):
+        raise ApiError(409, "conflict", "the preset changed meanwhile; retry")
     raw = dict(preset.spec)
     raw.setdefault("replicas", settings.default_replicas)
     try:
@@ -582,7 +659,10 @@ async def _create_from_preset(
         "preset_id": preset.id,
         "preset_name": preset.name,
         "created_by_service": created_by_service,
-        "secret_versions": versions,
+        "secret_versions": {**versions, **{e: p.to_json() for e, p in pinned.pins.items()}}
+        if pinned
+        else versions,
+        "session_id": pinned.session_id if pinned else None,
         "created_by_session": created_by_session,
         "labels": preset.labels,
         "project": project,

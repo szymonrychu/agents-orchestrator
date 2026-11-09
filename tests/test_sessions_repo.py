@@ -587,3 +587,16 @@ async def test_session_project_defaults_and_is_listed(pool):
         assert (await sessions.get_by_slug(conn, "proj")).project == moved.project
         labelled = await sessions.set_labels(conn, s.id, ["x"])
         assert labelled.project == "alpha"
+
+
+async def test_create_takes_a_given_id_and_pin_versions(pool):
+    sid = uuid.uuid4()
+    versions = {"X": {"secret": "vault-e-v1", "key": "TOKEN", "version": 1}, "Y": {"value": "v"}}
+    async with pool.connection() as conn:
+        c = await sessions.create(
+            conn, "pinned", SessionSpec(), session_id=sid, secret_versions=versions
+        )
+        got = await sessions.get(conn, sid)
+        other = await sessions.create(conn, "free", SessionSpec())
+    assert c.id == sid and got.secret_versions == versions
+    assert other.id != sid

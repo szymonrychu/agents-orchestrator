@@ -375,7 +375,12 @@ async def create_session(
     recorded as the creator and `created_by_service` stays empty."""
     _, caller = caller_of(request)
     return await sessions_api.create(
-        pool, settings, body, created_by_session=caller.id, usage=usage
+        pool,
+        settings,
+        body,
+        created_by_session=caller.id,
+        usage=usage,
+        vault=request.app.state.vault,
     )
 
 

@@ -26,11 +26,13 @@ class EnvMeta:
     updated_at: datetime
 
 
-def session_metas(secret_versions: Mapping[str, str], created_at: datetime) -> dict[str, EnvMeta]:
+def session_metas(secret_versions: Mapping[str, Any], created_at: datetime) -> dict[str, EnvMeta]:
     """A session's metadata comes from its snapshot: the version it was created with, bound at
     `created_at` (a later rotation of the preset does not change what the session runs)."""
     out = {}
     for name, secret in secret_versions.items():
+        if not isinstance(secret, str):  # a vault pin, not a protected variable's Secret name
+            continue
         match = _VERSION_RE.search(secret)
         if match:
             out[name] = EnvMeta(int(match.group(1)), created_at)

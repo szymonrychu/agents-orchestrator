@@ -66,8 +66,9 @@ class Session:
     preset_id: uuid.UUID | None = None
     preset_name: str | None = None
     created_by_service: str | None = None
-    # {ENV_NAME: Secret name} of the protected variables, snapshotted at create
-    secret_versions: dict[str, str] = field(default_factory=dict)
+    # {ENV_NAME: Secret name} of the protected variables, snapshotted at create; a vault ref's
+    # pin is a dict ({secret, key, version} or {value})
+    secret_versions: dict[str, Any] = field(default_factory=dict)
     # the superleader session that created it through the admin routes
     created_by_session: uuid.UUID | None = None
     # a pending self-close request from the session's leader (hive-self-close); the api sets and
@@ -141,10 +142,11 @@ async def create(
     preset_id: uuid.UUID | None = None,
     preset_name: str | None = None,
     created_by_service: str | None = None,
-    secret_versions: dict[str, str] | None = None,
+    secret_versions: dict[str, Any] | None = None,
     created_by_session: uuid.UUID | None = None,
     labels: list[str] | None = None,
     project: str = DEFAULT,
+    session_id: uuid.UUID | None = None,
 ) -> Session:
     validate_slug(slug)
     try:
@@ -155,7 +157,7 @@ async def create(
                 " secret_versions, created_by_session, labels, project)"
                 " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
                 (
-                    uuid.uuid4(),
+                    session_id or uuid.uuid4(),
                     slug,
                     _dump(spec),
                     preset_id,

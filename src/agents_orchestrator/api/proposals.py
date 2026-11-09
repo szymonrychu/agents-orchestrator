@@ -245,6 +245,7 @@ async def _session_plan(
     new = spec.model_dump(mode="json", exclude_unset=True)
     if fixed := fixed_changes(stored, new):
         raise session_spec.fixed_refused(fixed)
+    session_spec.refuse_ref_changes(stored, new)
     await session_spec.validated(spec, settings, session)
     protected = {n for n, e in spec.env.items() if e.protected}
     if unset := sorted(protected - set(session.secret_versions) - set(secrets)):

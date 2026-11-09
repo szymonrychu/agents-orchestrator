@@ -14,13 +14,19 @@ from fastapi.concurrency import run_in_threadpool
 from agents_orchestrator.api import schemas
 from agents_orchestrator.api.agent import _leads
 from agents_orchestrator.api.errors import ApiError, not_found
-from agents_orchestrator.api.sessions import _secret_unset, check_spec, one_view
+from agents_orchestrator.api.sessions import (
+    _secret_unset,
+    check_spec,
+    one_view,
+    vault_refs_not_allowed,
+)
 from agents_orchestrator.api.spec_edit import (
     guard_agent_edit,
     human_only_refused,
     merged_spec_in,
     note_fields,
 )
+from agents_orchestrator.api.vault_refs import refs_in
 from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.db import sessions as repo
@@ -54,6 +60,14 @@ def fixed_refused(paths: list[str]) -> ApiError:
         f"cannot change on a live session: {', '.join(paths)}",
         extra={"fields": paths},
     )
+
+
+def refuse_ref_changes(base: dict[str, Any], new: dict[str, Any]) -> None:
+    """422 `vault_ref_not_allowed` when `new` adds, changes or removes a vault ref of `base`: refs
+    enter and leave a live session only through its preset. Names the preset envs."""
+    old, now = refs_in(base), refs_in(new)
+    if changed := sorted(e for e in old.keys() | now.keys() if old.get(e) != now.get(e)):
+        raise vault_refs_not_allowed(changed)
 
 
 async def validated(spec: SessionSpec, settings: Settings, session: repo.Session) -> SessionSpec:
@@ -97,6 +111,11 @@ async def patch(
         base: dict[str, Any], new: dict[str, Any], values: Iterable[str], versions: dict[str, str]
     ) -> None:
         """Plan 3.3 steps 3 to 7 on `base` (the stored spec); each refusal notes its paths."""
+        try:
+            refuse_ref_changes(base, new)
+        except ApiError as exc:
+            note_fields(request, [f"env.{e}" for e in exc.extra["envs"]])
+            raise
         guard_agent_edit(base, new, values, request, privileged=not own)
         if not as_superleader(base) and (
             looser := tighten_changes(

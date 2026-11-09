@@ -37,6 +37,27 @@ def refs_in(spec: dict[str, Any]) -> dict[str, Ref]:
     return out
 
 
+def refused(exc: VaultRefused) -> ApiError:
+    """The vault's 422 as ours: same code, same `envs` and `entries`."""
+    return ApiError(
+        422, exc.code, f"the vault refused the references ({exc.code})", extra=exc.extra
+    )
+
+
+async def pin_refs(
+    vault: VaultClient, session_id: uuid.UUID, refs: dict[str, Ref], labels: list[str]
+) -> dict[str, vault_client.Pin]:
+    """Pin the refs of a session about to be created; 422 as the vault refuses, 503
+    `vault_unavailable`. The vault, not this code, decides whether labels match."""
+    wire = {env: vault_client.Ref(ref.vault, ref.env) for env, ref in refs.items()}
+    try:
+        return await vault.pin(session_id, wire, labels)
+    except VaultUnavailable:
+        raise unavailable() from None
+    except VaultRefused as exc:
+        raise refused(exc) from None
+
+
 async def check_refs(vault: VaultClient, spec: SessionSpec, labels: list[str]) -> dict[str, str]:
     """Ask the vault whether the spec's refs exist, name real envs and match `labels`; returns
     preset env -> entry name. 422 `vault_entry_unknown`, `vault_env_unknown`,
@@ -50,9 +71,7 @@ async def check_refs(vault: VaultClient, spec: SessionSpec, labels: list[str]) -
     except VaultUnavailable:
         raise unavailable() from None
     except VaultRefused as exc:
-        raise ApiError(
-            422, exc.code, f"the vault refused the references ({exc.code})", extra=exc.extra
-        ) from None
+        raise refused(exc) from None
     if got.unknown:
         raise ApiError(
             422,

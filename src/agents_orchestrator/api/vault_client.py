@@ -168,7 +168,10 @@ class VaultClient:
 
 
 def vault_of(request: Any) -> VaultClient:
-    client = request.app.state.vault
+    return vault_of_client(request.app.state.vault)
+
+
+def vault_of_client(client: VaultClient | None) -> VaultClient:
     if client is None:
         raise ApiError(503, "vault_unavailable", "agents-vault is not configured")
     return client

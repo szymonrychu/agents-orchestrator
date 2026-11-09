@@ -272,6 +272,15 @@ async def test_secret_for_an_unprotected_name_is_422(
     assert await _reservations(pool, preset.id) == []
 
 
+async def test_a_vault_ref_change_is_refused(pool, kube, settings, boss, preset, target, canary):
+    ref = {"vault": "11111111-1111-4111-8111-111111111111", "env": "TOKEN"}
+    with pytest.raises(ApiError) as exc:
+        await _filed(pool, kube, settings, boss, canary, patch={"env": {"NEW": ref}}, secrets={})
+    err = _error(exc, 422, "vault_ref_not_allowed")
+    assert err.extra["envs"] == ["NEW"]
+    assert await _reservations(pool, preset.id) == []
+
+
 async def test_a_new_protected_declaration_needs_a_value(
     pool, kube, settings, boss, preset, target, canary
 ):
