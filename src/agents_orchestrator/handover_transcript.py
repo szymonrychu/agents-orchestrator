@@ -1,6 +1,7 @@
-"""Rendered transcript of the predecessor for a leadership handover and the notice text
-(voluntary-handover, spec 3.4). Pure: no database, no I/O; the api sweeper calls it with rows of
-the `events` table (`id`, `ts`, `type`, `data`, ascending, main chain of the predecessor).
+"""Handover file of the predecessor for a leadership handover and the notice text
+(voluntary-handover, spec 3.4). Pure: no database, no I/O; the api sweeper calls it with the
+generated State section and rows of the `events` table (`id`, `ts`, `type`, `data`, ascending,
+main chain of the predecessor, the last `HANDOVER_TURNS` turns only).
 
 Every peer-originated string is escaped with `html.escape` (newlines kept), so the file and the
 notice cannot forge an `<attachment>` or `<session-message ...>` tag.
@@ -21,9 +22,10 @@ REREAD_RULE = (
     "Decision and approval states are never taken from a summary or transcript: re-read them "
     "from the source (orchestrator_task_get, the PR, the proposal) before acting."
 )
-PROSE_CHARS = 4000
+PROSE_CHARS = 2000
 CALL_CHARS = 200
-_LAUNCH_TOOLS = ("Agent", "Task")
+ERROR_CHARS = 200
+HANDOVER_TURNS = 3
 _VOLUNTARY = "handover:"
 _FORCED_ROLLOUT = "rollout"
 
@@ -38,12 +40,6 @@ class Header:
     summary: str | None
 
 
-@dataclass(frozen=True)
-class InFlight:
-    queued_messages: int
-    locks: list[str]
-
-
 def summary_of(reason: str) -> str | None:
     """The leader's summary when the move was voluntary (`handover: x`), else None.
     The reconciler's forced rollout request (`handover: rollout`) is a forced move."""
@@ -51,6 +47,14 @@ def summary_of(reason: str) -> str | None:
         text = reason[len(_VOLUNTARY) :].strip()
         return None if text == _FORCED_ROLLOUT else text or None
     return None
+
+
+def kind_of(reason: str) -> str:
+    """`handover` for a voluntary move, `rollout` for the reconciler's request, else the reason
+    itself (`scale_down`, `leader_lost`, `user`, `initial`)."""
+    if reason == f"{_VOLUNTARY} {_FORCED_ROLLOUT}":
+        return _FORCED_ROLLOUT
+    return "handover" if reason.startswith(_VOLUNTARY) else reason
 
 
 def attachment_name(epoch: int) -> str:
@@ -101,49 +105,6 @@ def _call_line(data: Mapping[str, Any]) -> str:
     return f"- tool {_esc(tool)}: {_one_line(detail, CALL_CHARS)}".rstrip(": ")
 
 
-def _launch_prompts(rows: Sequence[Mapping[str, Any]]) -> dict[str, str]:
-    prompts: dict[str, str] = {}
-    for row in rows:
-        data = row.get("data") or {}
-        if row["type"] == "tool_call" and data.get("tool_name") in _LAUNCH_TOOLS:
-            tin = data.get("tool_input")
-            prompt = tin.get("prompt") if isinstance(tin, Mapping) else None
-            if data.get("tool_use_id") and isinstance(prompt, str):
-                prompts[str(data["tool_use_id"])] = prompt
-    return prompts
-
-
-def _in_flight_lines(rows: Sequence[Mapping[str, Any]], in_flight: InFlight) -> list[str]:
-    prompts = _launch_prompts(rows)
-    running: dict[str, Mapping[str, Any]] = {}
-    linked: dict[str, str] = {}  # agent_id -> parent tool_use_id, from `subagent_linked`
-    for row in rows:
-        data = row.get("data") or {}
-        if row["type"] == "subagent_started" and data.get("agent_id"):
-            running[str(data["agent_id"])] = row
-        elif row["type"] == "subagent_linked" and data.get("parent_tool_use_id"):
-            linked[str(data.get("agent_id"))] = str(data["parent_tool_use_id"])
-        elif row["type"] == "subagent_stopped":
-            running.pop(str(data.get("agent_id")), None)
-    lines = ["## In flight", ""]
-    lines.append("Background subagents started and not stopped:")
-    if not running:
-        lines.append("- none")
-    for agent_id, row in running.items():
-        data = row["data"]
-        parent = data.get("parent_tool_use_id") or linked.get(agent_id)
-        prompt = prompts.get(str(parent), "")
-        first = next(iter(prompt.strip().splitlines()), "")
-        text = f"- {_esc(data.get('agent_type') or 'subagent')} {_esc(agent_id)}"
-        text += f", started {_when(row.get('ts'))}"
-        if first:
-            text += f": {_one_line(first, CALL_CHARS)}"
-        lines.append(text)
-    lines.append(f"Queued messages for the session: {in_flight.queued_messages}")
-    lines.append("Held locks: " + (", ".join(_esc(x) for x in in_flight.locks) or "none"))
-    return lines
-
-
 def _body_line(row: Mapping[str, Any], output_chars: int) -> str | None:
     kind, data = row["type"], row.get("data") or {}
     if kind == "gap":
@@ -171,9 +132,10 @@ def _body_line(row: Mapping[str, Any], output_chars: int) -> str | None:
     if kind == "tool_call":
         return _call_line(data)
     if kind == "tool_result":
-        status = "error" if data.get("is_error") else "ok"
-        text = _truncated(str(data.get("response") or ""), output_chars)
-        return f"  result ({status}): {_esc(text)}"
+        if not data.get("is_error"):
+            return None
+        text = _truncated(str(data.get("response") or ""), ERROR_CHARS)
+        return f"  result (error): {_esc(text)}"
     if kind == "turn_completed":
         return "[turn ended]"
     return None
@@ -181,14 +143,21 @@ def _body_line(row: Mapping[str, Any], output_chars: int) -> str | None:
 
 def render_transcript(
     header: Header,
+    state_md: str,
     rows: Sequence[Mapping[str, Any]],
-    in_flight: InFlight,
     *,
+    omitted_turns: int,
     budget_bytes: int,
     output_chars: int,
 ) -> str:
-    """Markdown: header, "In flight", then the body oldest first, the oldest body lines dropped
-    until the UTF-8 size fits `budget_bytes` (header and "In flight" are never dropped)."""
+    """Markdown: header, the State section, the previous leader's judgment, then the last turns
+    oldest first. The oldest body lines are dropped until the UTF-8 size fits `budget_bytes`;
+    header, State and judgment are never dropped (the State may exceed the budget alone)."""
+    judgment = (
+        _esc(header.summary)
+        if header.summary is not None
+        else f"none (forced move: {_esc(kind_of(header.reason))})"
+    )
     top = [
         f"# Handover transcript: hive {_esc(header.slug)}",
         "",
@@ -196,10 +165,21 @@ def render_transcript(
         f"- Reason: {_reason_label(header)}",
         f"- Predecessor pod: {_esc(header.predecessor_pod)}",
         f"- Time: {_when(header.changed_at)}",
+        "",
+        state_md.rstrip("\n"),
+        "",
+        "## Judgment of the previous leader",
+        "",
+        judgment,
+        "",
+        "## Last turns (newest at the end)",
+        "",
     ]
-    if header.summary is not None:
-        top += ["", "## Summary of the previous leader", "", _esc(header.summary)]
-    top += [""] + _in_flight_lines(rows, in_flight) + ["", "## Transcript (newest at the end)", ""]
+    if omitted_turns > 0:
+        top.append(
+            f"[{omitted_turns} earlier turns omitted; full log: the session events API or"
+            " agents-history]"
+        )
     fixed = "\n".join(top) + "\n"
     body = [line for line in (_body_line(r, output_chars) for r in rows) if line is not None]
     sizes = [len(line.encode()) + 1 for line in body]
@@ -222,14 +202,14 @@ def _size(n: int) -> str:
     return f"{n // 1024} KiB" if n % 1024 == 0 else f"{n} bytes"
 
 
-def notice_text(header: Header, budget_bytes: int = 65536) -> str:
-    summary = _esc(header.summary) if header.summary is not None else "none (forced move)"
+def notice_text(header: Header, budget_bytes: int = 16384) -> str:
     return (
         f"{HANDOVER_PREFIX} You now lead hive {_esc(header.slug)} (epoch {header.epoch}, "
         f"{_reason_label(header)}), taking over from {_esc(header.predecessor_pod)}. "
-        f"Their summary: {summary}. The attached file is their rendered transcript "
-        f"(at most {_size(budget_bytes)}, newest at the end): "
-        "read it, starting with the 'In flight' section. "
+        f"The attached file (turns capped at {_size(budget_bytes)}) holds a generated State "
+        "section as of the change, the previous leader's judgment and its last turns. "
+        "Call orchestrator_me first: its leader_state is the live state. "
+        f"{REREAD_RULE} "
         "Do not restart work that is in flight; check its outputs. "
         "Then continue with the user's goal."
     )

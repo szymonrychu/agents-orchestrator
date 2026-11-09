@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from agents_orchestrator import inactivity
+from agents_orchestrator import inactivity, taskboard_client
 from agents_orchestrator.api import sessions as sessions_api
 from agents_orchestrator.db import handover, sessions
 from agents_orchestrator.settings import Settings
@@ -41,6 +41,9 @@ async def sweep(pool: AsyncConnectionPool, settings: Settings) -> None:
                 conn,
                 budget_bytes=settings.handover_transcript_bytes,
                 output_chars=settings.handover_output_chars,
+                decisions=lambda session_id, slug, projects: taskboard_client.open_decisions(
+                    settings, session_id, slug, projects
+                ),
             ),
         ),
         ("close_expired", close_expired),
