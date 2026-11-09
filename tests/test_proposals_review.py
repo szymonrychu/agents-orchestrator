@@ -217,6 +217,57 @@ async def test_an_applied_proposal_keeps_the_preset_project(
     assert spec["wrapper"] == {"mcp_servers": {"grafana": GRAFANA}}
 
 
+async def test_approving_a_preset_in_an_archived_project_is_422_and_writes_nothing(
+    pool, kube, settings, boss, preset, canary
+):
+    """The config of a preset in an archived project is frozen (projects ruling P3(3)): the
+    apply holds the project row first and refuses; the proposal stays open, nothing moves."""
+    async with pool.connection() as conn:
+        await conn.execute("INSERT INTO projects (slug, name) VALUES ('attic', 'Attic')")
+        await conn.execute("UPDATE presets SET project = 'attic' WHERE id = %s", (preset.id,))
+    view = await _filed(pool, kube, settings, boss, canary)
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE projects SET archived_at = now() WHERE slug = 'attic'")
+    before = await _spec(pool, preset.id)
+    decisions = {"env.TOKEN": "approve", "wrapper.mcp_servers": "approve"}
+    with pytest.raises(ApiError) as exc:
+        await _review(pool, kube, settings, view.id, 1, decisions)
+    _error(exc, 422, "project_archived")
+    assert await _spec(pool, preset.id) == before
+    assert await _live(pool, preset.id) == {"TOKEN": 1}
+    assert len(await _reservations(pool, preset.id)) == 1
+    status, items = await _status(pool, view.id)
+    assert status == "open" and {i[2] for i in items} == {"pending"}
+    assert await _notices(pool, boss.id) == []
+    # unarchived, the same review applies
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE projects SET archived_at = NULL WHERE slug = 'attic'")
+    done = await _review(pool, kube, settings, view.id, 1, decisions)
+    assert done.status == "applied"
+    assert await _live(pool, preset.id) == {"TOKEN": 2}
+
+
+async def test_apply_waits_for_the_project_row_before_the_preset_row(
+    pool, kube, settings, boss, preset, canary
+):
+    """Lock order: the apply takes the project row FOR SHARE before the preset row, so a writer
+    holding the project row FOR UPDATE (an archive) makes it wait without touching the preset."""
+    view = await _filed(pool, kube, settings, boss, canary)
+    decisions = {"env.TOKEN": "approve", "wrapper.mcp_servers": "approve"}
+    async with pool.connection() as conn, conn.transaction():
+        await conn.execute("SELECT 1 FROM projects WHERE slug = 'default' FOR UPDATE")
+        task = asyncio.create_task(_review(pool, kube, settings, view.id, 1, decisions))
+        await asyncio.sleep(0.3)
+        assert not task.done()
+        async with pool.connection() as other:
+            row = await other.execute(
+                "SELECT 1 FROM presets WHERE id = %s FOR UPDATE NOWAIT", (preset.id,)
+            )
+            assert await row.fetchall() == [(1,)]
+    done = await task
+    assert done.status == "applied"
+
+
 async def test_partial_approve_applies_only_approved_paths_and_releases_the_denied_secret(
     pool, kube, settings, boss, preset, canary
 ):

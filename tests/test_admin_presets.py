@@ -281,6 +281,17 @@ async def test_admin_put_same_project_ok(call):
     assert same.status_code == 200 and same.json()["project"] == "alpha"
 
 
+async def test_admin_put_without_project_keeps_it(call):
+    await _project(call, "alpha")
+    pid = (await call("POST", A, json={"name": "kept", "spec": {}, "project": "alpha"})).json()[
+        "id"
+    ]
+    put = await call("PUT", f"{A}/{pid}", json={"name": "kept", "spec": {"replicas": 2}})
+    assert put.status_code == 200, put.text
+    assert put.json()["project"] == "alpha" and put.json()["spec"] == {"replicas": 2}
+    assert (await _human_get(call, pid))["project"] == "alpha"
+
+
 async def test_admin_copy_keeps_or_sets_project(call):
     await _project(call, "alpha")
     await _project(call, "beta")

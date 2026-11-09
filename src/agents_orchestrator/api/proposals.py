@@ -39,6 +39,7 @@ from agents_orchestrator.api import admin, admin_relay, schemas, secret_store, s
 from agents_orchestrator.api import forward as forward_core
 from agents_orchestrator.api import presets as presets_api
 from agents_orchestrator.api.errors import ApiError, not_found
+from agents_orchestrator.api.sessions import PLACE_ATTEMPTS, hold_project
 from agents_orchestrator.api.spec_edit import merged_spec_in, note_fields
 from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.db import proposals as repo
@@ -871,6 +872,24 @@ async def _stale_others(conn, p: repo.Proposal) -> list[repo.Proposal]:
     return out
 
 
+async def _locked_target(conn, preset_id: uuid.UUID, hold: bool) -> presets_repo.Preset | None:
+    """The target preset FOR UPDATE, or None when it is gone. With `hold` (an apply writes it),
+    its project row is taken first (`hold_project`: 422 `project_archived` freezes the config of
+    a preset in an archived project), in the epic's lock order: project row, then preset row. The
+    project is peeked unlocked and confirmed under the preset lock; a preset moved meanwhile is
+    read again."""
+    for _ in range(PLACE_ATTEMPTS):
+        peek = await presets_repo.get(conn, preset_id)
+        if peek is None:
+            return None
+        if hold:
+            await hold_project(conn, peek.project)
+        preset = await presets_repo.get_for_update(conn, preset_id)
+        if preset is None or not hold or preset.project == peek.project:
+            return preset
+    raise ApiError(409, "conflict", "the preset moved to another project meanwhile; retry")
+
+
 async def _review_locked(
     request: Request, conn, settings: Settings, proposal_id: int, body: schemas.ReviewIn
 ) -> _Done:
@@ -898,13 +917,13 @@ async def _review_locked(
         return await _review_schedule(request, conn, settings, p, decisions)
     if p.kind != "preset":
         raise _unsupported(p.kind)
-    preset = await presets_repo.get_for_update(conn, uuid.UUID(p.target_id))
+    to = _outcome(decisions)
+    preset = await _locked_target(conn, uuid.UUID(p.target_id), hold=to == "applied")
     if preset is None:
         return await _close(conn, p, "target_gone", _gone_error(p.kind))
     if p.status == "open" and await live_fingerprint(conn, preset) != current.fingerprint:
         return await _close(conn, p, "stale", _stale_error(p.kind))
     done = _Done(release=[p])
-    to = _outcome(decisions)
     if to == "applied":
         try:
             async with conn.transaction():  # a stale staged value undoes the write, not the mark

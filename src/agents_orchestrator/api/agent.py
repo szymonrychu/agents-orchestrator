@@ -179,7 +179,8 @@ async def projects(agent: Caller, pool: Pool) -> list[schemas.ProjectView]:
             rows = await projects_repo.list_projects(conn)
         else:
             own = await projects_repo.get_project(conn, session.project)
-            assert own is not None  # sessions.project references projects
+            if own is None:  # sessions.project references projects: a broken invariant
+                raise ApiError(500, "internal", "the session's project is missing")
             rows = [own]
     return [projects_api.view(p) for p in rows]
 

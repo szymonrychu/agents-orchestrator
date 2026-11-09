@@ -510,7 +510,7 @@ async def _insert(conn, slug: str, spec: SessionSpec, **provenance) -> repo.Sess
         raise ApiError(409, "conflict", f"session {slug!r} already exists") from None
 
 
-_PLACE_ATTEMPTS = 3
+PLACE_ATTEMPTS = 3
 
 
 def _visible(preset: presets.Preset | None, created_by_session: uuid.UUID | None) -> bool:
@@ -528,7 +528,7 @@ async def _placed_preset(
     active), locked in the epic's order: project row first, then the preset row. Without a
     body `project` the preset's own project is read unlocked first and confirmed under the
     preset lock; a preset moved meanwhile is read again."""
-    for _ in range(_PLACE_ATTEMPTS):
+    for _ in range(PLACE_ATTEMPTS):
         target = project
         if target is None:
             peek = await presets.get(conn, preset_id)

@@ -8,7 +8,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
-from agents_orchestrator.db import projects
 from agents_orchestrator.labels import normalize_labels
 from agents_orchestrator.settings import (
     SWEEP_GRACE_SECONDS_MAX,
@@ -37,8 +36,8 @@ class PresetIn(BaseModel):
     superleader_manageable: bool | None = None
     # None keeps the stored labels on PUT and means none on POST
     labels: list[str] | None = None
-    # PUT replaces the whole preset, so an omitted project is the default project
-    project: str = projects.DEFAULT
+    # None keeps the stored project on PUT and means the default project on POST
+    project: str | None = None
 
     @field_validator("labels")
     @classmethod

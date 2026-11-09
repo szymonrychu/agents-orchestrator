@@ -232,6 +232,7 @@ async def create(
         body, settings, human_only_base={} if superleader else None, request=request
     )
     manageable = superleader or bool(body.superleader_manageable)
+    project = projects.DEFAULT if body.project is None else body.project
     try:
         preset, metas = await _save(
             request,
@@ -239,14 +240,14 @@ async def create(
             settings,
             spec,
             values,
-            body.project,
-            lambda: repo.create(conn, body.name, spec, manageable, body.labels, body.project),
+            project,
+            lambda: repo.create(conn, body.name, spec, manageable, body.labels, project),
         )
     except repo.PresetExists:
         raise _exists(body.name) from None
     if superleader:
         extra = (["labels"] if body.labels else []) + (
-            ["project"] if body.project != projects.DEFAULT else []
+            ["project"] if project != projects.DEFAULT else []
         )
         note_fields(request, changed_paths({}, spec) + ["name"] + extra)
     return _view(preset, metas)
@@ -274,8 +275,10 @@ async def replace(
     stored = await repo.get(conn, preset_id)
     if stored is None or (superleader and not stored.superleader_manageable):
         raise not_found("preset")
+    # an omitted project keeps the one read here; the save holds it and writes it back
+    project = stored.project if body.project is None else body.project
     if superleader:
-        _refuse_column_moves(request, stored, body.model_dump())
+        _refuse_column_moves(request, stored, {**body.model_dump(), "project": project})
     spec, values = await _validated(
         body,
         settings,
@@ -292,9 +295,9 @@ async def replace(
             settings,
             spec,
             values,
-            body.project,
+            project,
             lambda: repo.update(
-                conn, preset_id, body.name, spec, flag, body.labels, expected, body.project
+                conn, preset_id, body.name, spec, flag, body.labels, expected, project
             ),
         )
     except repo.PresetNotFound:

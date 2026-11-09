@@ -3245,9 +3245,15 @@
             "type": "string"
           },
           "project": {
-            "default": "default",
-            "title": "Project",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project"
           },
           "spec": {
             "$ref": "#/components/schemas/SessionSpecIn",

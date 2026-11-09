@@ -412,9 +412,13 @@ async def test_user_moves_preset_by_put(http):
     assert r.json()["project"] == "beta" and r.json()["spec"] == {"replicas": 2}
     assert (await http.get(f"{PROJECTS}/alpha")).json()["presets"] == 0
     assert (await http.get(f"{PROJECTS}/beta")).json()["presets"] == 1
-    # PUT replaces the whole preset: an omitted project is the default project
-    r = await http.put(f"{P}/{pid}", json={"name": "mover", "spec": {"replicas": 2}})
-    assert r.status_code == 200 and r.json()["project"] == "default"
+    # a PUT without project keeps the stored one
+    r = await http.put(f"{P}/{pid}", json={"name": "mover", "spec": {"replicas": 3}})
+    assert r.status_code == 200, r.text
+    assert r.json()["project"] == "beta" and r.json()["spec"] == {"replicas": 3}
+    # a POST without project lands in default
+    r = await http.post(P, json={"name": "plain", "spec": {}})
+    assert r.status_code == 201 and r.json()["project"] == "default"
 
 
 async def test_user_copy_keeps_or_sets_project(http):
