@@ -432,6 +432,7 @@ def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
         "passthrough_env": sorted(
             {*spec.env, *session.secret_versions, *AGENT_PASSTHROUGH_ENV, *kube_env, *docker_env}
         ),
+        "secret_env": secret_env_names(session),
         "env": {
             "claude_code_oauth_token": "${CLAUDE_CODE_OAUTH_TOKEN}",
             "disable_autoupdater": True,
@@ -516,6 +517,39 @@ def _meta(slug: str, kind_name: str, settings: Settings) -> dict[str, Any]:
     }
 
 
+_PIN_SECRET_RE = re.compile(r"^(vault-[0-9a-f-]{36}-v\d+|ps-[0-9a-f]{8}-[0-9a-f]{6}-v\d+)$")
+_PIN_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
+
+
+def _pins(session: Session) -> dict[str, dict[str, Any]]:
+    """The pins the spec references: only a vault ref in `spec.env` renders its pin.
+
+    A Secret pin's name and key are checked against the vault grammar before they reach a pod
+    spec; a mismatch raises with the env name only.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for name, pin in session.secret_versions.items():
+        var = session.spec.env.get(name)
+        if not isinstance(pin, dict) or var is None or not var.is_ref:
+            continue
+        if "secret" in pin and not (
+            isinstance(pin["secret"], str)
+            and isinstance(pin.get("key"), str)
+            and _PIN_SECRET_RE.fullmatch(pin["secret"])
+            and _PIN_KEY_RE.fullmatch(pin["key"])
+        ):
+            raise ValueError(f"vault variable {name} has an invalid pin")
+        out[name] = pin
+    return out
+
+
+def secret_env_names(session: Session) -> list[str]:
+    """Env names the wrapper redacts by value: Secret pins plus legacy protected variables."""
+    names = {name for name, pin in _pins(session).items() if "secret" in pin}
+    names.update(name for name, var in session.spec.env.items() if var.protected)
+    return sorted(names)
+
+
 def _secret_ref(name: str, key: str) -> dict[str, Any]:
     return {"valueFrom": {"secretKeyRef": {"name": name, "key": key}}}
 
@@ -528,7 +562,7 @@ def env_entries(session: Session) -> list[dict[str, Any]]:
     variable (until it is migrated to a vault ref) is a `secretKeyRef` to its Secret version
     snapshotted at create. A plain one with `expand` false has its `$` doubled (the kubelet reads
     `$$` as a literal `$`, so `$(VAR)` stays text); with `expand` true it is emitted as is. A vault
-    ref in the spec without a pin is refused.
+    ref in the spec without a pin is refused; a pin renders only for a vault ref in the spec.
     """
     out: dict[str, dict[str, Any]] = {}
     for name, var in session.spec.env.items():
@@ -543,9 +577,7 @@ def env_entries(session: Session) -> list[dict[str, Any]]:
         else:
             value = var.value or ""
             out[name] = {"value": value if var.expand else value.replace("$", "$$")}
-    for name, pin in session.secret_versions.items():
-        if not isinstance(pin, dict):
-            continue
+    for name, pin in _pins(session).items():
         if "secret" in pin:
             out[name] = _secret_ref(pin["secret"], pin["key"])
         else:

@@ -183,6 +183,11 @@ def test_effective_labels_dedup_and_cut():
     assert len(out) == 20 and out[0] == "project:p"
 
 
+def test_effective_labels_has_exactly_one_project_label():
+    p = SimpleNamespace(project="proj", labels=["project:other", "a", "project:proj", "project:x"])
+    assert effective_labels(p) == ["project:proj", "a"]
+
+
 def test_vault_of_unconfigured_is_503():
     req = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(vault=None)))
     with pytest.raises(ApiError) as exc:

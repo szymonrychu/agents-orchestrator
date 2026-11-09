@@ -38,7 +38,7 @@
     config.yaml: "server:\n  auth_token: ${CCW_AUTH_TOKEN}\npaths:\n  workdir_root:\
       \ /workdir\n  sessions_root: /sessions\nclaude:\n  passthrough_env:\n  - AAA\n\
       \  - GITHUB_TOKEN\n  - ORCH_AGENT_TOKEN\n  - ORCH_AGENT_URL\n  - ORCH_SESSION_ID\n\
-      \  - POD_NAME\n  env:\n    claude_code_oauth_token: ${CLAUDE_CODE_OAUTH_TOKEN}\n\
+      \  - POD_NAME\n  secret_env: []\n  env:\n    claude_code_oauth_token: ${CLAUDE_CODE_OAUTH_TOKEN}\n\
       \    disable_autoupdater: true\n    claude_autocompact_pct_override: 95\n  model:\
       \ opus\n  effort: high\n  main_agent_only_tools:\n  - mcp__any-mcp__orchestrator_*\n\
       \  permissions:\n    deny:\n    - EnterPlanMode\n    - ExitPlanMode\n    - AskUserQuestion\n\
@@ -112,7 +112,7 @@
           agents.szymonrichert.pl/session: alpha
           app.kubernetes.io/managed-by: agents-orchestrator
         annotations:
-          agents.szymonrichert.pl/config-hash: 981cdb3edf692a8f5ddc3da5a2ac1c1426ed4f26dc8f18ccbf92db8893a8f6b6
+          agents.szymonrichert.pl/config-hash: 37368b546342e36f6c7857e67bfa1d8299f2214925e2107e10da379c404af0b7
       spec:
         imagePullSecrets:
         - name: regcred

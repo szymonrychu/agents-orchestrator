@@ -10,10 +10,10 @@
     config.yaml: "server:\n  auth_token: ${CCW_AUTH_TOKEN}\npaths:\n  workdir_root:\
       \ /workdir\n  sessions_root: /sessions\nclaude:\n  passthrough_env:\n  - API_KEY\n\
       \  - EXP\n  - LIT\n  - ORCH_AGENT_TOKEN\n  - ORCH_AGENT_URL\n  - ORCH_SESSION_ID\n\
-      \  - POD_NAME\n  env:\n    claude_code_oauth_token: ${CLAUDE_CODE_OAUTH_TOKEN}\n\
-      \    disable_autoupdater: true\n    claude_autocompact_pct_override: 95\n  model:\
-      \ sonnet\n  main_agent_only_tools:\n  - mcp__any-mcp__orchestrator_*\n  permissions:\n\
-      \    deny:\n    - EnterPlanMode\n    - ExitPlanMode\n    - AskUserQuestion\n\
+      \  - POD_NAME\n  secret_env:\n  - API_KEY\n  env:\n    claude_code_oauth_token:\
+      \ ${CLAUDE_CODE_OAUTH_TOKEN}\n    disable_autoupdater: true\n    claude_autocompact_pct_override:\
+      \ 95\n  model: sonnet\n  main_agent_only_tools:\n  - mcp__any-mcp__orchestrator_*\n\
+      \  permissions:\n    deny:\n    - EnterPlanMode\n    - ExitPlanMode\n    - AskUserQuestion\n\
       \  mcp_servers:\n    any-mcp:\n      type: stdio\n      command: /opt/any-mcp/bin/any-mcp\n\
       \      args:\n      - --config\n      - /opt/any-mcp/etc/any-mcp.yaml\nhooks:\n\
       \  onStart:\n  - type: command\n    run: sh /etc/ccw/on-start.sh\n    blocking:\
@@ -63,7 +63,7 @@
           agents.szymonrichert.pl/session: alpha
           app.kubernetes.io/managed-by: agents-orchestrator
         annotations:
-          agents.szymonrichert.pl/config-hash: a4a39ec095cff2ee28a4a577ce67ae83dbf19ca939411c3b676c1888215dd905
+          agents.szymonrichert.pl/config-hash: 90ce8b98bc215c62807ad71b46bb4a53958b5951367380bfa693df68c834e5ee
       spec:
         imagePullSecrets:
         - name: regcred

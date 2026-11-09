@@ -65,8 +65,11 @@ class Pin:
 
 
 def effective_labels(preset: Any) -> list[str]:
-    """The labels sent to the vault: the project label first, then the preset's, at most 20."""
-    labels = [f"project:{preset.project}", *preset.labels]
+    """The labels sent to the vault: one project label, then the preset's others, at most 20."""
+    labels = [
+        f"project:{preset.project}",
+        *(x for x in preset.labels if not x.startswith("project:")),
+    ]
     return list(dict.fromkeys(labels))[:LABELS_MAX]
 
 

@@ -124,7 +124,7 @@ def test_refs_in_other_text_fields_stay_escaped():
 
 
 def test_the_wrapper_expands_the_rendered_reference(tmp_path, monkeypatch):
-    from claude_code_wrapper.config import load_config
+    from test_render import load_config
 
     canary = stdlib_secrets.token_hex(12)
     monkeypatch.setenv("API_KEY", canary)

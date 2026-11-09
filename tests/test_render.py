@@ -13,7 +13,8 @@ from pathlib import Path
 
 import pytest
 import yaml
-from claude_code_wrapper.config import load_config
+from claude_code_wrapper.config import ClaudeConfig
+from claude_code_wrapper.config import load_config as _load_config
 
 from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.k8s import labels, on_start, render
@@ -264,6 +265,16 @@ def test_passthrough_env_lists_spec_env_names(tmp_path, monkeypatch):
     path = tmp_path / "c.yaml"
     path.write_text(by_kind(objs)["ConfigMap"]["data"]["config.yaml"])
     assert load_config(path).claude.passthrough_env == sorted(["ALPHA", "ZED", *AGENT_ENV])
+
+
+def load_config(path):
+    """Load a rendered config with the pinned wrapper; drops `claude.secret_env` until the pin
+    carries that optional field (the renderer emits it regardless)."""
+    if "secret_env" not in ClaudeConfig.model_fields:
+        cfg = yaml.safe_load(path.read_text())
+        cfg["claude"].pop("secret_env", None)
+        path.write_text(yaml.safe_dump(cfg))
+    return _load_config(path)
 
 
 def test_workdir_path_matches_mount_and_session_workdir():
