@@ -215,6 +215,10 @@ class Settings(BaseSettings):
     #: Rendered into every wrapper as `sessions.interrupt_settle_seconds`; the priority lane's
     #: send timeout is derived from it (`priority_send_timeout_seconds`).
     wrapper_interrupt_settle_seconds: float = Field(default=20, ge=0)
+    #: Rendered into every wrapper as `sessions.commands.permission_hold_seconds` (how long a
+    #: permission request waits for an operator) and `dialog_auto_dismiss_seconds` (0 = off).
+    wrapper_permission_hold_seconds: float = Field(default=1800, gt=0, le=86400)
+    wrapper_dialog_auto_dismiss_seconds: float = Field(default=300, ge=0)
     dispatching_stale_seconds: float = 60
     dispatching_heartbeat_seconds: float = 5
     lock_heartbeat_seconds: float = 5

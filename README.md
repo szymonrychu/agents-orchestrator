@@ -84,6 +84,8 @@ Every process reads `ORCH_*` variables (the contract `agents-orchestrator-settin
 | `ORCH_HANDOVER_MAX_WAIT_SECONDS` | `1800` | dispatcher | seconds (60 to 86400), the deadline of every `handover` request other than the forced `rollout` one: queued longer than this, background subagents stop holding it, and one still held by the leader's turn is rejected `expired` |
 | `ORCH_WRAPPER_SEND_TIMEOUT_SECONDS` | `15` | dispatcher, ingester | wrapper send timeout; at most half of dispatching_stale_seconds |
 | `ORCH_WRAPPER_INTERRUPT_SETTLE_SECONDS` | `20` | reconciler, dispatcher | rendered into every wrapper as `sessions.interrupt_settle_seconds`; the priority send timeout is `ORCH_WRAPPER_SEND_TIMEOUT_SECONDS + 3 * this + 14` s (89 s by default) |
+| `ORCH_WRAPPER_PERMISSION_HOLD_SECONDS` | `1800` | reconciler | rendered into every wrapper as `sessions.commands.permission_hold_seconds`: how long a permission request waits for an operator before the wrapper denies it (1 to 86400) |
+| `ORCH_WRAPPER_DIALOG_AUTO_DISMISS_SECONDS` | `300` | reconciler | rendered into every wrapper as `sessions.commands.dialog_auto_dismiss_seconds`: seconds an unanswered dialog stays open before the wrapper dismisses it (`0` = off) |
 | `ORCH_DISPATCHING_STALE_SECONDS` | `60` | dispatcher, ingester | dispatching row stale cutoff |
 | `ORCH_DISPATCHING_HEARTBEAT_SECONDS` | `5` | dispatcher, ingester | dispatching row heartbeat |
 | `ORCH_LOCK_HEARTBEAT_SECONDS` | `5` | all | singleton lock-held heartbeat |
