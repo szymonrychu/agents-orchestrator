@@ -621,7 +621,7 @@ async def test_removing_a_bound_protected_var_prunes_secret_versions_and_frees_t
 ):
     view = await _filed(pool, kube, settings, boss, canary)
     await _review(pool, kube, settings, view.id, 1, APPROVE_ALL)
-    staged = store.secret_name(preset.id, "TOKEN", 2)
+    staged = store.secret_name(store.Owner.preset(preset.id), "TOKEN", 2)
     assert (await _row(pool, target.id))[1] == {"TOKEN": staged}
     assert await store.collect_bound(pool, kube, NS) == 0
     removal, _, _ = await _create(
