@@ -550,9 +550,11 @@ def _pins(session: Session) -> dict[str, dict[str, Any]]:
 def _legacy_pins(session: Session) -> dict[str, str]:
     """The legacy pins that render: a session created before migration 0041 keeps the ps-*
     Secret its protected variable was snapshotted to (0041 removed the variable from the spec
-    and left the pin as it was), so its pods render unchanged. An env of the same name in the
-    spec, set since, wins. The Secret name is checked against the ps-* grammar before it reaches
-    a pod spec; a mismatch raises with the env name only.
+    and left the pin as it was), so its pods render unchanged. 0041 dropped the pins whose entry
+    was no longer protected. An env of the same name in the spec, set since, wins; if that env is
+    removed again the pin renders again (pins are never pruned on a spec write). The Secret
+    name is checked against the ps-* grammar before it reaches a pod spec; a mismatch raises
+    with the env name only.
     """
     out: dict[str, str] = {}
     for name, pin in session.secret_versions.items():

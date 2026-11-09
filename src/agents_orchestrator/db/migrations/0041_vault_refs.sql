@@ -7,8 +7,11 @@
 -- 2. Refuses to run when an env entry carries a non-boolean `protected` flag (it could not tell
 --    whether that entry is a secret).
 -- 3. presets and sessions spec.env: protected entries are removed, the `protected` key leaves
---    every other entry. sessions.secret_versions is left as it is: a legacy pin (a ps-* Secret
---    name, str) keeps rendering for a session created before this migration (k8s/render.py).
+--    every other entry. First, a legacy pin (a ps-* Secret name, str) in sessions.secret_versions
+--    whose name is not a protected entry of that session's spec is dropped: a PATCH before this
+--    migration that removed or unprotected the entry left it behind, inert in the old render. Every
+--    other legacy pin stays and keeps rendering for a session created before this migration
+--    (k8s/render.py).
 -- 4. Open, rework and stale proposals whose current revision carries a secret item or a protected
 --    declaration in an env item are withdrawn (status-guarded); `"protected": false` leaves the
 --    revision bases and env items of every proposal, so an open one still applies.
@@ -92,6 +95,34 @@ END
 $$;
 
 -- 3. -----------------------------------------------------------------------------------------
+-- The legacy pins of a session that still name a protected entry of its spec; any other pin (a
+-- vault pin object) as it is; a non-object as it is.
+CREATE OR REPLACE FUNCTION pg_temp.orch_0041_pins(pins jsonb, env jsonb) RETURNS jsonb
+LANGUAGE sql IMMUTABLE AS $$
+    SELECT CASE WHEN jsonb_typeof(pins) = 'object' THEN (
+        SELECT coalesce(jsonb_object_agg(k, v), '{}'::jsonb)
+        FROM jsonb_each(CASE WHEN jsonb_typeof(pins) = 'object' THEN pins ELSE '{}'::jsonb END)
+            AS t(k, v)
+        WHERE jsonb_typeof(v) <> 'string'
+           OR pg_temp.orch_0041_protected(
+                CASE WHEN jsonb_typeof(env) = 'object' THEN env -> k END))
+    ELSE pins END
+$$;
+
+-- Only before the strip below: once protected entries are gone (preset_secrets is dropped in the
+-- same transaction), a second run must keep the remaining legacy pins.
+DO $$
+BEGIN
+    IF to_regclass('preset_secrets') IS NOT NULL THEN
+        UPDATE sessions
+        SET secret_versions = pg_temp.orch_0041_pins(secret_versions, spec -> 'env')
+        WHERE jsonb_typeof(secret_versions) = 'object'
+          AND pg_temp.orch_0041_pins(secret_versions, spec -> 'env')
+              IS DISTINCT FROM secret_versions;
+    END IF;
+END
+$$;
+
 UPDATE presets SET spec = jsonb_set(spec, '{env}', pg_temp.orch_0041_env(spec -> 'env'))
 WHERE jsonb_typeof(spec -> 'env') = 'object'
   AND pg_temp.orch_0041_env(spec -> 'env') IS DISTINCT FROM spec -> 'env';

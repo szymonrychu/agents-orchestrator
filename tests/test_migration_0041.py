@@ -361,3 +361,61 @@ def test_a_non_boolean_protected_flag_refuses_the_whole_migration(empty_dsn, tmp
     assert _dump(empty_dsn) == before
     tables = {r[0] for r in _rows(empty_dsn, "SELECT tablename FROM pg_tables")}
     assert "preset_secrets" in tables
+
+
+async def test_a_protected_variable_removed_before_the_apply_does_not_come_back(
+    empty_dsn, tmp_path
+):
+    """A pre-0041 PATCH that dropped or unprotected a protected entry left its str pin behind
+    (replace_spec merged pins and never pruned them); the old render ignored it. 0041 drops every
+    str pin whose name is not a protected entry of that session's spec, so the render matches."""
+    from agents_orchestrator.db import sessions as sessions_repo
+    from agents_orchestrator.db.pool import open_pool
+    from agents_orchestrator.k8s import render
+
+    sid = "aaaaaaaa-0000-4000-8000-000000000003"
+    kept, dropped, unprotected = LEGACY, "ps-1234abcd-bcdef0-v1", "ps-1234abcd-cdef01-v2"
+    vault_pin = {"value": "v", "entry": "e", "entry_env": "E", "version": 1}
+    _upto_0040(empty_dsn, tmp_path)
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        c.execute(
+            "INSERT INTO sessions (id, slug, spec, secret_versions) VALUES (%s, 'gone', %s, %s)",
+            (
+                sid,
+                json.dumps({"env": {"A": PLAIN_A, "C": SECRET_B, "D": PLAIN_A}}),
+                json.dumps({"B": dropped, "C": kept, "D": unprotected, "V": vault_pin}),
+            ),
+        )
+        c.execute(
+            "INSERT INTO sessions (id, slug, spec, secret_versions) VALUES"
+            " (gen_random_uuid(), 'nullpins', '{}', NULL),"
+            " (gen_random_uuid(), 'strpins', %s, '\"x\"'),"
+            " (gen_random_uuid(), 'strenv', %s, %s)",
+            (json.dumps({"env": {}}), json.dumps({"env": "oops"}), json.dumps({"B": dropped})),
+        )
+    assert run_migrations(empty_dsn) == ["0041"]
+    pins = dict(_rows(empty_dsn, "SELECT slug, secret_versions FROM sessions"))
+    assert pins == {
+        "gone": {"C": kept, "V": vault_pin},
+        "nullpins": None,
+        "strpins": "x",
+        "strenv": {},
+    }
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        c.execute(FILE.read_text())
+    assert dict(_rows(empty_dsn, "SELECT slug, secret_versions FROM sessions")) == pins
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        c.execute("DELETE FROM sessions WHERE slug <> 'gone'")
+        c.execute("UPDATE sessions SET secret_versions = secret_versions - 'V' WHERE slug = 'gone'")
+    pool = await open_pool(empty_dsn)
+    try:
+        async with pool.connection() as conn:
+            gone = await sessions_repo.get(conn, uuid.UUID(sid))
+    finally:
+        await pool.close()
+    assert render.env_entries(gone) == [
+        {"name": "A", "value": "x"},
+        {"name": "C", "valueFrom": {"secretKeyRef": {"name": kept, "key": "value"}}},
+        {"name": "D", "value": "x"},
+    ]
+    assert render.secret_env_names(gone) == ["C"]
