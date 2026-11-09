@@ -1,7 +1,8 @@
 """O6: every /agent/v1/admin route sits behind require_agent and a gate (D3, D10): the
 superleader gate, or for the two session spec routes (GET and PATCH /sessions/{slug}) the
 session editor gate, which admits a superleader on any slug and any other session's leader on
-its own slug only; the proposal routes carry the proposer gate (superleaders only in stage A)."""
+its own slug only; the proposal routes carry the proposer gate, which admits a superleader and
+any other session's leader (the handlers keep a regular leader on its own session)."""
 
 from __future__ import annotations
 
@@ -116,12 +117,15 @@ async def test_editor_gate_is_per_route_and_slug_stays_a_path_parameter(pool, ds
 
 
 async def test_gate_table_over_all_admin_routes(pool, dsn):
+    """A regular leader passes only the proposer gate; another agent of a regular hive is
+    refused there 403 not_leader."""
     app = create_app(make_settings(dsn), pool)
     plain = await alone(pool, "g-plain")
+    member = await hive(pool, "g-member")
     trigger = await alone(pool, "g-trigger", superleader=True)
     await mark_trigger(pool, trigger.id)
     boss = await alone(pool, "g-boss", superleader=True)
-    for _, route in admin_routes(app):
+    for router, route in admin_routes(app):
         for method in route.methods - {"HEAD", "OPTIONS"}:
             path = concrete(route.path)
             async with client_for(app, plain.leader_ip) as http:
@@ -132,7 +136,13 @@ async def test_gate_table_over_all_admin_routes(pool, dsn):
                 non_super = await http.request(method, path, json={}, headers=headers(plain.id))
             assert_error(no_auth, 401, "unauthorized")
             assert_error(bad, 401, "unauthorized")
-            assert_error(non_super, 403, "not_superleader")
+            if router is proposal_routes.proposal_router:
+                assert non_super.status_code not in (401, 403), (method, route.path)
+                async with client_for(app, member.member_ip) as http:
+                    r = await http.request(method, path, json={}, headers=headers(member.id))
+                assert_error(r, 403, "not_leader")
+            else:
+                assert_error(non_super, 403, "not_superleader")
             async with client_for(app, trigger.leader_ip) as http:
                 trig = await http.request(method, path, json={}, headers=headers(trigger.id))
             assert trig.status_code not in (401, 403), (method, route.path, trig.text)

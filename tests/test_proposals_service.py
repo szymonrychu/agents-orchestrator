@@ -370,11 +370,10 @@ async def test_client_key_replay_on_a_hidden_target_is_404(pool, kube, settings,
     _error(exc, 404, "not_found")
 
 
-async def test_kind_session_is_not_supported_yet(pool, kube, settings, boss):
+async def test_kind_session_on_an_unknown_session_is_404(pool, kube, settings, boss):
     with pytest.raises(ApiError) as exc:
         await _create(pool, kube, settings, boss, kind="session", target="x", patch={"a": 1})
-    err = _error(exc, 422, "invalid_request")
-    assert "not supported yet" in err.message
+    _error(exc, 404, "not_found")
 
 
 async def test_a_kube_failure_while_staging_leaves_no_rows_and_deletes_written_secrets(

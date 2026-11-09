@@ -32,10 +32,15 @@ HIVE_TOOLS = [
 SESSION_TOOLS = ["sessions_list", "session_send"]
 INIT_SCRIPTS_TOOLS = ["init_scripts_get", "init_scripts_edit"]
 CHAT_TOOLS = ["chat_rooms", "chat_send", "chat_react", "chat_status"]
-# Read and patch the session's own spec (plan 3.2): every session gets them, the API gate admits
-# the session's own leader (a regular session) or any superleader; a superleader lists them among
-# its admin tools instead.
-SESSION_EDIT_TOOLS = ["session_get", "session_patch"]
+# Change proposals (preset-change-proposals plan 3.3): a superleader files them for any target it
+# may see, the leader of any other session for its own session only (the API gate decides).
+PROPOSAL_TOOLS = [
+    "proposal_create", "proposal_revise", "proposals_list", "proposal_get", "proposal_withdraw",
+]  # fmt: skip
+# Read and patch the session's own spec (plan 3.2) and propose what it may not patch: every session
+# gets them, the API gate admits the session's own leader (a regular session) or any superleader;
+# a superleader lists them among its admin tools instead.
+SESSION_EDIT_TOOLS = ["session_get", "session_patch", *PROPOSAL_TOOLS]
 CLOSE_TOOL = "self_close"
 # Taskboard tools (the agent-visible names are orchestrator_<tool>, like the chat tools): every
 # session gets them, trigger-created ones included (a decision_ask they raise is answered on the
@@ -64,7 +69,7 @@ ADMIN_TOOLS = [
     "chat_admin_room", "chat_users", "chat_room_allow", "chat_open", "chat_open_status",
     "chat_open_confirm", "secret_set", "history_search", "history_get",
     "history_records", "usage_get",
-    "proposal_create", "proposal_revise", "proposals_list", "proposal_get", "proposal_withdraw",
+    *PROPOSAL_TOOLS,
 ]  # fmt: skip
 
 
@@ -75,9 +80,10 @@ def orchestrator_allow(spec: SessionSpec) -> list[str]:
     task tools and `project_list`, alone sessions included, which also get `me`; the agent API
     decides what each caller may list, send, edit and say in the chat (leader only). The admin
     tools and `secret_set` are listed exactly when `session_messaging` is enabled, whoever
-    created the session; every other session gets `session_get`, `session_patch` and `self_close`
-    last instead (a superleader is never offered `self_close`; it has the first two as admin tools).
-    A tool in two groups (`leadership_withdraw`, a hive and an admin tool) is listed once.
+    created the session; every other session gets `SESSION_EDIT_TOOLS` (its spec and its
+    proposals) and `self_close` last instead (a superleader is never offered `self_close`; it has
+    the edit tools as admin tools). A tool in two groups (`leadership_withdraw`, a hive and an
+    admin tool) is listed once.
     """
     shared = [
         *SESSION_TOOLS,

@@ -125,8 +125,9 @@ async def _refused(
     if fields is not None:
         assert request.state.preset_fields == fields
         assert exc.extra["fields"] == fields
-    if code in ("human_only_field", "privileged_target"):
+    if code in ("human_only_field", "privileged_target", "secret_in_spec", "secret_unset"):
         assert exc.extra["proposable"] is True
+    if code in ("human_only_field", "privileged_target"):
         assert exc.message.endswith("; send it as a proposal: proposal_create")
     assert await _row(pool, target.id) == before
     return exc

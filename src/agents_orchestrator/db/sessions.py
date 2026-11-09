@@ -850,16 +850,24 @@ async def replace_spec(
     expected: dict[str, Any],
     spec: SessionSpec,
     recheck: Callable[[LockedSession], Awaitable[None]],
+    secret_versions: dict[str, str] | None = None,
 ) -> tuple[Session, bool]:
     """Replace the whole session spec in one transaction, under the row lock.
 
     SessionNotFound when the row is absent, SessionBeingDeleted unless it is active, SpecChanged
     when the stored JSONB is not `expected` (dict equality, not a parsed model). Then
     `recheck(locked)` runs on the fresh row; it may raise, and nothing is written then. Lock
-    order is the session row first; `recheck` may then take `presets` FOR SHARE (sessions, then
-    presets, as `set_init_scripts`). A spec that differs from the stored one is written with
-    generation + 1 and NOTIFY session_changed; an equal one writes and notifies nothing.
-    Returns the row and whether it was written.
+    order within this call is the session row first; `recheck` may then take `presets` FOR SHARE
+    (sessions, then presets, as `set_init_scripts`). A spec that differs from the stored one is
+    written with generation + 1 and NOTIFY session_changed; an equal one writes and notifies
+    nothing.
+
+    `secret_versions` ({ENV_NAME: Secret name}, from `k8s.secrets.bind_staged` in the caller's
+    transaction) is merged into the stored map in the same UPDATE; a changed map is a change on
+    its own. Returns the row and whether it was written. A caller that binds holds more locks
+    before this call: the preset FOR SHARE, then the variable advisory locks (`bind_staged`),
+    then this row (presets, variables, sessions), because `set_secret` takes the preset FOR
+    UPDATE and then the variable lock; binding before the preset lock can deadlock with it.
     """
     async with conn.transaction():
         row = await _lock_row(conn, session_id)
@@ -867,14 +875,17 @@ async def replace_spec(
             raise SpecChanged(str(session_id))
         # decided before the recheck, which gets the stored dict itself
         dumped = _dump(spec)
-        unchanged = dumped.obj == row["spec"]
-        await recheck(LockedSession(row["spec"], row["preset_id"], row["secret_versions"] or {}))
+        stored_versions = row["secret_versions"] or {}
+        versions = {**stored_versions, **(secret_versions or {})}
+        unchanged = dumped.obj == row["spec"] and versions == stored_versions
+        await recheck(LockedSession(row["spec"], row["preset_id"], stored_versions))
         if unchanged:
             return _from_row(row), False
         rows = await _fetch(
             conn,
-            "UPDATE sessions SET spec = %s, generation = generation + 1 WHERE id = %s RETURNING *",
-            (dumped, session_id),
+            "UPDATE sessions SET spec = %s, secret_versions = %s, generation = generation + 1"
+            " WHERE id = %s RETURNING *",
+            (dumped, Jsonb(versions) if versions else None, session_id),
         )
         await _notify(conn, session_id)
     return rows[0], True
