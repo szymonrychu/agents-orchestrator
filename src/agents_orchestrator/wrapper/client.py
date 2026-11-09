@@ -14,6 +14,8 @@ from agents_orchestrator.wrapper.models import (
     Busy,
     ConfigError,
     DialogOpen,
+    DialogResult,
+    DialogState,
     Envelope,
     Gone,
     PeersView,
@@ -251,6 +253,15 @@ class WrapperClient:
     async def command(self, session_id: str, name: str) -> dict[str, Any]:
         resp = await self._request("POST", f"/sessions/{session_id}/commands", json={"name": name})
         return resp.json()
+
+    async def get_dialog(self, session_id: str) -> DialogState:
+        resp = await self._request("GET", f"/sessions/{session_id}/dialog")
+        return DialogState.model_validate(resp.json())
+
+    async def answer_dialog(self, session_id: str, body: dict[str, Any]) -> DialogResult:
+        """Allow, deny or dismiss the open dialog; a 4xx raises WrapperError with its code."""
+        resp = await self._request("POST", f"/sessions/{session_id}/dialog", json=body)
+        return DialogResult.model_validate(resp.json())
 
     async def post_note(
         self,

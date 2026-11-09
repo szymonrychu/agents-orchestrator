@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -145,6 +145,37 @@ class DialogOpen:
     """409 dialog_open: a dialog is waiting for the user, the typed message was refused."""
 
     reason: str = ""
+
+
+class DialogPermission(_Model):
+    """A held PermissionRequest relay (wrapper 0.11.0)."""
+
+    request_id: str
+    tool_name: str
+    tool_input: str
+    truncated: bool
+    suggestions: list[Any] = Field(default_factory=list)
+    agent_id: str | None = None
+    since: str
+    expires_at: str
+
+
+class DialogState(_Model):
+    """GET /v1/sessions/{id}/dialog: what the session is waiting on, if anything."""
+
+    kind: Literal["permission", "dialog", "usage_wait", "none"]
+    since: str | None = None
+    permission: DialogPermission | None = None
+    tail: str | None = None
+
+
+class DialogResult(_Model):
+    """POST /v1/sessions/{id}/dialog: the outcome of an allow, deny or dismiss."""
+
+    status: Literal["answered", "dismissed", "still_open"]
+    request_id: str | None = None
+    behavior: str | None = None
+    escape_sent: bool | None = None
 
 
 @dataclass(frozen=True)

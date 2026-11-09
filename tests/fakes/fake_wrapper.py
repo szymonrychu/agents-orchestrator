@@ -330,6 +330,11 @@ class FakeWrapper:
         self.notes_max_chars = 2000
         self._notes_delay = 0.0
         self.requests: list[tuple[str, str]] = []  # (method, path) of every authenticated call
+        # dialog API: the open dialog per session (the wrapper's `dialog_view` shape), the ids
+        # answered so far, and the body of every accepted answer
+        self._dialogs: dict[str, dict[str, Any]] = {}
+        self._dialog_resolved: set[str] = set()
+        self.dialog_answers: list[dict[str, Any]] = []
         # `sessions.commands.client` as the orchestrator renders it: a client command outside it
         # is 403 command_not_allowed, as in the wrapper
         self.client_commands: list[str] = list(CLIENT_COMMANDS)
@@ -478,6 +483,17 @@ class FakeWrapper:
         self._session(session_id).waiting = (
             None if reason is None else {"reason": reason, "since": since or _now()}
         )
+
+    def set_dialog(self, state: dict[str, Any] | None, session_id: str | None = None) -> None:
+        """Open a dialog (wrapper 0.11.0 `dialog_view` shape: kind, since, permission, tail).
+
+        None or kind "none" closes it.
+        """
+        sid = self._session(session_id).session_id
+        if state is None or state.get("kind") == "none":
+            self._dialogs.pop(sid, None)
+        else:
+            self._dialogs[sid] = state
 
     def set_outstanding_subagents(self, count: int, session_id: str | None = None) -> None:
         """Set the snapshot `outstanding_subagents` (wrapper 0.10.0)."""
@@ -868,6 +884,48 @@ class FakeWrapper:
                 raise _Err(403, "command_not_allowed", f"command {name} is not allowed")
             self.emit("command_queued", {"name": name}, session_id)
             return {"command_id": self._new_id("cmd-"), "state": "queued"}
+
+        @app.get("/v1/sessions/{session_id}/dialog")
+        async def get_dialog(session_id: str, request: Request) -> dict[str, Any]:
+            self._auth(request)
+            self._get(session_id)
+            return self._dialogs.get(
+                session_id, {"kind": "none", "since": None, "permission": None, "tail": None}
+            )
+
+        @app.post("/v1/sessions/{session_id}/dialog")
+        async def answer_dialog(session_id: str, request: Request) -> dict[str, Any]:
+            self._auth(request)
+            self._get(session_id)
+            body = await self._json_body(request)
+            action, request_id = body.get("action"), body.get("request_id")
+            if action not in ("allow", "deny", "dismiss"):
+                raise _Err(422, "invalid_request", "action: allow, deny or dismiss")
+            if action != "dismiss" and not request_id:
+                raise _Err(422, "invalid_request", "request_id: required for allow and deny")
+            dialog = self._dialogs.get(session_id)
+            perm = dialog.get("permission") if dialog else None
+            if action != "dismiss":
+                if request_id in self._dialog_resolved:
+                    raise _Err(409, "permission_resolved", "already answered")
+                if perm is None:
+                    raise _Err(409, "no_dialog", "no permission request is open")
+                if perm["request_id"] != request_id:
+                    raise _Err(409, "dialog_changed", "another request is open")
+                self._dialog_resolved.add(request_id)
+                self._dialogs.pop(session_id)
+                self.dialog_answers.append(body)
+                return {"status": "answered", "request_id": request_id, "behavior": action}
+            if dialog is None:
+                raise _Err(409, "no_dialog", "no dialog is open")
+            since = body.get("expect_since")
+            if since is not None and since != dialog.get("since"):
+                raise _Err(409, "dialog_changed", "the dialog changed")
+            if dialog["kind"] in ("permission", "usage_wait"):
+                raise _Err(409, "not_dismissable", f"a {dialog['kind']} dialog is not dismissable")
+            self._dialogs.pop(session_id)
+            self.dialog_answers.append(body)
+            return {"status": "dismissed", "escape_sent": True}
 
         @app.post("/v1/sessions/{session_id}/notes", status_code=202)
         async def push_note(session_id: str, request: Request) -> dict[str, Any]:
