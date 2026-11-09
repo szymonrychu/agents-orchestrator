@@ -3670,7 +3670,7 @@
       },
       "ProposalIn": {
         "additionalProperties": false,
-        "description": "A change proposal (plan 3.4): an RFC 7396 merge `patch` of the target's spec, plus new\nvalues of protected variables in `secrets`; a value is never stored or echoed.",
+        "description": "A change proposal (plan 3.4): an RFC 7396 merge `patch` of the target's spec, which\nmay carry vault references (never a value).",
         "properties": {
           "client_key": {
             "anyOf": [
@@ -3703,16 +3703,6 @@
             "minLength": 1,
             "title": "Reason",
             "type": "string"
-          },
-          "secrets": {
-            "additionalProperties": {
-              "format": "password",
-              "type": "string",
-              "writeOnly": true
-            },
-            "default": {},
-            "title": "Secrets",
-            "type": "object"
           },
           "target": {
             "title": "Target",
@@ -3765,21 +3755,6 @@
             "title": "Path",
             "type": "string"
           },
-          "secret": {
-            "anyOf": [
-              {
-                "enum": [
-                  "set",
-                  "changed"
-                ],
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Secret"
-          },
           "security": {
             "title": "Security",
             "type": "boolean"
@@ -3791,7 +3766,6 @@
           "after",
           "security",
           "grant",
-          "secret",
           "decision",
           "note"
         ],
@@ -3819,16 +3793,6 @@
               }
             ],
             "title": "Reason"
-          },
-          "secrets": {
-            "additionalProperties": {
-              "format": "password",
-              "type": "string",
-              "writeOnly": true
-            },
-            "default": {},
-            "title": "Secrets",
-            "type": "object"
           }
         },
         "required": [

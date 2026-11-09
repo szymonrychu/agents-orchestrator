@@ -1,8 +1,8 @@
-"""api.proposals: create, revise, withdraw and read preset change proposals (plan 3.4), with
-protected values staged as Secret versions (Q13 B) and the whole-proposal stale flag (Q6 B).
-Service level: real Postgres, a fake kube, a fake request carrying `state`.
+"""api.proposals: create, revise, withdraw and read preset change proposals (plan 3.4) and the
+whole-proposal stale flag (Q6 B). A proposal carries no value: a preset proposal may carry vault
+references, which the vault checks. Service level: real Postgres, a fake kube, a fake vault, a
+fake request carrying `state`.
 
-Every test that sends a value checks the canary never reaches a view, a table row or the log.
 The audit `events` row is written by the AdminRoute wrapper, not by this service: the route task
 asserts it."""
 
@@ -12,21 +12,23 @@ import logging
 import secrets as stdlib_secrets
 from types import SimpleNamespace
 
+import httpx
+import pydantic
 import pytest
 from fakes.fake_kube import FakeKube
 from fastapi.exceptions import RequestValidationError
 from pydantic import SecretStr
 from test_agent_session_messaging import alone
 from test_api_agent import make_settings
+from test_api_presets_vault import ENTRY, GONE, OTHER, FakeVault
 
-from agents_orchestrator.api import proposals, schemas, secret_store
+from agents_orchestrator.api import proposals, schemas
 from agents_orchestrator.api.errors import ApiError
-from agents_orchestrator.api.presets import SECRET_MAX_BYTES
+from agents_orchestrator.api.vault_client import VaultClient
 from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.db import proposals as proposals_repo
 from agents_orchestrator.db import sessions as sessions_repo
 from agents_orchestrator.k8s import secrets as store
-from agents_orchestrator.k8s.kube import KubeError
 
 NS = "agents"
 GRAFANA = {"type": "stdio", "command": "mise", "args": ["x", "mcp-grafana@0.1.0", "--", "-t"]}
@@ -51,6 +53,16 @@ def kube():
     return FakeKube(namespace=NS)
 
 
+_current: dict[str, FakeVault] = {}
+
+
+@pytest.fixture(autouse=True)
+def vault():
+    """The vault every `_request` talks to; the test may change its entries or take it down."""
+    _current["vault"] = fake = FakeVault()
+    return fake
+
+
 @pytest.fixture
 def canary(caplog):
     caplog.set_level(logging.DEBUG)
@@ -60,9 +72,12 @@ def canary(caplog):
 
 
 def _request(kube) -> SimpleNamespace:
+    client = VaultClient(
+        "http://vault", "t", transport=httpx.MockTransport(_current["vault"].handler)
+    )
     return SimpleNamespace(
         state=SimpleNamespace(admin_secrets=[]),
-        app=SimpleNamespace(state=SimpleNamespace(kube=kube, kube_owned=False)),
+        app=SimpleNamespace(state=SimpleNamespace(kube=kube, kube_owned=False, vault=client)),
     )
 
 
@@ -166,12 +181,12 @@ def _error(exc_info, status: int, code: str) -> ApiError:
 # ---------------------------------------------------------------- create
 
 
-async def test_create_stages_the_value_and_records_redacted_items(
+async def test_create_records_redacted_items_and_writes_no_secret(
     pool, kube, settings, boss, preset, canary
 ):
     before = await _rows(pool, "SELECT spec, updated_at FROM presets WHERE id = %s", (preset.id,))
     view, created, request = await _create(
-        pool, kube, settings, boss, patch=MCP_PATCH, secrets={"TOKEN": canary}
+        pool, kube, settings, boss, patch={**MCP_PATCH, "env": {"NEW": {"protected": True}}}
     )
     assert created
     assert (view.kind, view.status, view.revision, view.stale) == ("preset", "open", 1, False)
@@ -183,60 +198,29 @@ async def test_create_stages_the_value_and_records_redacted_items(
     assert view.proposer_superleader
     [rev] = view.revisions
     items = {i.path: i for i in rev.items}
-    assert sorted(items) == ["env.TOKEN", "wrapper.mcp_servers"]
-    token = items["env.TOKEN"]
-    assert (token.security, token.grant, token.secret, token.decision) == (
-        True,
-        False,
-        "changed",
+    assert sorted(items) == ["env.NEW", "wrapper.mcp_servers"]
+    declared = items["env.NEW"]
+    assert (declared.before, declared.after, declared.decision) == (
+        None,
+        {"protected": True, "expand": False},
         "pending",
     )
-    assert token.before == {"protected": True, "expand": False, "set": True, "version": 1}
-    assert token.after == {"protected": True, "expand": False}
     mcp = items["wrapper.mcp_servers"]
-    assert (mcp.security, mcp.grant, mcp.secret) == (True, False, None)
+    assert (mcp.security, mcp.grant) == (True, False)
     assert (mcp.before, mcp.after) == (None, {"grafana": GRAFANA})
-    # one staged Secret, the value only in its stringData
-    staged = store.secret_name(preset.id, "TOKEN", 2)
-    assert [a.name for a in kube.applied("Secret")] == [staged]
-    assert kube.applied("Secret")[0].obj["stringData"] == {"value": canary}
-    assert staged in _secrets(kube)
-    assert await _reservations(pool, preset.id) == [("TOKEN", 2, view.id, 1, "staged")]
-    # the preset row and its live secret are untouched
+    assert all("secret" not in i.model_dump() for i in rev.items)
+    # nothing was staged or reserved, the preset row and its live secret are untouched
+    assert kube.applied("Secret") == []
+    assert await _reservations(pool, preset.id) == []
     after = await _rows(pool, "SELECT spec, updated_at FROM presets WHERE id = %s", (preset.id,))
     assert after == before
     async with pool.connection() as conn:
         live = await store.list_secrets(conn, preset.id)
     assert [(m.name, m.version) for m in live] == [("TOKEN", 1)]
-    # the audit gets names and paths only
-    assert request.state.admin_secrets == ["TOKEN"]
-    assert request.state.preset_fields == ["env.TOKEN", "wrapper.mcp_servers"]
+    # the audit gets paths only
+    assert request.state.admin_secrets == []
+    assert request.state.preset_fields == ["env.NEW", "wrapper.mcp_servers"]
     await _assert_nowhere(pool, canary, view)
-
-
-async def test_a_new_protected_variable_is_a_set_item(pool, kube, settings, boss, preset, canary):
-    view, _, _ = await _create(
-        pool,
-        kube,
-        settings,
-        boss,
-        patch={"env": {"NEW": {"protected": True}}},
-        secrets={"NEW": canary},
-    )
-    [item] = view.revisions[0].items
-    assert (item.path, item.secret, item.before) == ("env.NEW", "set", None)
-    assert item.after == {"protected": True, "expand": False}
-    assert store.secret_name(preset.id, "NEW", 1) in _secrets(kube)
-    await _assert_nowhere(pool, canary, view)
-
-
-async def test_a_value_on_an_unchanged_declaration_is_one_item(
-    pool, kube, settings, boss, preset, canary
-):
-    view, _, _ = await _create(pool, kube, settings, boss, patch={}, secrets={"TOKEN": canary})
-    [item] = view.revisions[0].items
-    assert (item.path, item.secret) == ("env.TOKEN", "changed")
-    assert item.before == {"protected": True, "expand": False, "set": True, "version": 1}
 
 
 async def test_non_security_and_grant_items_are_classified(pool, kube, settings, boss, preset):
@@ -257,56 +241,12 @@ async def test_value_inside_patch_is_secret_in_spec(pool, kube, settings, boss, 
     await _assert_nowhere(pool, canary)
 
 
-async def test_value_for_a_variable_not_protected_names_the_variable(
-    pool, kube, settings, boss, preset, canary
-):
-    for name in ("PLAIN", "MISSING"):
-        with pytest.raises(ApiError) as exc:
-            await _create(pool, kube, settings, boss, patch={}, secrets={name: canary})
-        err = _error(exc, 422, "invalid_request")
-        assert name in err.message
-        assert canary not in err.message
-    assert kube.applied("Secret") == []
-    await _assert_nowhere(pool, canary)
-
-
-async def test_more_than_20_values_is_refused(pool, kube, settings, boss, preset, canary):
-    env = {f"V{i}": {"protected": True} for i in range(21)}
+async def test_invalid_merged_spec_is_422_and_files_nothing(pool, kube, settings, boss, preset):
     with pytest.raises(ApiError) as exc:
-        await _create(
-            pool,
-            kube,
-            settings,
-            boss,
-            patch={"env": env},
-            secrets={n: canary for n in env},
-        )
-    _error(exc, 422, "invalid_request")
-    assert kube.applied("Secret") == []
-
-
-async def test_a_value_over_1_mib_is_413(pool, kube, settings, boss, preset):
-    with pytest.raises(ApiError) as exc:
-        await _create(
-            pool, kube, settings, boss, patch={}, secrets={"TOKEN": "x" * (SECRET_MAX_BYTES + 1)}
-        )
-    _error(exc, 413, "secret_too_large")
-    assert kube.applied("Secret") == []
-
-
-async def test_invalid_merged_spec_is_422_and_stages_nothing(
-    pool, kube, settings, boss, preset, canary
-):
-    with pytest.raises(ApiError) as exc:
-        await _create(
-            pool, kube, settings, boss, patch={"model": "no-such-model"}, secrets={"TOKEN": canary}
-        )
+        await _create(pool, kube, settings, boss, patch={"model": "no-such-model"})
     _error(exc, 422, "invalid_request")
     with pytest.raises(RequestValidationError):
-        await _create(
-            pool, kube, settings, boss, patch={"replicas": "many"}, secrets={"TOKEN": canary}
-        )
-    assert kube.applied("Secret") == []
+        await _create(pool, kube, settings, boss, patch={"replicas": "many"})
     assert await _rows(pool, "SELECT id FROM change_proposals") == []
 
 
@@ -317,18 +257,13 @@ async def test_an_empty_diff_is_nothing_changed(pool, kube, settings, boss, pres
         _error(exc, 422, "nothing_changed")
 
 
-async def test_a_hidden_or_unknown_preset_is_404_before_any_staging(
-    pool, kube, settings, boss, preset, canary
-):
+async def test_a_hidden_or_unknown_preset_is_404(pool, kube, settings, boss, preset):
     async with pool.connection() as conn:
         await presets_repo.create(conn, "hidden", {"env": {"TOKEN": {"protected": True}}})
     for target in ("hidden", "nope", "00000000-0000-0000-0000-000000000000"):
         with pytest.raises(ApiError) as exc:
-            await _create(
-                pool, kube, settings, boss, target=target, patch={}, secrets={"TOKEN": canary}
-            )
+            await _create(pool, kube, settings, boss, target=target, patch={"replicas": 2})
         _error(exc, 404, "not_found")
-    assert kube.applied("Secret") == []
 
 
 async def test_the_21st_active_proposal_is_409(pool, kube, settings, boss, preset):
@@ -344,19 +279,13 @@ async def test_the_21st_active_proposal_is_409(pool, kube, settings, boss, prese
     await _create(pool, kube, settings, boss, patch={"replicas": 2})
 
 
-async def test_client_key_replay_returns_the_same_proposal_and_stages_once(
-    pool, kube, settings, boss, preset, canary
-):
-    first, created, _ = await _create(
-        pool, kube, settings, boss, patch=MCP_PATCH, secrets={"TOKEN": canary}, client_key="k1"
-    )
+async def test_client_key_replay_returns_the_same_proposal(pool, kube, settings, boss, preset):
+    first, created, _ = await _create(pool, kube, settings, boss, patch=MCP_PATCH, client_key="k1")
     again, created_again, _ = await _create(
-        pool, kube, settings, boss, patch=MCP_PATCH, secrets={"TOKEN": canary}, client_key="k1"
+        pool, kube, settings, boss, patch=MCP_PATCH, client_key="k1"
     )
     assert (created, created_again) == (True, False)
     assert again.id == first.id
-    assert len(kube.applied("Secret")) == 1
-    assert len(await _reservations(pool, preset.id)) == 1
     assert len(await _rows(pool, "SELECT id FROM change_proposals")) == 1
 
 
@@ -376,101 +305,6 @@ async def test_kind_session_on_an_unknown_session_is_404(pool, kube, settings, b
     _error(exc, 404, "not_found")
 
 
-async def test_a_kube_failure_while_staging_leaves_no_rows_and_deletes_written_secrets(
-    pool, kube, settings, boss, preset, canary
-):
-    env = {"A": {"protected": True}, "B": {"protected": True}}
-    kube.fail(
-        "Secret", store.secret_name(preset.id, "B", 1), KubeError(f"500 {canary}"), verbs=["patch"]
-    )
-    with pytest.raises(ApiError) as exc:
-        await _create(
-            pool,
-            kube,
-            settings,
-            boss,
-            patch={"env": env},
-            secrets={"A": canary, "B": canary},
-        )
-    _error(exc, 502, "secret_store_failed")
-    written = store.secret_name(preset.id, "A", 1)
-    assert written in [a.name for a in kube.applied("Secret")]
-    assert written not in _secrets(kube)  # deleted again after the rollback
-    assert await _rows(pool, "SELECT id FROM change_proposals") == []
-    assert await _reservations(pool, preset.id) == []
-    await _assert_nowhere(pool, canary)
-
-
-async def test_a_rollback_after_staging_deletes_the_staged_secrets(
-    pool, kube, settings, boss, preset, canary, monkeypatch
-):
-    """Ruling: a create transaction that rolls back after `stage_secret` deletes the Secret
-    names it returned (`release` would find no reservation row to drive it)."""
-    real = secret_store.stage_secret
-    calls = []
-
-    async def flaky(*args, **kwargs):
-        calls.append(args[4])
-        if len(calls) == 2:
-            raise RuntimeError("database went away")
-        return await real(*args, **kwargs)
-
-    monkeypatch.setattr(secret_store, "stage_secret", flaky)
-    env = {"A": {"protected": True}, "B": {"protected": True}}
-    with pytest.raises(RuntimeError):
-        await _create(
-            pool, kube, settings, boss, patch={"env": env}, secrets={"A": canary, "B": canary}
-        )
-    assert calls == ["A", "B"]
-    written = store.secret_name(preset.id, "A", 1)
-    assert written in [a.name for a in kube.applied("Secret")]
-    assert written not in _secrets(kube)
-    assert await _rows(pool, "SELECT id FROM change_proposals") == []
-    assert await _reservations(pool, preset.id) == []
-
-
-async def test_rollback_cleanup_keeps_a_version_a_concurrent_set_made_live(
-    pool, kube, settings, boss, preset, canary, monkeypatch
-):
-    """Ruling (A4 security): the rolled-back stage of TOKEN v2 freed its number; a concurrent
-    `set_secret` takes v2, rewrites the Secret and commits before the cleanup runs. The cleanup
-    rechecks under the variable lock and keeps the now-live Secret."""
-    real_stage, real_forget = secret_store.stage_secret, proposals.presets_api.forget
-    live_v2 = store.secret_name(preset.id, "TOKEN", 2)
-
-    async def stage_then_fail(*args, **kwargs):
-        if args[4] == "ZED":  # TOKEN (sorted first) is staged, then the transaction fails
-            raise RuntimeError("database went away")
-        return await real_stage(*args, **kwargs)
-
-    async def concurrent_set_then_forget(conn, kube_, namespace, versions):
-        assert versions == [(preset.id, "TOKEN", 2)]
-        async with pool.connection() as other:
-            meta = await store.set_secret(
-                other, kube, NS, preset.id, "TOKEN", SecretStr(canary + "-rotated")
-            )
-        assert meta.version == 2
-        await real_forget(conn, kube_, namespace, versions)
-
-    monkeypatch.setattr(secret_store, "stage_secret", stage_then_fail)
-    monkeypatch.setattr(proposals.presets_api, "forget", concurrent_set_then_forget)
-    with pytest.raises(RuntimeError):
-        await _create(
-            pool,
-            kube,
-            settings,
-            boss,
-            patch={"env": {"ZED": {"protected": True}}},
-            secrets={"TOKEN": SecretStr(canary), "ZED": SecretStr(canary)},
-        )
-    assert live_v2 in _secrets(kube)
-    last = [a.obj for a in kube.applied("Secret") if a.name == live_v2][-1]
-    assert last["stringData"] == {"value": canary + "-rotated"}
-    assert await _rows(
-        pool, "SELECT version FROM preset_secrets WHERE preset_id = %s", (preset.id,)
-    ) == [(2,)]
-
-
 async def test_a_non_superleader_create_is_403(pool, kube, settings, boss, preset):
     with pytest.raises(ApiError) as exc:
         await _create(pool, kube, settings, boss, superleader=False, patch={"replicas": 2})
@@ -478,53 +312,99 @@ async def test_a_non_superleader_create_is_403(pool, kube, settings, boss, prese
     assert await _rows(pool, "SELECT id FROM change_proposals") == []
 
 
-async def test_a_failing_cleanup_does_not_mask_the_original_error(
-    pool, kube, settings, boss, preset, canary, monkeypatch
+async def test_proposal_secrets_field_refused(canary):
+    """Values are gone from proposals: `secrets` is an unknown field of the body (422 at the
+    route), on create and on revise."""
+    for model, body in (
+        (schemas.ProposalIn, {"kind": "preset", "target": "x", "patch": {}, "reason": "r"}),
+        (schemas.ProposalRevise, {"patch": {}}),
+    ):
+        with pytest.raises(pydantic.ValidationError) as exc:
+            model.model_validate({**body, "secrets": {"TOKEN": canary}})
+        [err] = exc.value.errors(include_input=False)
+        assert (err["type"], err["loc"]) == ("extra_forbidden", ("secrets",))
+
+
+def _ref(entry=OTHER, env="TOKEN") -> dict:
+    return {"vault": entry, "env": env}
+
+
+async def test_preset_proposal_with_ref_validated(pool, kube, settings, boss, preset, vault):
+    view, _, request = await _create(
+        pool, kube, settings, boss, patch={"env": {"GH": _ref()}}, reason="attach"
+    )
+    [item] = view.revisions[0].items
+    assert (item.path, item.before, item.after) == ("env.GH", None, _ref())
+    # the vault got the refs and the preset's effective labels (its project first)
+    [call] = vault.calls
+    assert call["refs"] == {"GH": {"entry": OTHER, "env": "TOKEN"}}
+    assert call["preset_labels"][0] == f"project:{preset.project}"
+    assert kube.applied("Secret") == []
+    assert request.state.preset_fields == ["env.GH"]
+    # a revise validates again
+    vault.calls.clear()
+    revised = await _revise(pool, kube, settings, boss, view.id, patch={"env": {"GH": _ref()}})
+    assert revised.revision == 2
+    assert len(vault.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("ref", "code", "extra"),
+    [
+        (_ref(GONE), "vault_entry_unknown", {"envs": ["GH"], "entries": [GONE]}),
+        (_ref(OTHER, "NOPE"), "vault_env_unknown", {"envs": ["GH"]}),
+        (_ref(ENTRY, "TOKEN"), "vault_label_mismatch", {"envs": ["GH"]}),
+    ],
+)
+async def test_preset_proposal_ref_refused_by_the_vault_is_422(
+    pool, kube, settings, boss, preset, ref, code, extra
 ):
-    real = secret_store.stage_secret
-    calls = []
+    with pytest.raises(ApiError) as exc:
+        await _create(pool, kube, settings, boss, patch={"env": {"GH": ref}})
+    err = _error(exc, 422, code)
+    assert err.extra == extra
+    assert await _rows(pool, "SELECT id FROM change_proposals") == []
+    view, _, _ = await _create(pool, kube, settings, boss, patch={"replicas": 2})
+    with pytest.raises(ApiError) as exc:
+        await _revise(pool, kube, settings, boss, view.id, patch={"env": {"GH": ref}})
+    assert _error(exc, 422, code).extra == extra
+    assert (await _get(pool, settings, view.id, boss.id)).revision == 1
 
-    async def flaky(*args, **kwargs):
-        calls.append(args[4])
-        if len(calls) == 2:
-            raise RuntimeError("database went away")
-        return await real(*args, **kwargs)
 
-    async def broken_forget(*args, **kwargs):
-        raise ValueError(canary)
+async def test_preset_proposal_with_the_vault_down_is_503(
+    pool, kube, settings, boss, preset, vault
+):
+    vault.down = True
+    with pytest.raises(ApiError) as exc:
+        await _create(pool, kube, settings, boss, patch={"env": {"GH": _ref()}})
+    _error(exc, 503, "vault_unavailable")
+    assert await _rows(pool, "SELECT id FROM change_proposals") == []
 
-    monkeypatch.setattr(secret_store, "stage_secret", flaky)
-    monkeypatch.setattr(proposals.presets_api, "forget", broken_forget)
-    env = {"A": {"protected": True}, "B": {"protected": True}}
-    with pytest.raises(RuntimeError, match="database went away"):
-        await _create(
-            pool, kube, settings, boss, patch={"env": env}, secrets={"A": canary, "B": canary}
-        )
+
+async def test_a_proposal_without_refs_never_calls_the_vault(
+    pool, kube, settings, boss, preset, vault
+):
+    vault.down = True
+    await _create(pool, kube, settings, boss, patch={"replicas": 2})
+    assert vault.calls == []
 
 
 # ---------------------------------------------------------------- revise and withdraw
 
 
 async def test_revise_after_the_target_became_non_manageable_is_404(
-    pool, kube, settings, boss, preset, canary
+    pool, kube, settings, boss, preset
 ):
-    view, _, _ = await _create(
-        pool, kube, settings, boss, patch=MCP_PATCH, secrets={"TOKEN": canary}
-    )
-    before = await _reservations(pool, preset.id)
+    view, _, _ = await _create(pool, kube, settings, boss, patch=MCP_PATCH)
     async with pool.connection() as conn:
         await presets_repo.update(conn, preset.id, "infra", preset.spec, False)
     with pytest.raises(ApiError) as exc:
-        await _revise(
-            pool, kube, settings, boss, view.id, patch=MCP_PATCH, secrets={"TOKEN": canary + "2"}
-        )
+        await _revise(pool, kube, settings, boss, view.id, patch=MCP_PATCH)
     _error(exc, 404, "not_found")
     async with pool.connection() as conn:
         stored = await proposals_repo.get(conn, view.id)
     assert stored is not None
     assert (stored.status, stored.revision) == ("open", 1)
-    assert await _reservations(pool, preset.id) == before
-    await _assert_nowhere(pool, canary + "2")
 
 
 async def test_revise_after_the_target_was_deleted_is_the_unknown_proposal_404(
@@ -574,31 +454,6 @@ async def test_writes_refuse_a_connection_inside_a_transaction(pool, kube, setti
     assert (await _get(pool, settings, view.id, boss.id)).revision == 1
 
 
-async def test_a_kube_failure_while_revising_keeps_revision_one_and_stages_nothing(
-    pool, kube, settings, boss, preset, canary
-):
-    view, _, _ = await _create(
-        pool, kube, settings, boss, patch=MCP_PATCH, secrets={"TOKEN": canary}
-    )
-    r1 = store.secret_name(preset.id, "TOKEN", 2)
-    r2 = store.secret_name(preset.id, "TOKEN", 3)
-    before = await _reservations(pool, preset.id)
-    kube.fail("Secret", r2, KubeError(f"500 {canary}"), verbs=["patch"])
-    with pytest.raises(ApiError) as exc:
-        await _revise(
-            pool, kube, settings, boss, view.id, patch=MCP_PATCH, secrets={"TOKEN": canary + "2"}
-        )
-    _error(exc, 502, "secret_store_failed")
-    assert r2 not in _secrets(kube)
-    assert r1 in _secrets(kube)
-    assert await _reservations(pool, preset.id) == before
-    async with pool.connection() as conn:
-        stored = await proposals_repo.get(conn, view.id)
-    assert stored is not None
-    assert (stored.status, stored.revision) == ("open", 1)
-    await _assert_nowhere(pool, canary + "2")
-
-
 async def test_revise_of_a_stale_proposal_rebases_it_to_open(pool, kube, settings, boss, preset):
     view, _, _ = await _create(pool, kube, settings, boss, patch={"replicas": 2})
     await _rows(
@@ -610,13 +465,8 @@ async def test_revise_of_a_stale_proposal_rebases_it_to_open(pool, kube, setting
     assert (revised.status, revised.revision, revised.stale) == ("open", 2, False)
 
 
-async def test_revise_from_rework_rebases_and_releases_the_old_value(
-    pool, kube, settings, boss, preset, canary
-):
-    view, _, _ = await _create(
-        pool, kube, settings, boss, patch=MCP_PATCH, secrets={"TOKEN": canary}
-    )
-    r1_secret = store.secret_name(preset.id, "TOKEN", 2)
+async def test_revise_from_rework_rebases_on_the_target_now(pool, kube, settings, boss, preset):
+    view, _, _ = await _create(pool, kube, settings, boss, patch=MCP_PATCH)
     async with pool.connection() as conn:
         await proposals_repo.transition(
             conn, view.id, from_states=("open",), to="rework", outcome="rework"
@@ -630,7 +480,6 @@ async def test_revise_from_rework_rebases_and_releases_the_old_value(
         boss,
         view.id,
         patch={"wrapper": {"mcp_servers": {"grafana": GRAFANA}}, "model": None},
-        secrets={"TOKEN": canary + "2"},
         reason="rebased",
     )
     assert (revised.status, revised.revision, revised.stale) == ("open", 2, False)
@@ -641,7 +490,7 @@ async def test_revise_from_rework_rebases_and_releases_the_old_value(
         None,
         "rebased",
     )
-    assert {i.path for i in r2.items} == {"env.TOKEN", "wrapper.mcp_servers"}
+    assert {i.path for i in r2.items} == {"wrapper.mcp_servers"}
     async with pool.connection() as conn:
         stored = await proposals_repo.get(conn, view.id)
         live = await store.list_metas(conn, [preset.id])
@@ -650,12 +499,7 @@ async def test_revise_from_rework_rebases_and_releases_the_old_value(
     assert stored.revisions[1].fingerprint == proposals.fingerprint_preset(edited, versions)
     assert stored.revisions[0].fingerprint != stored.revisions[1].fingerprint
     assert stored.revisions[1].base["replicas"] == 2  # the base is the target read now
-    # r1's value released after the commit, r2's staged
-    r2_secret = store.secret_name(preset.id, "TOKEN", 3)
-    assert r1_secret not in _secrets(kube)
-    assert r2_secret in _secrets(kube)
-    assert await _reservations(pool, preset.id) == [("TOKEN", 3, view.id, 2, "staged")]
-    await _assert_nowhere(pool, canary, revised)
+    assert kube.applied("Secret") == []
 
 
 async def test_revise_without_a_reason_keeps_the_previous_one(pool, kube, settings, boss, preset):
@@ -676,16 +520,13 @@ async def test_revise_of_a_terminal_proposal_is_409(pool, kube, settings, boss, 
     _error(exc, 409, "not_open")
 
 
-async def test_withdraw_releases_every_staged_value(pool, kube, settings, boss, preset, canary):
-    view, _, _ = await _create(pool, kube, settings, boss, patch={}, secrets={"TOKEN": canary})
-    staged = store.secret_name(preset.id, "TOKEN", 2)
-    assert staged in _secrets(kube)
+async def test_withdraw_closes_the_proposal(pool, kube, settings, boss, preset):
+    view, _, _ = await _create(pool, kube, settings, boss, patch=MCP_PATCH)
     done = await _withdraw(pool, kube, settings, boss, view.id)
     assert done.status == "withdrawn"
     assert done.closed_at is not None
     assert done.revisions[0].outcome == "withdrawn"
-    assert staged not in _secrets(kube)
-    assert await _reservations(pool, preset.id) == []
+    assert kube.applied("Secret") == []
 
 
 async def test_another_sessions_proposal_is_404(pool, kube, settings, boss, preset):

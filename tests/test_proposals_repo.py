@@ -16,10 +16,8 @@ MIGRATION = MIGRATIONS_DIR / "0038_change_proposals.sql"
 TTL = 7 * 24 * 3600
 
 
-def _item(path, after=1, *, security=False, grant=False, secret=None):
-    return proposals.Item(
-        path=path, before=None, after=after, security=security, grant=grant, secret=secret
-    )
+def _item(path, after=1, *, security=False, grant=False):
+    return proposals.Item(path=path, before=None, after=after, security=security, grant=grant)
 
 
 async def _insert(conn, session=None, *, client_key=None, items=None, target="t1", ttl=TTL):
@@ -75,7 +73,7 @@ async def test_insert_with_items_and_read_back(pool):
     items = [
         _item("replicas", 2),
         _item("kube_cluster_access", True, security=True, grant=True),
-        _item("env.TOKEN", {"protected": True, "expand": False}, security=True, secret="set"),
+        _item("env.TOKEN", {"protected": True, "expand": False}, security=True),
     ]
     async with pool.connection() as conn:
         pid = await _insert(conn, session, client_key="k1", items=items)

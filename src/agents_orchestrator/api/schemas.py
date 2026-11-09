@@ -186,15 +186,14 @@ class PresetView(BaseModel):
 
 
 class ProposalIn(BaseModel):
-    """A change proposal (plan 3.4): an RFC 7396 merge `patch` of the target's spec, plus new
-    values of protected variables in `secrets`; a value is never stored or echoed."""
+    """A change proposal (plan 3.4): an RFC 7396 merge `patch` of the target's spec, which
+    may carry vault references (never a value)."""
 
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal["preset", "schedule", "session"]
     target: str  # preset id or name, schedule id, session slug
     patch: dict[str, Any]
-    secrets: dict[str, SecretStr] = {}
     reason: str = Field(min_length=1, max_length=4000)
     client_key: str | None = Field(default=None, max_length=200)
 
@@ -219,7 +218,6 @@ class ProposalRevise(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     patch: dict[str, Any]
-    secrets: dict[str, SecretStr] = {}
     reason: str | None = Field(default=None, min_length=1, max_length=4000)
 
 
@@ -246,7 +244,6 @@ class ProposalItemView(BaseModel):
     after: Any
     security: bool
     grant: bool
-    secret: Literal["set", "changed"] | None
     decision: Literal["pending", "approved", "rework", "denied"]
     note: str | None
 
