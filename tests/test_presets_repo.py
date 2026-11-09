@@ -153,3 +153,18 @@ async def test_update_expected_updated_at_mismatch_raises(pool):
         with pytest.raises(presets.PresetChanged):
             await presets.update(conn, one.id, "Cas", {"a": 3}, expected_updated_at=one.updated_at)
         assert (await presets.get(conn, one.id)).spec == {"a": 2}
+
+
+async def test_list_presets_filters_by_project(pool):
+    async with pool.connection() as conn:
+        await conn.execute("INSERT INTO projects (slug, name) VALUES ('alpha', 'Alpha')")
+        moved = await presets.create(conn, "Moved", {})
+        stays = await presets.create(conn, "Stays", {})
+        assert stays.project == "default"
+        await conn.execute("UPDATE presets SET project = 'alpha' WHERE id = %s", (moved.id,))
+        assert (await presets.get(conn, moved.id)).project == "alpha"
+        assert [p.name for p in await presets.list_presets(conn, project="alpha")] == ["Moved"]
+        default = await presets.list_presets(conn, project="default")
+        assert [p.name for p in default] == ["Default", "Stays"]
+        assert await presets.list_presets(conn, project="nope") == []
+        assert len(await presets.list_presets(conn)) == 3

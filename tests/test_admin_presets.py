@@ -218,3 +218,87 @@ async def test_admin_copy_is_manageable(call):
     made = (await call("POST", A, json={"name": "orig", "spec": {}})).json()
     r = await call("POST", f"{A}/{made['id']}/copy")
     assert r.status_code == 201 and r.json()["superleader_manageable"] is True
+
+
+# ---------------------------------------------------------------- projects (T-19 P3)
+
+
+async def _project(call, slug):
+    async with main_client(call.app) as main:
+        r = await main.post("/api/v1/projects", json={"slug": slug, "name": slug.title()})
+    assert r.status_code == 201, r.text
+
+
+async def _human_get(call, pid):
+    async with main_client(call.app) as main:
+        return (await main.get(f"{M}/{pid}")).json()
+
+
+async def test_admin_create_in_project(call, pool, boss):
+    await _project(call, "alpha")
+    r = await call("POST", A, json={"name": "adm-alpha", "spec": {}, "project": "alpha"})
+    assert r.status_code == 201, r.text
+    assert r.json()["project"] == "alpha"
+    assert (await events(pool, boss.id))[-1]["data"]["fields"] == ["name", "project"]
+    plain = await call("POST", A, json={"name": "adm-plain", "spec": {}})
+    assert plain.status_code == 201 and plain.json()["project"] == "default"
+    assert_error(
+        await call("POST", A, json={"name": "adm-lost", "project": "nope"}), 422, "unknown_project"
+    )
+
+
+async def test_admin_patch_project_change_403_human_only_field(call, pool, boss):
+    await _project(call, "alpha")
+    pid = (await call("POST", A, json={"name": "stay", "spec": {}})).json()["id"]
+    before = await _human_get(call, pid)
+    for method, body in (
+        ("PATCH", {"project": "alpha"}),
+        ("PUT", {"name": "stay", "spec": {}, "project": "alpha"}),
+    ):
+        r = await call(method, f"{A}/{pid}", json=body)
+        assert_error(r, 403, "human_only_field")
+        assert r.json()["error"]["fields"] == ["project"]
+        last = (await events(pool, boss.id))[-1]["data"]
+        assert last["status"] == 403 and last["fields"] == ["project"]
+    # an unknown target is refused the same way: the move itself is human-only
+    r = await call("PATCH", f"{A}/{pid}", json={"project": "nope"})
+    assert_error(r, 403, "human_only_field")
+    assert await _human_get(call, pid) == before
+
+
+async def test_admin_put_same_project_ok(call):
+    await _project(call, "alpha")
+    r = await call("POST", A, json={"name": "same", "spec": {}, "project": "alpha"})
+    pid = r.json()["id"]
+    put = await call(
+        "PUT", f"{A}/{pid}", json={"name": "same", "spec": {"replicas": 2}, "project": "alpha"}
+    )
+    assert put.status_code == 200, put.text
+    assert put.json()["project"] == "alpha" and put.json()["spec"] == {"replicas": 2}
+    patched = await call("PATCH", f"{A}/{pid}", json={"spec": {"replicas": 1}})
+    assert patched.status_code == 200 and patched.json()["project"] == "alpha"
+    same = await call("PATCH", f"{A}/{pid}", json={"project": "alpha"})
+    assert same.status_code == 200 and same.json()["project"] == "alpha"
+
+
+async def test_admin_put_without_project_keeps_it(call):
+    await _project(call, "alpha")
+    pid = (await call("POST", A, json={"name": "kept", "spec": {}, "project": "alpha"})).json()[
+        "id"
+    ]
+    put = await call("PUT", f"{A}/{pid}", json={"name": "kept", "spec": {"replicas": 2}})
+    assert put.status_code == 200, put.text
+    assert put.json()["project"] == "alpha" and put.json()["spec"] == {"replicas": 2}
+    assert (await _human_get(call, pid))["project"] == "alpha"
+
+
+async def test_admin_copy_keeps_or_sets_project(call):
+    await _project(call, "alpha")
+    await _project(call, "beta")
+    src = (await call("POST", A, json={"name": "csrc", "project": "alpha"})).json()
+    kept = await call("POST", f"{A}/{src['id']}/copy", json={"name": "ckept"})
+    assert kept.status_code == 201 and kept.json()["project"] == "alpha"
+    moved = await call("POST", f"{A}/{src['id']}/copy", json={"name": "cmoved", "project": "beta"})
+    assert moved.status_code == 201 and moved.json()["project"] == "beta"
+    lost = await call("POST", f"{A}/{src['id']}/copy", json={"name": "clost", "project": "nope"})
+    assert_error(lost, 422, "unknown_project")

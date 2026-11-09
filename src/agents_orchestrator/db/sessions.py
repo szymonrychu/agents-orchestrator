@@ -16,6 +16,7 @@ from psycopg.types.json import Jsonb
 from agents_orchestrator.db import leadership
 from agents_orchestrator.db.eligibility import ELIGIBLE, background_busy
 from agents_orchestrator.db.pool import notify
+from agents_orchestrator.db.projects import DEFAULT, UnknownProject
 from agents_orchestrator.db.queue import SessionBeingDeleted, enqueue_message
 from agents_orchestrator.db.start_state import start_reason, start_state
 from agents_orchestrator.inactivity import NOTICE_CLOSE, NOTICE_REMINDER, close_reason
@@ -82,6 +83,8 @@ class Session:
     close_deadline_at: datetime | None = None
     # set by a forced discard (DELETE ...?force=true): owed pre-discard hooks are abandoned
     discard_forced_at: datetime | None = None
+    # the project it belongs to (projects.slug); moved by set_project, never by a spec change
+    project: str = DEFAULT
 
 
 @dataclass(frozen=True)
@@ -113,6 +116,7 @@ def _from_row(row: dict[str, Any]) -> Session:
         close_kind=row["close_kind"],
         close_deadline_at=row["close_deadline_at"],
         discard_forced_at=row["discard_forced_at"],
+        project=row["project"],
     )
 
 
@@ -140,6 +144,7 @@ async def create(
     secret_versions: dict[str, str] | None = None,
     created_by_session: uuid.UUID | None = None,
     labels: list[str] | None = None,
+    project: str = DEFAULT,
 ) -> Session:
     validate_slug(slug)
     try:
@@ -147,8 +152,8 @@ async def create(
             rows = await _fetch(
                 conn,
                 "INSERT INTO sessions (id, slug, spec, preset_id, preset_name, created_by_service,"
-                " secret_versions, created_by_session, labels)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
+                " secret_versions, created_by_session, labels, project)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
                 (
                     uuid.uuid4(),
                     slug,
@@ -159,6 +164,7 @@ async def create(
                     Jsonb(secret_versions) if secret_versions else None,
                     created_by_session,
                     labels or [],
+                    project,
                 ),
             )
             await _notify(conn, rows[0].id)
@@ -219,17 +225,34 @@ async def claim_self_restart(
     return SelfRestartClaim(False, max(1, int(row["wait"])))
 
 
+_SUPERLEADER = "COALESCE((spec->>'session_messaging')::boolean, false)"
+
+
 async def list_sessions(
-    conn: psycopg.AsyncConnection, labels: list[str] | None = None
+    conn: psycopg.AsyncConnection,
+    *,
+    labels: list[str] | None = None,
+    project: str | None = None,
+    slug: str | None = None,
+    superleaders: bool = False,
 ) -> list[Session]:
-    """Every session; with `labels`, only live (not being deleted) sessions sharing any."""
-    if not labels:
-        return await _fetch(conn, "SELECT * FROM sessions ORDER BY created_at, slug", ())
+    """Every session, narrowed by each filter given (they combine): `labels` keeps live (not
+    being deleted) sessions sharing any; `project` keeps that project's sessions, plus every
+    superleader session with `superleaders`; `slug` is an exact match."""
+    where: list[str] = []
+    params: list[Any] = []
+    if labels:
+        where.append("labels && %s::text[] AND desired = 'active'")
+        params.append(labels)
+    if project is not None:
+        where.append(f"(project = %s OR {_SUPERLEADER})" if superleaders else "project = %s")
+        params.append(project)
+    if slug is not None:
+        where.append("slug = %s")
+        params.append(slug)
+    clause = " WHERE " + " AND ".join(where) if where else ""
     return await _fetch(
-        conn,
-        "SELECT * FROM sessions WHERE labels && %s::text[] AND desired = 'active'"
-        " ORDER BY created_at, slug",
-        (labels,),
+        conn, f"SELECT * FROM sessions{clause} ORDER BY created_at, slug", tuple(params)
     )
 
 
@@ -242,6 +265,25 @@ async def set_labels(
     )
     if not rows:
         raise SessionNotFound(str(session_id))
+    return rows[0]
+
+
+async def set_project(
+    conn: psycopg.AsyncConnection, session_id: uuid.UUID, project: str
+) -> Session:
+    """Move the session to another project. Not part of the spec: no generation bump and no
+    NOTIFY (nothing in the pod changes; scope is read live per request). Raises
+    SessionNotFound, SessionBeingDeleted, or UnknownProject for a slug with no row."""
+    try:
+        async with conn.transaction():
+            await _lock_row(conn, session_id)
+            rows = await _fetch(
+                conn,
+                "UPDATE sessions SET project = %s WHERE id = %s RETURNING *",
+                (project, session_id),
+            )
+    except psycopg.errors.ForeignKeyViolation:
+        raise UnknownProject(project) from None
     return rows[0]
 
 
@@ -270,25 +312,26 @@ SELECT c.*,
                  FROM agents a WHERE a.session_id = c.id AND a.gone_at IS NULL
                    AND a.start_failure IS NOT NULL), '[]'::jsonb) AS start_failures
 FROM sessions c
-WHERE c.desired = 'active' AND c.id <> %s
+WHERE c.desired = 'active' AND c.id <> %(caller)s
+  AND (%(project)s::text IS NULL OR c.project = %(project)s
+       OR COALESCE((c.spec->>'session_messaging')::boolean, false))
 ORDER BY c.slug
 """
 
 
 async def list_messaging_peers(
-    conn: psycopg.AsyncConnection, caller_session_id: uuid.UUID, *, superleaders_only: bool
+    conn: psycopg.AsyncConnection, caller_session_id: uuid.UUID, *, project: str | None
 ) -> list[MessagingPeer]:
-    """The sessions the caller may message (D6, D7): every other active session, or only the
-    other active superleader sessions, ordered by slug."""
+    """The sessions the caller may message (D6, D7, projects Q5 C), ordered by slug: every other
+    active session with `project` None (a superleader caller), else the other active sessions
+    of `project` plus every active superleader session."""
     async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(_PEERS, (caller_session_id,))
+        await cur.execute(_PEERS, {"caller": caller_session_id, "project": project})
         rows = await cur.fetchall()
     out = []
     for row in rows:
         spec = _from_row(row).spec
         superleader = bool(spec.session_messaging)
-        if superleaders_only and not superleader:
-            continue
         failures = row["start_failures"]
         state = start_state(row["ready_agents"], failures)
         out.append(
@@ -693,22 +736,30 @@ async def discard_idle(conn: psycopg.AsyncConnection, close_grace_seconds: int) 
 
 
 async def set_init_scripts(
-    conn: psycopg.AsyncConnection, session_id: uuid.UUID, scripts: list[str]
+    conn: psycopg.AsyncConnection,
+    session_id: uuid.UUID,
+    scripts: list[str],
+    *,
+    same_project_preset: bool = False,
 ) -> tuple[Session, bool]:
     """Write the init scripts to the session spec and to its source preset, in one transaction.
 
     No generation bump: the list is never rendered into pods. Lock order is sessions, then
-    presets. Returns the updated session and whether a preset row was written.
+    presets. With `same_project_preset` (an agent's edit, projects plan 3.3) the preset is
+    written only when it is in the session's project, checked under the preset row lock, so the
+    edit never reaches a preset that is or just moved to another project; then only the session
+    is written. Returns the updated session and whether a preset row was written.
     """
     async with conn.transaction():
         async with conn.cursor() as cur:
             await cur.execute(
-                "SELECT desired, preset_id FROM sessions WHERE id = %s FOR UPDATE", (session_id,)
+                "SELECT desired, preset_id, project FROM sessions WHERE id = %s FOR UPDATE",
+                (session_id,),
             )
             locked = await cur.fetchone()
         if locked is None:
             raise SessionNotFound(str(session_id))
-        desired, preset_id = locked
+        desired, preset_id, project = locked
         if desired == "deleting":
             raise SessionBeingDeleted(str(session_id))
         listed = Jsonb(scripts)
@@ -720,8 +771,11 @@ async def set_init_scripts(
         )
         preset_written = False
         if preset_id is not None:
-            cur = await conn.execute("SELECT 1 FROM presets WHERE id = %s FOR UPDATE", (preset_id,))
-            if await cur.fetchone() is not None:
+            cur = await conn.execute(
+                "SELECT project FROM presets WHERE id = %s FOR UPDATE", (preset_id,)
+            )
+            preset = await cur.fetchone()
+            if preset is not None and (not same_project_preset or preset[0] == project):
                 await conn.execute(
                     "UPDATE presets SET spec = jsonb_set(spec, '{init_scripts}', %s),"
                     " updated_at = now() WHERE id = %s",

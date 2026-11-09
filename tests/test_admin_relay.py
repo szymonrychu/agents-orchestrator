@@ -929,3 +929,18 @@ async def test_room_request_get_forwarded(rig):
     assert r.status_code == 200, r.text
     (call,) = rig.fakes["connector"].calls
     assert call.path == "/chat/v1/admin/room-requests/5"
+
+
+async def test_admin_relay_sends_all_projects_scope(rig):
+    """The admin relay is superleader-only, so every upstream call (the stored-object lookup and
+    the forward) carries `X-Orch-Projects: *`; an inbound value is dropped (projects plan 3.3)."""
+    service, method, template = ("webhook", "PATCH", "/endpoints/{id}")
+    assert (service, method, template) in STORED
+    body = _body_for(rig, service, method, template, rig.vis)
+    r = await rig.call(
+        method, relay_url(service, template), json=body, headers={"X-Orch-Projects": "a"}
+    )
+    assert r.status_code == _success(service, method, template), r.text
+    calls = rig.fakes[service].calls
+    assert len(calls) >= 2
+    assert [c.headers.get("x-orch-projects") for c in calls] == ["*"] * len(calls)

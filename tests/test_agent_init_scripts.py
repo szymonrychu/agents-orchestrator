@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 import httpx
@@ -130,3 +131,46 @@ async def test_plugin_parity(pool, dsn):
     assert edit.structured["preset_updated"] is True
     assert (await stored(pool, c["id"], preset.id))[::2] == (["echo plugin"], ["echo plugin"])
     assert uuid.UUID(got.structured["session_id"]) == c["id"]
+
+
+async def _move_preset(conn, preset_id, project: str) -> None:
+    await conn.execute(
+        "INSERT INTO projects (slug, name) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+        (project, project),
+    )
+    await conn.execute("UPDATE presets SET project = %s WHERE id = %s", (project, preset_id))
+
+
+async def test_put_skips_preset_write_when_preset_in_other_project(pool, dsn):
+    """Plan 3.3: the agent edit reaches the source preset only when the preset is in the
+    session's project; otherwise only the session is written."""
+    c, preset = await preset_session(pool)
+    async with pool.connection() as conn:
+        await _move_preset(conn, preset.id, "b")
+    async with client_for(create_app(make_settings(dsn), pool)) as http:
+        r = await http.put(URL, headers=headers(c["id"]), json={"scripts": ["echo new"]})
+    assert r.status_code == 200, r.text
+    assert r.json()["preset_updated"] is False
+    assert r.json()["scripts"] == ["echo new"]
+    session_scripts, _, preset_scripts = await stored(pool, c["id"], preset.id)
+    assert (session_scripts, preset_scripts) == (["echo new"], ["echo old"])
+
+
+async def test_put_skips_preset_write_when_preset_moved_before_lock(pool, dsn):
+    """The project check runs under the preset row lock: a move committed while the edit waits
+    on that lock is seen, and the preset is not written."""
+    c, preset = await preset_session(pool)
+    app = create_app(make_settings(dsn), pool)
+    async with client_for(app) as http:
+        async with pool.connection() as conn, conn.transaction():
+            await _move_preset(conn, preset.id, "b")
+            put = asyncio.create_task(
+                http.put(URL, headers=headers(c["id"]), json={"scripts": ["echo new"]})
+            )
+            done, _ = await asyncio.wait({put}, timeout=0.5)
+            assert not done
+        r = await put
+    assert r.status_code == 200, r.text
+    assert r.json()["preset_updated"] is False
+    session_scripts, _, preset_scripts = await stored(pool, c["id"], preset.id)
+    assert (session_scripts, preset_scripts) == (["echo new"], ["echo old"])

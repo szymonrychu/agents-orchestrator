@@ -10,6 +10,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from agents_orchestrator.db import projects
+
 log = logging.getLogger(__name__)
 
 _CODES = {
@@ -63,6 +65,20 @@ def error_response(
 
 def not_found(what: str) -> ApiError:
     return ApiError(404, "not_found", f"{what} not found")
+
+
+def project_error(exc: Exception) -> ApiError:
+    """The api error for a projects repository exception."""
+    match exc:
+        case projects.UnknownProject():
+            return ApiError(422, "unknown_project", f"project {exc} does not exist")
+        case projects.ProjectArchived():
+            return ApiError(422, "project_archived", f"project {exc} is archived")
+        case projects.DefaultProject():
+            return ApiError(409, "default_project", "the default project cannot be archived")
+        case projects.ProjectExists():
+            return ApiError(409, "project_exists", f"project {exc} already exists")
+    raise TypeError(f"not a project error: {exc!r}")
 
 
 def install(app: FastAPI) -> None:

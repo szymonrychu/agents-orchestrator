@@ -283,6 +283,22 @@ ingress:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
 ```
+
+## Projects
+
+A project groups presets and sessions; it is the unit of permission scope for agents. Projects live in the orchestrator (table `projects`, one writer), a fresh database has the `default` project, and every preset and session carries a `project` slug (default `default`). The slug is 1 to 40 lowercase letters, digits and dashes and never changes. The `project` column of a preset and of a session is human-only: only the main-port routes move one (`PUT /api/v1/presets/{preset_id}`, `PATCH /api/v1/sessions/{session_id}/project`); no agent-port route moves a session or a preset. A create places one: the main-port creates and copies (`POST /api/v1/presets`, `POST /api/v1/presets/{preset_id}/copy`, `POST /api/v1/sessions`), and the superleader admin creates and copies (`POST /agent/v1/admin/presets`, `.../copy`, `POST /agent/v1/admin/sessions`). A preset `PUT` without `project` keeps the stored project; a create without it uses `default` (a session from a preset: the preset's project).
+
+Archive: `PATCH /api/v1/projects/{slug}` with `archived: true` hides a project from the default list (`?archived=true` lists the archived ones) and refuses new placements into it (422 `project_archived`); existing presets and sessions stay, and an archived project still lists its sessions. `default` cannot be archived (409 `default_project`). Restoring is `archived: false`. Approving a preset change proposal on a preset in an archived project is also 422 `project_archived` (nothing written, the proposal stays open).
+
+Scope rule: a session's scope is computed per request and never stored: `*` (every project) for a superleader session (`spec.session_messaging`), else the session's own project, read live, so moving a session changes its reach on the next call. The scope is data only: it limits what an agent can read and address through the relays; it is not a security boundary between processes in a pod. Every agent-port route is classified in `AGENT_SCOPE` (`own`, `peers`, `project`, `superleader`; a test fails on an unclassified route). Every orchestrator call to the taskboard sends `X-Orch-Projects`: the caller's scope on the agent task relay, `*` on the superleader admin relay and on room-request decisions (rooms are not project-bound). The orchestrator sets it; an inbound value is dropped.
+
+Routes (details under API and Agent API):
+
+- Main port: `GET|POST /api/v1/projects`, `GET|PATCH /api/v1/projects/{slug}`, `PATCH /api/v1/sessions/{session_id}/project`, `project` on preset and session create and replace, and `?project=` on `GET /api/v1/presets` and `GET /api/v1/sessions` (`superleaders=include`, `slug`). Service port: the read routes `GET /api/v1/projects` and `GET /api/v1/projects/{slug}`, `project` on `POST /api/v1/sessions`, and `slug` on `GET /api/v1/sessions`.
+- Agent port: `GET /agent/v1/projects`, and `project` and `projects_scope` on `GET /agent/v1/me`.
+- Error codes: 409 `project_exists`, 409 `default_project`, 409 `session_deleting`, 422 `unknown_project`, 422 `project_archived`, 422 `invalid_request`, 404 `not_found`, and 403 `project_forbidden` on a cross-project session message. The former 403 `target_not_superleader` is gone: cross-project refusals of session messages are 403 `project_forbidden`.
+- Session messaging: leaders of two sessions of the same project may message each other, a superleader and any session may message each other, and a cross-project send otherwise needs the reply right; the refusal is 403 `project_forbidden`. The peer list (`GET /agent/v1/sessions`) is the other sessions of the caller's project plus every superleader (all sessions for a superleader) and never includes the caller.
+
 ## Security
 
 Agent pods reach `/agent/v1` on the agents Service only, with the session token and from their own pod IP. The agent port serves nothing else (404), and `/agent/v1` is 404 on the main port.
@@ -302,6 +318,8 @@ ingress:
 ```
 
 A `kube_cluster_access` agent is cluster-admin. Its pods run as its own ServiceAccount, bound to `cluster-admin` by a per-session ClusterRoleBinding, with the token mounted, so it can read every Secret in every namespace (including the orchestrator master key, the Claude token and the database credentials) and can mint tokens, certificates and bindings that outlive its session; discarding the session is therefore not a full revocation, and the credentials it could read must be rotated. A `kube_namespace_access` agent is bounded to the allowlisted namespaces and tiers it holds, but a tier can still expose that namespace's Secrets (see Kubernetes permissions, Namespace access). Sessions started by the trigger services (agents-webhook, agents-schedule) from a preset with either option get the same access, so untrusted webhook content reaching such a session is a prompt-injection path into the granted access. Any superleader session (`session_messaging`) can feed text to the leader of any session with Kubernetes access, and any session's leader can feed text to a superleader session that has it; the frame trailer on the delivered turn is the only defence.
+
+Project scope is data-only (see Projects): it filters what the relays and the peer list show and which sessions an agent may message, but an agent pod holds its session token and can run any process, so a compromised agent is limited to its project's data and to the same-project and superleader leaders it may message, nothing more. Same-project messaging (projects Q5 C) lets any session's leader feed text to another leader of its project; the frame trailer on the delivered turn is the only defence, as with superleader messages above.
 
 ### Session spec self-edit (known risk)
 
@@ -337,6 +355,7 @@ In-cluster trigger services (agents-webhook, agents-schedule) call the orchestra
   - `GET /api/v1/meta`
   - `GET /api/v1/presets`
   - `GET /api/v1/presets/{preset_id}`
+  - `GET /api/v1/projects` and `GET /api/v1/projects/{slug}` (project views without the `presets` and `sessions` counts, which are null on this port)
   - `GET /api/v1/sessions`
   - `POST /api/v1/sessions`
   - `GET /api/v1/sessions/{session_id}`
@@ -858,7 +877,7 @@ Versioning: `/api/v1` is additive only. New routes, new optional request fields 
 
 Documented exception, 2026-10-23: `PATCH /api/v1/sessions/{session_id}` was removed (it now answers 405), and `POST /api/v1/sessions` requires exactly one of `spec` and `preset_id`. Why: a live spec edit rolled every agent pod of a running session; sessions now snapshot their preset at create and the spec is fixed from then on. To change it, discard the session and schedule again from a preset.
 
-In-place fields (amends the exception above): `spec.replicas` and `spec.init_scripts` change in place with no generation bump and no pod roll; `spec.wrapper.permission_mode` (2026-11-01) also changes in place through `PUT /api/v1/sessions/{session_id}/permission-mode`, but it is rendered into the pod config, so a changed value bumps the generation and the config hash rolls the pods through the normal rollout (idle pods restart, busy ones wait for the turn to end). PATCH on the session stays 405 (only `PATCH /api/v1/sessions/{session_id}/labels` exists). The agent-port route `PATCH /agent/v1/admin/sessions/{slug}` (see Admin session spec edit) edits the rest of a live session's spec for an agent; it is not on the main port.
+In-place fields (amends the exception above): `spec.replicas` and `spec.init_scripts` change in place with no generation bump and no pod roll; `spec.wrapper.permission_mode` (2026-11-01) also changes in place through `PUT /api/v1/sessions/{session_id}/permission-mode`, but it is rendered into the pod config, so a changed value bumps the generation and the config hash rolls the pods through the normal rollout (idle pods restart, busy ones wait for the turn to end). PATCH on the session stays 405 (only `PATCH /api/v1/sessions/{session_id}/labels` and `PATCH /api/v1/sessions/{session_id}/project` exist). The agent-port route `PATCH /agent/v1/admin/sessions/{slug}` (see Admin session spec edit) edits the rest of a live session's spec for an agent; it is not on the main port.
 
 Documented exception, 2026-10-25: the orchestrator's unit is a session. Every `/api/v1/clusters...` route became `/api/v1/sessions...` (path parameter `session_id`), every `cluster_id` field became `session_id`, the schemas `SessionSpec`, `SessionSummary`, `SessionView` and `CreateSession`, `caps.max_sessions`, the error codes `session_deleting`, `static_session` and `session_limit`, and the SSE events `session_status` and `session_removed`. There is no alias: the old routes answer 404. Why: one word for one thing across the API, the UI and the database (tables `sessions` and `session_leaders`, migration `0005`).
 
@@ -876,7 +895,7 @@ All presets as a list of preset views `{id, name, is_default, superleader_manage
 
 ### `POST /api/v1/presets`
 
-Body `{"name": "<name>", "spec": {...}}`. The name is 1 to 40 characters of letters, digits, spaces, dots, dashes and underscores, with no leading or trailing space; the API never trims it. Names are unique ignoring case. Optional `labels` (list of strings, default none; rules of `PATCH /api/v1/sessions/{session_id}/labels`) is a column on the preset, not a spec field; a session created from the preset snapshots it. `spec` takes the same fields as the session spec (all optional) and is checked against the current settings (models, efforts, image allowlist, caps) like a session create; only the keys sent are stored, no defaults are filled. Response 201 with the preset view. Optional `superleader_manageable` (boolean, default false) is the switch that lets a superleader see and manage this preset through the admin API; it is a column on the preset, not a spec field, and is set only on the main port. Errors: 422 `invalid_request` (bad name, or a spec the settings refuse), 409 `conflict` (name taken).
+Body `{"name": "<name>", "spec": {...}}`. The name is 1 to 40 characters of letters, digits, spaces, dots, dashes and underscores, with no leading or trailing space; the API never trims it. Names are unique ignoring case. Optional `labels` (list of strings, default none; rules of `PATCH /api/v1/sessions/{session_id}/labels`) is a column on the preset, not a spec field; a session created from the preset snapshots it. `spec` takes the same fields as the session spec (all optional) and is checked against the current settings (models, efforts, image allowlist, caps) like a session create; only the keys sent are stored, no defaults are filled. Response 201 with the preset view. Optional `project` (a project slug, default `default`) places the preset; the project must exist and be active (422 `unknown_project`, `project_archived`). Optional `superleader_manageable` (boolean, default false) is the switch that lets a superleader see and manage this preset through the admin API; it is a column on the preset, not a spec field, and is set only on the main port. Errors: 422 `invalid_request` (bad name, or a spec the settings refuse), 409 `conflict` (name taken).
 
 ### `GET /api/v1/presets/{preset_id}`
 
@@ -884,7 +903,7 @@ One preset view. `spec.reuse_running_agent` (optional, default false) tells trig
 
 ### `PUT /api/v1/presets/{preset_id}`
 
-Body `{"name": "<name>", "spec": {...}}` replaces the name and the whole spec, with the rules of the create. A model, effort or image that is no longer in the settings lists is accepted only when it equals the value already stored in this preset. The default preset can be edited but not renamed. An omitted `superleader_manageable` or `labels` keeps the stored value. Response 200 with the preset view. Errors: 404 `not_found`, 409 `conflict` (name taken), 409 `preset_default` (renaming the default), 422 `invalid_request`.
+Body `{"name": "<name>", "spec": {...}}` replaces the name and the whole spec, with the rules of the create. A model, effort or image that is no longer in the settings lists is accepted only when it equals the value already stored in this preset. The default preset can be edited but not renamed. An omitted `superleader_manageable`, `labels` or `project` keeps the stored value; a different `project` moves the preset. Response 200 with the preset view. Errors: 404 `not_found`, 409 `conflict` (name taken), 409 `preset_default` (renaming the default), 422 `invalid_request`.
 
 ### `DELETE /api/v1/presets/{preset_id}`
 
@@ -893,6 +912,22 @@ Deletes the preset. Sessions made from it keep their spec; their `preset_id` bec
 ### `POST /api/v1/presets/{preset_id}/copy`
 
 Optional body `{"name": "<name>"}`. Creates a new, non-default preset holding the source's stored spec verbatim and its labels. Without a name it is `<source name> copy`, then `<source name> copy 2`, `copy 3` and so on until free; the source part is cut to fit 40 characters and right-trimmed before ` copy`. Response 201 with the new preset view. Errors: 404 `not_found` (unknown source), 409 `conflict` (an explicit name is taken), 422 `invalid_request` (bad explicit name).
+
+### `GET /api/v1/projects`
+
+Projects as a list of project views `{slug, name, description, archived, created_at, updated_at, presets, sessions}` by slug. `presets` is the number of presets in the project and `sessions` the number of its active (not being deleted) sessions; both are null on the service port. Without a query only active projects are listed; `?archived=true` lists only archived ones. Response 200. A fresh database has one project, `default`.
+
+### `POST /api/v1/projects`
+
+Body `{"slug": "<slug>", "name": "<name>", "description": "<text>"}`; `description` is optional. The slug is 1 to 40 lowercase letters, digits and dashes starting with a letter or digit and never changes; the name is 1 to 80 characters; the description is at most 4000. Response 201 with the project view. Errors: 422 `invalid_request`, 409 `project_exists`.
+
+### `GET /api/v1/projects/{slug}`
+
+One project view, with the `presets` and `sessions` counts on the main port. Errors: 404 `not_found`.
+
+### `PATCH /api/v1/projects/{slug}`
+
+Body with any of `name`, `description`, `archived` (other keys, the slug included, are 422 `invalid_request`). `archived: true` archives the project, `false` restores it; archiving the `default` project is 409 `default_project`. Response 200 with the project view. Errors: 404 `not_found`.
 
 ### `PUT /api/v1/presets/{preset}/secrets/{name}`
 
@@ -908,7 +943,7 @@ One proposal with every revision: items with redacted `before` and `after`, `sec
 
 ### `POST /api/v1/proposals/{proposal_id}/review`
 
-The human review of the current revision: body `{"revision": <n>, "items": [{"path", "decision": "approve" | "rework" | "deny", "note"?}]}`, one decision per item, a note on every rework. Any rework requests a new revision and applies nothing; otherwise the approved items are applied all or nothing on an unchanged target and the proposal is `applied` (or `denied` when none is approved). The proposer is notified. Response 200 with the view. Errors: 404 `not_found`, 409 `not_open`, `proposal_expired`, `revision_changed`, `target_gone`, `proposal_stale`, 422 `invalid_request`, `invalid_spec`, 502 `secret_store_failed`. Main port only: no agent route and no MCP tool reaches it.
+The human review of the current revision: body `{"revision": <n>, "items": [{"path", "decision": "approve" | "rework" | "deny", "note"?}]}`, one decision per item, a note on every rework. Any rework requests a new revision and applies nothing; otherwise the approved items are applied all or nothing on an unchanged target and the proposal is `applied` (or `denied` when none is approved). The proposer is notified. Response 200 with the view. Errors: 404 `not_found`, 409 `not_open`, `proposal_expired`, `revision_changed`, `target_gone`, `proposal_stale`, 422 `invalid_request`, `invalid_spec`, `project_archived` (an approval on a preset in an archived project: nothing written, the proposal stays open), 502 `secret_store_failed`. Main port only: no agent route and no MCP tool reaches it.
 
 ### `POST /api/v1/templates/preview`
 
@@ -944,7 +979,7 @@ Body `{"keys": ["<full object key>", ...]}` (1 to 1000 keys, extra fields reject
 
 ### `GET /api/v1/sessions`
 
-All sessions as a list of session views. Optional repeatable `label` query parameter (each value normalised like a label, 422 `invalid_request` when invalid): only live sessions (`desired` `active`, so not one being deleted) that carry at least one of the given labels are returned. Response 200.
+All sessions as a list of session views. Optional repeatable `label` query parameter (each value normalised like a label, 422 `invalid_request` when invalid): only live sessions (`desired` `active`, so not one being deleted) that carry at least one of the given labels are returned. Optional `project` keeps the sessions of that project (an archived project still lists; an unknown one is 422 `unknown_project`); with `superleaders=include` every superleader session (`spec.session_messaging`) is added whatever its project (the flag changes nothing without `project`; any other value is 422 `invalid_request`). Optional `slug` is an exact match (agents-common's create recovery reads it). The filters combine. Response 200.
 
 ### `POST /api/v1/sessions`
 
@@ -955,7 +990,7 @@ Schedules a session. The body holds exactly one of `spec` and `preset_id`, else 
 
 Start prompt: when the spec has `start_prompt`, the create renders it (the `web_chat_start` context) and queues it as the session's first message in the same transaction; an empty render queues nothing and a render failure is 422 `invalid_request` (`start_prompt: ...`) with nothing created. Until that message is `sent`, `failed` or `cancelled`, the dispatcher delivers no other message of the session, whatever its lane, target or sender, so the start prompt is always turn 1. Posted messages are never prefixed with it.
 
-The session's `labels` are a snapshot of the preset's labels at creation (`[]` for a raw-spec session); editing the preset later never changes them. Response 201 with the session view. Errors: 422 `invalid_request` (bad slug, both or neither of `spec` and `preset_id`, `spec` without `slug`, image outside `ORCH_AGENT_IMAGES`, reserved env key, replicas or PVC size above the caps, invalid `any_mcp_config`, an invalid preset), 404 `not_found` (unknown preset), 409 `conflict` (slug exists, or no free generated slug), 409 `session_limit`, 409 `usage_quota` (the account's Claude usage is at or above the resolved spec's quota; nothing is stored, see Usage gate), 403 `forbidden`.
+Optional `project` (both forms) places the session in that project. Without it a preset session goes into the preset's project and a raw-spec session into `default`; a preset is a template usable in any project. The project must exist and be active: 422 `unknown_project`, 422 `project_archived`. The project row is held (FOR SHARE) until the insert commits, locked before the preset row, so it cannot be archived meanwhile. The session view carries `project`. The session's `labels` are a snapshot of the preset's labels at creation (`[]` for a raw-spec session); editing the preset later never changes them. Response 201 with the session view. Errors: 422 `invalid_request` (bad slug, both or neither of `spec` and `preset_id`, `spec` without `slug`, image outside `ORCH_AGENT_IMAGES`, reserved env key, replicas or PVC size above the caps, invalid `any_mcp_config`, an invalid preset), 404 `not_found` (unknown preset), 409 `conflict` (slug exists, or no free generated slug), 409 `session_limit`, 409 `usage_quota` (the account's Claude usage is at or above the resolved spec's quota; nothing is stored, see Usage gate), 403 `forbidden`.
 
 ### `GET /api/v1/sessions/{session_id}`
 
@@ -992,6 +1027,10 @@ Replaces the session's init scripts. Body `{"scripts": ["<shell script>", ...]}`
 ### `PATCH /api/v1/sessions/{session_id}/labels`
 
 Replaces the session's labels. Body `{"labels": ["<label>", ...]}` (extra fields rejected). A label is trimmed and lowercased, 1 to 40 characters of `a-z`, `0-9`, `-`, `_`, `.`, `:`; the list is deduplicated keeping the first-seen order and holds at most 20 labels, else 422 `invalid_request`. Labels are not part of the spec: no generation bump, no pod roll. Response 200 with the session view (`labels`). Errors: 404 `not_found`, 422 `invalid_request`.
+
+### `PATCH /api/v1/sessions/{session_id}/project`
+
+Moves a live session to another project (main port only). Body `{"project": "<slug>"}` (extra fields rejected). The project is a column, not a spec field: no generation bump, no pod roll, and project scope is read live per request, so the move takes effect at once. A move is a new placement, so the target must exist and be active. Response 200 with the session view. Errors: 404 `not_found`, 409 `session_deleting`, 422 `unknown_project`, 422 `project_archived`, 422 `invalid_request`.
 
 ### `PUT /api/v1/sessions/{session_id}/permission-mode`
 
@@ -1339,11 +1378,20 @@ The caller's identity, the leader and the hive members.
   "max_replicas": 4, "static": false,
   "members": [
     {"pod_name": "string", "ready": true, "state": "idle", "context_pct": 12.5, "leader": true}
-  ]
+  ],
+  "project": "default", "projects_scope": "default"
 }
 ```
 
-`leader` and `epoch` come from the session's leader record and are null while there is none. `members` are the not-gone agents by ordinal; `state` is the stored agent state and `context_pct` is null when unknown.
+`leader` and `epoch` come from the session's leader record and are null while there is none. `members` are the not-gone agents by ordinal; `state` is the stored agent state and `context_pct` is null when unknown. `project` is the session's project and `projects_scope` the projects its agents may reach: `"*"` (every project) for a superleader session, else the session's project. Both are read live, so a move of the session (`PATCH /api/v1/sessions/{id}/project`) shows on the next call.
+
+### `GET /agent/v1/projects`
+
+The projects the caller's session may reach. Response 200, a list of `{slug, name, description, archived, created_at, updated_at, presets: null, sessions: null}` (no counts, as on the service port): the session's own project, archived or not, or every active project, by slug, for a superleader session. Errors: the 401 and 403 above.
+
+### Project scope of agent routes
+
+Every agent-port route is classified in `AGENT_SCOPE` (`api/scope.py`), and a test fails when a route is missing: `own` (the caller's session only: `/me`, scale, close, locks, handover, activity, labels, init scripts, `POST /agent/v1/chat/messages` and its delivery status, the leader branch of `GET|PATCH /agent/v1/admin/sessions/{slug}`, own proposals), `peers` (`GET /agent/v1/sessions`, `POST /agent/v1/sessions/{slug}/messages`), `project` (the taskboard relay, `GET /agent/v1/projects`, the other chat relay routes) and `superleader` (every other `/agent/v1/admin/*` route). The scope is `*` for a superleader session, else the session's project. The relays send it upstream as `X-Orch-Projects`, set by the orchestrator only: an inbound `X-Orch-Projects` is dropped like every inbound header. The taskboard relay sends the caller's scope; the admin relay is superleader-only and always sends `*`. The agent chat relay (`/agent/v1/chat/*`) sends no scope to the chat connector yet; the room-request decisions it files on the taskboard send `*` (rooms are not project-bound).
 
 ### `GET /agent/v1/activity`
 
@@ -1369,7 +1417,7 @@ The init scripts of the caller's session and the last init run, so the agent kno
 
 ### `PUT /agent/v1/init-scripts`
 
-Replaces the caller's session init scripts. Body `{"scripts": ["<shell script>", ...]}` with the same limits as the public PUT. Writes the session's stored `spec.init_scripts` and its source preset's (when it still exists) in one transaction, with no generation bump and no pod roll; the edit applies to the next session created from the preset and never re-runs here. Response 200 with the view above and `preset_updated` true when a preset was written. Errors: 422 `invalid_request` (nothing is written), 409 `conflict` (the session is being deleted), plus the 401 and 403 above. These two routes back the plugin tools `orchestrator_init_scripts_get` and `orchestrator_init_scripts_edit`.
+Replaces the caller's session init scripts. Body `{"scripts": ["<shell script>", ...]}` with the same limits as the public PUT. Writes the session's stored `spec.init_scripts` and its source preset's (when it still exists and is in the session's project, checked under the preset row lock; a preset in another project is left alone and only the session is written) in one transaction, with no generation bump and no pod roll; the edit applies to the next session created from the preset and never re-runs here. Response 200 with the view above and `preset_updated` true when a preset was written. Errors: 422 `invalid_request` (nothing is written), 409 `conflict` (the session is being deleted), plus the 401 and 403 above. These two routes back the plugin tools `orchestrator_init_scripts_get` and `orchestrator_init_scripts_edit`.
 
 ### `POST /agent/v1/scale`
 
@@ -1390,11 +1438,11 @@ Served only on the agent port. Backs the plugin tool `orchestrator_self_close`.
 
 ### Cross-session messaging
 
-A superleader session is one whose spec has `session_messaging` true. Its leader lists and messages the leader of every other open session; the leader of any other session, alone sessions included, lists and messages only the superleader sessions. A send needs a superleader on at least one end (two superleaders may message each other), or the reply right: a session may message back a session that messaged it within `ORCH_SESSION_REPLY_WINDOW_SECONDS` (24 h by default), whatever the status of that message. The right runs one way only (an answer needs a question) and is not listed by `GET /agent/v1/sessions`. Every session can receive. A message is an async mailbox entry: it is queued untargeted in the target session, so whoever leads there at claim time gets it as a turn framed with the sender session's slug (see "Session messages" under Delivery and retries); a reply is a send back to that slug. Backs the plugin tools `orchestrator_sessions_list` and `orchestrator_session_send`.
+A superleader session is one whose spec has `session_messaging` true. Its leader lists and messages the leader of every other open session; the leader of any other session, alone sessions included, lists and messages the superleader sessions (of any project) and the other sessions of its own project (projects Q5 C). A send needs a superleader on at least one end (two superleaders may message each other), or both sessions in the same project (read from both session rows on every request, so moving a session to another project revokes the right on the next request), or the reply right: a session may message back a session that messaged it within `ORCH_SESSION_REPLY_WINDOW_SECONDS` (24 h by default), whatever the status of that message. The right runs one way only (an answer needs a question) and is not listed by `GET /agent/v1/sessions`. Every session can receive. A message is an async mailbox entry: it is queued untargeted in the target session, so whoever leads there at claim time gets it as a turn framed with the sender session's slug (see "Session messages" under Delivery and retries); a reply is a send back to that slug. Backs the plugin tools `orchestrator_sessions_list` and `orchestrator_session_send`.
 
 #### `GET /agent/v1/sessions`
 
-Response 200 `{"sessions": [{"slug", "preset_name", "superleader", "leader_present", "start_state", "start_reason"}]}`, ordered by slug. Never the caller's own session and never a session being discarded (`desired: deleting`). For a caller in a superleader session: every other active session, with or without the option. For any other caller: only the other active superleader sessions, an empty list when there is none. `preset_name` is the preset the session was created from, or null. `leader_present` is true when a hive has a leader on a not-gone agent, or an alone session has a not-gone agent. `start_state` is `booting`, `ready` or `bootstrap_failed` (same rule as the session summary) and `start_reason` is one line (`<step>: <message>` of the first failure, or why it is still booting), null when ready. Any agent of the session may list (read only); a non-superleader leader still sees its own members through `GET /agent/v1/me`. Errors: the 401 and 403 above.
+Response 200 `{"sessions": [{"slug", "preset_name", "superleader", "leader_present", "start_state", "start_reason"}]}`, ordered by slug. Never the caller's own session and never a session being discarded (`desired: deleting`). For a caller in a superleader session: every other active session, with or without the option. For any other caller: the other active sessions of the caller's project plus every active superleader session (of any project), an empty list when there is none. `preset_name` is the preset the session was created from, or null. `leader_present` is true when a hive has a leader on a not-gone agent, or an alone session has a not-gone agent. `start_state` is `booting`, `ready` or `bootstrap_failed` (same rule as the session summary) and `start_reason` is one line (`<step>: <message>` of the first failure, or why it is still booting), null when ready. Any agent of the session may list (read only); a non-superleader leader still sees its own members through `GET /agent/v1/me`. Errors: the 401 and 403 above.
 
 #### `POST /agent/v1/sessions/{slug}/messages`
 
@@ -1403,7 +1451,7 @@ Queues a message to the session named `slug`. Body `{"text"}`, 1 to 16000 charac
 - 403 `not_leader`: the caller is not its session's current leader (the only agent of an alone session counts as leader);
 - 404 `not_found`: no session has that slug;
 - 422 `self_send`: the slug is the caller's own session;
-- 403 `target_not_superleader`: neither the caller's session nor the target is a superleader, and the target has not messaged the caller's session within `ORCH_SESSION_REPLY_WINDOW_SECONDS` (the message names the window in hours; with the window 0 it is the plain superleader text);
+- 403 `project_forbidden`: neither the caller's session nor the target is a superleader, the two sessions are in different projects, and the target has not messaged the caller's session within `ORCH_SESSION_REPLY_WINDOW_SECONDS` (the message names the window in hours; with the window 0 it leaves the window out). Two sessions of the same project may always message each other;
 - 409 `session_deleting`: the target is being discarded;
 - 409 `hop_limit`: the new hop exceeds `ORCH_SESSION_MESSAGE_MAX_HOPS` (8). The hop is computed by the server: when the caller's current turn (`agent_status.current_turn_id`) delivered a message that has a sender, it is that message's hop plus one, else 1. It stops a ping-pong whose replies are sent in the turn that delivered the previous message;
 - 429 `rate_limited`: the caller's session sent `ORCH_SESSION_MESSAGE_RATE_PER_MINUTE` (10) or more messages in the last 60 s, any status;
@@ -1435,7 +1483,7 @@ Forwards to `GET {ORCH_CHAT_URL}/chat/v1/rooms`: the rooms the caller's session 
 
 Forwards to `POST {ORCH_CHAT_URL}/chat/v1/messages`. Body `{text, room?, reply_to?}`: `text` 1 to 16000 characters, `room` a room id from the rooms list, `reply_to` a message reference `m<n>` or `s<n>`; with `room` omitted the upstream picks the room of `reply_to`, else the room bound to the session, else answers 422 `room_required`. Response 202 `{id: "s<n>", status: "queued"}`.
 
-Chat relay. When the upstream refuses with 409 `room_bound` and names an `occupier` (the session bound to a room agents may start a chat in), the orchestrator relays the post instead of failing it. It applies only to a post with a `room` and no `reply_to` (otherwise the 409 `room_bound` passes back, without the `occupier`). Steps, all checks before any write: the text with the prefix `[<caller slug>] ` must stay within 16000 characters (else 422 `invalid_request`); the occupier session must exist (unknown: the plain 409 `room_bound`) and not be closing (409 `occupier_closing`, `retry_after` 60); the session-message limits apply to caller and occupier as for `POST /agent/v1/sessions/{slug}/messages` and share their counters (`hop_limit`, `rate_limited`, `pair_budget`, `target_queue_full`; there is no `target_not_superleader` check, eligibility is the connector's `agents_may_initiate`). Then the orchestrator posts `{text: "[<caller slug>] <text>", room}` as the occupier and queues the occupier a session message on the `regular` lane (a relay notice framed like a session message, carrying the original text, so the occupier knows what was said in its name). A refusal of that post (for example 422 `pseudonym_disclosed`) passes back unchanged and nothing is queued. Response 202 `{"status": "relayed", "via": "<occupier slug>", "send_id": "s<n>", "message_id": <n>}`; `message_id` is null only when the notice could not be queued after the post. The 202 stamps the caller's `last_update_at`, never the occupier's. The `occupier` field never reaches an agent, on any chat route and any status. Log line: `chat relay from=<slug> to=<slug> room=<room> send=<id> status=202`, never the text.
+Chat relay. When the upstream refuses with 409 `room_bound` and names an `occupier` (the session bound to a room agents may start a chat in), the orchestrator relays the post instead of failing it. It applies only to a post with a `room` and no `reply_to` (otherwise the 409 `room_bound` passes back, without the `occupier`). Steps, all checks before any write: the text with the prefix `[<caller slug>] ` must stay within 16000 characters (else 422 `invalid_request`); the occupier session must exist (unknown: the plain 409 `room_bound`) and not be closing (409 `occupier_closing`, `retry_after` 60); the session-message limits apply to caller and occupier as for `POST /agent/v1/sessions/{slug}/messages` and share their counters (`hop_limit`, `rate_limited`, `pair_budget`, `target_queue_full`; there is no `project_forbidden` check, eligibility is the connector's `agents_may_initiate`). Then the orchestrator posts `{text: "[<caller slug>] <text>", room}` as the occupier and queues the occupier a session message on the `regular` lane (a relay notice framed like a session message, carrying the original text, so the occupier knows what was said in its name). A refusal of that post (for example 422 `pseudonym_disclosed`) passes back unchanged and nothing is queued. Response 202 `{"status": "relayed", "via": "<occupier slug>", "send_id": "s<n>", "message_id": <n>}`; `message_id` is null only when the notice could not be queued after the post. The 202 stamps the caller's `last_update_at`, never the occupier's. The `occupier` field never reaches an agent, on any chat route and any status. Log line: `chat relay from=<slug> to=<slug> room=<room> send=<id> status=202`, never the text.
 
 #### `POST /agent/v1/chat/reactions`
 
@@ -1454,7 +1502,7 @@ A session reaches agents-taskboard through relay routes on the agent port only: 
 3. 503 `taskboard_unconfigured`: `ORCH_TASKBOARD_URL` and `ORCH_TASKBOARD_TOKEN` are empty;
 4. 413 `payload_too_large`: a body over 256 KiB.
 
-There is no leader check and no trigger-session refusal: trigger-created sessions may keep tasks and ask decisions, but cannot answer them. The relay forwards the method, path, query string and body with only `Authorization: Bearer <ORCH_TASKBOARD_TOKEN>`, `X-Orch-Session: <caller session id>`, `X-Orch-Slug: <caller session slug>` and, for a body, `Content-Type: application/json`; every inbound header, `X-Orch-*` included, is dropped. On `GET /agent/v1/tasks`, a `labels=mine` parameter is replaced by one `label` parameter per label of the calling session (`Session.labels`); a session without labels gets `{"items": [], "next_cursor": null}` without an upstream call. The upstream status and JSON body pass through unchanged; a connection error, a timeout or a non-JSON answer is 503 `taskboard_unavailable`.
+There is no leader check and no trigger-session refusal: trigger-created sessions may keep tasks and ask decisions, but cannot answer them. The relay forwards the method, path, query string and body with only `Authorization: Bearer <ORCH_TASKBOARD_TOKEN>`, `X-Orch-Session: <caller session id>`, `X-Orch-Slug: <caller session slug>`, `X-Orch-Projects: <caller scope>` (`*` for a superleader session, else its project, see Project scope of agent routes) and, for a body, `Content-Type: application/json`; every inbound header, `X-Orch-*` included, is dropped. On `GET /agent/v1/tasks`, a `labels=mine` parameter is replaced by one `label` parameter per label of the calling session (`Session.labels`); a session without labels gets `{"items": [], "next_cursor": null}` without an upstream call. The upstream status and JSON body pass through unchanged; a connection error, a timeout or a non-JSON answer is 503 `taskboard_unavailable`.
 
 `PUT /agent/v1/session/labels` body `{labels: [..]}` (agent port only) replaces the labels of the calling session and returns `{session_id, labels}`. The session comes from the verified agent identity; there is no id in the path and an extra body field (a `session_id` included) is 422, so no other session can be targeted. Labels are trimmed, lowercased and deduplicated, 1-40 chars of `[a-z0-9-_.:]`, at most 20 (else 422), the same rules as `PATCH /api/v1/sessions/{id}/labels`. It is idempotent, needs no taskboard and has no trigger-session refusal or leader check.
 
@@ -1470,7 +1518,7 @@ Advisory locks on files, so agents claim what they edit and are warned before wr
 
 ## Admin relay (superleader)
 
-A superleader session (`session_messaging` set in its spec, whoever created the session: a user, a trigger service or the matrix connector) reaches the trigger services through `/agent/v1/admin/webhooks/*`, `/schedules/*`, `/chats/*` and `/history/*`, which map 1:1 to the upstream admin routes (`ORCH_WEBHOOK_URL`, `ORCH_SCHEDULE_URL`, `ORCH_CONNECTOR_URL`, `ORCH_HISTORY_URL` with their tokens). After the superleader gate the upstream must be configured (503 `upstream_unconfigured`) and the body is capped at 256 KiB (413). The upstream gets only its service bearer, `X-Orch-Session` and `X-Orch-Slug`; its status and JSON come back unchanged, a failed or non-JSON call is 503 `upstream_unavailable`. The proposals code reaches the same upstreams through `admin_relay.upstream_target(settings, service)` and `forward(..., extra_headers=)`: the only headers added to the fixed set are those the orchestrator itself sets (a schedule proposal's `If-Match`); an inbound header is still never forwarded.
+A superleader session (`session_messaging` set in its spec, whoever created the session: a user, a trigger service or the matrix connector) reaches the trigger services through `/agent/v1/admin/webhooks/*`, `/schedules/*`, `/chats/*` and `/history/*`, which map 1:1 to the upstream admin routes (`ORCH_WEBHOOK_URL`, `ORCH_SCHEDULE_URL`, `ORCH_CONNECTOR_URL`, `ORCH_HISTORY_URL` with their tokens). After the superleader gate the upstream must be configured (503 `upstream_unconfigured`) and the body is capped at 256 KiB (413). The upstream gets only its service bearer, `X-Orch-Session`, `X-Orch-Slug` and `X-Orch-Projects: *` (the relay is superleader-only, so the scope is always every project); its status and JSON come back unchanged, a failed or non-JSON call is 503 `upstream_unavailable`. The proposals code reaches the same upstreams through `admin_relay.upstream_target(settings, service)` and `forward(..., extra_headers=)`: the only headers added to the fixed set are those the orchestrator itself sets (a schedule proposal's `If-Match`); an inbound header is still never forwarded.
 
 The history routes are read and search only; the superleader cannot delete a stored session (deleting is for the user, through the web UI), so there is no DELETE route and any other method is 405 with nothing sent upstream:
 

@@ -29,6 +29,7 @@ from fastapi.responses import JSONResponse
 from agents_orchestrator.api import forward as forward_core
 from agents_orchestrator.api.admin import caller_of, router
 from agents_orchestrator.api.errors import ApiError
+from agents_orchestrator.api.scope import ALL_PROJECTS, PROJECTS_HEADER
 from agents_orchestrator.api.sessions import Cfg
 from agents_orchestrator.api.tasks import taskboard_target
 from agents_orchestrator.settings import Settings
@@ -62,7 +63,13 @@ def _task_path(task_key: str, suffix: str = "") -> str:
 
 
 async def _call(
-    request: Request, target: forward_core.Target, method: str, path: str, body: Any = None
+    request: Request,
+    target: forward_core.Target,
+    method: str,
+    path: str,
+    body: Any = None,
+    *,
+    extra_headers: dict[str, str] | None = None,
 ) -> tuple[int, Any]:
     """One call as the calling session; the JSON answer with its status."""
     _, session = caller_of(request)
@@ -77,22 +84,37 @@ async def _call(
         session.slug,
         empty_ok=True,
         query="",
+        extra_headers=extra_headers,
     )
     return status, (json.loads(content) if content else None)
+
+
+async def _board_call(
+    settings: Settings, request: Request, method: str, path: str, body: Any = None
+) -> tuple[int, Any]:
+    """A taskboard call for a room request: a room is not project-bound, so the scope is `*`."""
+    return await _call(
+        request,
+        _taskboard(settings),
+        method,
+        path,
+        body,
+        extra_headers={PROJECTS_HEADER: ALL_PROJECTS},
+    )
 
 
 async def check_task(request: Request, settings: Settings, body: bytes | None) -> None:
     """Before a room request is forwarded: the taskboard must be configured and know the task
     named by the body's `task_key` (422 `unknown_task`). A body without a valid key is left to
     the connector, which answers 422 itself."""
-    target = _taskboard(settings)
+    _taskboard(settings)
     try:
         key = json.loads(body).get("task_key") if body else None
     except (ValueError, AttributeError):
         key = None
     if not isinstance(key, str) or not TASK_KEY.fullmatch(key):
         return
-    status, _ = await _call(request, target, "GET", _task_path(key))
+    status, _ = await _board_call(settings, request, "GET", _task_path(key))
     if status == 404:
         raise ApiError(422, "unknown_task", f"the taskboard has no task {key}")
     if not 200 <= status < 300:
@@ -128,7 +150,6 @@ async def ensure_decision(
     if row.get("status") != "pending_confirmation" or row.get("decision_id") is not None:
         return row
     _, session = caller_of(request)
-    board = _taskboard(settings)
     key = row["task_key"]
     ask = {
         "question": _question(row),
@@ -136,7 +157,9 @@ async def ensure_decision(
         "options": [{"label": YES, "recommended": True}, {"label": NO}],
         "client_key": decision_key(row["id"], settings.connector_token),
     }
-    status, decision = await _call(request, board, "POST", _task_path(key, "/decisions"), ask)
+    status, decision = await _board_call(
+        settings, request, "POST", _task_path(key, "/decisions"), ask
+    )
     if status not in (200, 201) or not isinstance(decision, dict) or "id" not in decision:
         raise ApiError(503, "taskboard_unavailable", f"the taskboard answered {status}")
     attach = {"task_key": key, "decision_id": decision["id"]}
@@ -184,7 +207,7 @@ async def confirm(request: Request, settings: Cfg, request_id: int) -> Response:
         )
     if row["decision_id"] is None:
         return JSONResponse(await ensure_decision(request, settings, row), 202)
-    status, task = await _call(request, _taskboard(settings), "GET", _task_path(row["task_key"]))
+    status, task = await _board_call(settings, request, "GET", _task_path(row["task_key"]))
     if status != 200 or not isinstance(task, dict):
         raise ApiError(503, "taskboard_unavailable", f"the taskboard answered {status}")
     decision = next(

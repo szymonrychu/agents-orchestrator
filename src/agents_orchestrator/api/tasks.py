@@ -1,20 +1,20 @@
 """Taskboard relay (`/agent/v1/tasks`), served only on the agent port.
 
-An agent session reaches agents-taskboard through the orchestrator, which vouches for its
-identity: every route runs `require_agent`, then requires the taskboard upstream configured (503
+An agent session reaches agents-taskboard through the orchestrator, which vouches for its identity:
+every route runs `require_agent`, then requires the taskboard upstream configured (503
 `taskboard_unconfigured`), then caps the body at 256 KiB (413 `payload_too_large`) and forwards the
 call to `{ORCH_TASKBOARD_URL}/taskboard/api/v1/tasks/...`. There is no trigger-session refusal and
-no leader check (leader decision 2026-11-02): trigger-created sessions may use the relay, they
-still cannot answer decisions because answering exists only on the web listener, so the relay
-does not forward `.../answer` (nor `/stream`): any path outside the allowed set is 404
-`not_found` here. The forwarded request carries only the taskboard bearer
-(`ORCH_TASKBOARD_TOKEN`), `X-Orch-Session` and `X-Orch-Slug` of the caller (slug read from the
-sessions repo), and for a body `Content-Type: application/json`; no inbound header and never the
-agent token. On `GET tasks` a `labels=mine` parameter becomes one `label` parameter per label of
-the calling session; an unlabelled session gets an empty page without calling the upstream. The
-upstream status and JSON body come back unchanged; a connection error, a timeout or a non-JSON
-answer is 503 `taskboard_unavailable`. The relay stores nothing and logs method, path and status
-only.
+no leader check (leader decision 2026-11-02): trigger-created sessions may use the relay, they still
+cannot answer decisions because answering exists only on the web listener, so the relay does not
+forward `.../answer` (nor `/stream`): any path outside the allowed set is 404 `not_found` here. The
+forwarded request carries only the taskboard bearer (`ORCH_TASKBOARD_TOKEN`), `X-Orch-Session` and
+`X-Orch-Slug` of the caller (slug read from the sessions repo), `X-Orch-Projects` (the caller's
+project scope, `scope.scope_of`: `*` for a superleader, else its project, read live), and for a body
+`Content-Type: application/json`; no inbound header and never the agent token. On `GET tasks` a
+`labels=mine` parameter becomes one `label` parameter per label of the calling session; an
+unlabelled session gets an empty page without calling the upstream. The upstream status and JSON
+body come back unchanged; a connection error, a timeout or a non-JSON answer is 503
+`taskboard_unavailable`. The relay stores nothing and logs method, path and status only.
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from fastapi import APIRouter, FastAPI, Request, Response
 from agents_orchestrator.api import forward as forward_core
 from agents_orchestrator.api.agent import Caller, _session
 from agents_orchestrator.api.errors import ApiError
+from agents_orchestrator.api.scope import projects_header
 from agents_orchestrator.api.sessions import Cfg, Pool
 from agents_orchestrator.settings import Settings
 
@@ -124,6 +125,7 @@ async def _relay(request: Request, agent: Caller, pool: Pool, settings: Cfg, pat
         str(own.id),
         own.slug,
         query=query,
+        extra_headers=projects_header(own),
     )
     if request.method in _WRITES:
         await forward_core.touch_on_success(pool, own.id, status)

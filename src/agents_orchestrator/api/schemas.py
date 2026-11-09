@@ -24,6 +24,8 @@ class CreateSession(BaseModel):
     slug: str | None = None
     spec: SessionSpecIn | None = None
     preset_id: uuid.UUID | None = None
+    # None: the preset's project, or the default project for a spec-only session
+    project: str | None = None
 
 
 class PresetIn(BaseModel):
@@ -34,6 +36,8 @@ class PresetIn(BaseModel):
     superleader_manageable: bool | None = None
     # None keeps the stored labels on PUT and means none on POST
     labels: list[str] | None = None
+    # None keeps the stored project on PUT and means the default project on POST
+    project: str | None = None
 
     @field_validator("labels")
     @classmethod
@@ -42,12 +46,14 @@ class PresetIn(BaseModel):
 
 
 class PresetPatch(BaseModel):
-    """Admin partial edit: `spec` is an RFC 7396 merge patch of the stored spec."""
+    """Admin partial edit: `spec` is an RFC 7396 merge patch of the stored spec. A `project`
+    other than the stored one is refused (human-only)."""
 
     model_config = ConfigDict(extra="forbid")
 
     name: str | None = None
     labels: list[str] | None = None
+    project: str | None = None
     spec: dict[str, Any] | None = None
 
     @field_validator("labels")
@@ -62,6 +68,12 @@ class SessionSpecPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     spec: dict[str, Any]
+
+
+class SessionProjectIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project: str
 
 
 class SessionLabelsIn(BaseModel):
@@ -108,6 +120,36 @@ class CopyPreset(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str | None = None
+    # None keeps the source's project
+    project: str | None = None
+
+
+class ProjectIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    slug: str
+    name: str
+    description: str = ""
+
+
+class ProjectPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = None
+    description: str | None = None
+    archived: bool | None = None
+
+
+class ProjectView(BaseModel):
+    slug: str
+    name: str
+    description: str
+    archived: bool
+    created_at: datetime
+    updated_at: datetime
+    # None on the service port, which does not read counts
+    presets: int | None = None
+    sessions: int | None = None
 
 
 class PresetView(BaseModel):
@@ -116,6 +158,9 @@ class PresetView(BaseModel):
     is_default: bool
     superleader_manageable: bool
     labels: list[str]
+    project: str
+    # the privileged grants on (preset_policy.privileged), so a client never names the fields
+    privileged: list[str]
     spec: dict[str, Any]
     created_at: datetime
     updated_at: datetime
@@ -307,6 +352,8 @@ class SessionView(BaseModel):
     created_by_service: str | None = None
     created_by_session: uuid.UUID | None = None
     labels: list[str] = []
+    # the project the session belongs to; moved by PATCH /sessions/{id}/project
+    project: str
 
 
 class InitScriptsIn(BaseModel):

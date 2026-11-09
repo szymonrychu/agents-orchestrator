@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import itertools
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -33,13 +34,14 @@ async def insert_session(
     id: uuid.UUID | None = None,
     created_by_service: str | None = None,
     created_by_session: uuid.UUID | None = None,
+    project: str = "default",
 ) -> dict[str, Any]:
     n = next(_counter)
     return await _one(
         pool,
         "INSERT INTO sessions (id, slug, spec, generation, observed_generation, desired, status,"
-        " created_by_service, created_by_session)"
-        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+        " created_by_service, created_by_session, project)"
+        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
         (
             id or uuid.uuid4(),
             slug or f"session-{n}",
@@ -50,6 +52,7 @@ async def insert_session(
             Jsonb(status if status is not None else {}),
             created_by_service,
             created_by_session,
+            project,
         ),
     )
 
@@ -319,3 +322,50 @@ async def attach_preset(pool, session_id: uuid.UUID, *, manageable: bool = True)
         (preset["id"], session_id),
     )
     return preset["id"]
+
+
+@dataclass(frozen=True)
+class Seat:
+    """One session of `two_project_fixture`: its row and the pod IP of its leading agent."""
+
+    row: dict[str, Any]
+    ip: str
+
+    @property
+    def id(self) -> uuid.UUID:
+        return self.row["id"]
+
+    @property
+    def slug(self) -> str:
+        return self.row["slug"]
+
+
+async def two_project_fixture(pool) -> dict[str, Seat]:
+    """The projects plan section 8 fixture: projects `a` and `b`; A1 (project a, a hive with a
+    leader), A2 (a), B1 (b) and S (a superleader in a). Each answers from its leader's pod IP
+    (10.9.200.x); A2, B1 and S are alone sessions, so their one agent leads."""
+    async with pool.connection() as conn:
+        await conn.execute("INSERT INTO projects (slug, name) VALUES ('a', 'A'), ('b', 'B')")
+    seats: dict[str, Seat] = {}
+    layout = (
+        ("A1", "a", {"replicas": 2, "max_replicas": 2}),
+        ("A2", "a", {"replicas": 1}),
+        ("B1", "b", {"replicas": 1}),
+        ("S", "a", {"replicas": 1, "session_messaging": True}),
+    )
+    for n, (name, project, spec) in enumerate(layout, start=1):
+        row = await insert_session(pool, slug=f"two-{name.lower()}", spec=spec, project=project)
+        lead = await insert_agent(pool, row["id"], ordinal=0, ready=True)
+        ip = f"10.9.200.{n}"
+        async with pool.connection() as conn:
+            await conn.execute("UPDATE agents SET pod_ip = %s WHERE id = %s", (ip, lead["id"]))
+            if spec["replicas"] > 1:
+                await conn.execute(
+                    "INSERT INTO session_leaders (session_id, agent_id, epoch, since, reason)"
+                    " VALUES (%s, %s, 1, now(), 'start')",
+                    (row["id"], lead["id"]),
+                )
+        if spec["replicas"] > 1:
+            await insert_agent(pool, row["id"], ordinal=1, ready=True)
+        seats[name] = Seat(row, ip)
+    return seats

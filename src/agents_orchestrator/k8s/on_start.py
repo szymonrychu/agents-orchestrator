@@ -49,6 +49,9 @@ TASK_TOOLS = [
     "task_create", "task_update", "task_list", "task_get", "task_comment",
     "decision_ask", "decision_withdraw", "todo_set", "todo_update", "session_labels_set",
 ]  # fmt: skip
+# Project tool (projects T-19): every session lists the projects its scope reaches
+# (GET /agent/v1/projects: its own project, or every active one for a superleader).
+PROJECT_TOOLS = ["project_list"]
 # Superleader admin tools: the plugin's declarative admin rows (any-mcp-tatara-plugins
 # orchestration/orchestrator admin.py) plus the local secret_set tool. History is read and search
 # only: there is no history delete tool, deleting a stored session is for the user (web UI).
@@ -73,20 +76,21 @@ ADMIN_TOOLS = [
 def orchestrator_allow(spec: SessionSpec) -> list[str]:
     """The orchestrator tools this session's agents may call.
 
-    Every session gets the session tools (D11), the init-scripts tools, the chat tools (D13) and
-    the task tools, alone sessions included, which also get `me`; the agent API decides what each
-    caller may list, send, edit and say in the chat (leader only). The admin tools and
-    `secret_set` are listed exactly when `session_messaging` is enabled, whoever created the
-    session; every other session gets `SESSION_EDIT_TOOLS` (its spec and its proposals) and
-    `self_close` last instead (a superleader is never offered `self_close`; it has the edit tools
-    as admin tools). A tool in two groups (`leadership_withdraw`, a hive and an admin tool) is
-    listed once.
+    Every session gets the session tools (D11), the init-scripts tools, the chat tools (D13), the
+    task tools and `project_list`, alone sessions included, which also get `me`; the agent API
+    decides what each caller may list, send, edit and say in the chat (leader only). The admin
+    tools and `secret_set` are listed exactly when `session_messaging` is enabled, whoever
+    created the session; every other session gets `SESSION_EDIT_TOOLS` (its spec and its
+    proposals) and `self_close` last instead (a superleader is never offered `self_close`; it has
+    the edit tools as admin tools). A tool in two groups (`leadership_withdraw`, a hive and an
+    admin tool) is listed once.
     """
     shared = [
         *SESSION_TOOLS,
         *INIT_SCRIPTS_TOOLS,
         *CHAT_TOOLS,
         *TASK_TOOLS,
+        *PROJECT_TOOLS,
         *(ADMIN_TOOLS if spec.session_messaging else [*SESSION_EDIT_TOOLS, CLOSE_TOOL]),
     ]
     if not spec.hive:

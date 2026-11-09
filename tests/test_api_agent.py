@@ -69,6 +69,7 @@ async def test_me_identity(pool, dsn):
     assert body["static"] is False
     assert body["leader"] is None
     assert body["epoch"] is None
+    assert (body["project"], body["projects_scope"]) == ("default", "default")
 
 
 async def test_token_rejections(pool, dsn):

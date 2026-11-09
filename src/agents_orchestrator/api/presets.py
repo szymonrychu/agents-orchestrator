@@ -11,11 +11,22 @@ from fastapi.concurrency import run_in_threadpool
 from pydantic import SecretStr, ValidationError
 
 from agents_orchestrator.api import schemas, secret_store
-from agents_orchestrator.api.errors import ApiError, not_found
-from agents_orchestrator.api.sessions import Cfg, Pool, check_spec
-from agents_orchestrator.api.spec_edit import guard_agent_edit, merged_spec_in, note_fields
+from agents_orchestrator.api.errors import ApiError, not_found, project_error
+from agents_orchestrator.api.sessions import Cfg, Pool, check_spec, hold_project
+from agents_orchestrator.api.spec_edit import (
+    guard_agent_edit,
+    human_only_refused,
+    merged_spec_in,
+    note_fields,
+)
 from agents_orchestrator.db import presets as repo
-from agents_orchestrator.preset_policy import changed_paths, privileged, strip_grants
+from agents_orchestrator.db import projects
+from agents_orchestrator.preset_policy import (
+    HUMAN_ONLY_COLUMNS,
+    changed_paths,
+    privileged,
+    strip_grants,
+)
 from agents_orchestrator.secret_view import EnvMeta, redact_spec_dict
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import SessionSpec, default_cache_key
@@ -39,6 +50,8 @@ def _view(
         is_default=preset.is_default,
         superleader_manageable=preset.superleader_manageable,
         labels=preset.labels,
+        project=preset.project,
+        privileged=privileged(preset.spec),
         spec=redact_spec_dict(preset.spec, metas),
         created_at=preset.created_at,
         updated_at=preset.updated_at,
@@ -99,6 +112,16 @@ def check_secret_size(value: SecretStr) -> None:
         raise ApiError(413, "secret_too_large", f"a secret holds at most {SECRET_MAX_BYTES} bytes")
 
 
+def _refuse_column_moves(request: Request, stored: repo.Preset, new: dict[str, Any]) -> None:
+    """403 `human_only_field` when an agent edit changes a human-only column (`project`). The
+    stored row is the one the save compares `updated_at` against, so a concurrent move by the
+    user makes the save a 409 rather than slipping past this check."""
+    moved = [c for c in HUMAN_ONLY_COLUMNS if new[c] != getattr(stored, c)]
+    if moved:
+        note_fields(request, moved)
+        raise human_only_refused(moved)
+
+
 def store_failed() -> ApiError:
     return ApiError(502, "secret_store_failed", "could not store a protected variable")
 
@@ -116,21 +139,23 @@ async def _save(
     settings: Settings,
     spec: dict[str, Any],
     values: dict[str, SecretStr],
+    project: str,
     save: Callable[[], Awaitable[repo.Preset]],
 ) -> tuple[repo.Preset, list[secret_store.SecretMeta]]:
     """Save the preset row and its secrets as one step; a failure leaves the old state.
 
-    The row save, the new Secret versions and the retirement of dropped variables share one
-    transaction. The new versions are written to Kubernetes before it commits, so when anything
-    fails the transaction rolls back and the versions written so far are deleted. The previous
-    versions are collected only after the commit. A protected variable sent without a value is
-    left as it is.
+    The preset's `project` is checked and held first (`hold_project`). The row save, the new
+    Secret versions and the retirement of dropped variables share one transaction. The new
+    versions are written to Kubernetes before it commits, so when anything fails the transaction
+    rolls back and the versions written so far are deleted. The previous versions are collected
+    only after the commit. A protected variable sent without a value is left as it is.
     """
     declared = sorted(n for n, e in spec.get("env", {}).items() if e.get("protected"))
     created: list[tuple[uuid.UUID, str, int]] = []
     kube = None
     try:
         async with conn.transaction():
+            await hold_project(conn, project)
             preset = await save()
             if values or await secret_store.has_rows(conn, preset.id):
                 kube = secret_store.kube_of(request)
@@ -181,8 +206,13 @@ def manageable_main_port_only() -> ApiError:
     )
 
 
-async def list_all(conn, only_manageable: bool = False) -> list[schemas.PresetView]:
-    presets = await repo.list_presets(conn)
+async def list_all(
+    conn, only_manageable: bool = False, project: str | None = None
+) -> list[schemas.PresetView]:
+    """Every preset, or one project's (422 `unknown_project`; an archived one still lists)."""
+    if project is not None and await projects.get_project(conn, project) is None:
+        raise project_error(projects.UnknownProject(project))
+    presets = await repo.list_presets(conn, project=project)
     if only_manageable:
         presets = [p for p in presets if p.superleader_manageable]
     metas = await secret_store.list_metas(conn, [p.id for p in presets])
@@ -202,6 +232,7 @@ async def create(
         body, settings, human_only_base={} if superleader else None, request=request
     )
     manageable = superleader or bool(body.superleader_manageable)
+    project = projects.DEFAULT if body.project is None else body.project
     try:
         preset, metas = await _save(
             request,
@@ -209,14 +240,16 @@ async def create(
             settings,
             spec,
             values,
-            lambda: repo.create(conn, body.name, spec, manageable, body.labels),
+            project,
+            lambda: repo.create(conn, body.name, spec, manageable, body.labels, project),
         )
     except repo.PresetExists:
         raise _exists(body.name) from None
     if superleader:
-        note_fields(
-            request, changed_paths({}, spec) + ["name"] + (["labels"] if body.labels else [])
+        extra = (["labels"] if body.labels else []) + (
+            ["project"] if project != projects.DEFAULT else []
         )
+        note_fields(request, changed_paths({}, spec) + ["name"] + extra)
     return _view(preset, metas)
 
 
@@ -242,6 +275,10 @@ async def replace(
     stored = await repo.get(conn, preset_id)
     if stored is None or (superleader and not stored.superleader_manageable):
         raise not_found("preset")
+    # an omitted project keeps the one read here; the save holds it and writes it back
+    project = stored.project if body.project is None else body.project
+    if superleader:
+        _refuse_column_moves(request, stored, {**body.model_dump(), "project": project})
     spec, values = await _validated(
         body,
         settings,
@@ -258,7 +295,10 @@ async def replace(
             settings,
             spec,
             values,
-            lambda: repo.update(conn, preset_id, body.name, spec, flag, body.labels, expected),
+            project,
+            lambda: repo.update(
+                conn, preset_id, body.name, spec, flag, body.labels, expected, project
+            ),
         )
     except repo.PresetNotFound:
         raise not_found("preset") from None
@@ -285,6 +325,7 @@ def _merged_body(stored: repo.Preset, body: schemas.PresetPatch) -> schemas.Pres
         name=stored.name if body.name is None else body.name,
         spec=spec,
         labels=body.labels,
+        project=stored.project if body.project is None else body.project,
     )
 
 
@@ -299,6 +340,7 @@ async def patch(
         if stored is None or not stored.superleader_manageable:
             raise not_found("preset")
         merged = _merged_body(stored, body)
+        _refuse_column_moves(request, stored, merged.model_dump())
         spec, values = await _validated(
             merged,
             settings,
@@ -314,8 +356,9 @@ async def patch(
                 settings,
                 spec,
                 values,
+                merged.project,
                 lambda m=merged, sp=spec, at=stored.updated_at: repo.update(
-                    conn, preset_id, m.name, sp, None, m.labels, at
+                    conn, preset_id, m.name, sp, None, m.labels, at, m.project
                 ),
             )
         except repo.PresetNotFound:
@@ -386,9 +429,9 @@ async def remove(
 
 
 @router.get("/presets", response_model=list[schemas.PresetView])
-async def list_presets(pool: Pool) -> list[schemas.PresetView]:
+async def list_presets(pool: Pool, project: str | None = None) -> list[schemas.PresetView]:
     async with pool.connection() as conn:
-        return await list_all(conn)
+        return await list_all(conn, project=project)
 
 
 @router.post("/presets", status_code=201, response_model=schemas.PresetView)
@@ -438,24 +481,31 @@ async def copy(
     explicit: str | None,
     superleader: bool = False,
     request: Request | None = None,
+    project: str | None = None,
 ) -> schemas.PresetView:
+    """Copy a preset under `explicit` (or a free `<name> copy`) into `project` (None: the
+    source's project)."""
     if explicit is not None:
         _checked_name(explicit)
     source = await repo.get(conn, preset_id)
     if source is None or (superleader and not source.superleader_manageable):
         raise not_found("preset")
+    project = source.project if project is None else project
     spec = _without_derived_key(source.spec, preset_id)
     if superleader:
         spec, removed = strip_grants(spec)
         if request is not None:
-            note_fields(request, removed)
+            note_fields(request, removed + (["project"] if project != source.project else []))
     for _ in range(_COPY_TRIES):
         taken = {p.name.lower() for p in await repo.list_presets(conn)}
         name = explicit if explicit is not None else _copy_name(source.name, taken)
         try:
-            return _view(
-                await repo.create(conn, name, spec, source.superleader_manageable, source.labels)
-            )
+            async with conn.transaction():
+                await hold_project(conn, project)
+                created = await repo.create(
+                    conn, name, spec, source.superleader_manageable, source.labels, project
+                )
+            return _view(created)
         except repo.PresetExists:
             if explicit is not None:
                 raise _exists(name) from None
@@ -467,7 +517,8 @@ async def copy_preset(
     preset_id: uuid.UUID, pool: Pool, body: schemas.CopyPreset | None = None
 ) -> schemas.PresetView:
     async with pool.connection() as conn:
-        return await copy(conn, preset_id, body.name if body else None)
+        body = body or schemas.CopyPreset()
+        return await copy(conn, preset_id, body.name, project=body.project)
 
 
 async def by_ref(conn, ref: str) -> repo.Preset:

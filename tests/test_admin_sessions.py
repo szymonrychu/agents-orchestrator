@@ -300,3 +300,26 @@ async def test_main_create_from_privileged_preset_201(main):
         "POST", "/api/v1/sessions", json={"preset_id": made.json()["id"], "slug": "human-p"}
     )
     assert r.status_code == 201, r.text
+
+
+async def test_admin_create_with_project(call, main):
+    """The admin create takes the same `project` as the main port; without one the preset's."""
+    r = await main("POST", "/api/v1/projects", json={"slug": "alpha", "name": "Alpha"})
+    assert r.status_code == 201, r.text
+    shown = (
+        await main(
+            "POST",
+            M,
+            json={"name": "shp", "spec": {}, "superleader_manageable": True, "project": "alpha"},
+        )
+    ).json()
+    r = await call("POST", S, json={"preset_id": shown["id"], "slug": "child-p"})
+    assert r.status_code == 201, r.text
+    assert r.json()["project"] == "alpha"
+    r = await call(
+        "POST", S, json={"preset_id": shown["id"], "slug": "child-q", "project": "default"}
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["project"] == "default"
+    r = await call("POST", S, json={"preset_id": shown["id"], "slug": "child-r", "project": "nope"})
+    assert_error(r, 422, "unknown_project")

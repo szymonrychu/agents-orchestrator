@@ -317,6 +317,7 @@ ALONE_SESSION_TOOLS = [
     "todo_set",
     "todo_update",
     "session_labels_set",
+    "project_list",
     "session_get",
     "session_patch",
     "proposal_create",
@@ -330,8 +331,8 @@ ALONE_SESSION_TOOLS = [
 
 def assert_alone_session_tools(configmap: dict[str, Any]) -> None:
     """An alone session created by a user renders the orchestrator entry with exactly `me` and the
-    session, init-scripts, chat and task tools, as a literal list so a code change cannot pass by
-    agreeing with itself."""
+    session, init-scripts, chat, task and project tools, as a literal list so a code change cannot
+    pass by agreeing with itself."""
     plugins = on_start_any_mcp(configmap).get("plugins", [])
     entry = next((p for p in plugins if p.get("name") == "orchestrator"), None)
     assert entry is not None, plugins

@@ -23,7 +23,7 @@ from agents_orchestrator.api.admin import ADMIN_PREFIX
 from agents_orchestrator.api.app import create_app
 from agents_orchestrator.api.errors import ApiError
 from agents_orchestrator.db import presets as presets_repo
-from agents_orchestrator.preset_policy import NON_SECURITY
+from agents_orchestrator.preset_policy import HUMAN_ONLY_COLUMNS, NON_SECURITY
 
 A = f"{ADMIN_PREFIX}/presets"
 M = "/api/v1/presets"
@@ -995,6 +995,13 @@ GRANT_FIELDS = ("kube_cluster_access", "session_messaging")
 QUOTA = {"usage_quota": {"five_hour_pct": 80}}
 
 
+# Preset columns (not spec paths) an agent may not change: each guarded route and column.
+GUARDED_COLUMN_WRITES: dict[tuple[str, str], tuple[str, ...]] = {
+    ("PUT", f"{A}/{{ref}}"): ("project",),
+    ("PATCH", f"{A}/{{ref}}"): ("project",),
+}
+
+
 def _admin_preset_writes() -> set[tuple[str, str]]:
     return {
         (method, route.path)
@@ -1298,3 +1305,28 @@ async def test_delete_grant_flipped_between_check_and_delete_403(
     assert (await human("GET", f"{M}/{pid}")).json()["spec"]["kube_cluster_access"] is True
     assert kube.names("Secret") == secrets_before
     assert await _secret_rows(pool, pid) == rows_before
+
+
+def test_every_guarded_column_is_human_only():
+    guard_routes = {r for r, kind in GUARDED_PRESET_WRITES.items() if kind == "guard"}
+    assert set(GUARDED_COLUMN_WRITES) == guard_routes - {("POST", A)}
+    for columns in GUARDED_COLUMN_WRITES.values():
+        assert columns == HUMAN_ONLY_COLUMNS
+
+
+@pytest.mark.parametrize("route", list(GUARDED_COLUMN_WRITES), ids="-".join)
+async def test_project_move_refused_on_every_admin_preset_write(call, human, seed, kube, route):
+    method, path = route
+    r = await human("POST", "/api/v1/projects", json={"slug": "elsewhere", "name": "Elsewhere"})
+    assert r.status_code == 201, r.text
+    pid = await seed({})
+    before = (await human("GET", f"{M}/{pid}")).json()
+    secrets_before = kube.names("Secret")
+    body = {"project": "elsewhere"}
+    if method == "PUT":
+        body |= {"name": "seeded", "spec": {}}
+    r = await call(method, path.format(ref=pid), json=body)
+    assert_error(r, 403, "human_only_field")
+    assert r.json()["error"]["fields"] == ["project"]
+    assert (await human("GET", f"{M}/{pid}")).json() == before
+    assert kube.names("Secret") == secrets_before

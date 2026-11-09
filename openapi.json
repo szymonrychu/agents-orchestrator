@@ -1125,6 +1125,17 @@
               }
             ],
             "title": "Name"
+          },
+          "project": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project"
           }
         },
         "title": "CopyPreset",
@@ -1144,6 +1155,17 @@
               }
             ],
             "title": "Preset Id"
+          },
+          "project": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project"
           },
           "slug": {
             "anyOf": [
@@ -2215,6 +2237,14 @@
             "title": "Pod Name",
             "type": "string"
           },
+          "project": {
+            "title": "Project",
+            "type": "string"
+          },
+          "projects_scope": {
+            "title": "Projects Scope",
+            "type": "string"
+          },
           "session_id": {
             "format": "uuid",
             "title": "Session Id",
@@ -2234,7 +2264,9 @@
           "epoch",
           "max_replicas",
           "static",
-          "members"
+          "members",
+          "project",
+          "projects_scope"
         ],
         "title": "Me",
         "type": "object"
@@ -3212,6 +3244,17 @@
             "title": "Name",
             "type": "string"
           },
+          "project": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project"
+          },
           "spec": {
             "$ref": "#/components/schemas/SessionSpecIn",
             "default": {
@@ -3245,7 +3288,7 @@
       },
       "PresetPatch": {
         "additionalProperties": false,
-        "description": "Admin partial edit: `spec` is an RFC 7396 merge patch of the stored spec.",
+        "description": "Admin partial edit: `spec` is an RFC 7396 merge patch of the stored spec. A `project`\nother than the stored one is refused (human-only).",
         "properties": {
           "labels": {
             "anyOf": [
@@ -3271,6 +3314,17 @@
               }
             ],
             "title": "Name"
+          },
+          "project": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project"
           },
           "spec": {
             "anyOf": [
@@ -3315,6 +3369,17 @@
             "title": "Name",
             "type": "string"
           },
+          "privileged": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Privileged",
+            "type": "array"
+          },
+          "project": {
+            "title": "Project",
+            "type": "string"
+          },
           "spec": {
             "additionalProperties": true,
             "title": "Spec",
@@ -3336,6 +3401,8 @@
           "is_default",
           "superleader_manageable",
           "labels",
+          "project",
+          "privileged",
           "spec",
           "created_at",
           "updated_at"
@@ -3442,6 +3509,132 @@
           "variables"
         ],
         "title": "PreviewOut",
+        "type": "object"
+      },
+      "ProjectIn": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slug",
+          "name"
+        ],
+        "title": "ProjectIn",
+        "type": "object"
+      },
+      "ProjectPatch": {
+        "additionalProperties": false,
+        "properties": {
+          "archived": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Archived"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          }
+        },
+        "title": "ProjectPatch",
+        "type": "object"
+      },
+      "ProjectView": {
+        "properties": {
+          "archived": {
+            "title": "Archived",
+            "type": "boolean"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "presets": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Presets"
+          },
+          "sessions": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sessions"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slug",
+          "name",
+          "description",
+          "archived",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ProjectView",
         "type": "object"
       },
       "ProposalIn": {
@@ -4119,6 +4312,20 @@
           "sessions"
         ],
         "title": "SessionPeers",
+        "type": "object"
+      },
+      "SessionProjectIn": {
+        "additionalProperties": false,
+        "properties": {
+          "project": {
+            "title": "Project",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "title": "SessionProjectIn",
         "type": "object"
       },
       "SessionRestartAccepted": {
@@ -5176,6 +5383,10 @@
             ],
             "title": "Preset Name"
           },
+          "project": {
+            "title": "Project",
+            "type": "string"
+          },
           "reminder_at": {
             "anyOf": [
               {
@@ -5229,7 +5440,8 @@
           "leader_reason",
           "closes_at",
           "init_edited_since_run",
-          "backup"
+          "backup",
+          "project"
         ],
         "title": "SessionView",
         "type": "object"
@@ -11116,6 +11328,76 @@
         ]
       }
     },
+    "/agent/v1/projects": {
+      "get": {
+        "description": "Scope `project` (projects plan 3.3): the caller's own project, archived or not; a\nsuperleader session gets every active project. No counts, as on the service port.",
+        "operationId": "projects_agent_v1_projects_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ProjectView"
+                  },
+                  "title": "Response Projects Agent V1 Projects Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "The caller's project, or every active project for a superleader",
+        "tags": [
+          "agent"
+        ]
+      }
+    },
     "/agent/v1/scale": {
       "post": {
         "description": "A scale-up over the usage quota is refused 409 `usage_quota`, but only for the leader:\na non-leader is always answered 403 `not_leader`.",
@@ -11327,7 +11609,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Sessions the caller's session may message (superleaders, or all for a superleader)",
+        "summary": "Sessions the caller may message (superleaders, own project; all for a superleader)",
         "tags": [
           "agent"
         ]
@@ -12721,6 +13003,24 @@
     "/api/v1/presets": {
       "get": {
         "operationId": "list_presets_api_v1_presets_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "project",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Project"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -12735,6 +13035,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "List Presets"
@@ -13010,6 +13320,173 @@
         "summary": "Set Preset Secret"
       }
     },
+    "/api/v1/projects": {
+      "get": {
+        "description": "Active projects, or only the archived ones with `archived=true`. Counts are left out on\nthe service port.",
+        "operationId": "list_projects_api_v1_projects_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "archived",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Archived",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ProjectView"
+                  },
+                  "title": "Response List Projects Api V1 Projects Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Projects"
+      },
+      "post": {
+        "operationId": "create_project_api_v1_projects_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Project"
+      }
+    },
+    "/api/v1/projects/{slug}": {
+      "get": {
+        "operationId": "get_project_api_v1_projects__slug__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Project"
+      },
+      "patch": {
+        "operationId": "patch_project_api_v1_projects__slug__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Project"
+      }
+    },
     "/api/v1/proposals": {
       "get": {
         "description": "Every session's proposals, newest first, current revision only.",
@@ -13169,7 +13646,7 @@
     },
     "/api/v1/sessions": {
       "get": {
-        "description": "All sessions; `label` (repeatable) keeps live sessions that carry any of the labels.",
+        "description": "All sessions. `label` (repeatable) keeps live sessions that carry any of the labels;\n`project` keeps that project's sessions (422 `unknown_project`; an archived one still\nlists), and with `superleaders=include` every superleader session is added; `slug` is an\nexact match. The filters combine.",
         "operationId": "list_sessions_api_v1_sessions_get",
         "parameters": [
           {
@@ -13189,6 +13666,55 @@
                 }
               ],
               "title": "Label"
+            }
+          },
+          {
+            "in": "query",
+            "name": "project",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Project"
+            }
+          },
+          {
+            "in": "query",
+            "name": "superleaders",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "const": "include",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Superleaders"
+            }
+          },
+          {
+            "in": "query",
+            "name": "slug",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Slug"
             }
           }
         ],
@@ -14398,6 +14924,57 @@
           }
         },
         "summary": "Put Permission Mode"
+      }
+    },
+    "/api/v1/sessions/{session_id}/project": {
+      "patch": {
+        "description": "Move a live session to another project. Scope is read live per request, so the move\ntakes effect at once. A move is a new placement: the target must exist and be active (422\n`unknown_project`, `project_archived`); its row is locked before the session row.",
+        "operationId": "patch_project_api_v1_sessions__session_id__project_patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionProjectIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Project"
       }
     },
     "/api/v1/sessions/{session_id}/restart": {
