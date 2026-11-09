@@ -48,7 +48,7 @@ def test_plain_string_env_is_listed(dsn):
     seed(dsn, "legacy", {"env": {"TOKEN": "plain"}})
     code, text = run(dsn)
     assert code == 1
-    assert "env.TOKEN must be an object {value, protected, expand}" in text
+    assert "env.TOKEN must be an object {value, expand} or {vault, env}" in text
 
 
 def test_no_value_is_ever_printed(dsn):

@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, NamedTuple
 from urllib.parse import urlparse
 
 from pydantic import (
@@ -200,6 +200,8 @@ def source_plugin_name(source: str) -> str:
 
 INIT_SCRIPTS_MAX = 20
 PROTECTED_MAX = 50
+VAULT_REFS_MAX = 50
+_VAULT_ENV_RE = re.compile(r"[A-Z_][A-Z0-9_]{0,127}")
 
 CACHE_KEY_TEMPLATE_MAX = 256
 CACHE_EXCLUDE_MAX = 50
@@ -307,8 +309,18 @@ class _HookAction(_Strict):
         return v
 
 
+class Ref(NamedTuple):
+    """A vault reference: the entry id and the entry's env name."""
+
+    vault: uuid.UUID
+    env: str
+
+
 class EnvVar(_Strict):
     """One session env variable, GitLab CI style: `{value, protected, expand}`.
+
+    A variable may instead be a vault reference `{vault, env}`: the entry's value is resolved by
+    the vault at session create; a reference carries nothing else.
 
     A protected variable is write-only: it carries no value here (the value lives in a
     Kubernetes Secret and is rendered as `secretKeyRef`). `expand` gates `$` handling of a plain
@@ -324,9 +336,30 @@ class EnvVar(_Strict):
     set: bool | None = None
     version: int | None = None
     updated_at: datetime | None = None
+    vault: uuid.UUID | None = None
+    env: str | None = None
+
+    @property
+    def is_ref(self) -> bool:
+        return self.vault is not None
 
     @model_validator(mode="after")
     def _shape(self) -> EnvVar:
+        if self.vault is not None or self.env is not None:
+            if self.vault is None or self.env is None:
+                raise ValueError("a vault reference needs both vault and env")
+            if not _VAULT_ENV_RE.fullmatch(self.env):
+                raise ValueError("a vault reference env must match [A-Z_][A-Z0-9_]{0,127}")
+            if (
+                self.value is not None
+                or self.expand
+                or self.protected
+                or self.set is not None
+                or self.version is not None
+                or self.updated_at is not None
+            ):
+                raise ValueError("a vault reference carries only vault and env")
+            return self
         if self.protected:
             if self.value is not None:
                 raise ValueError(
@@ -342,7 +375,9 @@ class EnvVar(_Strict):
     @model_serializer(mode="wrap")
     def _sparse(self, handler: Any) -> dict[str, Any]:
         data = handler(self)
-        for key in ("value", "set", "version", "updated_at"):
+        if self.is_ref:
+            return {"vault": str(self.vault), "env": self.env}
+        for key in ("value", "set", "version", "updated_at", "vault", "env"):
             if data.get(key) is None:
                 data.pop(key, None)
         return data
@@ -358,6 +393,10 @@ class EnvVarIn(_Strict):
     value: SecretStr | None = None
     protected: bool = Field(default=False, strict=True)
     expand: bool = Field(default=False, strict=True)
+
+    @property
+    def is_ref(self) -> bool:
+        return False
 
     @model_validator(mode="after")
     def _shape(self) -> EnvVarIn:
@@ -743,7 +782,20 @@ class SessionSpec(BaseModel):
     @property
     def plain_env(self) -> dict[str, str]:
         """The non-protected variables and their values."""
-        return {k: v.value for k, v in self.env.items() if not v.protected and v.value is not None}
+        return {
+            k: v.value
+            for k, v in self.env.items()
+            if not v.protected and not v.is_ref and v.value is not None
+        }
+
+    @property
+    def vault_refs(self) -> dict[str, Ref]:
+        """The vault references by preset env key, sorted by key."""
+        return {
+            k: Ref(v.vault, v.env)
+            for k, v in sorted(self.env.items())
+            if v.vault is not None and v.env is not None
+        }
 
     @property
     def protected_env(self) -> list[str]:
@@ -826,7 +878,8 @@ class SessionSpec(BaseModel):
             if bad:
                 raise ValueError(
                     "; ".join(
-                        f"env.{k} must be an object {{value, protected, expand}}" for k in bad
+                        f"env.{k} must be an object {{value, expand}} or {{vault, env}}"
+                        for k in bad
                     )
                 )
         return v
@@ -851,6 +904,9 @@ class SessionSpec(BaseModel):
         protected = sum(1 for e in v.values() if e.protected)
         if protected > PROTECTED_MAX:
             raise ValueError(f"env has {protected} protected variables, at most {PROTECTED_MAX}")
+        refs = sum(1 for e in v.values() if e.is_ref)
+        if refs > VAULT_REFS_MAX:
+            raise ValueError(f"env has {refs} vault references, at most {VAULT_REFS_MAX}")
         return v
 
     @field_validator("discard_hook_url")
