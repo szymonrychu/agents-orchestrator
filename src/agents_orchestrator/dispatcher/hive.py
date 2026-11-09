@@ -15,12 +15,16 @@ The hash covers only the structure (leader, epoch, members, wrapper sessions, re
 busy/idle flip or a context change pushes nothing. Members pull live state with
 `orchestrator_me` and peers' activity with `orchestrator_activity`; nothing is streamed.
 
-The one exception is the leader's keyed `handover_due` note (hive-decoupling D4): a leader whose
-`agent_status.context_pct` is at or above the handover threshold is told, once per leader, epoch,
-5% bucket, level and candidate list, to hand leadership over and to whom. The level turns firm
-at compact - 5; the successor gets the leader's transcript, so there is no briefing protocol. It
-is evaluated on every push tick, outside the hash and claim path above, and remembered per
-session in `HiveState`.
+The one exception is the leader's keyed `handover_due` note (hive-decoupling D4): a leader that is
+due (see `due_level`) is told, once per leader, epoch, 5% bucket, level and candidate list, to
+hand leadership over and to whom. It is due softly once its context grew by
+ORCH_HANDOVER_BUDGET_TOKENS on top of the context it had when its leadership began
+(`session_leaders.start_context_tokens`, filled by the dispatcher on the first tick the gauge is
+known) and it has led for ORCH_HANDOVER_MIN_TENURE_SECONDS, never while its pod awaits a rollout;
+without a token gauge the percent rule (compact - HANDOVER_MARGIN_PCT) applies. It is due hard
+at compact - 5, whatever the tenure or rollout; the successor gets the leader's transcript and
+a generated state, so there is no briefing protocol. It is evaluated on every push tick, outside
+the hash and claim path above, and remembered per session in `HiveState`.
 
 The leader's keyed `rollout_due` note (voluntary handover 3.7) tells it a rollout waits on it: sent
 once per (leader, epoch, revision) while the reconciler's `status.rollout.leader_since` is set and
@@ -44,7 +48,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import psycopg
 from psycopg.rows import dict_row
@@ -60,6 +64,7 @@ from agents_orchestrator.db.eligibility import (
 )
 from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE
 from agents_orchestrator.dispatcher import feed
+from agents_orchestrator.handover_transcript import REREAD_RULE
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import SessionSpec, legacy_context
 from agents_orchestrator.wrapper.client import NoteOutcome, WrapperClient
@@ -122,12 +127,62 @@ def compact_pct(auto_compact_pct: int | None, settings: Settings) -> int:
     return settings.default_auto_compact_pct if auto_compact_pct is None else auto_compact_pct
 
 
-def handover_threshold(spec: dict[str, Any], settings: Settings) -> int:
-    """Context % above which the leader should hand over instead of compacting.
+@dataclass(frozen=True)
+class Levels:
+    """The handover levels of one leader."""
 
-    The effective compaction point less HANDOVER_MARGIN_PCT, at least 1.
-    """
-    return max(compact_pct(spec.get("auto_compact_pct"), settings) - HANDOVER_MARGIN_PCT, 1)
+    hard_pct: int  # compact - FIRM_MARGIN_PCT
+    fallback_pct: int  # max(compact - HANDOVER_MARGIN_PCT, 1), for an unknown token gauge
+    start_tokens: int | None
+    budget_tokens: int
+
+
+def levels(spec: dict[str, Any], start_tokens: int | None, settings: Settings) -> Levels:
+    """The levels of a leader whose context was `start_tokens` when its leadership began."""
+    compact = compact_pct(spec.get("auto_compact_pct"), settings)
+    return Levels(
+        hard_pct=compact - FIRM_MARGIN_PCT,
+        fallback_pct=max(compact - HANDOVER_MARGIN_PCT, 1),
+        start_tokens=start_tokens,
+        budget_tokens=settings.handover_budget_tokens,
+    )
+
+
+def due_level(
+    lv: Levels,
+    used_tokens: int | None,
+    window_tokens: int | None,
+    pct: float | None,
+    tenure_seconds: float,
+    min_tenure_seconds: int,
+    rollout_pending: bool,
+) -> Literal["none", "soft", "hard"]:
+    """Whether a leader should hand over: `hard` at the hard limit whatever else holds, `soft`
+    past its token budget (or the percent fallback) once the minimum tenure is over and its pod
+    does not await a rollout, else `none`."""
+    tokens = used_tokens is not None and window_tokens is not None and window_tokens > 0
+    hard_tokens = lv.hard_pct / 100 * window_tokens if tokens and window_tokens else None
+    if pct is not None and pct >= lv.hard_pct:
+        return "hard"
+    if (
+        tokens
+        and used_tokens is not None
+        and hard_tokens is not None
+        and used_tokens >= hard_tokens
+    ):
+        return "hard"
+    if (
+        tokens
+        and lv.start_tokens is not None
+        and used_tokens is not None
+        and hard_tokens is not None
+    ):
+        hit = used_tokens >= min(lv.start_tokens + lv.budget_tokens, hard_tokens)
+    else:
+        hit = pct is not None and pct >= lv.fallback_pct
+    if hit and tenure_seconds >= min_tenure_seconds and not rollout_pending:
+        return "soft"
+    return "none"
 
 
 def hive_state_payload(
@@ -158,7 +213,18 @@ def hive_state_payload(
     }
 
 
-def render_hive_state(payload: dict[str, Any], slug: str, threshold: int) -> str:
+def handover_advice(lv: Levels, settings: Settings) -> str:
+    """The standing handover guidance of the hive-state note."""
+    return (
+        "Leadership is yours until you hand it over. The orchestrator sends a handover_due note "
+        f"when you should: after {round(lv.budget_tokens / 1000)}k tokens of work on top of your "
+        "context at the start of leadership and at least "
+        f"{round(settings.handover_min_tenure_seconds / 60)} minutes as leader, and always "
+        f"before {lv.hard_pct}% context. {REREAD_RULE}"
+    )
+
+
+def render_hive_state(payload: dict[str, Any], slug: str, advice: str) -> str:
     """The `<hive-state>` text block pushed under the key `hive_state`."""
     clean = feed._clean
     role = "leader" if payload["you"] == payload["leader"] else "member"
@@ -176,10 +242,7 @@ def render_hive_state(payload: dict[str, Any], slug: str, threshold: int) -> str
         f"(epoch {payload['epoch']}). Members: {', '.join(members)}."
         + (" The hive is static: agents are not added or removed." if payload["static"] else ""),
     ]
-    lines.append(
-        "Leadership is yours until you hand it over; hand over at a natural boundary "
-        f"once your context passes {threshold}%."
-    )
+    lines.append(advice)
     lines.append(PULL_SENTENCE)
     lines.append("</hive-state>")
     return "\n".join(lines)
@@ -187,7 +250,8 @@ def render_hive_state(payload: dict[str, Any], slug: str, threshold: int) -> str
 
 def render_handover_due(
     context_pct: float,
-    compact: int,
+    used_tokens: int | None,
+    lv: Levels,
     epoch: int,
     candidates: list[dict[str, Any]],
     *,
@@ -196,13 +260,21 @@ def render_handover_due(
 ) -> str:
     """The `<handover-due>` text block pushed to the leader under the key `handover_due`.
 
-    The leader hands over with a summary as the reason; the successor receives the transcript, so
-    no briefing happens over ccw. `firm` adds the note that compaction is near.
+    The leader hands over with its judgment as the reason; the successor receives the transcript
+    and a generated state, so no briefing happens over ccw. `firm` adds the note that compaction
+    is near.
     """
+    parts = []
+    if used_tokens is not None:
+        parts.append(f"{round(used_tokens / 1000)}k tokens")
+        if lv.start_tokens is not None:
+            parts.append(f"started at {round(lv.start_tokens / 1000)}k")
+            parts.append(f"budget to {round((lv.start_tokens + lv.budget_tokens) / 1000)}k")
+    parts.append(f"hard limit {lv.hard_pct}%")
     lines = [
         "<handover-due>",
-        f"Your context is {round(context_pct)}% of a limit that compacts at {compact}%; "
-        "hand leadership over before that.",
+        f"Your context is {round(context_pct)}% ({'; '.join(parts)}); "
+        "hand leadership over before the hard limit.",
     ]
     if not candidates:
         hint = "; scale up with orchestrator_scale" if scalable else ""
@@ -218,11 +290,16 @@ def render_handover_due(
         lines.append(
             "Finish the step you are in, then call "
             f"orchestrator_leadership_handover(to=<pod_name>, epoch={epoch}, "
-            "reason=<state summary of at most 2000 characters: the user's goal, what is done, "
-            "what is in flight, next steps, open questions, locks and branches>). "
-            "It applies when your turn has ended and your background agents have reported; "
-            "the successor receives your transcript. Do not brief it over ccw."
+            "reason=<your judgment for the successor: priorities, risks, what you would do next; "
+            "facts such as open decisions, unhandled messages and members are generated for "
+            "it>). It applies when your turn has ended and your background agents have "
+            "reported; the successor receives your transcript. Do not brief it over ccw."
         )
+        lines.append(
+            "Pass handled=[ids] for session messages you answered or that need no answer; "
+            "the rest carry over."
+        )
+        lines.append(REREAD_RULE)
     lines.append("</handover-due>")
     return "\n".join(lines)
 
@@ -260,7 +337,11 @@ def state_hash(leader: str, epoch: int, members: list[dict[str, Any]]) -> str:
 class _Plan:
     session_id: uuid.UUID
     slug: str
-    threshold: int
+    levels: Levels
+    level: Literal["none", "soft", "hard"]
+    advice: str
+    # the leader's context when its leadership began, to record when still unknown
+    fill_start: int | None
     max_replicas: int
     static: bool
     leader: str
@@ -269,11 +350,10 @@ class _Plan:
     epoch: int
     hashes: dict[str, str]  # per agent, the state hash it last accepted
     members: list[dict[str, Any]]
-    compact_pct: int
     scalable: bool
     # handover requests decided within OUTCOME_WINDOW_SECONDS that an agent made, by id
     outcomes: list[dict[str, Any]]
-    # ELIGIBLE successors, best first; None while the leader is below the threshold
+    # ELIGIBLE successors, best first; None while the leader is not due
     candidates: list[dict[str, Any]] | None = None
     # the reconciler's status.rollout while only the leader's pod is left (leader_since set)
     rollout: dict[str, Any] | None = None
@@ -298,10 +378,10 @@ async def _read(
     """Phase 1: under the lock, read the leader row and the members."""
     cid = session["id"]
     spec = session["spec"]
-    threshold = handover_threshold(spec, settings)
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "SELECT a.pod_name AS leader, a.ordinal, l.agent_id, l.epoch, l.state_hash"
+            "SELECT a.pod_name AS leader, a.ordinal, l.agent_id, l.epoch, l.state_hash,"
+            " l.start_context_tokens, extract(epoch FROM now() - l.since) AS tenure"
             " FROM session_leaders l JOIN agents a ON a.id = l.agent_id WHERE l.session_id = %s",
             (cid,),
         )
@@ -310,15 +390,33 @@ async def _read(
             return None
         await cur.execute(
             "SELECT a.id, a.pod_name, a.url, a.wrapper_session_id, a.ready,"
-            " coalesce(s.state, 'unknown') AS state, s.context_pct"
+            " coalesce(s.state, 'unknown') AS state, s.context_pct,"
+            " s.context_used_tokens, s.context_window_tokens"
             " FROM agents a LEFT JOIN agent_status s ON s.agent_id = a.id"
             " WHERE a.session_id = %s AND a.gone_at IS NULL ORDER BY a.ordinal",
             (cid,),
         )
         members = await cur.fetchall()
-        candidates = None
         lead = next((m for m in members if m["pod_name"] == leader["leader"]), None)
-        if lead is not None and _is_due(lead, threshold):
+        used = lead["context_used_tokens"] if lead is not None else None
+        fill_start = used if leader["start_context_tokens"] is None else None
+        lv = levels(
+            spec, leader["start_context_tokens"] if fill_start is None else fill_start, settings
+        )
+        rollout = (session.get("status") or {}).get("rollout") or {}
+        level = "none"
+        if lead is not None:
+            level = due_level(
+                lv,
+                used,
+                lead["context_window_tokens"],
+                lead["context_pct"],
+                float(leader["tenure"]),
+                settings.handover_min_tenure_seconds,
+                leader["ordinal"] in (rollout.get("pending") or []),
+            )
+        candidates = None
+        if level != "none":
             await cur.execute(
                 _CANDIDATES,
                 {
@@ -337,11 +435,13 @@ async def _read(
         )
         outcomes = await cur.fetchall()
     typed = SessionSpec.model_validate(spec, context=legacy_context(session.get("secret_versions")))
-    rollout = (session.get("status") or {}).get("rollout") or {}
     return _Plan(
         session_id=cid,
         slug=session["slug"],
-        threshold=threshold,
+        levels=lv,
+        level=level,
+        advice=handover_advice(lv, settings),
+        fill_start=fill_start,
         max_replicas=spec.get("max_replicas") or spec.get("replicas") or 1,
         static=bool(spec.get("static")),
         leader=leader["leader"],
@@ -350,17 +450,11 @@ async def _read(
         epoch=leader["epoch"],
         hashes=_load_hashes(leader["state_hash"]),
         members=members,
-        compact_pct=compact_pct(spec.get("auto_compact_pct"), settings),
         scalable=typed.scalable,
         outcomes=outcomes,
         candidates=candidates,
         rollout=rollout if rollout.get("leader_since") else None,
     )
-
-
-def _is_due(member: dict[str, Any], threshold: int) -> bool:
-    """The member's context gauge is at or above the handover threshold."""
-    return member["context_pct"] is not None and member["context_pct"] >= threshold
 
 
 def _load_hashes(raw: str | None) -> dict[str, str]:
@@ -399,15 +493,15 @@ async def _push_agent(
         plan.max_replicas,
         plan.static,
     )
-    text = render_hive_state(payload, plan.slug, plan.threshold)
+    text = render_hive_state(payload, plan.slug, plan.advice)
     client = client_factory(plan.session_id, member["url"])
     return await _note(client, member["wrapper_session_id"], text, STATE_KEY)
 
 
 async def _push_due(plan: _Plan, state: HiveState, client_factory: ClientFactory) -> int:
-    """Tell a leader at or above the threshold to hand over, once per due key.
+    """Tell a due leader to hand over, once per due key.
 
-    Runs on every tick, whatever the hive_state hash says. Below the threshold (or with no
+    Runs on every tick, whatever the hive_state hash says. When the leader is not due (or with no
     leader to tell) nothing is sent and the key is forgotten, so a leader that compacted and
     climbs again is told again. A failed push is not remembered: the next tick retries it.
     """
@@ -417,13 +511,16 @@ async def _push_due(plan: _Plan, state: HiveState, client_factory: ClientFactory
             state.due_sent.pop(plan.session_id, None)
         return 0
     identity = tuple((c["pod_name"], c["wrapper_session_id"]) for c in plan.candidates)
+    used, window = leader["context_used_tokens"], leader["context_window_tokens"]
     pct = leader["context_pct"]
-    firm = pct >= plan.compact_pct - FIRM_MARGIN_PCT
+    if pct is None:  # due by tokens alone
+        pct = 100 * used / window
+    firm = plan.level == "hard"
     key: DueKey = (plan.leader_id, plan.epoch, int(pct // BUCKET_PCT), firm, identity)
     if state.due_sent.get(plan.session_id) == key:
         return 0
     text = render_handover_due(
-        pct, plan.compact_pct, plan.epoch, plan.candidates, firm=firm, scalable=plan.scalable
+        pct, used, plan.levels, plan.epoch, plan.candidates, firm=firm, scalable=plan.scalable
     )
     client = client_factory(plan.session_id, leader["url"])
     outcome = await _note(client, leader["wrapper_session_id"], text, DUE_KEY)
@@ -497,6 +594,12 @@ async def _claim(conn: psycopg.AsyncConnection, plan: _Plan, current: str) -> li
         "UPDATE session_leaders SET state_hash = %s WHERE session_id = %s",
         (json.dumps(hashes), plan.session_id),
     )
+    if plan.fill_start is not None:
+        await conn.execute(
+            "UPDATE session_leaders SET start_context_tokens = %s"
+            " WHERE session_id = %s AND epoch = %s AND start_context_tokens IS NULL",
+            (plan.fill_start, plan.session_id, plan.epoch),
+        )
     return due
 
 
