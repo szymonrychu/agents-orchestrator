@@ -289,3 +289,15 @@ def test_decision_overflow_ids_capped_at_100():
     assert "T-1:130" in more and "T-1:131" not in more
     assert "+50 not listed" in more
 
+
+
+def test_150_unhandled_messages_render_20_full_100_ids_and_count():
+    when = datetime(2026, 11, 9, 11, 0, tzinfo=UTC)
+    messages = [ls.IncomingMessage(i, "peer", when, f"body {i}", 6) for i in range(131, 151)]
+    text = ls.render_state(
+        _state(messages=messages, more_message_ids=list(range(1, 101)), more_message_count=130)
+    )
+    assert text.count("### message ") == 20
+    ids = next(x for x in text.splitlines() if x.startswith("Older unhandled message ids:"))
+    assert len(ids.split(":")[1].split(",")) == 100
+    assert "(30 more)" in text
