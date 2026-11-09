@@ -72,7 +72,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "any-mcp-tatara-orchestrator", git = "https://github.com/szymonrychu/any-mcp-tatara-plugins?subdirectory=orchestration%2Forchestrator&rev=v0.25.0" },
+    { name = "any-mcp-tatara-orchestrator", git = "https://github.com/szymonrychu/any-mcp-tatara-plugins?subdirectory=orchestration%2Forchestrator&rev=v0.27.0" },
     { name = "claude-code-wrapper", git = "https://github.com/szymonrychu/claude-code-wrapper?rev=cd5ca3d0026b57a2423e4fe77850ca3658e5f59e" },
     { name = "moto", extras = ["server"], specifier = ">=5.2.4" },
     { name = "pytest" },
@@ -134,8 +134,8 @@ dependencies = [
 
 [[package]]
 name = "any-mcp-tatara-orchestrator"
-version = "0.25.0"
-source = { git = "https://github.com/szymonrychu/any-mcp-tatara-plugins?subdirectory=orchestration%2Forchestrator&rev=v0.25.0#afb638d31be264b9c6f4bdc0f18ce6203d99af05" }
+version = "0.27.0"
+source = { git = "https://github.com/szymonrychu/any-mcp-tatara-plugins?subdirectory=orchestration%2Forchestrator&rev=v0.27.0#3153d1384d55330453fafbe1a81f350385f2f2dd" }
 dependencies = [
     { name = "any-mcp" },
 ]

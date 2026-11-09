@@ -41,9 +41,6 @@ TASK_TOOLS = [
 ]  # fmt: skip
 PROJECT_TOOLS = ["project_list"]
 TAIL_TOOLS = [*SESSION_TOOLS, *INIT_SCRIPTS_TOOLS, *CHAT_TOOLS, *TASK_TOOLS, *PROJECT_TOOLS]
-# Allowed before the pinned plugin ships them; remove when the plugin pin offers the tool
-# (projects P15).
-PLUGIN_PENDING = {"project_list"}
 ALONE_TOOLS = ["me", *TAIL_TOOLS]
 PROPOSAL = [
     "proposal_create",
@@ -380,7 +377,7 @@ async def test_allowed_tools_exist_in_plugin():
     )
     assert named == {"orchestrator_init_scripts_edit", "orchestrator_session_send"}
     assert set(CHAT_TOOLS) <= allowed
-    assert allowed | {n.removeprefix("orchestrator_") for n in named} <= offered | PLUGIN_PENDING
+    assert allowed | {n.removeprefix("orchestrator_") for n in named} <= offered
 
 
 def _fake_tools(tmp_path: Path) -> tuple[Path, Path]:
@@ -596,7 +593,7 @@ async def test_admin_tools_exist_in_plugin():
         config = {**entry["config"], "base_url": "http://orch:8080", "token": "t", "session": "1"}
         async with PluginHarness(OrchestratorPlugin, config={**config, "agent": "a0"}) as h:
             offered |= {t["name"].removeprefix("orchestratorplugin_") for t in await h.list_tools()}
-        missing = set(entry["allow"]) - offered - PLUGIN_PENDING
+        missing = set(entry["allow"]) - offered
         assert not missing, (spec, sorted(missing))
     assert set(on_start.ADMIN_TOOLS) <= offered
 
