@@ -780,6 +780,8 @@ class HandoverIn(BaseModel):
     to: str | None = None
     reason: str = Field(min_length=1, max_length=2000)
     epoch: int
+    #: Ids of incoming session messages the leader answered or that need no answer.
+    handled: list[int] = Field(default_factory=list, max_length=50)
 
 
 class MakeLeaderIn(BaseModel):
@@ -805,6 +807,7 @@ class LeadershipRequested(BaseModel):
     request_id: int
     status: Literal["pending"] = "pending"
     applies: str = "when your turn has ended and your background agents have reported"
+    handled: list[int] = []
 
 
 class WithdrawIn(BaseModel):

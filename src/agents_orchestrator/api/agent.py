@@ -32,7 +32,7 @@ from agents_orchestrator.api.sessions import (
 )
 from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import events as events_repo
-from agents_orchestrator.db import file_locks, leadership
+from agents_orchestrator.db import file_locks, leadership, session_messaging
 from agents_orchestrator.db import projects as projects_repo
 from agents_orchestrator.db import queue as q
 from agents_orchestrator.db import sessions as sessions_repo
@@ -304,7 +304,8 @@ async def handover(
         request_id = await leadership.insert_request(
             conn, agent.session_id, "handover", agent.id, to_id, body.reason, body.epoch
         )
-    return schemas.LeadershipRequested(request_id=request_id)
+        handled = await session_messaging.mark_handled(conn, agent.session_id, body.handled)
+    return schemas.LeadershipRequested(request_id=request_id, handled=handled)
 
 
 class LockPaths(BaseModel):
@@ -451,10 +452,13 @@ class SessionMessageIn(BaseModel):
 
     text: str = Field(min_length=1, max_length=SESSION_MESSAGE_MAX_CHARS)
     lane: schemas.Lane = "regular"
+    #: Ids of incoming session messages the leader answered or that need no answer.
+    handled: list[int] = Field(default_factory=list, max_length=50)
 
 
 class SessionMessageQueued(BaseModel):
     message_id: int
+    handled: list[int] = []
 
 
 @router.get(
@@ -539,7 +543,8 @@ async def session_send(
             )
         except q.SessionBeingDeleted as exc:
             raise ApiError(409, "session_deleting", "target session is being discarded") from exc
-    return SessionMessageQueued(message_id=message_id)
+        handled = await session_messaging.mark_handled(conn, own.id, body.handled)
+    return SessionMessageQueued(message_id=message_id, handled=handled)
 
 
 def _hook_path(body: Any) -> str | None:

@@ -6,6 +6,7 @@ Kept apart from `db/queue.py`; the queue transitions stay there.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import psycopg
@@ -78,3 +79,23 @@ async def relay_mark(conn: psycopg.AsyncConnection, message_id: int) -> RelayMar
     if row is None:
         return None
     return RelayMark(row["chat_relay_send"], row["chat_relay_room"])
+
+
+async def mark_handled(
+    conn: psycopg.AsyncConnection, session_id: uuid.UUID, ids: Sequence[int]
+) -> list[int]:
+    """Mark incoming session messages of `session_id` as handled by its leader.
+
+    Only an unhandled message that another session sent (not a notice) is marked; any other id
+    is ignored. Returns the newly marked ids, ascending.
+    """
+    if not ids:
+        return []
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "UPDATE messages SET handled_at = now() WHERE session_id = %s AND id = ANY(%s)"
+            " AND sender_session_id IS NOT NULL AND notice IS NULL AND handled_at IS NULL"
+            " RETURNING id",
+            (session_id, list(ids)),
+        )
+        return sorted(row[0] for row in await cur.fetchall())

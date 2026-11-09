@@ -1640,6 +1640,14 @@
             "title": "Epoch",
             "type": "integer"
           },
+          "handled": {
+            "items": {
+              "type": "integer"
+            },
+            "maxItems": 50,
+            "title": "Handled",
+            "type": "array"
+          },
           "reason": {
             "maxLength": 2000,
             "minLength": 1,
@@ -1876,6 +1884,14 @@
             "default": "when your turn has ended and your background agents have reported",
             "title": "Applies",
             "type": "string"
+          },
+          "handled": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Handled",
+            "type": "array"
           },
           "request_id": {
             "title": "Request Id",
@@ -4145,6 +4161,14 @@
       "SessionMessageIn": {
         "additionalProperties": false,
         "properties": {
+          "handled": {
+            "items": {
+              "type": "integer"
+            },
+            "maxItems": 50,
+            "title": "Handled",
+            "type": "array"
+          },
           "lane": {
             "default": "regular",
             "enum": [
@@ -4170,6 +4194,14 @@
       },
       "SessionMessageQueued": {
         "properties": {
+          "handled": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Handled",
+            "type": "array"
+          },
           "message_id": {
             "title": "Message Id",
             "type": "integer"
