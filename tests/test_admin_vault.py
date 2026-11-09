@@ -215,6 +215,14 @@ async def test_existing_plain_env_409_then_replace_200(app, call, pool):
     assert [x["kind"] for x in rows] == ["preset_vault_attached"]
 
 
+async def test_replace_plain_env_on_privileged_preset_200(app, call):
+    await make(app, "pp", {"TOKEN": {"value": "plain"}}, kube_cluster_access=True)
+    body = {"envs": {"TOKEN": "TOKEN"}, "replace": True}
+    r = await call("PUT", f"{A}/pp/vault/{ENTRY}", json=body)
+    assert r.status_code == 200, r.text
+    assert r.json()["spec"]["env"]["TOKEN"] == ref()
+
+
 async def test_attaching_the_same_ref_again_is_not_a_conflict(app, call):
     await make(app, "same", {"TOKEN": ref()})
     r = await call("PUT", f"{A}/same/vault/{ENTRY}", json={"envs": {"TOKEN": "TOKEN"}})

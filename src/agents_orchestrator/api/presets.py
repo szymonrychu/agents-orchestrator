@@ -82,6 +82,7 @@ async def _validated(
     preset_id: uuid.UUID | None = None,
     human_only_base: dict[str, Any] | None = None,
     request: Request | None = None,
+    plain_to_ref: bool = False,
 ) -> tuple[dict[str, Any], dict[str, SecretStr], SessionSpec]:
     """Check name and spec; return the spec as the caller sent it (no defaults filled), the
     protected values it carried, which never go into the spec, and the parsed spec.
@@ -92,7 +93,9 @@ async def _validated(
     spec, values = body.spec.split()
     if human_only_base is not None:
         dumped = spec.model_dump(mode="json", exclude_unset=True)
-        guard_agent_edit(human_only_base, dumped, values, request, privileged=True)
+        guard_agent_edit(
+            human_only_base, dumped, values, request, privileged=True, plain_to_ref=plain_to_ref
+        )
     return await validated_spec(spec, settings, stored, preset_id), values, spec
 
 
@@ -508,7 +511,13 @@ async def _edit_refs(
         _, spec_in = merged_spec_in({**stored.spec, "env": env}, {})
         body = schemas.PresetIn(name=stored.name, spec=spec_in, project=stored.project)
         spec, values, model = await _validated(
-            body, settings, stored.spec, preset_id, human_only_base=stored.spec, request=request
+            body,
+            settings,
+            stored.spec,
+            preset_id,
+            human_only_base=stored.spec,
+            request=request,
+            plain_to_ref=True,
         )
         await check_vault(request, model, stored.labels, stored.project)
         if conflicts:

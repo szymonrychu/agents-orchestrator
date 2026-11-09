@@ -54,6 +54,7 @@ def guard_agent_edit(
     request: Request | None,
     *,
     privileged: bool,
+    plain_to_ref: bool = False,
 ) -> None:
     """403 when an agent edit of `base` into `new` leaves the human-only rules, and, when
     `privileged`, the allowlist of a privileged target (`values` names the protected variables
@@ -62,7 +63,7 @@ def guard_agent_edit(
     if refused:
         raise _noted(request, refused, human_only_refused)
     if privileged:
-        refused = privileged_target_changes(base, new)
+        refused = privileged_target_changes(base, new, plain_to_ref=plain_to_ref)
         if privileged_flags(base):
             # a value for a protected variable would swap a credential the granted pod runs with
             refused = sorted({*refused, *(f"env.{n}" for n in values)})

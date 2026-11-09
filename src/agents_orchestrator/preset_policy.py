@@ -181,14 +181,17 @@ def _is_ref_or_absent(entry: Any) -> bool:
     return entry is None or (isinstance(entry, dict) and entry.get("vault") is not None)
 
 
-def privileged_target_changes(stored: dict[str, Any], new: dict[str, Any]) -> list[str]:
+def privileged_target_changes(
+    stored: dict[str, Any], new: dict[str, Any], *, plain_to_ref: bool = False
+) -> list[str]:
     """The changed spec paths an agent may not touch on a stored preset that is privileged.
 
     Empty when the stored preset has no privileged flag on. Otherwise only the `NON_SECURITY`
     paths, the human-only fields (which `human_only_changes` already limits to toward safe) and
     the `env.<NAME>` paths whose stored and new entries are each a vault reference or absent
     may change; name and labels are not spec paths. The stored preset counts, so turning a flag
-    off together with another edit is refused."""
+    off together with another edit is refused. With `plain_to_ref` (the vault attach) an
+    `env.<NAME>` may also go from a plain value to a vault reference, never the other way."""
     if not privileged(stored):
         return []
     allowed = NON_SECURITY | HUMAN_ONLY_PATHS
@@ -197,7 +200,8 @@ def privileged_target_changes(stored: dict[str, Any], new: dict[str, Any]) -> li
     def refs_only(path: str) -> bool:
         name = path.removeprefix("env.")
         return path.startswith("env.") and all(
-            _is_ref_or_absent(e.get(name)) for e in (old_env, new_env)
+            _is_ref_or_absent(e.get(name))
+            for e in ((new_env,) if plain_to_ref else (old_env, new_env))
         )
 
     return sorted(p for p in changed_paths(stored, new) if p not in allowed and not refs_only(p))
