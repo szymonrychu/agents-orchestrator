@@ -2250,6 +2250,17 @@
             ],
             "title": "Leader"
           },
+          "leader_state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Leader State"
+          },
           "max_replicas": {
             "title": "Max Replicas",
             "type": "integer"

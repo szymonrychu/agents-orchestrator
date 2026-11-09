@@ -168,3 +168,63 @@ async def test_me_leader_and_members(pool, dsn):
             "leader": False,
         },
     ]
+
+
+async def _lead_and_message(pool, c, leader) -> int:
+    """Make `leader` the leader and give the session one unhandled message from a peer."""
+    peer = await insert_session(pool)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO session_leaders (session_id, agent_id, epoch, since, reason)"
+            " VALUES (%s, %s, 1, now(), 'test')",
+            (c["id"], leader["id"]),
+        )
+        cur = await conn.execute(
+            "INSERT INTO messages (session_id, text, status, lane, sender_session_id,"
+            " sender_slug) VALUES (%s, 'please review', 'sent', 'regular', %s, 'peer-slug')"
+            " RETURNING id",
+            (c["id"], peer["id"]),
+        )
+        return (await cur.fetchone())[0]
+
+
+async def test_me_leader_state_for_leader(pool, dsn):
+    c, a0, _ = await hive(pool)
+    message_id = await _lead_and_message(pool, c, a0)
+    async with client_for(create_app(make_settings(dsn), pool), IP0) as http:
+        r = await http.get("/agent/v1/me", headers=headers(c["id"]))
+    assert r.status_code == 200, r.text
+    state = r.json()["leader_state"]
+    assert state.startswith("## State (generated")
+    assert f"### message {message_id} from peer-slug" in state
+    assert "please review" in state
+
+
+async def test_me_leader_state_null_for_member(pool, dsn):
+    c, a0, _ = await hive(pool)
+    await _lead_and_message(pool, c, a0)
+    async with client_for(create_app(make_settings(dsn), pool), IP1) as http:
+        r = await http.get("/agent/v1/me", headers=headers(c["id"]))
+    assert r.status_code == 200, r.text
+    assert r.json()["leader_state"] is None
+
+
+async def test_me_leader_state_null_without_a_leader(pool, dsn):
+    c, _, _ = await hive(pool)
+    async with client_for(create_app(make_settings(dsn), pool), IP0) as http:
+        r = await http.get("/agent/v1/me", headers=headers(c["id"]))
+    assert r.json()["leader_state"] is None
+
+
+async def test_me_leader_state_taskboard_unconfigured(pool, dsn):
+    c, a0, _ = await hive(pool)
+    await _lead_and_message(pool, c, a0)
+    settings = make_settings(dsn)
+    assert not settings.taskboard_available
+    async with client_for(create_app(settings, pool), IP0) as http:
+        r = await http.get("/agent/v1/me", headers=headers(c["id"]))
+    assert r.status_code == 200, r.text
+    assert (
+        "- taskboard unavailable: call orchestrator_task_list(waiting=true)"
+        in r.json()["leader_state"]
+    )

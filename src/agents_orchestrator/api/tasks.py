@@ -33,12 +33,12 @@ from agents_orchestrator.api.errors import ApiError
 from agents_orchestrator.api.scope import projects_header
 from agents_orchestrator.api.sessions import Cfg, Pool
 from agents_orchestrator.settings import Settings
+from agents_orchestrator.taskboard_client import UPSTREAM_PREFIX
 
 router = APIRouter(prefix="/agent/v1/tasks", tags=["agent"])
 
 MAX_BODY_BYTES = forward_core.MAX_BODY_BYTES
 TIMEOUT_SECONDS = forward_core.TIMEOUT_SECONDS
-UPSTREAM_PREFIX = "/taskboard/api/v1"
 STATE_ATTR = "taskboard_http"
 
 _ID = r"[A-Za-z0-9_-]+"

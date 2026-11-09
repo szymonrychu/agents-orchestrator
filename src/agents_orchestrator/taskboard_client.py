@@ -16,11 +16,12 @@ from typing import Any
 import httpx
 
 from agents_orchestrator.api.scope import PROJECTS_HEADER
-from agents_orchestrator.api.tasks import UPSTREAM_PREFIX
 from agents_orchestrator.settings import Settings
 
 log = logging.getLogger(__name__)
 
+# the taskboard path prefix; `api/tasks.py` (the relay) builds its target from it too
+UPSTREAM_PREFIX = "/taskboard/api/v1"
 TIMEOUT_SECONDS = 3.0
 
 

@@ -1381,11 +1381,12 @@ The caller's identity, the leader and the hive members.
   "members": [
     {"pod_name": "string", "ready": true, "state": "idle", "context_pct": 12.5, "leader": true}
   ],
-  "project": "default", "projects_scope": "default"
+  "project": "default", "projects_scope": "default",
+  "leader_state": "markdown string or null"
 }
 ```
 
-`leader` and `epoch` come from the session's leader record and are null while there is none. `members` are the not-gone agents by ordinal; `state` is the stored agent state and `context_pct` is null when unknown. `project` is the session's project and `projects_scope` the projects its agents may reach: `"*"` (every project) for a superleader session, else the session's project. Both are read live, so a move of the session (`PATCH /api/v1/sessions/{id}/project`) shows on the next call.
+`leader_state` is filled only when the caller is the current leader: the live generated State (`db/leader_state.py`, the same sections as the State of the handover file, open decisions read from the taskboard just now); null for every other caller. `leader` and `epoch` come from the session's leader record and are null while there is none. `members` are the not-gone agents by ordinal; `state` is the stored agent state and `context_pct` is null when unknown. `project` is the session's project and `projects_scope` the projects its agents may reach: `"*"` (every project) for a superleader session, else the session's project. Both are read live, so a move of the session (`PATCH /api/v1/sessions/{id}/project`) shows on the next call.
 
 ### `GET /agent/v1/projects`
 
