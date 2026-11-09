@@ -314,3 +314,5 @@ in the namespace, so an attached vault value is exposed to it. Decision: attach 
 (O7 replace-over-plain rule unchanged), the exposure is only marked. `vault_list` adds
 `privileged: bool` to each attachment; the attach answer (`VaultAttachView`) adds
 `attachment_privileged: bool`. Why not block: the user chose visibility over refusal.
+
+- 2026-11-09 (agent-dialogs T-98): a 409 dialog_open now takes the busy requeue path (backoff, no attempt) instead of failing the message with "dialog_open"; the operator can now answer the dialog from the web UI, so waiting is correct. Replaces test_dialog_open_fails_regular_message_with_reason.
