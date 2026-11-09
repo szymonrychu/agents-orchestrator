@@ -53,7 +53,7 @@ TASK_TOOLS = [
 # (GET /agent/v1/projects: its own project, or every active one for a superleader).
 PROJECT_TOOLS = ["project_list"]
 # Superleader admin tools: the plugin's declarative admin rows (any-mcp-tatara-plugins
-# orchestration/orchestrator admin.py) plus the local secret_set tool. History is read and search
+# orchestration/orchestrator admin.py), the vault tools included. History is read and search
 # only: there is no history delete tool, deleting a stored session is for the user (web UI).
 ADMIN_TOOLS = [
     "presets_list", "preset_get", "preset_create", "preset_replace", "preset_patch",
@@ -67,7 +67,8 @@ ADMIN_TOOLS = [
     "schedule_preview", "chat_admin_rooms", "chat_room_settings", "chat_rules",
     "chat_rule_add", "chat_rule_delete",
     "chat_admin_room", "chat_users", "chat_room_allow", "chat_open", "chat_open_status",
-    "chat_open_confirm", "secret_set", "history_search", "history_get",
+    "chat_open_confirm", "vault_list", "vault_attach", "vault_detach",
+    "history_search", "history_get",
     "history_records", "usage_get",
     *PROPOSAL_TOOLS,
 ]  # fmt: skip
@@ -79,7 +80,7 @@ def orchestrator_allow(spec: SessionSpec) -> list[str]:
     Every session gets the session tools (D11), the init-scripts tools, the chat tools (D13), the
     task tools and `project_list`, alone sessions included, which also get `me`; the agent API
     decides what each caller may list, send, edit and say in the chat (leader only). The admin
-    tools and `secret_set` are listed exactly when `session_messaging` is enabled, whoever
+    tools are listed exactly when `session_messaging` is enabled, whoever
     created the session; every other session gets `SESSION_EDIT_TOOLS` (its spec and its
     proposals) and `self_close` last instead (a superleader is never offered `self_close`; it has
     the edit tools as admin tools). A tool in two groups (`leadership_withdraw`, a hive and an
