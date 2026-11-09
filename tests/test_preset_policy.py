@@ -8,6 +8,7 @@ from agents_orchestrator.preset_policy import (
     classify,
     fixed_changes,
     human_only_changes,
+    merge_patch,
     privileged,
     strip_grants,
     tighten_changes,
@@ -77,6 +78,78 @@ def test_env_changes_are_not_human_only():
     assert human_only_changes(stored, {"env": {}}) == []
     assert human_only_changes(stored, {}) == []
     assert human_only_changes(stored, {"env": {"K": {"value": "v"}}}) == []
+
+
+def test_several_fields_sorted():
+    assert human_only_changes({}, {"session_messaging": True, "kube_cluster_access": True}) == [
+        "kube_cluster_access",
+        "session_messaging",
+    ]
+
+
+def test_strip_grants():
+    spec = {
+        "kube_cluster_access": True,
+        "docker": True,
+        "docker_cpu": "1",
+        "discard_hook_url": "https://x",
+        "session_messaging": True,
+        "wrapper": {"permission_mode": "auto"},
+        "replicas": 2,
+    }
+    out, removed = strip_grants(spec)
+    assert out == {"wrapper": {"permission_mode": "auto"}, "replicas": 2}
+    assert removed == [
+        "discard_hook_url",
+        "docker",
+        "docker_cpu",
+        "kube_cluster_access",
+        "session_messaging",
+    ]
+    assert spec["kube_cluster_access"] is True  # not mutated
+
+
+def test_strip_grants_keeps_sizes_without_docker():
+    out, removed = strip_grants({"kube_cluster_access": True, "docker_cpu": "1"})
+    assert out == {"docker_cpu": "1"}
+    assert removed == ["kube_cluster_access"]
+
+
+def test_privileged():
+    assert privileged({}) == []
+    assert (
+        privileged(
+            {
+                "kube_cluster_access": False,
+                "session_messaging": None,
+                "discard_hook_url": "https://x",
+            }
+        )
+        == []
+    )
+    assert privileged({"docker": True, "kube_cluster_access": True}) == [
+        "docker",
+        "kube_cluster_access",
+    ]
+    assert privileged({"session_messaging": True}) == ["session_messaging"]
+
+
+def test_merge_patch_rfc7396():
+    assert merge_patch({"a": {"b": 1, "c": 2}}, {"a": {"b": None, "d": 3}}) == {
+        "a": {"c": 2, "d": 3}
+    }
+    assert merge_patch({"l": [1, 2]}, {"l": [3]}) == {"l": [3]}
+    assert merge_patch({"a": 1}, "x") == "x"
+    assert merge_patch({"a": {"b": 1}}, {"a": None}) == {}
+
+
+def test_merge_patch_does_not_mutate():
+    target = {"a": {"b": 1}}
+    patch = {"a": {"c": [1]}}
+    out = merge_patch(target, patch)
+    out["a"]["c"].append(2)
+    assert target == {"a": {"b": 1}}
+    assert patch == {"a": {"c": [1]}}
 
 
 def test_changed_paths():
