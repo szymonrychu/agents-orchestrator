@@ -316,10 +316,21 @@ class SessionBackup(BaseModel):
 CloseKind = Literal["self", "inactivity"]
 
 
+class VaultPinView(BaseModel):
+    """What a session was pinned to for one vault env variable; never a value."""
+
+    entry: uuid.UUID | None
+    entry_env: str | None
+    version: int | None
+    protected: bool
+
+
 class SessionView(BaseModel):
     id: uuid.UUID
     slug: str
     spec: SessionSpec
+    # the session's vault pins by env name (empty without vault refs)
+    vault: dict[str, VaultPinView] = {}
     desired: Literal["active", "deleting"]
     status: dict[str, Any]
     generation: int

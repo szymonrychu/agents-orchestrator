@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 
 import httpx
 import pytest
@@ -282,3 +283,28 @@ async def test_session_patch_without_ref_change_passes(pool, dsn):
             json={"spec": {"env": {"A": {"value": "2"}}}},
         )
     assert r.status_code == 200, r.text
+
+
+async def test_session_view_vault_no_secret_value(http, pool, vault):
+    preset = await make_preset(pool, "view")
+    r = await http.post(C, json={"preset_id": str(preset.id), "slug": "viewed"})
+    assert r.status_code == 201, r.text
+    for body in (r.json(), (await http.get(f"{C}/{r.json()['id']}")).json()):
+        assert body["vault"] == {
+            "X": {"entry": ENTRY, "entry_env": "TOKEN", "version": 1, "protected": True},
+            "Y": {"entry": NOTE, "entry_env": "NOTE", "version": None, "protected": False},
+        }
+        assert body["spec"]["env"]["X"]["vault"] == ENTRY
+        assert "plain" not in json.dumps(body)
+
+
+async def test_export_keeps_refs(http, pool, vault):
+    from agents_orchestrator.db import export
+
+    preset = await make_preset(pool, "exp")
+    r = await http.post(C, json={"preset_id": str(preset.id), "slug": "exported"})
+    async with pool.connection() as conn:
+        lines = [ln async for ln in export.export_session_history(conn, uuid.UUID(r.json()["id"]))]
+    first = json.loads(lines[0])
+    assert first["spec"]["env"]["X"] == {"vault": ENTRY, "env": "TOKEN"}
+    assert "secret_versions" not in first and "plain" not in "".join(lines)

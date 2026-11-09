@@ -429,7 +429,9 @@ def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
             ("DOCKER_CONFIG",) if settings.image_pull_secret else ()
         )
     claude: dict[str, Any] = {
-        "passthrough_env": sorted([*spec.env, *AGENT_PASSTHROUGH_ENV, *kube_env, *docker_env]),
+        "passthrough_env": sorted(
+            {*spec.env, *session.secret_versions, *AGENT_PASSTHROUGH_ENV, *kube_env, *docker_env}
+        ),
         "env": {
             "claude_code_oauth_token": "${CLAUDE_CODE_OAUTH_TOKEN}",
             "disable_autoupdater": True,
@@ -521,21 +523,34 @@ def _secret_ref(name: str, key: str) -> dict[str, Any]:
 def env_entries(session: Session) -> list[dict[str, Any]]:
     """The session's own env variables as container env, sorted by name.
 
-    A protected variable is a `secretKeyRef` to the Secret version snapshotted at create. A plain
-    one with `expand` false has its `$` doubled (the kubelet reads `$$` as a literal `$`, so
-    `$(VAR)` stays text); with `expand` true it is emitted as is, so `$(VAR)` references work.
+    Vault pins in `secret_versions` render by shape: `{secret, key}` is a `secretKeyRef`,
+    `{value}` is a readable value with `$` doubled (a readable value never expands). A protected
+    variable (until it is migrated to a vault ref) is a `secretKeyRef` to its Secret version
+    snapshotted at create. A plain one with `expand` false has its `$` doubled (the kubelet reads
+    `$$` as a literal `$`, so `$(VAR)` stays text); with `expand` true it is emitted as is. A vault
+    ref in the spec without a pin is refused.
     """
-    out: list[dict[str, Any]] = []
-    for name, var in sorted(session.spec.env.items()):
-        if var.protected:
+    out: dict[str, dict[str, Any]] = {}
+    for name, var in session.spec.env.items():
+        if var.is_ref:
+            if not isinstance(session.secret_versions.get(name), dict):
+                raise ValueError(f"vault variable {name} has no pin")
+        elif var.protected:
             secret = session.secret_versions.get(name)
-            if secret is None:
+            if not isinstance(secret, str):
                 raise ValueError(f"protected variable {name} has no stored secret")
-            out.append({"name": name, **_secret_ref(secret, "value")})
+            out[name] = _secret_ref(secret, "value")
         else:
             value = var.value or ""
-            out.append({"name": name, "value": value if var.expand else value.replace("$", "$$")})
-    return out
+            out[name] = {"value": value if var.expand else value.replace("$", "$$")}
+    for name, pin in session.secret_versions.items():
+        if not isinstance(pin, dict):
+            continue
+        if "secret" in pin:
+            out[name] = _secret_ref(pin["secret"], pin["key"])
+        else:
+            out[name] = {"value": pin["value"].replace("$", "$$")}
+    return [{"name": name, **out[name]} for name in sorted(out)]
 
 
 def _container(session: Session, settings: Settings, names: dict[str, str]) -> dict[str, Any]:

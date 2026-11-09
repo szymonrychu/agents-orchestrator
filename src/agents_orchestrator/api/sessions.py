@@ -130,6 +130,21 @@ def session_backup(session: repo.Session, settings: Settings) -> schemas.Session
     )
 
 
+def _vault_views(session: repo.Session) -> dict[str, schemas.VaultPinView]:
+    out = {}
+    for name, pin in session.secret_versions.items():
+        if not isinstance(pin, dict):  # a protected variable's Secret name, not a vault pin
+            continue
+        var = session.spec.env.get(name)
+        out[name] = schemas.VaultPinView(
+            entry=var.vault if var else None,
+            entry_env=var.env if var else None,
+            version=pin.get("version"),
+            protected="secret" in pin,
+        )
+    return out
+
+
 def _view(session: repo.Session, agg: dict | None, settings: Settings) -> schemas.SessionView:
     agg = agg or {}
     last_update = agg.get("last_update")
@@ -138,6 +153,7 @@ def _view(session: repo.Session, agg: dict | None, settings: Settings) -> schema
         id=session.id,
         slug=session.slug,
         spec=redact_spec(session.spec, session_metas(session.secret_versions, session.created_at)),
+        vault=_vault_views(session),
         desired=session.desired,
         status=session.status,
         generation=session.generation,

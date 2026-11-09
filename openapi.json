@@ -5448,6 +5448,14 @@
           },
           "summary": {
             "$ref": "#/components/schemas/SessionSummary"
+          },
+          "vault": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/VaultPinView"
+            },
+            "default": {},
+            "title": "Vault",
+            "type": "object"
           }
         },
         "required": [
@@ -5899,6 +5907,57 @@
           "type"
         ],
         "title": "ValidationError",
+        "type": "object"
+      },
+      "VaultPinView": {
+        "description": "What a session was pinned to for one vault env variable; never a value.",
+        "properties": {
+          "entry": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entry"
+          },
+          "entry_env": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entry Env"
+          },
+          "protected": {
+            "title": "Protected",
+            "type": "boolean"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          }
+        },
+        "required": [
+          "entry",
+          "entry_env",
+          "version",
+          "protected"
+        ],
+        "title": "VaultPinView",
         "type": "object"
       },
       "WebhookHook": {
