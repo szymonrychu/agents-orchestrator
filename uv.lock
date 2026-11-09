@@ -73,7 +73,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "any-mcp-tatara-orchestrator", git = "https://github.com/szymonrychu/any-mcp-tatara-plugins?subdirectory=orchestration%2Forchestrator&rev=v0.29.0" },
-    { name = "claude-code-wrapper", git = "https://github.com/szymonrychu/claude-code-wrapper?rev=cd5ca3d0026b57a2423e4fe77850ca3658e5f59e" },
+    { name = "claude-code-wrapper", git = "https://github.com/szymonrychu/claude-code-wrapper?rev=d97701aa8400906de0c1b4ced1d8d2440f346015" },
     { name = "moto", extras = ["server"], specifier = ">=5.2.4" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -527,8 +527,8 @@ wheels = [
 
 [[package]]
 name = "claude-code-wrapper"
-version = "0.10.0"
-source = { git = "https://github.com/szymonrychu/claude-code-wrapper?rev=cd5ca3d0026b57a2423e4fe77850ca3658e5f59e#cd5ca3d0026b57a2423e4fe77850ca3658e5f59e" }
+version = "0.12.0"
+source = { git = "https://github.com/szymonrychu/claude-code-wrapper?rev=d97701aa8400906de0c1b4ced1d8d2440f346015#d97701aa8400906de0c1b4ced1d8d2440f346015" }
 dependencies = [
     { name = "anyio" },
     { name = "fastapi" },
