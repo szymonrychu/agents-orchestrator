@@ -1247,8 +1247,19 @@
       },
       "EnvVarIn": {
         "additionalProperties": false,
-        "description": "The request form of an env variable: a protected one may carry its new value.\n\nOnly the api sees it; `SessionSpecIn.split` moves the value out so a `SessionSpec` never holds\none. Without a value a protected variable keeps its stored one.",
+        "description": "The request form of an env variable: a protected one may carry its new value, and a\nvariable may be a vault reference `{vault, env}` as in `EnvVar`.\n\nOnly the api sees it; `SessionSpecIn.split` moves the value out so a `SessionSpec` never holds\none. Without a value a protected variable keeps its stored one.",
         "properties": {
+          "env": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Env"
+          },
           "expand": {
             "default": false,
             "title": "Expand",
@@ -1271,6 +1282,18 @@
               }
             ],
             "title": "Value"
+          },
+          "vault": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vault"
           }
         },
         "title": "EnvVarIn",

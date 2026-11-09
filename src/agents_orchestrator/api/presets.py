@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
+from types import SimpleNamespace
 from typing import Any
 
 from fastapi import APIRouter, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from pydantic import SecretStr, ValidationError
 
-from agents_orchestrator.api import schemas, secret_store
+from agents_orchestrator.api import schemas, secret_store, vault_client
 from agents_orchestrator.api.errors import ApiError, not_found, project_error
 from agents_orchestrator.api.sessions import Cfg, Pool, check_spec, hold_project
 from agents_orchestrator.api.spec_edit import (
@@ -19,6 +20,7 @@ from agents_orchestrator.api.spec_edit import (
     merged_spec_in,
     note_fields,
 )
+from agents_orchestrator.api.vault_refs import check_refs, record_ref_events, ref_diff, refs_in
 from agents_orchestrator.db import presets as repo
 from agents_orchestrator.db import projects
 from agents_orchestrator.preset_policy import (
@@ -29,7 +31,7 @@ from agents_orchestrator.preset_policy import (
 )
 from agents_orchestrator.secret_view import EnvMeta, redact_spec_dict
 from agents_orchestrator.settings import Settings
-from agents_orchestrator.spec import SessionSpec, default_cache_key
+from agents_orchestrator.spec import Ref, SessionSpec, default_cache_key
 
 SECRET_MAX_BYTES = 1024 * 1024  # F1.9: a Kubernetes Secret holds at most 1 MiB
 
@@ -73,9 +75,9 @@ async def _validated(
     preset_id: uuid.UUID | None = None,
     human_only_base: dict[str, Any] | None = None,
     request: Request | None = None,
-) -> tuple[dict[str, Any], dict[str, SecretStr]]:
-    """Check name and spec; return the spec as the caller sent it (no defaults filled) and the
-    protected values it carried, which never go into the spec.
+) -> tuple[dict[str, Any], dict[str, SecretStr], SessionSpec]:
+    """Check name and spec; return the spec as the caller sent it (no defaults filled), the
+    protected values it carried, which never go into the spec, and the parsed spec.
 
     With `human_only_base` (the stored spec, `{}` on create) the human-only fields may only move
     toward safe, else 403 before anything is written."""
@@ -84,7 +86,7 @@ async def _validated(
     if human_only_base is not None:
         dumped = spec.model_dump(mode="json", exclude_unset=True)
         guard_agent_edit(human_only_base, dumped, values, request, privileged=True)
-    return await validated_spec(spec, settings, stored, preset_id), values
+    return await validated_spec(spec, settings, stored, preset_id), values, spec
 
 
 async def validated_spec(
@@ -123,6 +125,49 @@ def _refuse_column_moves(request: Request, stored: repo.Preset, new: dict[str, A
         raise human_only_refused(moved)
 
 
+async def check_vault(
+    request: Request | None, spec: SessionSpec, labels: list[str], project: str
+) -> None:
+    """Have the vault check the spec's refs against the preset's effective labels (its labels
+    plus its project); no call, and no vault needed, when the spec has no refs. Runs before the
+    preset row is locked."""
+    if not spec.vault_refs:
+        return
+    vault = vault_client.vault_of(request)
+    await check_refs(
+        vault, spec, vault_client.effective_labels(SimpleNamespace(project=project, labels=labels))
+    )
+
+
+def _changed_meanwhile() -> ApiError:
+    return ApiError(409, "conflict", "the preset changed meanwhile; retry")
+
+
+def _unchanged_since(
+    stored: repo.Preset, *, labels: bool, project: bool
+) -> Callable[[repo.Preset], None]:
+    """The recheck of a save whose vault check ran on `stored`: on the locked row, the labels
+    and project the save inherits (`labels`, `project`) and the stored refs must be as checked,
+    else 409 `conflict`."""
+    refs = refs_in(stored.spec)
+
+    def recheck(row: repo.Preset) -> None:
+        if (
+            (labels and row.labels != stored.labels)
+            or (project and row.project != stored.project)
+            or refs_in(row.spec) != refs
+        ):
+            raise _changed_meanwhile()
+
+    return recheck
+
+
+def _actor(request: Request, superleader: bool) -> str:
+    """`user`, or the slug of the superleader session making the call."""
+    caller = getattr(request.state, "admin_caller", None) if superleader else None
+    return "user" if caller is None else caller[1].slug
+
+
 def store_failed() -> ApiError:
     return ApiError(502, "secret_store_failed", "could not store a protected variable")
 
@@ -142,8 +187,13 @@ async def _save(
     values: dict[str, SecretStr],
     project: str,
     save: Callable[[], Awaitable[repo.Preset]],
+    actor: str = "user",
+    old_refs: dict[str, Ref] | None = None,
 ) -> tuple[repo.Preset, list[secret_store.SecretMeta]]:
     """Save the preset row and its secrets as one step; a failure leaves the old state.
+
+    In the same transaction: the names the new spec defines leave the preset's re-attach list,
+    and the vault refs attached or detached against `old_refs` are recorded as events by `actor`.
 
     The preset's `project` is checked and held first (`hold_project`). The row save, the new
     Secret versions and the retirement of dropped variables share one transaction. The new
@@ -158,6 +208,7 @@ async def _save(
         async with conn.transaction():
             await hold_project(conn, project)
             preset = await save()
+            preset = await _after_save(conn, preset, spec, actor, old_refs or {})
             if values or await secret_store.has_rows(conn, preset.id):
                 kube = secret_store.kube_of(request)
                 for name, value in values.items():
@@ -180,6 +231,21 @@ async def _save(
     if kube is not None:
         await secret_store.gc(conn, kube, settings.namespace, preset_id=preset.id)
     return preset, (await secret_store.list_metas(conn, [preset.id])).get(preset.id, [])
+
+
+async def _after_save(
+    conn, preset: repo.Preset, spec: dict[str, Any], actor: str, old_refs: dict[str, Ref]
+) -> repo.Preset:
+    """Prune the re-attach list of every name the new spec defines (any shape) and record the
+    ref changes; both inside the save's transaction. Returns the preset as it now stands."""
+    defined = set(spec.get("env") or {})
+    if any(n in defined for n in preset.vault_reattach):
+        preset = await repo.set_vault_reattach(
+            conn, preset.id, [n for n in preset.vault_reattach if n not in defined]
+        )
+    attached, detached = ref_diff(old_refs, refs_in(spec))
+    await record_ref_events(conn, preset.id, actor, attached, detached)
+    return preset
 
 
 def _exists(name: str) -> ApiError:
@@ -229,11 +295,12 @@ async def create(
 ) -> schemas.PresetView:
     if superleader and body.superleader_manageable is False:
         raise manageable_main_port_only()
-    spec, values = await _validated(
+    spec, values, model = await _validated(
         body, settings, human_only_base={} if superleader else None, request=request
     )
     manageable = superleader or bool(body.superleader_manageable)
     project = projects.DEFAULT if body.project is None else body.project
+    await check_vault(request, model, body.labels or [], project)
     try:
         preset, metas = await _save(
             request,
@@ -243,6 +310,7 @@ async def create(
             values,
             project,
             lambda: repo.create(conn, body.name, spec, manageable, body.labels, project),
+            _actor(request, superleader),
         )
     except repo.PresetExists:
         raise _exists(body.name) from None
@@ -280,7 +348,7 @@ async def replace(
     project = stored.project if body.project is None else body.project
     if superleader:
         _refuse_column_moves(request, stored, {**body.model_dump(), "project": project})
-    spec, values = await _validated(
+    spec, values, model = await _validated(
         body,
         settings,
         stored.spec,
@@ -288,6 +356,9 @@ async def replace(
         human_only_base=stored.spec if superleader else None,
         request=request,
     )
+    labels = stored.labels if body.labels is None else body.labels
+    await check_vault(request, model, labels, project)
+    recheck = _unchanged_since(stored, labels=body.labels is None, project=body.project is None)
     expected = stored.updated_at if superleader else None
     try:
         preset, metas = await _save(
@@ -298,8 +369,10 @@ async def replace(
             values,
             project,
             lambda: repo.update(
-                conn, preset_id, body.name, spec, flag, body.labels, expected, project
+                conn, preset_id, body.name, spec, flag, body.labels, expected, project, recheck
             ),
+            _actor(request, superleader),
+            refs_in(stored.spec),
         )
     except repo.PresetNotFound:
         raise not_found("preset") from None
@@ -342,7 +415,7 @@ async def patch(
             raise not_found("preset")
         merged = _merged_body(stored, body)
         _refuse_column_moves(request, stored, merged.model_dump())
-        spec, values = await _validated(
+        spec, values, model = await _validated(
             merged,
             settings,
             stored.spec,
@@ -350,6 +423,9 @@ async def patch(
             human_only_base=stored.spec,
             request=request,
         )
+        labels = stored.labels if merged.labels is None else merged.labels
+        await check_vault(request, model, labels, merged.project)
+        recheck = _unchanged_since(stored, labels=merged.labels is None, project=True)
         try:
             preset, metas = await _save(
                 request,
@@ -358,9 +434,11 @@ async def patch(
                 spec,
                 values,
                 merged.project,
-                lambda m=merged, sp=spec, at=stored.updated_at: repo.update(
-                    conn, preset_id, m.name, sp, None, m.labels, at, m.project
+                lambda m=merged, sp=spec, at=stored.updated_at, rc=recheck: repo.update(
+                    conn, preset_id, m.name, sp, None, m.labels, at, m.project, rc
                 ),
+                _actor(request, True),
+                refs_in(stored.spec),
             )
         except repo.PresetNotFound:
             raise not_found("preset") from None
@@ -497,6 +575,8 @@ async def copy(
         spec, removed = strip_grants(spec)
         if request is not None:
             note_fields(request, removed + (["project"] if project != source.project else []))
+    if refs_in(spec):
+        await check_vault(request, SessionSpec.model_validate(spec), source.labels, project)
     for _ in range(_COPY_TRIES):
         taken = {p.name.lower() for p in await repo.list_presets(conn)}
         name = explicit if explicit is not None else _copy_name(source.name, taken)
@@ -505,6 +585,14 @@ async def copy(
                 await hold_project(conn, project)
                 created = await repo.create(
                     conn, name, spec, source.superleader_manageable, source.labels, project
+                )
+                attached, _ = ref_diff({}, refs_in(spec))
+                await record_ref_events(
+                    conn,
+                    created.id,
+                    _actor(request, superleader) if request else "user",
+                    attached,
+                    [],
                 )
             return _view(created)
         except repo.PresetExists:
@@ -515,11 +603,11 @@ async def copy(
 
 @router.post("/presets/{preset_id}/copy", status_code=201, response_model=schemas.PresetView)
 async def copy_preset(
-    preset_id: uuid.UUID, pool: Pool, body: schemas.CopyPreset | None = None
+    preset_id: uuid.UUID, request: Request, pool: Pool, body: schemas.CopyPreset | None = None
 ) -> schemas.PresetView:
     async with pool.connection() as conn:
         body = body or schemas.CopyPreset()
-        return await copy(conn, preset_id, body.name, project=body.project)
+        return await copy(conn, preset_id, body.name, request=request, project=body.project)
 
 
 async def by_ref(conn, ref: str) -> repo.Preset:

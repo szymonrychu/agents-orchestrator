@@ -12,8 +12,8 @@ and false equal:
   never any other change.
 - wrapper.permissions.deny: entries may be added, never removed.
 - wrapper.permissions.allow: entries may be removed, never added.
-- env.<NAME> of a stored protected variable: may not be removed or unprotected
-  (decision 7 b); adding a protected variable and setting its value stay allowed.
+- env.<NAME>: on a privileged target an `env.<NAME>` path is still security, except when the
+  stored and the new entry are each a vault reference or absent (attach, detach, re-point).
 
 `HUMAN_ONLY_COLUMNS` are preset columns outside the spec that an agent may not change at all.
 
@@ -174,33 +174,33 @@ def human_only_changes(stored: dict[str, Any], new: dict[str, Any]) -> list[str]
     if not _entries(s_perm.get("deny")) <= _entries(n_perm.get("deny")):
         out.append("wrapper.permissions.deny")
 
-    new_env = _dict(new.get("env"))
-    for name, entry in _dict(stored.get("env")).items():
-        if _dict(entry).get("protected") and not _dict(new_env.get(name)).get("protected"):
-            out.append(f"env.{name}")
     return sorted(out)
 
 
-def privileged_target_changes(
-    stored: dict[str, Any], new: dict[str, Any], secret_values: Iterable[str] = ()
-) -> list[str]:
+def _is_ref_or_absent(entry: Any) -> bool:
+    return entry is None or (isinstance(entry, dict) and entry.get("vault") is not None)
+
+
+def privileged_target_changes(stored: dict[str, Any], new: dict[str, Any]) -> list[str]:
     """The changed spec paths an agent may not touch on a stored preset that is privileged.
 
     Empty when the stored preset has no privileged flag on. Otherwise only the `NON_SECURITY`
-    paths and the human-only fields (which `human_only_changes` already limits to toward safe)
+    paths, the human-only fields (which `human_only_changes` already limits to toward safe) and
+    the `env.<NAME>` paths whose stored and new entries are each a vault reference or absent
     may change; name and labels are not spec paths. The stored preset counts, so turning a flag
-    off together with another edit is refused. `secret_values` names the protected variables
-    the call gives a value: each is refused as `env.<NAME>`, because a new value would swap a
-    credential the granted pod runs with. A stored protected entry resent unchanged (or
-    differing only in form) passes; removing or unprotecting it is human-only (7 b)."""
+    off together with another edit is refused."""
     if not privileged(stored):
         return []
-    protected = {
-        f"env.{n}" for n, e in _dict(stored.get("env")).items() if _dict(e).get("protected")
-    }
-    allowed = NON_SECURITY | HUMAN_ONLY_PATHS | protected
-    refused = {p for p in changed_paths(stored, new) if p not in allowed}
-    return sorted(refused | {f"env.{n}" for n in secret_values})
+    allowed = NON_SECURITY | HUMAN_ONLY_PATHS
+    old_env, new_env = _dict(stored.get("env")), _dict(new.get("env"))
+
+    def refs_only(path: str) -> bool:
+        name = path.removeprefix("env.")
+        return path.startswith("env.") and all(
+            _is_ref_or_absent(e.get(name)) for e in (old_env, new_env)
+        )
+
+    return sorted(p for p in changed_paths(stored, new) if p not in allowed and not refs_only(p))
 
 
 def _fixed_value(spec: dict[str, Any], field: str) -> Any:

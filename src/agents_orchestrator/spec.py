@@ -384,7 +384,8 @@ class EnvVar(_Strict):
 
 
 class EnvVarIn(_Strict):
-    """The request form of an env variable: a protected one may carry its new value.
+    """The request form of an env variable: a protected one may carry its new value, and a
+    variable may be a vault reference `{vault, env}` as in `EnvVar`.
 
     Only the api sees it; `SessionSpecIn.split` moves the value out so a `SessionSpec` never holds
     one. Without a value a protected variable keeps its stored one.
@@ -393,14 +394,23 @@ class EnvVarIn(_Strict):
     value: SecretStr | None = None
     protected: bool = Field(default=False, strict=True)
     expand: bool = Field(default=False, strict=True)
+    vault: uuid.UUID | None = None
+    env: str | None = None
 
     @property
     def is_ref(self) -> bool:
-        return False
+        return self.vault is not None
 
     @model_validator(mode="after")
     def _shape(self) -> EnvVarIn:
-        if self.protected:
+        if self.vault is not None or self.env is not None:
+            if self.vault is None or self.env is None:
+                raise ValueError("a vault reference needs both vault and env")
+            if not _VAULT_ENV_RE.fullmatch(self.env):
+                raise ValueError("a vault reference env must match [A-Z_][A-Z0-9_]{0,127}")
+            if self.value is not None or self.expand or self.protected:
+                raise ValueError("a vault reference carries only vault and env")
+        elif self.protected:
             if self.expand:
                 raise ValueError("a protected variable ignores expand (not expanded); set it false")
         elif self.value is None:
@@ -1029,6 +1039,9 @@ class SessionSpecIn(SessionSpec):
         values: dict[str, SecretStr] = {}
         env: dict[str, EnvVar] = {}
         for name, entry in self.env.items():
+            if entry.vault is not None:
+                env[name] = EnvVar(vault=entry.vault, env=entry.env)
+                continue
             given = {k: getattr(entry, k) for k in entry.model_fields_set if k != "value"}
             if entry.protected:
                 if entry.value is not None:

@@ -399,10 +399,12 @@ async def test_new_protected_declaration_refused(pool, settings):
     [{"env": {"K": None}}, {"env": {"K": {"protected": False, "value": "plain"}}}],
     ids=["remove", "unprotect"],
 )
-async def test_protected_removal_or_unprotect_refused(pool, settings, patch):
+async def test_protected_removal_or_unprotect_is_not_human_only(pool, settings, patch):
+    """The stored-protected rule is gone (Q4): a session edit may drop or unprotect the entry."""
     me = await alone(pool, "svc-unprotect")
     await _seed(pool, settings, me, {"env": {"K": {"protected": True}}}, versions={"K": "s-1"})
-    await _refused(pool, settings, me, me, patch, 403, "human_only_field", ["env.K"])
+    view = await _patch(pool, settings, me, me, patch)
+    assert view.spec.env.get("K") is None or view.spec.env["K"].protected is False
 
 
 @pytest.mark.parametrize(

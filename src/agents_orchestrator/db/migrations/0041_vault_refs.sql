@@ -25,3 +25,13 @@ WHERE jsonb_typeof(spec -> 'env') = 'object'
                          THEN spec -> 'env' ELSE '{}'::jsonb END) AS e
     WHERE jsonb_typeof(e.value) = 'object' AND e.value -> 'protected' = 'true'::jsonb
   );
+
+-- Names-only audit rows of vault reference attaches and detaches on presets (one writer: the
+-- api). No foreign key: the rows outlive the preset.
+CREATE TABLE IF NOT EXISTS preset_vault_events (
+    id bigserial PRIMARY KEY,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    kind text NOT NULL CHECK (kind IN ('preset_vault_attached', 'preset_vault_detached')),
+    actor text NOT NULL,
+    data jsonb NOT NULL
+);

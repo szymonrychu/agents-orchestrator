@@ -176,32 +176,27 @@ async def _refused_untouched(human, kube, pid, before, secrets_before, r, status
     assert kube.names("Secret") == secrets_before
 
 
-async def test_admin_put_cannot_remove_protected_env(call, human, seed, kube, canary, pool, boss):
-    pid, before = await _protected_seed(human, seed, canary)
-    secrets_before = kube.names("Secret")
+async def test_admin_put_can_remove_protected_env(call, human, seed, canary):
+    """The stored-protected rule is gone (Q4): a non-privileged preset may drop the entry."""
+    pid, _ = await _protected_seed(human, seed, canary)
     r = await call("PUT", f"{A}/{pid}", json={"name": "seeded", "spec": {"env": {}}})
-    await _refused_untouched(
-        human, kube, pid, before, secrets_before, r, 403, "human_only_field", ["env.K"]
-    )
-    last = (await events(pool, boss.id))[-1]
-    assert last["data"]["status"] == 403 and last["data"]["fields"] == ["env.K"]
+    assert r.status_code == 200, r.text
+    assert r.json()["spec"].get("env", {}) == {}
     assert canary not in r.text
 
 
 @pytest.mark.parametrize("verb", ["PUT", "PATCH"])
-async def test_unprotect_403(call, human, seed, kube, canary, verb):
-    """S2: an agent may not turn a protected variable plain and give it a value of its own."""
-    pid, before = await _protected_seed(human, seed, canary)
-    secrets_before = kube.names("Secret")
+async def test_unprotect_is_allowed_on_a_plain_preset(call, human, seed, canary, verb):
+    """The stored-protected rule is gone (Q4): the agent may turn a protected variable plain
+    with a value of its own; a privileged preset still refuses it."""
+    pid, _ = await _protected_seed(human, seed, canary)
     plain = {"env": {"K": {"value": canary + "-plain", "protected": False}}}
     if verb == "PUT":
         r = await call("PUT", f"{A}/{pid}", json={"name": "seeded", "spec": plain})
     else:
         r = await call("PATCH", f"{A}/{pid}", json={"spec": plain})
-    await _refused_untouched(
-        human, kube, pid, before, secrets_before, r, 403, "human_only_field", ["env.K"]
-    )
-    assert canary not in r.text
+    assert r.status_code == 200, r.text
+    assert r.json()["spec"]["env"]["K"]["protected"] is False
 
 
 async def test_put_against_changed_row_is_409(pool, settings, seed, monkeypatch):
@@ -429,13 +424,12 @@ async def test_patch_adds_protected_declaration(call, seed):
 
 
 @pytest.mark.parametrize("patch", [{"env": {"K": None}}, {"env": None}])
-async def test_patch_null_on_protected_env_403(call, human, seed, kube, canary, patch):
-    pid, before = await _protected_seed(human, seed, canary)
-    secrets_before = kube.names("Secret")
+async def test_patch_null_on_protected_env_is_allowed(call, human, seed, canary, patch):
+    """The stored-protected rule is gone (Q4): a non-privileged preset may drop the entry."""
+    pid, _ = await _protected_seed(human, seed, canary)
     r = await call("PATCH", f"{A}/{pid}", json={"spec": patch})
-    await _refused_untouched(
-        human, kube, pid, before, secrets_before, r, 403, "human_only_field", ["env.K"]
-    )
+    assert r.status_code == 200, r.text
+    assert "K" not in r.json()["spec"].get("env", {})
 
 
 async def test_patch_inactivity_is_an_ordinary_editable_field(call, seed):
@@ -629,8 +623,8 @@ async def test_privileged_target_resend_with_protected_env_passes(call, human, s
 @pytest.mark.parametrize(("flag", "grant"), FLAGS)
 @pytest.mark.parametrize("verb", ["PUT", "PATCH"])
 async def test_privileged_unprotect_403(call, human, seed, kube, canary, flag, grant, verb):
-    """Residual (a): unprotecting a credential of a privileged preset is refused like on any
-    other preset (human-only runs first)."""
+    """Residual (a): replacing a credential of a privileged preset with a plain value stays
+    refused (a plain env change is security there)."""
     pid, before = await _protected_seed(human, seed, canary, grant)
     secrets_before = kube.names("Secret")
     plain = {"env": {"K": {"value": canary + "-plain", "protected": False}}}
@@ -639,7 +633,7 @@ async def test_privileged_unprotect_403(call, human, seed, kube, canary, flag, g
     else:
         r = await call("PATCH", f"{A}/{pid}", json={"spec": plain})
     await _refused_untouched(
-        human, kube, pid, before, secrets_before, r, 403, "human_only_field", ["env.K"]
+        human, kube, pid, before, secrets_before, r, 403, "privileged_target", ["env.K"]
     )
     assert canary not in r.text
 

@@ -8,7 +8,6 @@ from agents_orchestrator.preset_policy import (
     classify,
     fixed_changes,
     human_only_changes,
-    merge_patch,
     privileged,
     strip_grants,
     tighten_changes,
@@ -71,95 +70,13 @@ def test_permission_lists():
     assert human_only_changes({}, p(["A"], None)) == ["wrapper.permissions.allow"]
 
 
-def test_protected_env_removal_is_human_only():
-    """Decision 7 b: removing or unprotecting a stored protected variable is human-only;
-    adding one (and setting its value through the secret route) is not."""
+def test_env_changes_are_not_human_only():
+    """The stored-protected rule is gone (decision Q4): removing or changing an env entry is
+    not a human-only change; a privileged target limits it separately."""
     stored = {"env": {"K": {"protected": True}}}
-    assert human_only_changes(stored, {"env": {}}) == ["env.K"]
-    assert human_only_changes(stored, {}) == ["env.K"]
-    assert human_only_changes(stored, {"env": {"K": {"value": "v"}}}) == ["env.K"]
-    assert human_only_changes(stored, {"env": {"K": {"value": "v", "protected": False}}}) == [
-        "env.K"
-    ]
-    assert human_only_changes(stored, {"env": {"K": {"protected": True}}}) == []
-    assert human_only_changes({}, {"env": {"J": {"protected": True}}}) == []
-    assert human_only_changes({"env": {"P": {"value": "x"}}}, {}) == []
-    assert (
-        human_only_changes(stored, {"env": {"K": {"protected": True}, "N": {"protected": True}}})
-        == []
-    )
-
-
-def test_several_fields_sorted():
-    assert human_only_changes({}, {"session_messaging": True, "kube_cluster_access": True}) == [
-        "kube_cluster_access",
-        "session_messaging",
-    ]
-
-
-def test_strip_grants():
-    spec = {
-        "kube_cluster_access": True,
-        "docker": True,
-        "docker_cpu": "1",
-        "discard_hook_url": "https://x",
-        "session_messaging": True,
-        "wrapper": {"permission_mode": "auto"},
-        "replicas": 2,
-    }
-    out, removed = strip_grants(spec)
-    assert out == {"wrapper": {"permission_mode": "auto"}, "replicas": 2}
-    assert removed == [
-        "discard_hook_url",
-        "docker",
-        "docker_cpu",
-        "kube_cluster_access",
-        "session_messaging",
-    ]
-    assert spec["kube_cluster_access"] is True  # not mutated
-
-
-def test_strip_grants_keeps_sizes_without_docker():
-    out, removed = strip_grants({"kube_cluster_access": True, "docker_cpu": "1"})
-    assert out == {"docker_cpu": "1"}
-    assert removed == ["kube_cluster_access"]
-
-
-def test_privileged():
-    assert privileged({}) == []
-    assert (
-        privileged(
-            {
-                "kube_cluster_access": False,
-                "session_messaging": None,
-                "discard_hook_url": "https://x",
-            }
-        )
-        == []
-    )
-    assert privileged({"docker": True, "kube_cluster_access": True}) == [
-        "docker",
-        "kube_cluster_access",
-    ]
-    assert privileged({"session_messaging": True}) == ["session_messaging"]
-
-
-def test_merge_patch_rfc7396():
-    assert merge_patch({"a": {"b": 1, "c": 2}}, {"a": {"b": None, "d": 3}}) == {
-        "a": {"c": 2, "d": 3}
-    }
-    assert merge_patch({"l": [1, 2]}, {"l": [3]}) == {"l": [3]}
-    assert merge_patch({"a": 1}, "x") == "x"
-    assert merge_patch({"a": {"b": 1}}, {"a": None}) == {}
-
-
-def test_merge_patch_does_not_mutate():
-    target = {"a": {"b": 1}}
-    patch = {"a": {"c": [1]}}
-    out = merge_patch(target, patch)
-    out["a"]["c"].append(2)
-    assert target == {"a": {"b": 1}}
-    assert patch == {"a": {"c": [1]}}
+    assert human_only_changes(stored, {"env": {}}) == []
+    assert human_only_changes(stored, {}) == []
+    assert human_only_changes(stored, {"env": {"K": {"value": "v"}}}) == []
 
 
 def test_changed_paths():
@@ -184,17 +101,22 @@ def test_privileged_target_changes():
     assert ptc(stored, {**stored, "env": {**stored["env"], "N": {"value": "1"}}}) == ["env.N"]
 
 
-def test_privileged_target_refuses_secret_values():
-    """A value for a protected variable of a privileged preset (credential substitution in a
-    pod with a grant) is refused even though the stored spec does not change."""
+def test_privileged_target_env_ref_paths_are_not_security():
+    """An env.<NAME> path whose stored and new entries are each a ref or absent is allowed on a
+    privileged target (Q4); a plain or protected entry on either side stays security."""
     from agents_orchestrator.preset_policy import privileged_target_changes as ptc
 
-    stored = {"kube_cluster_access": True, "env": {"K": {"protected": True}}}
-    assert ptc(stored, stored, ["K"]) == ["env.K"]
-    assert ptc(stored, {**stored, "start_prompt": "p"}, ["K"]) == ["env.K", "start_prompt"]
-    assert (
-        ptc({"env": {"K": {"protected": True}}}, {"env": {"K": {"protected": True}}}, ["K"]) == []
-    )
+    ref = {"vault": "11111111-1111-4111-8111-111111111111", "env": "TOKEN"}
+    other = {"vault": "22222222-2222-4222-8222-222222222222", "env": "TOKEN"}
+    stored = {"kube_cluster_access": True, "env": {"R": ref, "P": {"value": "x"}}}
+    keep = {"P": {"value": "x"}}
+    assert ptc(stored, {**stored, "env": {**keep, "R": other}}) == []  # re-point
+    assert ptc(stored, {**stored, "env": keep}) == []  # detach
+    assert ptc(stored, {**stored, "env": {**stored["env"], "N": ref}}) == []  # attach
+    assert ptc(stored, {**stored, "env": {**stored["env"], "N": {"value": "1"}}}) == ["env.N"]
+    assert ptc(stored, {**stored, "env": {"R": ref}}) == ["env.P"]  # plain removed
+    assert ptc(stored, {**stored, "env": {**stored["env"], "R": {"value": "v"}}}) == ["env.R"]
+    assert ptc(stored, {**stored, "env": {**keep, "R": {"protected": True}}}) == ["env.R"]
 
 
 NS = "kube_namespace_access"

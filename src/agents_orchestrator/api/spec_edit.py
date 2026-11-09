@@ -17,6 +17,7 @@ from agents_orchestrator.preset_policy import (
     merge_patch,
     privileged_target_changes,
 )
+from agents_orchestrator.preset_policy import privileged as privileged_flags
 from agents_orchestrator.spec import SessionSpecIn
 
 _PROPOSE = "; send it as a proposal: proposal_create"
@@ -60,8 +61,13 @@ def guard_agent_edit(
     refused = human_only_changes(base, new)
     if refused:
         raise _noted(request, refused, human_only_refused)
-    if privileged and (refused := privileged_target_changes(base, new, values)):
-        raise _noted(request, refused, privileged_edit_refused)
+    if privileged:
+        refused = privileged_target_changes(base, new)
+        if privileged_flags(base):
+            # a value for a protected variable would swap a credential the granted pod runs with
+            refused = sorted({*refused, *(f"env.{n}" for n in values)})
+        if refused:
+            raise _noted(request, refused, privileged_edit_refused)
 
 
 def _noted(

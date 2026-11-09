@@ -150,11 +150,13 @@ async def update(
     labels: list[str] | None = None,
     expected_updated_at: datetime | None = None,
     project: str | None = None,
+    recheck: Callable[[Preset], None] | None = None,
 ) -> Preset:
     """Replace name and spec; a None flag, None labels or a None project keep the stored values.
 
     With `expected_updated_at`, the row must still carry that timestamp (checked under the row
-    lock) or `PresetChanged` is raised and nothing is written."""
+    lock) or `PresetChanged` is raised and nothing is written. `recheck(row)` runs on the locked
+    row before the write and raises to refuse."""
     validate_preset_name(name)
     try:
         async with conn.transaction():
@@ -167,6 +169,8 @@ async def update(
                 raise PresetChanged(str(preset_id))
             if current[0].is_default and name != current[0].name:
                 raise PresetDefault(current[0].name)
+            if recheck is not None:
+                recheck(current[0])
             rows = await _fetch(
                 conn,
                 "UPDATE presets SET name = %s, spec = %s,"
@@ -226,3 +230,24 @@ async def set_vault_reattach(
     if not rows:
         raise PresetNotFound(str(preset_id))
     return rows[0]
+
+
+async def insert_vault_event(
+    conn: psycopg.AsyncConnection, kind: str, actor: str, data: dict[str, Any]
+) -> None:
+    """Append a names-only vault attach or detach event (the payload carries no value)."""
+    await conn.execute(
+        "INSERT INTO preset_vault_events (kind, actor, data) VALUES (%s, %s, %s)",
+        (kind, actor, Jsonb(data)),
+    )
+
+
+async def vault_events(conn: psycopg.AsyncConnection, preset_id: uuid.UUID) -> list[dict[str, Any]]:
+    """The vault events of one preset, oldest first."""
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT kind, actor, data FROM preset_vault_events"
+            " WHERE data ->> 'preset_id' = %s ORDER BY id",
+            (str(preset_id),),
+        )
+        return await cur.fetchall()
