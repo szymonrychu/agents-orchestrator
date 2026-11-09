@@ -80,7 +80,11 @@ async def test_job_rendered_with_pvc_mount(env):
     } in (pod["volumes"])
     assert workdir_mount(c.spec)["mountPath"] == "/workdir"
     assert workdir_mount(c.spec)["subPath"] == "workdir"
-    assert pod["securityContext"] == {"runAsUser": 1000, "fsGroup": 1000}
+    assert pod["securityContext"] == {
+        "runAsUser": 1000,
+        "fsGroup": 1000,
+        "fsGroupChangePolicy": "OnRootMismatch",
+    }
     assert pod["restartPolicy"] == "Never"
     assert "imagePullSecrets" not in pod
     assert obj["spec"]["backoffLimit"] == 0

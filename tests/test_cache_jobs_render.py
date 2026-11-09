@@ -215,6 +215,7 @@ def test_job_pod_hardened(action):
         "runAsUser": 1000,
         "runAsNonRoot": True,
         "fsGroup": 1000,
+        "fsGroupChangePolicy": "OnRootMismatch",
         "seccompProfile": {"type": "RuntimeDefault"},
     }
     assert pod["imagePullSecrets"] == [{"name": "harbor-pull"}]

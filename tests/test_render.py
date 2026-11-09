@@ -456,7 +456,11 @@ def test_shutdown_below_grace_and_resources():
     assert pod["terminationGracePeriodSeconds"] == 90
     assert config_of(objs)["limits"]["shutdown_timeout_seconds"] < 90
     assert pod["containers"][0]["resources"] == {"limits": {"cpu": "1"}}
-    assert pod["securityContext"] == {"runAsUser": 1000, "fsGroup": 1000}
+    assert pod["securityContext"] == {
+        "runAsUser": 1000,
+        "fsGroup": 1000,
+        "fsGroupChangePolicy": "OnRootMismatch",
+    }
 
 
 def test_render_is_pure():
