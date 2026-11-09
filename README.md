@@ -170,6 +170,10 @@ One image, one `orch` entrypoint. Every command reads `ORCH_*` settings (see Con
 
 `orch presets-check` (needs `ORCH_DATABASE_URL`) validates every stored preset the way a session create does and lists the ones that would be refused: one block per preset with the failing field and rule, then a count; exit code 1 when any would fail, 0 otherwise. It prints names, paths and rule text only, never an env value. Run it before deploying a release that tightens the spec model, for example to find a `${X}` in a hook or MCP field that names no `env` variable, or a plain-string `env` entry.
 
+## Handover measurements
+
+`orch handover-stats [--days N] [--baseline]` (needs `ORCH_DATABASE_URL`; read-only, default 7 days) prints one JSON object with `days`, `handovers`, `by_kind` (counts by reason: `handover`, `rollout`, `scale_down`, `leader_lost`, `user`), `median_tenure_seconds`, `tenures`, `tenures_under_20_min` and `intake_bytes_by_day` (a list of `[date, bytes]`). It reads `handover_log`, one row per delivered handover notice written by the api sweeper (session, epoch, kind, `tenure_seconds` = how long the predecessor led, `intake_bytes` = notice text plus file). `--baseline` derives the same numbers from the existing `handover` notices instead (tenure = gap between a session's consecutive notices, intake = notice text plus attachment sizes, kind `unknown`), so the numbers before the change can be compared with the ones after. The three queries behind it: the median of the non-null tenures (`percentile_cont(0.5)`), the count of tenures under 1200 s, and the sum of `intake_bytes` per day.
+
 ## Images
 
 CI (`.github/workflows/ci.yaml`, job `images`) builds the orchestrator image from the root `Dockerfile` and smoke-tests it with `docker run --rm <image> --help`, but only after the `lint`, `test` and `e2e` jobs pass; a red build is never pushed. Only a push to `main` logs in to Harbor (secrets `HARBOR_USERNAME`, `HARBOR_PASSWORD`) and pushes it with `regctl`, in 50MB chunks. The `e2e` job builds and loads its own images and does not use the pushed one, so it does not wait for `images`.

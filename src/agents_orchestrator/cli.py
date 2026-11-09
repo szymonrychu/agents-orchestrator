@@ -249,11 +249,52 @@ def _cmd_presets_check(_args: argparse.Namespace) -> int:
     return presets_check.run(settings.database_url, settings, sys.stdout)
 
 
+def _configure_handover_stats(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--days", type=int, default=7, help="window in days (default 7)")
+    parser.add_argument(
+        "--baseline",
+        action="store_true",
+        help="derive the numbers from the existing handover notices instead of handover_log",
+    )
+
+
+def _cmd_handover_stats(args: argparse.Namespace) -> int:
+    import asyncio
+    import dataclasses
+    import json
+    from datetime import date
+
+    import psycopg
+
+    from agents_orchestrator.db import handover_stats
+
+    async def collect():
+        run = handover_stats.baseline_stats if args.baseline else handover_stats.handover_stats
+        async with await psycopg.AsyncConnection.connect(settings.database_url) as conn:
+            return await run(conn, args.days)
+
+    def default(value):
+        if isinstance(value, date):
+            return value.isoformat()
+        raise TypeError(type(value).__name__)
+
+    settings = _settings()
+    stats = asyncio.run(collect())
+    print(json.dumps(dataclasses.asdict(stats), default=default, indent=2))
+    return 0
+
+
 register("migrate", _cmd_migrate, "apply database migrations and exit")
 register(
     "presets-check",
     _cmd_presets_check,
     "list the stored presets a session create would refuse (run before a deploy; prints no values)",
+)
+register(
+    "handover-stats",
+    _cmd_handover_stats,
+    "print handover tenure and intake statistics as JSON (read-only)",
+    _configure_handover_stats,
 )
 register("api", _cmd_api, "serve the HTTP API and UI")
 register("dispatcher", _cmd_dispatcher, "dispatch queued messages to agents")
