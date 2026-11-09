@@ -161,6 +161,8 @@ class PresetView(BaseModel):
     project: str
     # the privileged grants on (preset_policy.privileged), so a client never names the fields
     privileged: list[str]
+    # env names to re-attach as vault references (set by migration 0041)
+    vault_reattach: list[str]
     spec: dict[str, Any]
     created_at: datetime
     updated_at: datetime

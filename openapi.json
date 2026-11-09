@@ -3393,6 +3393,13 @@
             "format": "date-time",
             "title": "Updated At",
             "type": "string"
+          },
+          "vault_reattach": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Vault Reattach",
+            "type": "array"
           }
         },
         "required": [
@@ -3403,6 +3410,7 @@
           "labels",
           "project",
           "privileged",
+          "vault_reattach",
           "spec",
           "created_at",
           "updated_at"

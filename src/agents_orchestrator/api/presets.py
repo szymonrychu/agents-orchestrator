@@ -52,6 +52,7 @@ def _view(
         labels=preset.labels,
         project=preset.project,
         privileged=privileged(preset.spec),
+        vault_reattach=preset.vault_reattach,
         spec=redact_spec_dict(preset.spec, metas),
         created_at=preset.created_at,
         updated_at=preset.updated_at,
