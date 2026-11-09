@@ -1028,7 +1028,7 @@ Replaces the session's init scripts. Body `{"scripts": ["<shell script>", ...]}`
 
 ### `PATCH /api/v1/sessions/{session_id}/labels`
 
-Replaces the session's labels. Body `{"labels": ["<label>", ...]}` (extra fields rejected). A label is trimmed and lowercased, 1 to 40 characters of `a-z`, `0-9`, `-`, `_`, `.`, `:`; a label starting with `project:` is reserved and refused with 422 `invalid_request` on every preset and session label write (stored ones were removed by migration 0041); the list is deduplicated keeping the first-seen order and holds at most 20 labels, else 422 `invalid_request`. Labels are not part of the spec: no generation bump, no pod roll. Response 200 with the session view (`labels`). Errors: 404 `not_found`, 422 `invalid_request`.
+Replaces the session's labels. Body `{"labels": ["<label>", ...]}` (extra fields rejected). A label is trimmed and lowercased, 1 to 40 characters of `a-z`, `0-9`, `-`, `_`, `.`, `:`; a label starting with `project:` is reserved and refused with 422 `invalid_request` on every preset and session label write (stored ones were removed by migration 0042); the list is deduplicated keeping the first-seen order and holds at most 20 labels, else 422 `invalid_request`. Labels are not part of the spec: no generation bump, no pod roll. Response 200 with the session view (`labels`). Errors: 404 `not_found`, 422 `invalid_request`.
 
 ### `PATCH /api/v1/sessions/{session_id}/project`
 
