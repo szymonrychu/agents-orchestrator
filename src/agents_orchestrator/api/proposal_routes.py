@@ -16,9 +16,9 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query, Request, Response
 
 from agents_orchestrator.api import proposals, schemas
-from agents_orchestrator.api.admin import ADMIN_PREFIX, AdminRoute, caller_of, require_superleader
-from agents_orchestrator.api.agent import Caller
-from agents_orchestrator.api.errors import not_found
+from agents_orchestrator.api.admin import ADMIN_PREFIX, AdminRoute, _admit, caller_of
+from agents_orchestrator.api.agent import Caller, _leads
+from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.sessions import Cfg, Pool
 from agents_orchestrator.db import proposals as repo
 from agents_orchestrator.db import sessions as sessions_repo
@@ -30,9 +30,15 @@ Limit = Annotated[int, Query(ge=1, le=LIST_LIMIT_MAX)]
 
 
 async def require_proposer(request: Request, agent: Caller, pool: Pool) -> sessions_repo.Session:
-    """Stage A: superleader sessions only (403 not_superleader), admitted for the audit like
-    `require_superleader`. Stage C adds a session's leader for its own session."""
-    return await require_superleader(request, agent, pool)
+    """The caller's session, admitted for the audit like `require_superleader`: a superleader
+    session (any of its agents), or any other session's leader (else 403 not_leader). The
+    create and revise handlers keep a regular leader on its own session (plan 3.3)."""
+    async with pool.connection() as conn:
+        session = await sessions_repo.get(conn, agent.session_id)
+        assert session is not None
+        if not session.spec.session_messaging and not await _leads(conn, agent, session):
+            raise ApiError(403, "not_leader", "only the session's leader may propose changes")
+    return _admit(request, agent, session)
 
 
 proposal_router = APIRouter(

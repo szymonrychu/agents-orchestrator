@@ -319,6 +319,11 @@ ALONE_SESSION_TOOLS = [
     "session_labels_set",
     "session_get",
     "session_patch",
+    "proposal_create",
+    "proposal_revise",
+    "proposals_list",
+    "proposal_get",
+    "proposal_withdraw",
     "self_close",
 ]
 

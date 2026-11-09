@@ -12,14 +12,16 @@ import logging
 import secrets as stdlib_secrets
 
 import pytest
-from factories import insert_session
+from factories import attach_preset, insert_session
 from fakes.fake_kube import FakeKube
 from psycopg.types.json import Jsonb
 from pydantic import SecretStr
 from test_k8s_secrets import NS, make_preset, put, secret_objects, stage
 
+from agents_orchestrator.db import sessions
 from agents_orchestrator.k8s import secrets as store
 from agents_orchestrator.k8s.kube import KubeError
+from agents_orchestrator.spec import SessionSpec
 
 
 @pytest.fixture
@@ -349,3 +351,48 @@ async def test_reap_deletes_unreserved_versions_up_to_the_probe_depth(pool, kube
         await store._write(kube, NS, full, SecretStr(canary), {store.PROPOSAL_LABEL: "9"})
     assert sorted(await store.reap_unreserved(pool, kube, NS)) == sorted(orphans)
     assert set(secret_objects(kube)) == {store.secret_name(pid, "TOK", live), staged, beyond}
+
+
+async def _bound_by_replace(pool, kube, value):
+    """A session apply: stage TOK for a session's preset, bind it through `replace_spec`."""
+    async with pool.connection() as conn:
+        s = await sessions.create(conn, "bound", SessionSpec(image="img:1"))
+    pid = await attach_preset(pool, s.id)
+    await put(pool, kube, pid, "TOK", value + "live")
+    bound = await stage(pool, kube, pid, "TOK", value)
+    async with pool.connection() as conn:
+        _, stored = await sessions.get_stored(conn, s.id)
+
+        async def recheck(_locked):
+            return None
+
+        spec = SessionSpec(image="img:1", env={"TOK": {"protected": True}})
+        async with conn.transaction():
+            name = await store.bind_staged(conn, pid, "TOK", proposal_id=7, revision=1)
+            await sessions.replace_spec(
+                conn, s.id, stored, spec, recheck, secret_versions={"TOK": name}
+            )
+    assert name == bound
+    return s, pid, bound
+
+
+async def test_gc_keeps_a_version_bound_through_replace_spec(pool, kube, canary):
+    s, pid, bound = await _bound_by_replace(pool, kube, canary)
+    await put(pool, kube, pid, "TOK", canary + "next")  # v3 live; gc runs for TOK
+    async with pool.connection() as conn:
+        await store.gc(conn, kube, NS, preset_id=pid)
+    assert set(secret_objects(kube)) == {bound, store.secret_name(pid, "TOK", 3)}
+    assert await reservations(pool, pid) == [("TOK", 2, 7, 1, "bound")]
+
+
+async def test_collect_bound_deletes_a_replace_spec_binding_only_after_the_session_row(
+    pool, kube, canary
+):
+    s, pid, bound = await _bound_by_replace(pool, kube, canary)
+    assert await store.collect_bound(pool, kube, NS) == 0
+    assert bound in secret_objects(kube)
+    async with pool.connection() as conn:
+        await conn.execute("DELETE FROM sessions WHERE id = %s", (s.id,))
+    assert await store.collect_bound(pool, kube, NS) == 1
+    assert bound not in secret_objects(kube)
+    assert await reservations(pool, pid) == []

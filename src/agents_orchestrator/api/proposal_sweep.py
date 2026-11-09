@@ -8,9 +8,10 @@ its own pooled connection, so its row and advisory locks are released at its own
 held across the other units' Kubernetes calls:
 
 1. expire: active proposals past `expires_at` on the database clock become `expired`;
-2. stale: open preset proposals whose live fingerprint differs from the current revision's
-   become `stale` (also the ones a review's SKIP LOCKED pass left unmarked);
-3. target_gone: active preset proposals whose preset is deleted or no longer manageable;
+2. stale: open preset and session proposals whose live fingerprint differs from the current
+   revision's become `stale` (also the ones a review's SKIP LOCKED pass left unmarked);
+3. target_gone: active preset proposals whose preset is deleted or no longer manageable, and
+   active session proposals whose session is purged or being deleted;
 4. release: the staged reservations of every proposal no longer open and of superseded
    revisions, Secret first (a missing one is fine, a failed delete keeps the row);
 5. collect_bound: bound reservations no session names any more;
@@ -22,7 +23,6 @@ review (or revise, withdraw) holds is left to it and seen again next pass. Every
 status-guarded and notifies the proposer once; a `NotInState` (another writer won) is skipped.
 Schedule proposals have no staged values; their staleness is checked at review only (views
 read `stale: false`).
-Session proposals (stage C) add their branch to steps 2 and 3.
 
 The Kubernetes client is built only when a step has a Secret to delete.
 """
@@ -104,31 +104,46 @@ async def _expire(pool: AsyncConnectionPool) -> None:
     await _each(pool, await _read(pool, repo.due), "expire", act)
 
 
-async def _target(conn: AsyncConnection, p: repo.Proposal) -> presets_repo.Preset | None:
-    """The preset a proposal targets, None when deleted or no longer superleader-manageable."""
+async def _live(conn: AsyncConnection, p: repo.Proposal) -> str | None:
+    """The live fingerprint of the preset or session a proposal targets; None when the preset is
+    deleted or no longer superleader-manageable, or the session purged or being deleted."""
+    if p.kind == "session":
+        found = await proposals.live_session(conn, uuid.UUID(p.target_id))
+        return (
+            None
+            if found is None
+            else proposals.fingerprint_session(found[1], found[0].secret_versions)
+        )
     preset = await presets_repo.get(conn, uuid.UUID(p.target_id))
-    return preset if preset is not None and preset.superleader_manageable else None
+    if preset is None or not preset.superleader_manageable:
+        return None
+    return await proposals.live_fingerprint(conn, preset)
+
+
+async def _ids(conn: AsyncConnection, statuses: tuple[str, ...]) -> list[int]:
+    """The preset and session proposals in `statuses` (schedules are compared at review only)."""
+    return [i for kind in ("preset", "session") for i in await repo.ids_in(conn, kind, statuses)]
 
 
 async def _stale(pool: AsyncConnectionPool) -> None:
     async def act(conn: AsyncConnection, p: repo.Proposal) -> None:
         # only `open`: rework and stale re-base on their next revision anyway (NotInState)
-        preset = await _target(conn, p)
-        if preset is None:  # the target_gone step closes it
+        live = await _live(conn, p)
+        if live is None:  # the target_gone step closes it
             return
-        if await proposals.live_fingerprint(conn, preset) != p.revisions[0].fingerprint:
+        if live != p.revisions[0].fingerprint:
             await proposals.mark_closed(conn, p, "stale", from_states=("open",))
 
-    ids = await _read(pool, lambda conn: repo.ids_in(conn, "preset", ("open",)))
+    ids = await _read(pool, lambda conn: _ids(conn, ("open",)))
     await _each(pool, ids, "stale", act)
 
 
 async def _target_gone(pool: AsyncConnectionPool) -> None:
     async def act(conn: AsyncConnection, p: repo.Proposal) -> None:
-        if await _target(conn, p) is None:
+        if await _live(conn, p) is None:
             await proposals.mark_closed(conn, p, "target_gone")
 
-    ids = await _read(pool, lambda conn: repo.ids_in(conn, "preset", repo.ACTIVE))
+    ids = await _read(pool, lambda conn: _ids(conn, repo.ACTIVE))
     await _each(pool, ids, "target_gone", act)
 
 

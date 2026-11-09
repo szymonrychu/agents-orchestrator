@@ -10,12 +10,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets as stdlib_secrets
+import uuid
 
 import pytest
 from fakes.fake_kube import FakeKube
 from pydantic import SecretStr
 from test_admin_session_patch import audits
-from test_agent_session_messaging import Sess, alone
+from test_agent_session_messaging import Sess, alone, hive
 from test_api_agent import client_for, headers, make_settings
 from test_api_sessions import assert_error
 from test_api_sessions import client_for as main_client
@@ -134,13 +135,25 @@ async def test_no_auth_401_and_not_audited(app, pool, boss, method, path):
 
 
 @pytest.mark.parametrize(("method", "path"), AGENT_ROUTES)
-async def test_non_superleader_403_on_every_agent_route(app, pool, preset, method, path):
-    """Stage A admits superleaders only: a regular leader is refused before any lookup."""
-    plain = await alone(pool, "pr-plain")
-    r = await agent(app, plain, method, path, json=body())
-    assert_error(r, 403, "not_superleader")
+async def test_non_leader_of_a_regular_hive_403_on_every_agent_route(
+    app, pool, preset, method, path
+):
+    """Q10 B: a regular session passes the gate only through its leader; another agent of it is
+    refused before any lookup and is not audited."""
+    plain = await hive(pool, "pr-plain")
+    async with client_for(app, plain.member_ip) as http:
+        r = await http.request(method, path, json=body(), headers=headers(plain.id))
+    assert_error(r, 403, "not_leader")
     assert await audits(pool, plain.id) == []
     assert await _rows(pool, "SELECT id FROM change_proposals") == []
+
+
+async def test_non_leader_agent_of_a_superleader_passes(app, pool, preset):
+    boss = await hive(pool, "pr-boss-hive", superleader=True)
+    async with client_for(app, boss.member_ip) as http:
+        r = await http.request("POST", P, json=body(), headers=headers(boss.id))
+    assert r.status_code == 201, r.text
+    assert r.json()["proposer_superleader"] is True
 
 
 # ---------------------------------------------------------------- create
@@ -628,3 +641,209 @@ def _hide_then_pass(pool, preset_id):
         await hide(pool, preset_id)
 
     return own
+
+
+# ---------------------------------------------------------------- session targets
+
+
+async def _session_of(pool, slug: str, preset_id) -> Sess:
+    sess = await alone(pool, slug)
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE sessions SET preset_id = %s WHERE id = %s", (preset_id, sess.id))
+    return sess
+
+
+async def test_session_proposal_hidden_when_its_preset_turns_unmanageable(app, pool, boss, preset):
+    """A foreign session's proposal follows `admin._target`: once the session's preset is no
+    longer manageable, get, list, revise and withdraw answer like an unknown id."""
+    target = await _session_of(pool, "pr-target", preset.id)
+    view = await filed(app, boss, kind="session", target=target.slug, patch=PLAIN_PATCH)
+    await hide(pool, preset.id)
+    unknown = await agent(app, boss, "GET", f"{P}/999999")
+    for method, suffix, kw in [
+        ("GET", "", {}),
+        ("POST", "/revise", {"json": {"patch": MCP_PATCH}}),
+        ("POST", "/withdraw", {}),
+    ]:
+        r = await agent(app, boss, method, f"{P}/{view['id']}{suffix}", **kw)
+        assert_error(r, 404, "not_found")
+        assert r.json() == unknown.json(), suffix
+    assert (await agent(app, boss, "GET", P)).json() == []
+    r = await human(app, "GET", f"{M}/{view['id']}")
+    assert r.json()["status"] == "open" and r.json()["revision"] == 1
+
+
+async def test_session_proposal_hidden_when_its_preset_is_deleted(app, pool, boss, preset):
+    """A deleted preset leaves the session with no preset: `admin._target` hides it, so does
+    the listing (unlike a deleted preset target, which stays readable)."""
+    target = await _session_of(pool, "pr-target", preset.id)
+    view = await filed(app, boss, kind="session", target=target.slug, patch=PLAIN_PATCH)
+    async with pool.connection() as conn:
+        await conn.execute("DELETE FROM presets WHERE id = %s", (preset.id,))
+    r = await agent(app, boss, "GET", f"{P}/{view['id']}")
+    assert_error(r, 404, "not_found")
+    assert (await agent(app, boss, "GET", P)).json() == []
+
+
+async def test_own_session_proposal_stays_visible_on_an_unmanageable_preset(
+    app, pool, boss, preset
+):
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE sessions SET preset_id = %s WHERE id = %s", (preset.id, boss.id))
+    view = await filed(app, boss, kind="session", target=boss.slug, patch=MCP_PATCH)
+    await hide(pool, preset.id)
+    r = await agent(app, boss, "GET", f"{P}/{view['id']}")
+    assert r.status_code == 200, r.text
+    assert [v["id"] for v in (await agent(app, boss, "GET", P)).json()] == [view["id"]]
+    r = await agent(app, boss, "POST", f"{P}/{view['id']}/revise", json={"patch": PLAIN_PATCH})
+    assert r.status_code == 200, r.text
+
+
+async def test_purged_session_proposal_stays_readable(app, pool, boss, preset):
+    target = await _session_of(pool, "pr-target", preset.id)
+    view = await filed(app, boss, kind="session", target=target.slug, patch=PLAIN_PATCH)
+    async with pool.connection() as conn:
+        await conn.execute("DELETE FROM sessions WHERE id = %s", (target.id,))
+    r = await agent(app, boss, "GET", f"{P}/{view['id']}")
+    assert r.status_code == 200, r.text
+    assert [v["id"] for v in (await agent(app, boss, "GET", P)).json()] == [view["id"]]
+
+
+# ---------------------------------------------------------------- regular leaders (Q10 B)
+
+
+async def _leader_of(pool, slug: str, preset_id, *, hive_session: bool = False) -> Sess:
+    sess = await (hive(pool, slug) if hive_session else alone(pool, slug))
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE sessions SET preset_id = %s WHERE id = %s", (preset_id, sess.id))
+    return sess
+
+
+def own(sess: Sess, **over) -> dict:
+    return body(**{"kind": "session", "target": sess.slug, "patch": PLAIN_ENV, **over})
+
+
+PLAIN_ENV = {"env": {"PLAIN": {"value": "x"}}}
+
+
+async def test_regular_leader_proposes_a_grant_and_a_value_for_its_own_session(
+    app, pool, kube, preset, canary, caplog
+):
+    caplog.set_level(logging.INFO)
+    lead = await _leader_of(pool, "pr-lead", preset.id)
+    patch = {"session_messaging": True, "env": {"TOKEN": {"protected": True}}}
+    q = "SELECT spec, generation, secret_versions FROM sessions WHERE id = %s"
+    before = await _rows(pool, q, (lead.id,))
+    r = await agent(app, lead, "POST", P, json=own(lead, patch=patch, secrets={"TOKEN": canary}))
+    assert r.status_code == 201, r.text
+    view = r.json()
+    assert (view["kind"], view["target_id"], view["target_name"]) == (
+        "session",
+        str(lead.id),
+        lead.slug,
+    )
+    assert view["proposer_superleader"] is False
+    items = {i["path"]: i for i in view["revisions"][0]["items"]}
+    assert sorted(items) == ["env.TOKEN", "session_messaging"]
+    assert (items["session_messaging"]["grant"], items["env.TOKEN"]["secret"]) == (True, "set")
+    assert store.secret_name(preset.id, "TOKEN", 2) in kube.names("Secret")
+    after = await _rows(pool, q, (lead.id,))
+    assert "session_messaging" not in after[0][0]  # filing applies nothing
+    assert after == before
+    [row] = await audits(pool, lead.id)
+    assert (row["status"], row["secrets"], row["fields"]) == (
+        201,
+        ["TOKEN"],
+        ["env.TOKEN", "session_messaging"],
+    )
+    await assert_nowhere(pool, canary, r.text, caplog.text)
+
+
+async def test_regular_leader_off_its_own_session_is_403_alike(app, pool, kube, preset, canary):
+    """Another session (hidden or visible), an unknown slug, a preset or a schedule: one 403
+    body, before any lookup, nothing staged or stored (no existence leak)."""
+    lead = await _leader_of(pool, "pr-lead", preset.id)
+    other = await _leader_of(pool, "pr-other-lead", preset.id)
+    staged = kube.names("Secret")
+    bodies = [
+        body(kind="session", target=other.slug, patch=PLAIN_ENV, secrets={"TOKEN": canary}),
+        body(kind="session", target="no-such-session", patch=PLAIN_ENV),
+        body(kind="preset", target="infra", patch=PLAIN_ENV, secrets={"TOKEN": canary}),
+        body(kind="preset", target="no-such-preset", patch=PLAIN_ENV),
+        body(kind="schedule", target=str(uuid.uuid4()), patch={"prompt": "x"}),
+    ]
+    answers = [await agent(app, lead, "POST", P, json=b) for b in bodies]
+    for r in answers:
+        assert_error(r, 403, "not_superleader")
+        assert r.json() == answers[0].json()
+    assert await _rows(pool, "SELECT id FROM change_proposals") == []
+    assert kube.names("Secret") == staged
+    await assert_nowhere(pool, canary, *(r.text for r in answers))
+
+
+async def test_regular_leader_reads_revises_and_withdraws_only_its_own(
+    app, pool, kube, boss, preset, canary
+):
+    lead = await _leader_of(pool, "pr-lead", preset.id)
+    mine = (await agent(app, lead, "POST", P, json=own(lead))).json()
+    theirs = await filed(app, boss)
+    assert [v["id"] for v in (await agent(app, lead, "GET", P)).json()] == [mine["id"]]
+    r = await agent(app, lead, "GET", f"{P}/{mine['id']}")
+    assert r.status_code == 200 and r.json()["proposer_superleader"] is False
+    unknown = await agent(app, lead, "GET", f"{P}/999999")
+    for method, suffix, kw in [
+        ("GET", "", {}),
+        ("POST", "/revise", {"json": {"patch": PLAIN_PATCH}}),
+        ("POST", "/withdraw", {}),
+    ]:
+        r = await agent(app, lead, method, f"{P}/{theirs['id']}{suffix}", **kw)
+        assert_error(r, 404, "not_found")
+        assert r.json() == unknown.json(), suffix
+    r = await agent(
+        app,
+        lead,
+        "POST",
+        f"{P}/{mine['id']}/revise",
+        json={"patch": {"inactivity": {"close_seconds": 7200}}},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["revision"] == 2
+    w = await agent(app, lead, "POST", f"{P}/{mine['id']}/withdraw")
+    assert w.status_code == 200 and w.json()["status"] == "withdrawn"
+
+
+async def test_demoted_superleader_may_not_revise_its_preset_proposal(app, pool, kube, preset):
+    """Revise follows create: a non-superleader revises only a proposal on its own session; its
+    other proposals stay readable and withdrawable."""
+    lead = await alone(pool, "pr-demoted", superleader=True)
+    view = await filed(app, lead)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE sessions SET spec = spec - 'session_messaging' WHERE id = %s", (lead.id,)
+        )
+    r = await agent(app, lead, "POST", f"{P}/{view['id']}/revise", json={"patch": PLAIN_PATCH})
+    assert_error(r, 403, "not_superleader")
+    async with client_for(app, lead.leader_ip) as http:
+        other = await http.post(P, json=body(), headers=headers(lead.id))
+    assert r.json() == other.json()
+    assert (await agent(app, lead, "GET", f"{P}/{view['id']}")).json()["revision"] == 1
+    w = await agent(app, lead, "POST", f"{P}/{view['id']}/withdraw")
+    assert w.status_code == 200 and w.json()["status"] == "withdrawn"
+
+
+async def test_new_leader_after_a_handover_sees_the_session_proposals(app, pool, kube, preset):
+    lead = await _leader_of(pool, "pr-hive", preset.id, hive_session=True)
+    view = (await agent(app, lead, "POST", P, json=own(lead))).json()
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE session_leaders SET agent_id = (SELECT id FROM agents WHERE session_id = %s"
+            " AND ordinal = 1), epoch = epoch + 1 WHERE session_id = %s",
+            (lead.id, lead.id),
+        )
+    async with client_for(app, lead.member_ip) as http:
+        listed = await http.get(P, headers=headers(lead.id))
+        got = await http.get(f"{P}/{view['id']}", headers=headers(lead.id))
+    assert [v["id"] for v in listed.json()] == [view["id"]]
+    assert got.status_code == 200 and got.json()["proposer_slug"] == lead.slug
+    old = await agent(app, lead, "GET", P)
+    assert_error(old, 403, "not_leader")
