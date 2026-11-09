@@ -563,3 +563,11 @@ def test_cli_round_trip_over_http(tmp_path):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_sessions_target_always_requires_redacted_marker(tmp_path):
+    from agents_orchestrator.cache import transfer
+
+    assert transfer._require_redacted("/sessions") is True
+    assert transfer._require_redacted("/sessions/") is True
+    assert transfer._require_redacted(str(tmp_path / "work")) is False

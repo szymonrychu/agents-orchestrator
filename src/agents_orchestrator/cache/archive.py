@@ -118,17 +118,14 @@ def _add(tar: tarfile.TarFile, path: str, rel: str, real_root: str) -> bool:
     return False
 
 
-SESSION_FILE = "session.json"
 SESSION_CONFIG = "config"
 REDACTED_MARKER = ".redacted"
 
 
 def _holds_unmarked_config(dirpath: str) -> bool:
-    """True for a session dir (`session.json` and `config/`) with no `.redacted` file."""
+    """True for a dir holding a real `config/` subdir and no regular `.redacted` file."""
     config = os.path.join(dirpath, SESSION_CONFIG)
     if not os.path.isdir(config) or os.path.islink(config):
-        return False
-    if not os.path.isfile(os.path.join(dirpath, SESSION_FILE)):
         return False
     marker = os.path.join(dirpath, REDACTED_MARKER)
     return not (os.path.isfile(marker) and not os.path.islink(marker))
@@ -150,10 +147,10 @@ def pack(
     skipped and counted, logged as one count line, never the targets. Raises TooLarge as soon
     as the compressed output would pass `max_bytes`.
 
-    With `require_redacted`, the `config/` subtree of a wrapper session dir (a dir holding
-    `session.json` and `config/`) is packed only when the dir also holds a `.redacted` marker
-    file; otherwise it is left out and one fixed line naming the session id (the dir name) is
-    logged.
+    With `require_redacted`, every `config/` subtree is packed only when its parent dir (the
+    wrapper session dir) holds a `.redacted` marker file, whether or not `session.json` is
+    present; otherwise it is left out and one fixed line naming the session id (the dir name)
+    is logged.
     """
     _require_workdir(workdir)
     root = os.fspath(workdir)

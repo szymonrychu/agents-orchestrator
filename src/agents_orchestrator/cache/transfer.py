@@ -106,8 +106,12 @@ def _max_bytes(env: Mapping[str, str]) -> int:
     return value
 
 
-def _require_redacted(env: Mapping[str, str]) -> bool:
-    return env.get("CACHE_REQUIRE_REDACTED") == "1"
+SESSIONS_DIR = "/sessions"
+
+
+def _require_redacted(workdir_text: str) -> bool:
+    """The sessions target (the `/sessions` mount) always gates `config/` on the marker."""
+    return os.path.realpath(workdir_text) == SESSIONS_DIR
 
 
 def _exclude(env: Mapping[str, str]) -> list[str]:
@@ -240,7 +244,7 @@ def save(env: Mapping[str, str], *, transport: httpx.BaseTransport | None = None
                     out,
                     exclude=exclude,
                     max_bytes=max_bytes,
-                    require_redacted=_require_redacted(env),
+                    require_redacted=_require_redacted(workdir_text),
                 )
         except archive.TooLarge:
             _emit("failed", reason="too_large")

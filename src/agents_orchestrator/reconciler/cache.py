@@ -177,7 +177,6 @@ def render_cache_job(
             {"name": "CACHE_SCRATCH", "value": SCRATCH_DIR},
             {"name": "CACHE_VERIFY_TLS", "value": str(settings.cache_s3_verify_tls).lower()},
             {"name": "HOME", "value": TMP_DIR},
-            *([{"name": "CACHE_REQUIRE_REDACTED", "value": "1"}] if op.sessions and save else []),
         ],
         "securityContext": {
             "readOnlyRootFilesystem": True,

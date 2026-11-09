@@ -391,24 +391,19 @@ def test_session_config_marker_symlink_does_not_count(tmp_path: Path) -> None:
     assert not any(n.startswith("pod-0/linked/config") for n in _names(_pack_sessions(root)))
 
 
-def test_config_dir_without_session_file_is_ordinary(tmp_path: Path) -> None:
+def test_config_dir_without_session_file_is_gated(tmp_path: Path) -> None:
     root = tmp_path / "sessions"
     (root / "pod-0" / "config").mkdir(parents=True)
     (root / "pod-0" / "config" / "x").write_text("1")
+    assert "pod-0/config/x" not in _names(_pack_sessions(root))
+    (root / "pod-0" / ".redacted").write_text("{}")
     assert "pod-0/config/x" in _names(_pack_sessions(root))
 
 
-def test_marker_not_required_by_default(tmp_path: Path) -> None:
-    root = tmp_path / "sessions"
-    _session_dir(root, "pod-0", "plain", marker=False)
-    assert "pod-0/plain/config/projects/p/t.jsonl" in _names(_packed(root))
-
-
-def test_restore_of_archive_without_config(tmp_path: Path) -> None:
-    root = tmp_path / "sessions"
-    _session_dir(root, "pod-0", "plain", marker=False)
-    dst = tmp_path / "restored"
-    count = unpack(io.BytesIO(_pack_sessions(root)), dst)
-    assert count > 0
-    assert (dst / "pod-0" / "plain" / "session.json").is_file()
-    assert not (dst / "pod-0" / "plain" / "config").exists()
+def test_config_dir_gate_off_when_not_required(tmp_path: Path) -> None:
+    root = tmp_path / "work"
+    (root / "config").mkdir(parents=True)
+    (root / "config" / "x").write_text("1")
+    out = io.BytesIO()
+    pack(root, out, exclude=[], max_bytes=BIG)
+    assert "config/x" in _names(out.getvalue())
