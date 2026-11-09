@@ -276,7 +276,7 @@ async def copy_preset(
         )
 
 
-@router.put("/presets/{ref}/vault/{entry_id}", response_model=schemas.PresetView)
+@router.put("/presets/{ref}/vault/{entry_id}", response_model=schemas.VaultAttachView)
 async def attach_vault(
     ref: str,
     entry_id: uuid.UUID,
@@ -284,15 +284,16 @@ async def attach_vault(
     request: Request,
     pool: Pool,
     settings: Cfg,
-) -> schemas.PresetView:
+) -> schemas.VaultAttachView:
     """Attach a vault entry as refs, in one save, on a manageable preset (privileged ones too).
     `envs` maps entry env to preset env; one entry env may back several preset envs through
     repeated calls, which keep the refs already there. Without `envs` every env of the entry is
     attached under its own name. A preset env that is taken is 409 `env_exists` unless
-    `replace`."""
+    `replace`. The answer marks `attachment_privileged` (marked, never blocked)."""
     async with pool.connection() as conn:
         found = await manageable_preset(conn, ref)
-        return await presets_api.attach_vault(request, conn, settings, found.id, entry_id, body)
+        view = await presets_api.attach_vault(request, conn, settings, found.id, entry_id, body)
+    return schemas.VaultAttachView(**view.model_dump(), attachment_privileged=bool(view.privileged))
 
 
 @router.delete("/presets/{ref}/vault/{entry_id}", response_model=schemas.PresetView)

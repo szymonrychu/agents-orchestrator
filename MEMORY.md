@@ -303,3 +303,12 @@ superleader (or an injected prompt) every project's names and readable hosts/use
 bumped v0.5.0 -> v0.13.0 for `labels_match` (the vault pins the same tag). Tests live in
 tests/test_admin_vault.py (O8 section), not test_admin_relay.py: the route is not an upstream relay,
 so the relay contract test (upstream OpenAPI binding) does not list it.
+
+## 2026-11-09 privileged attachments are marked, not blocked (O13, user decision 318)
+
+A preset with a privileged grant (`preset_policy.privileged(spec)` not empty: `kube_cluster_access`,
+`kube_namespace_access`, `session_messaging`, `docker`) runs a session that can read every Secret
+in the namespace, so an attached vault value is exposed to it. Decision: attach stays allowed
+(O7 replace-over-plain rule unchanged), the exposure is only marked. `vault_list` adds
+`privileged: bool` to each attachment; the attach answer (`VaultAttachView`) adds
+`attachment_privileged: bool`. Why not block: the user chose visibility over refusal.

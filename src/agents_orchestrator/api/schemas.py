@@ -168,6 +168,14 @@ class PresetView(BaseModel):
     updated_at: datetime
 
 
+class VaultAttachView(PresetView):
+    """The preset view an admin vault attach answers. `attachment_privileged` marks a preset
+    whose session can read every Secret in the namespace (`privileged` is not empty); marked,
+    never blocked."""
+
+    attachment_privileged: bool
+
+
 class ProposalIn(BaseModel):
     """A change proposal (plan 3.4): an RFC 7396 merge `patch` of the target's spec, which
     may carry vault references (never a value)."""

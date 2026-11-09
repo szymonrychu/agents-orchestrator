@@ -75,6 +75,7 @@ from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.scope import projects_header
 from agents_orchestrator.api.sessions import Cfg
 from agents_orchestrator.db import presets as presets_repo
+from agents_orchestrator.preset_policy import privileged
 from agents_orchestrator.settings import Settings
 
 LOCAL_TOOL_HEADER = "x-orch-tool"
@@ -549,9 +550,12 @@ def _register() -> None:
 _VAULT_SHAPE = ApiError(502, "upstream_shape", "the vault upstream answered an unexpected shape")
 
 
-def _scoped_entry(entry: Any, project_labels: list[str], visible: set[str]) -> dict | None:
+def _scoped_entry(
+    entry: Any, project_labels: list[str], visible: set[str], marked: set[str]
+) -> dict | None:
     """The entry as the superleader may see it, or None when its project labels exclude the
-    caller. Attachments keep manageable presets; readable values need one of them."""
+    caller. Attachments keep manageable presets, each marked `privileged` when its preset is in
+    `marked`; readable values need one of them."""
     if not isinstance(entry, dict):
         raise _VAULT_SHAPE
     labels = entry.get("labels")
@@ -564,6 +568,7 @@ def _scoped_entry(entry: Any, project_labels: list[str], visible: set[str]) -> d
         attachments = [
             a for a in attachments if isinstance(a, dict) and str(a.get("preset_id")) in visible
         ]
+        attachments = [{**a, "privileged": str(a.get("preset_id")) in marked} for a in attachments]
         entry = {**entry, "attachments": attachments}
     elif attachments is not None:
         raise _VAULT_SHAPE
@@ -601,9 +606,10 @@ async def vault_list(request: Request, q: str | None = None) -> Response:
         raise vault_refs.unavailable() from None
     visible = await _visible(request)
     project_labels = [f"{PROJECT_PREFIX}{session.project}"]
-    entries = [e for e in (_scoped_entry(x, project_labels, visible) for x in listed) if e]
     async with request.app.state.pool.connection() as conn:
         presets = await presets_repo.list_presets(conn)
+    marked = {str(p.id) for p in presets if privileged(p.spec)}
+    entries = [e for e in (_scoped_entry(x, project_labels, visible, marked) for x in listed) if e]
     to_reattach = [
         {"preset_id": str(p.id), "preset_name": p.name, "envs": sorted(p.vault_reattach)}
         for p in presets

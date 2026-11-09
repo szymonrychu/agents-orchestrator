@@ -5845,6 +5845,88 @@
         "title": "VaultAttachIn",
         "type": "object"
       },
+      "VaultAttachView": {
+        "description": "The preset view an admin vault attach answers. `attachment_privileged` marks a preset\nwhose session can read every Secret in the namespace (`privileged` is not empty); marked,\nnever blocked.",
+        "properties": {
+          "attachment_privileged": {
+            "title": "Attachment Privileged",
+            "type": "boolean"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "is_default": {
+            "title": "Is Default",
+            "type": "boolean"
+          },
+          "labels": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Labels",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "privileged": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Privileged",
+            "type": "array"
+          },
+          "project": {
+            "title": "Project",
+            "type": "string"
+          },
+          "spec": {
+            "additionalProperties": true,
+            "title": "Spec",
+            "type": "object"
+          },
+          "superleader_manageable": {
+            "title": "Superleader Manageable",
+            "type": "boolean"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "vault_reattach": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Vault Reattach",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "is_default",
+          "superleader_manageable",
+          "labels",
+          "project",
+          "privileged",
+          "vault_reattach",
+          "spec",
+          "created_at",
+          "updated_at",
+          "attachment_privileged"
+        ],
+        "title": "VaultAttachView",
+        "type": "object"
+      },
       "VaultPinView": {
         "description": "What a session was pinned to for one vault env variable; never a value.",
         "properties": {
@@ -7983,7 +8065,7 @@
         ]
       },
       "put": {
-        "description": "Attach a vault entry as refs, in one save, on a manageable preset (privileged ones too).\n`envs` maps entry env to preset env; one entry env may back several preset envs through\nrepeated calls, which keep the refs already there. Without `envs` every env of the entry is\nattached under its own name. A preset env that is taken is 409 `env_exists` unless\n`replace`.",
+        "description": "Attach a vault entry as refs, in one save, on a manageable preset (privileged ones too).\n`envs` maps entry env to preset env; one entry env may back several preset envs through\nrepeated calls, which keep the refs already there. Without `envs` every env of the entry is\nattached under its own name. A preset env that is taken is 409 `env_exists` unless\n`replace`. The answer marks `attachment_privileged` (marked, never blocked).",
         "operationId": "attach_vault_agent_v1_admin_presets__ref__vault__entry_id__put",
         "parameters": [
           {
@@ -8053,7 +8135,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PresetView"
+                  "$ref": "#/components/schemas/VaultAttachView"
                 }
               }
             },

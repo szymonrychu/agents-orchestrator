@@ -231,6 +231,15 @@ async def test_replace_plain_env_on_privileged_preset_200(app, call):
     assert r.json()["spec"]["env"]["TOKEN"] == ref()
 
 
+async def test_attach_marks_a_privileged_preset_and_still_allows_it(app, call):
+    await make(app, "plain-p")
+    await make(app, "kube-p", kube_cluster_access=True)
+    for name, want in (("plain-p", False), ("kube-p", True)):
+        r = await call("PUT", f"{A}/{name}/vault/{ENTRY}", json={"envs": {"TOKEN": "TOKEN"}})
+        assert r.status_code == 200, r.text
+        assert r.json()["attachment_privileged"] is want
+
+
 async def test_attaching_the_same_ref_again_is_not_a_conflict(app, call):
     await make(app, "same", {"TOKEN": ref()})
     r = await call("PUT", f"{A}/same/vault/{ENTRY}", json={"envs": {"TOKEN": "TOKEN"}})
@@ -441,6 +450,28 @@ async def test_vault_list_hides_readable_values_unless_attached_to_a_manageable_
     assert got["only-hidden"]["attachments"] == []
     assert got["unknown-attachments"]["attachments"] is None
     assert r.text.count(READABLE) == 1
+
+
+async def test_vault_list_marks_privileged_attachments(app, call, vault):
+    plain = await make(app, "plain-p")
+    kube = await make(app, "kube-p", kube_cluster_access=True)
+    ns = await make(app, "ns-p", session_messaging=True)
+    vault.listing = [
+        listed(
+            E_OPEN,
+            "multi",
+            [],
+            [att(plain["id"]), att(kube["id"], "kube-p"), att(ns["id"], "ns-p")],
+        )
+    ]
+    r = await call("GET", V)
+    assert r.status_code == 200, r.text
+    got = r.json()["entries"][0]["attachments"]
+    assert [(a["preset_id"], a["privileged"]) for a in got] == [
+        (plain["id"], False),
+        (kube["id"], True),
+        (ns["id"], True),
+    ]
 
 
 async def test_vault_list_to_reattach_names_manageable_presets_only(app, call, pool):
