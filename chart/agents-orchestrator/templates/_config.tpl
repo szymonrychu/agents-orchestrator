@@ -232,6 +232,42 @@ ConfigMap, the migrate init containers or the other components. Empty when the g
 {{- end }}
 
 {{/*
+"true" when the agents-vault client is configured, empty when it is off. vault.url and a token source
+(vault.token or vault.existingSecret) go together; one without the other fails the render.
+*/}}
+{{- define "agents-orchestrator.vaultEnabled" -}}
+{{- $u := .Values.vault | default dict -}}
+{{- $token := or $u.token $u.existingSecret -}}
+{{- if and $u.url $token -}}
+true
+{{- else if or $u.url $token -}}
+{{- fail "agents-orchestrator: set vault.url together with vault.token or vault.existingSecret, or none of them" -}}
+{{- end -}}
+{{- end }}
+
+{{/* Name of the Secret holding ORCH_VAULT_TOKEN: existingSecret wins over the chart Secret. */}}
+{{- define "agents-orchestrator.vaultSecretName" -}}
+{{- default (printf "%s-vault" (include "agents-orchestrator.fullname" .)) (.Values.vault | default dict).existingSecret -}}
+{{- end }}
+
+{{/*
+ORCH_VAULT_URL and ORCH_VAULT_TOKEN env entries, always together (Settings refuses one without the
+other). Only the api main container, which serves the agents-vault client, includes this; never the shared
+ConfigMap, the migrate init containers or the other components. Empty when the vault is off.
+*/}}
+{{- define "agents-orchestrator.vaultEnv" -}}
+{{- if include "agents-orchestrator.vaultEnabled" . -}}
+- name: ORCH_VAULT_URL
+  value: {{ .Values.vault.url | quote }}
+- name: ORCH_VAULT_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "agents-orchestrator.vaultSecretName" . }}
+      key: {{ .Values.vault.existingSecretKey | default "vault-token" }}
+{{- end -}}
+{{- end }}
+
+{{/*
 Admin relay upstreams (admin.webhook, admin.schedule, admin.connector, admin.history). Each needs url together
 with a token source (token or existingSecret); one without the other fails the render. Emits
 "<name>" lines for the configured ones.

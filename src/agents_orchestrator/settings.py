@@ -331,6 +331,8 @@ class Settings(BaseSettings):
     schedule_token: str = Field(default="", repr=False)
     connector_url: str = ""
     connector_token: str = Field(default="", repr=False)
+    vault_url: str = ""
+    vault_token: str = Field(default="", repr=False)
     history_url: str = ""
     history_token: str = Field(default="", repr=False)
 
@@ -706,7 +708,9 @@ class Settings(BaseSettings):
                 raise _Bad("must not carry a query or fragment (the relay appends the API path)")
         return v
 
-    @field_validator("webhook_url", "schedule_url", "connector_url", "history_url", "usage_url")
+    @field_validator(
+        "webhook_url", "schedule_url", "connector_url", "history_url", "usage_url", "vault_url"
+    )
     @classmethod
     def _check_admin_url(cls, v: str) -> str:
         if v:
@@ -737,7 +741,12 @@ class Settings(BaseSettings):
         return v
 
     @field_validator(
-        "webhook_token", "schedule_token", "connector_token", "history_token", "usage_token"
+        "webhook_token",
+        "schedule_token",
+        "connector_token",
+        "history_token",
+        "usage_token",
+        "vault_token",
     )
     @classmethod
     def _check_admin_pair(cls, v: str, info: ValidationInfo) -> str:
@@ -847,7 +856,7 @@ class Settings(BaseSettings):
         return self.cache_s3_api_access_key_id, self.cache_s3_api_secret_access_key
 
     def admin_upstream(self, name: str) -> tuple[str, str] | None:
-        """(url, token) of the admin relay upstream: webhook, schedule, connector or history."""
+        """(url, token) of an admin relay upstream (webhook, schedule, connector, history, ...)."""
         url = getattr(self, f"{name}_url")
         return (url, getattr(self, f"{name}_token")) if url else None
 
@@ -858,6 +867,10 @@ class Settings(BaseSettings):
     @property
     def taskboard_available(self) -> bool:
         return bool(self.taskboard_url)
+
+    @property
+    def vault_available(self) -> bool:
+        return bool(self.vault_url)
 
     @property
     def usage_available(self) -> bool:

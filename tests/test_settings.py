@@ -752,3 +752,35 @@ def test_dispatcher_pass_policy_reads_handover_max_wait(monkeypatch):
     monkeypatch.setenv("ORCH_HANDOVER_MAX_WAIT_SECONDS", "900")
     policy = Dispatcher(None, Settings())._pass_policy
     assert policy.handover_max_wait_seconds == 900
+
+
+def test_vault_pair_required(monkeypatch):
+    s = Settings()
+    assert (s.vault_url, s.vault_token) == ("", "")
+    assert s.vault_available is False
+    assert s.admin_upstream("vault") is None
+    token = "vault-" + secrets.token_hex(16)
+    monkeypatch.setenv("ORCH_VAULT_URL", "http://agents-vault:8001")
+    with pytest.raises(
+        SettingsError, match="set ORCH_VAULT_URL and ORCH_VAULT_TOKEN together, or neither"
+    ):
+        Settings()
+    monkeypatch.setenv("ORCH_VAULT_TOKEN", token)
+    s = Settings()
+    assert s.vault_available is True
+    assert s.admin_upstream("vault") == ("http://agents-vault:8001", token)
+    assert token not in repr(s)
+    monkeypatch.delenv("ORCH_VAULT_URL")
+    with pytest.raises(SettingsError) as exc:
+        Settings()
+    assert "set ORCH_VAULT_URL and ORCH_VAULT_TOKEN together, or neither" in str(exc.value)
+    assert token not in str(exc.value)
+
+
+def test_vault_url_admin_rules(monkeypatch):
+    monkeypatch.setenv("ORCH_VAULT_TOKEN", "t0k")
+    for bad in ("ftp://vault", "vault:8000", "http://", "http://vault/?q=1", "http://vault/#f"):
+        monkeypatch.setenv("ORCH_VAULT_URL", bad)
+        with pytest.raises(SettingsError) as exc:
+            Settings()
+        assert "ORCH_VAULT_URL" in exc.value.problems, bad

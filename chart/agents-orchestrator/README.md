@@ -63,6 +63,12 @@ default and renders no URL or token then.
 | `usage.token` | `""` | `ORCH_USAGE_TOKEN`, via the chart Secret `<fullname>-usage`, key `usage-token` |
 | `usage.existingSecret` | `""` | `ORCH_USAGE_TOKEN`, via this Secret (wins over `usage.token`) |
 | `usage.existingSecretKey` | `usage-token` | key of the token in the Secret |
+| `vault.url` | `""` (off) | `ORCH_VAULT_URL` |
+| `vault.token` | `""` | `ORCH_VAULT_TOKEN`, via the chart Secret `<fullname>-vault`, key `vault-token` |
+| `vault.existingSecret` | `""` | `ORCH_VAULT_TOKEN`, via this Secret (wins over `vault.token`) |
+| `vault.existingSecretKey` | `vault-token` | key of the token in the Secret |
+
+`vault.url` is the agents-vault service listener. Set it together with `vault.token` or `vault.existingSecret`, or none of them; one without the other fails the render. Env of the api main container only.
 | `usageQuotaDefault` | `100` | `ORCH_USAGE_QUOTA_DEFAULT` |
 
 `usage.url` is the agents-usage service port; the token is the service token the orchestrator

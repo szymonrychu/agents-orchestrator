@@ -35,6 +35,9 @@ spec:
         {{- if and (eq $component "api") $.Values.usage.token (not $.Values.usage.existingSecret) }}
         checksum/usage-secret: {{ $.Values.usage.token | sha256sum }}
         {{- end }}
+        {{- if and (eq $component "api") $.Values.vault.token (not $.Values.vault.existingSecret) }}
+        checksum/vault-secret: {{ $.Values.vault.token | sha256sum }}
+        {{- end }}
         {{- $dh := $.Values.discardHook | default dict }}
         {{- if and (eq $component "reconciler") $dh.token (not $dh.existingSecret) }}
         checksum/discard-hook-secret: {{ $dh.token | sha256sum }}
@@ -139,6 +142,9 @@ spec:
             {{- . | nindent 12 }}
             {{- end }}
             {{- with include "agents-orchestrator.usageEnv" $ }}
+            {{- . | nindent 12 }}
+            {{- end }}
+            {{- with include "agents-orchestrator.vaultEnv" $ }}
             {{- . | nindent 12 }}
             {{- end }}
             {{- with include "agents-orchestrator.adminEnv" $ }}
