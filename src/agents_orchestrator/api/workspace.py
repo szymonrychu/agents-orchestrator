@@ -620,21 +620,22 @@ async def get_dialog(
     )
 
 
-@router.post(
-    "/agents/{agent_id}/dialog", response_model=schemas.DialogAnswerResult, dependencies=guarded
-)
+@router.post("/agents/{agent_id}/dialog", response_model=schemas.DialogAnswerResult)
 async def answer_dialog(
     request: Request, pool: Pool, settings: Cfg, agent_id: uuid.UUID, body: schemas.DialogAnswer
 ) -> schemas.DialogAnswerResult:
     """Allow, deny or dismiss the open dialog; the wrapper's 4xx (409 `no_dialog`,
     `dialog_changed`, `permission_resolved`, `not_dismissable`) pass through. The log line
     carries no message text and no tool input. The main port has no user identity (the
-    source allowlist is the auth), so the caller is the peer address."""
-    async with pool.connection() as conn:
-        target = await resolve_agent(conn, settings, agent_id=agent_id)
+    source allowlist is the auth), so the caller is the peer address. The origin guard runs
+    inside the audited block so refused answers (403, 404, 409) are logged too."""
     sent = body.model_dump(exclude_none=True)
     outcome: str | int = "-"
+    target: WrapperTarget | None = None
     try:
+        await require_allowed_origin(request)
+        async with pool.connection() as conn:
+            target = await resolve_agent(conn, settings, agent_id=agent_id)
         answered = await forward(request.app, target, "POST", _dialog_path(target), json=sent)
         outcome = answered.get("status", "-") if isinstance(answered, dict) else "-"
     except ApiError as exc:
@@ -644,8 +645,8 @@ async def answer_dialog(
         log.info(
             "dialog answer peer=%s agent=%s pod=%s action=%s request_id=%s status=%s",
             request.client.host if request.client else "-",
-            target.agent_id,
-            target.pod_name,
+            target.agent_id if target else agent_id,
+            target.pod_name if target else "-",
             body.action,
             body.request_id or "-",
             outcome,

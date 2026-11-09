@@ -457,7 +457,7 @@ class DialogAnswer(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     action: Literal["allow", "deny", "dismiss"]
-    request_id: str | None = None
+    request_id: str | None = Field(None, pattern=r"^perm_[0-9a-f]{12}$")
     expect_since: str | None = None
     message: str | None = Field(None, max_length=2000)
 

@@ -1280,6 +1280,7 @@
           "request_id": {
             "anyOf": [
               {
+                "pattern": "^perm_[0-9a-f]{12}$",
                 "type": "string"
               },
               {
@@ -12987,7 +12988,7 @@
         "summary": "Get Dialog"
       },
       "post": {
-        "description": "Allow, deny or dismiss the open dialog; the wrapper's 4xx (409 `no_dialog`,\n`dialog_changed`, `permission_resolved`, `not_dismissable`) pass through. The log line\ncarries no message text and no tool input. The main port has no user identity (the\nsource allowlist is the auth), so the caller is the peer address.",
+        "description": "Allow, deny or dismiss the open dialog; the wrapper's 4xx (409 `no_dialog`,\n`dialog_changed`, `permission_resolved`, `not_dismissable`) pass through. The log line\ncarries no message text and no tool input. The main port has no user identity (the\nsource allowlist is the auth), so the caller is the peer address. The origin guard runs\ninside the audited block so refused answers (403, 404, 409) are logged too.",
         "operationId": "answer_dialog_api_v1_agents__agent_id__dialog_post",
         "parameters": [
           {

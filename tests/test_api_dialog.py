@@ -276,3 +276,33 @@ def test_dialog_route_only_on_main_api_prefix(rig):
     paths = set(rig.app.openapi()["paths"])
     assert {p for p in paths if "dialog" in p} == {"/api/v1/agents/{agent_id}/dialog"}
     assert not any(p.startswith("/agent/v1") and "dialog" in p for p in paths)
+
+
+@pytest.mark.parametrize(
+    "bad", ["perm_x\nforged", "perm_0123456789AB", "perm_0123456789abc", "x" * 5000], ids=range(4)
+)
+async def test_bad_request_id_422_not_forwarded(rig, bad):
+    fake, sid, row = await rig.agent(0)
+    fake.set_dialog(permission_state(), sid)
+    r = await rig.http.post(url(row), json={"action": "allow", "request_id": bad})
+    assert r.status_code == 422, r.text
+    assert dialog_calls(fake) == []
+
+
+async def test_refused_answers_are_audited(rig, caplog):
+    fake, sid, row = await rig.agent(0)
+    caplog.set_level(logging.INFO)
+    fake.set_dialog(permission_state(), sid)
+    unknown = "00000000-0000-4000-8000-000000000000"
+    r = await rig.http.post(f"/api/v1/agents/{unknown}/dialog", json={"action": "dismiss"})
+    assert r.status_code == 404
+    bad = {"Origin": "https://evil.example"}
+    r = await rig.http.post(url(row), json={"action": "deny", "request_id": RID}, headers=bad)
+    assert r.status_code == 403
+    lines = [rec.getMessage() for rec in caplog.records if "dialog answer" in rec.getMessage()]
+    assert len(lines) == 2, lines
+    for want in ("status=404", f"agent={unknown}", "action=dismiss"):
+        assert want in lines[0]
+    for want in ("status=403", f"agent={row['id']}", "action=deny"):
+        assert want in lines[1]
+    assert all("tool_input" not in m for m in lines)
