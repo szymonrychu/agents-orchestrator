@@ -276,6 +276,121 @@ async def test_successor_falls_back_above_threshold(pool):
         assert change is not None and change.agent_id == d0["id"]
 
 
+async def test_successor_needs_token_headroom(pool):
+    # compaction 25: hard limit 20% of a 1M window = 200k, less 50k headroom = 150k
+    c, (a0, a1, a2) = await hive(pool)
+    await run(
+        pool,
+        "UPDATE sessions SET spec = spec || jsonb_build_object('auto_compact_pct', 25)"
+        " WHERE id = %s",
+        (c["id"],),
+    )
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
+    await status(pool, a1["id"], "idle", 18)
+    await status(pool, a2["id"], "busy", 6)
+    await run(
+        pool,
+        "UPDATE agent_status SET context_window_tokens = 1000000, context_used_tokens ="
+        " CASE agent_id WHEN %s THEN 180000 ELSE 60000 END WHERE agent_id IN (%s, %s)",
+        (a1["id"], a1["id"], a2["id"]),
+    )
+    await request(pool, c["id"], "handover", a0["id"], None, "done", 3)
+    change = await lpass(pool, c["id"])
+    assert change is not None and change.agent_id == a2["id"]
+
+
+async def test_headroom_margin_clamped_on_small_window(pool):
+    # compaction 40 on a 200k window: hard 70k, margin min(50k, 35k) = 35k, so 30k used qualifies
+    # (an unclamped 50k margin would make the limit 20k and nobody would qualify)
+    c, (a0, a1, a2) = await hive(pool)
+    await run(
+        pool,
+        "UPDATE sessions SET spec = spec || jsonb_build_object('auto_compact_pct', 40)"
+        " WHERE id = %s",
+        (c["id"],),
+    )
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
+    await status(pool, a1["id"], "idle", 15)
+    await status(pool, a2["id"], "idle", 5)
+    await run(
+        pool,
+        "UPDATE agent_status SET context_window_tokens = 200000, context_used_tokens ="
+        " CASE agent_id WHEN %s THEN 30000 ELSE 100000 END WHERE agent_id IN (%s, %s)",
+        (a1["id"], a1["id"], a2["id"]),
+    )
+    await request(pool, c["id"], "handover", a0["id"], None, "done", 3)
+    change = await lpass(pool, c["id"])
+    assert change is not None and change.agent_id == a1["id"]
+
+
+async def test_headroom_percent_fallback(pool):
+    # tokens unknown: hard 20% less 10 pct of headroom leaves 10%
+    c, (a0, a1, a2) = await hive(pool)
+    await run(
+        pool,
+        "UPDATE sessions SET spec = spec || jsonb_build_object('auto_compact_pct', 25)"
+        " WHERE id = %s",
+        (c["id"],),
+    )
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
+    await status(pool, a1["id"], "idle", 16)
+    await status(pool, a2["id"], "busy", 5)
+    await request(pool, c["id"], "handover", a0["id"], None, "done", 3)
+    change = await lpass(pool, c["id"])
+    assert change is not None and change.agent_id == a2["id"]
+
+
+async def set_pending(pool, session_id, *ordinals: int) -> None:
+    await run(
+        pool,
+        "UPDATE sessions SET status = %s WHERE id = %s",
+        (json.dumps({"rollout": {"pending": list(ordinals)}}), session_id),
+    )
+
+
+async def test_rollout_pending_ranked_last(pool):
+    c, (a0, a1, a2) = await hive(pool)
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
+    await status(pool, a1["id"], "idle", 2)
+    await status(pool, a2["id"], "idle", 8)
+    await set_pending(pool, c["id"], 1)
+    await request(pool, c["id"], "handover", a0["id"], None, "done", 3)
+    change = await lpass(pool, c["id"])
+    assert change is not None and change.agent_id == a2["id"]
+
+    # every candidate pending: a successor is still picked, lowest context first
+    c, (b0, b1, b2) = await hive(pool)
+    await set_leader(pool, c["id"], b0["id"], epoch=3)
+    await status(pool, b1["id"], "idle", 8)
+    await status(pool, b2["id"], "idle", 2)
+    await set_pending(pool, c["id"], 1, 2)
+    await request(pool, c["id"], "handover", b0["id"], None, "done", 3)
+    change = await lpass(pool, c["id"])
+    assert change is not None and change.agent_id == b2["id"]
+
+
+async def test_set_leader_records_start_and_previous_since(pool):
+    c, (a0, a1, _a2) = await hive(pool)
+    await run(
+        pool,
+        "UPDATE agent_status SET context_used_tokens = CASE agent_id WHEN %s THEN 11000"
+        " ELSE 42000 END WHERE agent_id IN (%s, %s)",
+        (a0["id"], a0["id"], a1["id"]),
+    )
+    await lpass(pool, c["id"])
+    row = await leader_row(pool, c["id"])
+    assert (row["agent_id"], row["start_context_tokens"], row["previous_since"]) == (
+        a0["id"],
+        11000,
+        None,
+    )
+    first_since = row["since"]
+    await request(pool, c["id"], "handover", a0["id"], a1["id"], "x", 1)
+    await lpass(pool, c["id"])
+    row = await leader_row(pool, c["id"])
+    assert row["start_context_tokens"] == 42000 and row["previous_since"] == first_since
+
+
 async def test_leader_lost_and_scale_down_use_successor(pool):
     c, (a0, a1, a2, a3) = await hive(pool, 4)
     await set_leader(pool, c["id"], a0["id"], epoch=3)
@@ -321,7 +436,10 @@ async def test_note_candidates_equal_pass_pick(pool):
             await status(pool, agent["id"], state, ctx, bg=bg)
         async with pool.connection() as conn:
             async with conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute(hive_module._CANDIDATES, (c["id"], agents[0]["id"], 80))
+                await cur.execute(
+                    hive_module._CANDIDATES,
+                    {"session": c["id"], "leader": agents[0]["id"], "compact": 95},
+                )
                 note = await cur.fetchall()
             pick = await leadership._successor(
                 conn, c["id"], agents[0]["id"], leadership.PassPolicy()

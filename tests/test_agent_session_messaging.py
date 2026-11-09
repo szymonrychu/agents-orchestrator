@@ -240,7 +240,7 @@ async def test_send_queues_with_sender(pool, dsn):
         r = await _send(app, caller, target.slug, f"from {caller.slug}")
         assert r.status_code == 202, r.text
         body = r.json()
-        assert set(body) == {"message_id"}
+        assert set(body) == {"message_id", "handled"}
         (row,) = await _rows(pool, "id = %s", (body["message_id"],))
         assert row["session_id"] == target.id
         assert row["text"] == f"from {caller.slug}"
@@ -522,7 +522,7 @@ async def test_session_tools_parity(pool, dsn):
     assert listed.structured == (await _list(app, plain)).json()
     assert listed.structured == {"sessions": [_entry(boss, superleader=True, leader_present=True)]}
     assert not sent.is_error, sent.text
-    assert set(sent.structured) == {"message_id"}
+    assert set(sent.structured) == {"message_id", "handled"}
     (row,) = await _rows(pool)
     assert row["id"] == sent.structured["message_id"]
     assert row["session_id"] == boss.id

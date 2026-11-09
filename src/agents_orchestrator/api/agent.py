@@ -10,6 +10,7 @@ from __future__ import annotations
 import hmac
 import posixpath
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 from xml.sax.saxutils import escape
@@ -17,6 +18,7 @@ from xml.sax.saxutils import escape
 from fastapi import APIRouter, Depends, Header, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
+from agents_orchestrator import taskboard_client
 from agents_orchestrator.api import projects as projects_api
 from agents_orchestrator.api import schemas, session_limits
 from agents_orchestrator.api import sessions as sessions_api
@@ -32,7 +34,7 @@ from agents_orchestrator.api.sessions import (
 )
 from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import events as events_repo
-from agents_orchestrator.db import file_locks, leadership
+from agents_orchestrator.db import file_locks, leader_state, leadership, session_messaging
 from agents_orchestrator.db import projects as projects_repo
 from agents_orchestrator.db import queue as q
 from agents_orchestrator.db import sessions as sessions_repo
@@ -66,6 +68,8 @@ class Me(BaseModel):
     project: str
     # "*" for a superleader session (every project), else `project` (projects plan 3.2)
     projects_scope: str
+    # the live generated state (same sections as the handover file); only for the current leader
+    leader_state: str | None = None
 
 
 class CloseRequest(BaseModel):
@@ -133,12 +137,19 @@ async def _member_id(conn: Any, session_id: uuid.UUID, pod_name: str) -> uuid.UU
 
 
 @router.get("/me", response_model=Me, summary="Identity, leader and members of the caller")
-async def me(agent: Caller, pool: Pool) -> Me:
+async def me(agent: Caller, pool: Pool, settings: Cfg) -> Me:
     async with pool.connection() as conn:
         session = await sessions_repo.get(conn, agent.session_id)
         leader = await agents_repo.leader_of(conn, agent.session_id)
         members = await agents_repo.list_members(conn, agent.session_id)
+        leads = leader is not None and leader[0] == agent.id
+        state = await leader_state.collect(conn, agent.session_id) if leads else None
     assert session is not None
+    if state is not None:  # the taskboard call happens after the connection is released
+        decisions = await taskboard_client.open_decisions(
+            settings, session.id, session.slug, scope_of(session)
+        )
+        state = replace(state, decisions=decisions)
     leader_id = leader[0] if leader else None
     leader_pod = next((m["pod_name"] for m in members if m["id"] == leader_id), None)
     return Me(
@@ -152,6 +163,7 @@ async def me(agent: Caller, pool: Pool) -> Me:
         static=session.spec.static,
         project=session.project,
         projects_scope=scope_of(session),
+        leader_state=leader_state.render_state(state) if state is not None else None,
         members=[
             Member(
                 pod_name=m["pod_name"],
@@ -304,7 +316,8 @@ async def handover(
         request_id = await leadership.insert_request(
             conn, agent.session_id, "handover", agent.id, to_id, body.reason, body.epoch
         )
-    return schemas.LeadershipRequested(request_id=request_id)
+        handled = await session_messaging.mark_handled(conn, agent.session_id, body.handled)
+    return schemas.LeadershipRequested(request_id=request_id, handled=handled)
 
 
 class LockPaths(BaseModel):
@@ -451,10 +464,13 @@ class SessionMessageIn(BaseModel):
 
     text: str = Field(min_length=1, max_length=SESSION_MESSAGE_MAX_CHARS)
     lane: schemas.Lane = "regular"
+    #: Ids of incoming session messages the leader answered or that need no answer.
+    handled: list[int] = Field(default_factory=list, max_length=50)
 
 
 class SessionMessageQueued(BaseModel):
     message_id: int
+    handled: list[int] = []
 
 
 @router.get(
@@ -539,7 +555,8 @@ async def session_send(
             )
         except q.SessionBeingDeleted as exc:
             raise ApiError(409, "session_deleting", "target session is being discarded") from exc
-    return SessionMessageQueued(message_id=message_id)
+        handled = await session_messaging.mark_handled(conn, own.id, body.handled)
+    return SessionMessageQueued(message_id=message_id, handled=handled)
 
 
 def _hook_path(body: Any) -> str | None:

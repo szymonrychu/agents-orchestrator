@@ -23,12 +23,14 @@ from psycopg.rows import dict_row
 from agents_orchestrator.db import leadership, queue
 from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE
 from agents_orchestrator.dispatcher import Dispatcher, hive
+from agents_orchestrator.handover_transcript import REREAD_RULE
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.tokens import tokens_for
 from agents_orchestrator.wrapper.client import WrapperClient
 
 TOKEN = "test-token"
 KEY = "k" * 32
+DB0 = "postgresql://u:p@h/db"
 OLD = "now() - interval '60 seconds'"
 
 
@@ -88,7 +90,16 @@ class Env:
             agents.append(await self.agent(c["id"], i))
         if lead:
             await self.lpass(c["id"])
+            await self.age_leader(c["id"])
         return c, agents
+
+    async def age_leader(self, session_id, seconds: int = 3600) -> None:
+        """Backdate the leader's `since`, so the minimum tenure is over."""
+        await self.run(
+            "UPDATE session_leaders SET since = now() - make_interval(secs => %s)"
+            " WHERE session_id = %s",
+            (seconds, session_id),
+        )
 
     async def agent(self, session_id, ordinal: int, *, ctx: float | None = None) -> dict:
         sid = await self.session()
@@ -236,18 +247,11 @@ async def test_hive_state_on_structural_change_only(env):
 
 
 async def test_hive_state_threshold_hint(env):
-    # effective threshold: coalesce(auto_compact_pct, default 95) - 15, at least 1
-    for spec, threshold in (
-        ({"auto_compact_pct": 80}, 65),
-        ({}, 80),
-        ({"auto_compact_pct": 10}, 1),
-    ):
+    # the hard limit in the advice: coalesce(auto_compact_pct, default 95) - 5
+    for spec, hard in (({"auto_compact_pct": 80}, 75), ({}, 90), ({"auto_compact_pct": 10}, 5)):
         _, (a0, a1, _a2) = await env.hive(spec=spec)
         await env.push()
-        hint = (
-            "Leadership is yours until you hand it over; hand over at a natural boundary "
-            f"once your context passes {threshold}%."
-        )
+        hint = f"and always before {hard}% context."
         assert hint in env.notes(a0)[0] and hint in env.notes(a1)[0]
         assert "instead of compacting" not in env.notes(a0)[0]
 
@@ -329,7 +333,7 @@ async def test_handover_due_sent_to_leader_at_threshold(env):
     await set_agent_status(env.pool, a0["id"], state="idle", context_pct=80)
     assert await env.push() == 1  # hive_state is unchanged: only the due note goes out
     (text,) = env.notes(a0, DUE)
-    assert "80%" in text and "compacts at 95%" in text
+    assert "80%" in text and "hard limit 90%" in text
     assert env.notes(a1, DUE) == [] and env.notes(a2, DUE) == []  # members get none
     sent = [n for n in env.fake.notes[a0["wrapper_session_id"]] if n["key"] == DUE]
     assert sent[0]["source"] == "orchestrator"
@@ -358,6 +362,134 @@ async def test_handover_due_candidates_ranked(env):
     assert "Candidates, best first: " + ", ".join(lines) + "." in text
     for left_out in (a0, a4, a5, a6):  # the leader, an agent itself due, unready, leaving
         assert left_out["pod_name"] not in text.split("Candidates", 1)[1]
+
+
+async def test_candidates_exclude_no_headroom_and_rank_pending_last(env):
+    c, (a0, a1, a2) = await env.hive()
+    await env.run(
+        "UPDATE sessions SET spec = spec || jsonb_build_object('auto_compact_pct', 25),"
+        " status = %s WHERE id = %s",
+        (json.dumps({"rollout": {"pending": [1]}}), c["id"]),
+    )
+    await set_agent_status(env.pool, a0["id"], state="idle", context_pct=19)
+    await set_agent_status(env.pool, a1["id"], state="idle", context_pct=2)  # pending: last
+    await set_agent_status(env.pool, a2["id"], state="idle", context_pct=8)
+    await env.push()
+    (text,) = env.notes(a0, DUE)
+    assert "Candidates, best first: " + ", ".join(a["pod_name"] for a in (a2, a1)) + "." in text
+
+    await set_agent_status(env.pool, a2["id"], state="idle", context_pct=15)  # no headroom
+    await env.push()  # the candidate list changed, so a new note goes out
+    text = env.notes(a0, DUE)[-1]
+    assert a2["pod_name"] not in text.split("Candidates", 1)[1]
+
+
+def _levels(start=40000, c=25, budget=150000):
+    spec = {"auto_compact_pct": c}
+    return hive.levels(
+        spec, start, Settings(database_url=DB0, master_key=KEY, handover_budget_tokens=budget)
+    )
+
+
+def test_levels_soft_from_start_plus_budget():
+    lv = _levels()  # C 25: hard 20%, soft = 40000 + 150000
+    assert (lv.hard_pct, lv.fallback_pct) == (20, 10)
+    assert hive.due_level(lv, 189999, 1000000, 19.0, 1200, 1200, False) == "none"
+    assert hive.due_level(lv, 190000, 1000000, 19.0, 1200, 1200, False) == "soft"
+
+
+def test_soft_clamped_to_hard():
+    lv = _levels(start=30000)  # window 200000: start + budget is 180000, the hard limit 40000
+    assert hive.due_level(lv, 39999, 200000, 19.99, 1200, 1200, False) == "none"
+    assert hive.due_level(lv, 40000, 200000, 20.0, 1200, 1200, False) == "hard"
+
+
+def test_tenure_gate():
+    lv = _levels()
+    assert hive.due_level(lv, 190000, 1000000, 19.0, 1199, 1200, False) == "none"
+    assert hive.due_level(lv, 190000, 1000000, 19.0, 1200, 1200, False) == "soft"
+    assert hive.due_level(lv, 200000, 1000000, 20.0, 0, 1200, False) == "hard"
+
+
+def test_null_start_falls_back_to_percent():
+    lv = hive.levels({}, None, Settings(database_url=DB0, master_key=KEY))  # C 95: fallback 80
+    assert hive.due_level(lv, None, None, 80.0, 1200, 1200, False) == "soft"
+    assert hive.due_level(lv, None, None, 79.0, 1200, 1200, False) == "none"
+    # tokens known but no start: still the percent rule
+    assert hive.due_level(lv, 790000, 1000000, 79.0, 1200, 1200, False) == "none"
+
+
+def test_rollout_pending_suppresses_soft_not_hard():
+    lv = hive.levels({}, None, Settings(database_url=DB0, master_key=KEY))
+    assert hive.due_level(lv, None, None, 85.0, 1200, 1200, True) == "none"
+    assert hive.due_level(lv, None, None, 90.0, 1200, 1200, True) == "hard"
+
+
+async def test_start_tokens_filled_once(env):
+    c, (a0, a1, a2) = await env.hive()
+    await set_agent_status(
+        env.pool,
+        a0["id"],
+        state="idle",
+        context_used_tokens=50000,
+        context_window_tokens=1000000,
+        context_pct=5,
+    )
+    await env.push()
+    row = await env.leader_row(c["id"])
+    assert row["start_context_tokens"] == 50000
+    await set_agent_status(
+        env.pool,
+        a0["id"],
+        state="idle",
+        context_used_tokens=90000,
+        context_window_tokens=1000000,
+        context_pct=9,
+    )
+    await env.push()
+    row = await env.leader_row(c["id"])
+    assert row["start_context_tokens"] == 50000
+
+
+async def test_budget_drives_due_note(env):
+    c, (a0, a1, a2) = await env.hive(spec={"auto_compact_pct": 25})
+    await env.run(
+        "UPDATE session_leaders SET start_context_tokens = 40000 WHERE session_id = %s", (c["id"],)
+    )
+    gauge = dict(state="idle", context_window_tokens=1000000)
+    await set_agent_status(env.pool, a0["id"], context_used_tokens=150000, context_pct=15, **gauge)
+    await env.push()
+    assert env.notes(a0, DUE) == []  # 15% is past the old C-10 rule, but under start + budget
+    await set_agent_status(env.pool, a0["id"], context_used_tokens=190000, context_pct=19, **gauge)
+    await env.push()
+    (text,) = env.notes(a0, DUE)
+    assert "started at 40k" in text and "budget to 190k" in text and "hard limit 20%" in text
+    assert "handled=[" in text and REREAD_RULE in text
+
+
+async def test_tenure_and_rollout_hold_back_the_soft_note(env):
+    c, (a0, a1, a2) = await env.hive()
+    await set_agent_status(env.pool, a0["id"], state="idle", context_pct=85)
+    await env.age_leader(c["id"], 600)  # under 20 minutes
+    await env.push()
+    assert env.notes(a0, DUE) == []
+    await env.age_leader(c["id"], 1300)
+    await env.run(
+        "UPDATE sessions SET status = %s WHERE id = %s",
+        (json.dumps({"rollout": {"pending": [0]}}), c["id"]),
+    )
+    await env.push()
+    assert env.notes(a0, DUE) == []  # the leader awaits its roll
+    await set_agent_status(env.pool, a0["id"], state="idle", context_pct=91)  # hard
+    await env.push()
+    assert len(env.notes(a0, DUE)) == 1
+
+
+async def test_hive_state_and_due_text_carry_budget_and_rule(env):
+    c, (a0, a1, a2) = await env.hive()
+    await env.push()
+    text = env.notes(a0)[0]
+    assert "150k tokens" in text and "20 minutes" in text and REREAD_RULE in text
 
 
 async def test_handover_due_resend_rules(env):
@@ -404,6 +536,7 @@ async def test_handover_due_resend_rules(env):
     await env.push()
     assert len(env.notes(a0, DUE)) == 6 and env.notes(a1, DUE) == []
     await set_agent_status(env.pool, a1["id"], state="idle", context_pct=81)
+    await env.age_leader(c["id"])  # the new leader has led long enough
     await env.push()
     assert len(env.notes(a1, DUE)) == 1 and len(env.notes(a0, DUE)) == 6
 
@@ -431,11 +564,12 @@ async def test_handover_due_protocol_text(env):
     await env.push()
     (text,) = env.notes(a0, DUE)
     assert text.startswith("<handover-due>") and text.rstrip().endswith("</handover-due>")
-    assert "Your context is 90% of a limit that compacts at 95%" in text
-    assert "hand leadership over before that" in text
+    assert (
+        "Your context is 90% (hard limit 90%); hand leadership over before the hard limit" in text
+    )
     assert "no ready successor" not in text
     assert "Finish the step you are in, then call orchestrator_leadership_handover(" in text
-    assert "to=<pod_name>, epoch=1, reason=<state summary of at most 2000 characters" in text
+    assert "to=<pod_name>, epoch=1, reason=<your judgment for the successor" in text
     assert "It applies when your turn has ended and your background agents have reported" in text
     assert "the successor receives your transcript. Do not brief it over ccw." in text
     assert a1["wrapper_session_id"] not in text
@@ -452,15 +586,14 @@ async def test_due_text_has_no_ccw_protocol(env):
         assert "notify_when_idle" not in text and "peer-idle-notice" not in text
 
 
-async def test_due_text_summary_2000(env):
+async def test_due_text_asks_for_judgment_only(env):
     _, (a0, _a1, _a2) = await env.hive()
     await set_agent_status(env.pool, a0["id"], state="idle", context_pct=90)
     await env.push()
     (text,) = env.notes(a0, DUE)
-    assert "2000 characters" in text and "500" not in text
-    for part in ("the user's goal", "what is done", "what is in flight", "next steps"):
-        assert part in text
-    assert "open questions, locks and branches" in text
+    assert "priorities, risks, what you would do next" in text
+    assert "open decisions, unhandled messages and members are generated" in text
+    assert "2000" not in text and "500" not in text
 
 
 FIRM = (

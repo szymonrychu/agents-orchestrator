@@ -194,7 +194,12 @@ class Settings(BaseSettings):
     inactivity_handoff_seconds: int = Field(default=300, ge=0, le=3600)
     #: Size budget of the predecessor's rendered transcript attached to a handover notice (the
     #: oldest lines are dropped first), and the cap on each tool output in it.
-    handover_transcript_bytes: int = Field(default=65536, ge=8192, le=1048576)
+    handover_transcript_bytes: int = Field(default=16384, ge=8192, le=1048576)
+    #: Tokens a leader may work on top of its context at the start of its leadership before it
+    #: is due to hand over (the hard limit always wins), and the minimum time as leader before
+    #: a soft handover is requested.
+    handover_budget_tokens: int = Field(default=150000, ge=10000, le=2000000)
+    handover_min_tenure_seconds: int = Field(default=1200, ge=0, le=86400)
     handover_output_chars: int = Field(default=500, ge=100, le=4000)
     #: Rollout: seconds the leader has, once only its pod is outdated, to hand over at a natural
     #: boundary before the reconciler queues the forced `rollout` handover; and the cap after

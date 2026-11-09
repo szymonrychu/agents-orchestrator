@@ -36,6 +36,13 @@ def test_call_sites_embed_the_shared_fragments() -> None:
     assert eligibility.ELIGIBLE in queue._HANDOVER_PENDING
 
 
+def test_rollout_and_headroom_in_both_picks() -> None:
+    assert eligibility.ROLLOUT_PENDING in eligibility.SUCCESSOR_ORDER
+    assert eligibility.HEADROOM in leadership._SUCCESSOR
+    assert eligibility.HEADROOM in hive._CANDIDATES
+    assert not hasattr(eligibility, "THRESHOLD")
+
+
 def test_eligible_excludes_dead_agents() -> None:
     # D4: one fragment, embedded by both the pick predicate and the manual make-leader target
     assert "'dead'" in eligibility.DEAD
