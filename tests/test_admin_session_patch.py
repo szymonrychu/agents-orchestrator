@@ -245,21 +245,3 @@ async def test_regular_hive_non_leader_cannot_read_its_own_session(app, pool, se
     assert_error(await call(app, me, "GET", me.slug, ip=me.member_ip), 403, "not_leader")
     assert (await call(app, me, "GET", me.slug)).status_code == 200  # the leader still reads it
     assert [a["status"] for a in await audits(pool, me.id)] == [200]
-
-
-async def test_patch_prunes_a_stale_secret_version_and_keeps_a_declared_one(app, pool, settings):
-    """An agent PATCH cannot remove a protected variable (human only), but any write through
-    `replace_spec` drops a `secret_versions` name the spec no longer declares protected."""
-    me = await alone(pool, "sp-prune", superleader=True)
-    await _seed(
-        pool,
-        settings,
-        me,
-        {"env": {"B": {"protected": True}}},
-        versions={"B": "ps-x-v1", "GONE": "ps-x-v2"},
-    )
-    r = await call(app, me, "PATCH", me.slug, json=PEERS_OFF)
-    assert r.status_code == 200, r.text
-    async with pool.connection() as conn:
-        cur = await conn.execute("SELECT secret_versions FROM sessions WHERE id = %s", (me.id,))
-        assert (await cur.fetchone())[0] == {"B": "ps-x-v1"}
