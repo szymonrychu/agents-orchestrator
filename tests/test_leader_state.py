@@ -257,3 +257,35 @@ def test_render_members_and_requests():
     assert "background subagents: sub1 since t0" in text
     assert "- 3 handover from hive-0 to hive-1, queued 2026-11-09 00:00:00: tidy" in text
     assert "pending [1]" in text
+
+
+def test_decision_question_capped_at_500():
+    long = OpenDecision("T-1", "1", "q" * 900)
+    text = ls.render_state(_state(decisions=[long]))
+    assert "q" * 500 + "..." in text and "q" * 501 not in text
+
+
+def test_request_reason_capped_at_500():
+    request = ls.PendingRequest(
+        3, "handover", "r" * 900, "hive-0", "hive-1", datetime(2026, 11, 9, tzinfo=UTC)
+    )
+    text = ls.render_state(_state(requests=[request]))
+    assert "r" * 500 + "..." in text and "r" * 501 not in text
+
+
+def test_decisions_listed_at_most_30_then_ids():
+    decisions = [OpenDecision(f"T-{i}", str(i), f"question {i}") for i in range(1, 46)]
+    text = ls.render_state(_state(decisions=decisions))
+    assert text.count(" decision ") == ls.STATE_DECISIONS == 30
+    assert "question 30" in text and "question 31" not in text
+    more = next(x for x in text.splitlines() if x.startswith("and 15 more"))
+    assert "T-31:31" in more and "T-45:45" in more
+
+
+def test_decision_overflow_ids_capped_at_100():
+    decisions = [OpenDecision("T-1", str(i), "q") for i in range(1, 181)]
+    text = ls.render_state(_state(decisions=decisions))
+    more = next(x for x in text.splitlines() if x.startswith("and 150 more"))
+    assert "T-1:130" in more and "T-1:131" not in more
+    assert "+50 not listed" in more
+

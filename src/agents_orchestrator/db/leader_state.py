@@ -18,12 +18,14 @@ import psycopg
 from psycopg.rows import dict_row
 
 from agents_orchestrator.db import file_locks
-from agents_orchestrator.handover_transcript import _esc
+from agents_orchestrator.handover_transcript import _cut, _esc
 from agents_orchestrator.taskboard_client import OpenDecision
 
 STATE_MESSAGES = 20
 STATE_MESSAGE_CHARS = 4000
 STATE_MORE_IDS = 100
+STATE_DECISIONS = 30
+STATE_TEXT_CHARS = 500
 REPORT_WINDOW_HOURS = 24
 DECISIONS_UNAVAILABLE = "- taskboard unavailable: call orchestrator_task_list(waiting=true)"
 
@@ -173,7 +175,7 @@ def _member_line(m: MemberState) -> str:
 def _request_line(r: PendingRequest) -> str:
     who = f" from {_esc(r.from_pod)}" if r.from_pod else ""
     who += f" to {_esc(r.to_pod)}" if r.to_pod else ""
-    reason = f": {_esc(r.reason)}" if r.reason else ""
+    reason = f": {_esc(_cut(r.reason, STATE_TEXT_CHARS))}" if r.reason else ""
     return f"- {r.id} {_esc(r.kind)}{who}, queued {_when(r.created_at)}{reason}"
 
 
@@ -188,9 +190,15 @@ def _decisions_lines(decisions: list[OpenDecision] | None) -> list[str]:
     if decisions is None:
         return [DECISIONS_UNAVAILABLE]
     lines = [
-        f"- {_esc(d.task_key)} decision {_esc(d.decision_id)}: {_esc(d.question)}"
-        for d in decisions
+        f"- {_esc(d.task_key)} decision {_esc(d.decision_id)}: "
+        f"{_esc(_cut(d.question, STATE_TEXT_CHARS))}"
+        for d in decisions[:STATE_DECISIONS]
     ]
+    rest = decisions[STATE_DECISIONS:]
+    if rest:
+        ids = ", ".join(f"{_esc(d.task_key)}:{_esc(d.decision_id)}" for d in rest[:STATE_MORE_IDS])
+        extra = f", +{len(rest) - STATE_MORE_IDS} not listed" if len(rest) > STATE_MORE_IDS else ""
+        lines.append(f"and {len(rest)} more (ids {ids}{extra})")
     return lines or ["- none"]
 
 
