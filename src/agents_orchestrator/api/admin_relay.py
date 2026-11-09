@@ -68,7 +68,7 @@ from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import SecretStr
 
-from agents_orchestrator.api import chat_requests, secret_store, vault_client
+from agents_orchestrator.api import chat_requests, secret_store, vault_client, vault_refs
 from agents_orchestrator.api import forward as forward_core
 from agents_orchestrator.api.admin import caller_of, router, touched
 from agents_orchestrator.api.errors import ApiError, not_found
@@ -597,6 +597,8 @@ async def vault_list(request: Request, q: str | None = None) -> Response:
         raise _VAULT_SHAPE from None
     except vault_client.VaultUnavailable:
         raise ApiError(503, "upstream_unavailable", "the vault upstream is unavailable") from None
+    except vault_client.VaultRefused:
+        raise vault_refs.unavailable() from None
     visible = await _visible(request)
     project_labels = [f"{PROJECT_PREFIX}{session.project}"]
     entries = [e for e in (_scoped_entry(x, project_labels, visible) for x in listed) if e]

@@ -36,11 +36,14 @@ class ListingVault(FakeVault):
         self.listed = 0
         self.listing = None  # O8: a canned answer for GET /vault/v1/entries
         self.queries = []
+        self.list_refusal = None  # a canned 422 error body for GET /vault/v1/entries
 
     def handler(self, req: httpx.Request) -> httpx.Response:
         if self.down:
             return httpx.Response(503, text="down")
         if req.method == "GET":
+            if self.list_refusal is not None:
+                return httpx.Response(422, json={"error": self.list_refusal})
             self.listed += 1
             self.queries.append(req.url.params.get("q"))
             if self.listing is not None:
@@ -483,6 +486,14 @@ async def test_vault_list_upstream_failures(call, vault):
     assert_error(await call("GET", V), 502, "upstream_shape")
     vault.listing = ["not-an-object"]
     assert_error(await call("GET", V), 502, "upstream_shape")
+
+
+async def test_vault_list_vault_refusal_is_503_vault_unavailable(call, vault):
+    vault.list_refusal = {"code": "vault_entry_unknown", "message": "upstream detail"}
+    r = await call("GET", V)
+    assert_error(r, 503, "vault_unavailable")
+    assert "upstream detail" not in r.text
+    assert "vault_entry_unknown" not in r.text
 
 
 async def test_vault_list_unconfigured_503(pool, dsn, boss):
