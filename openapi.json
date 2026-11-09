@@ -3575,6 +3575,58 @@
         "title": "ProjectPatch",
         "type": "object"
       },
+      "ProjectSecretSet": {
+        "description": "The version a project secret write stored.",
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "version"
+        ],
+        "title": "ProjectSecretSet",
+        "type": "object"
+      },
+      "ProjectSecretView": {
+        "description": "Metadata of a project secret (plan 3.16); the value is never returned.",
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "sessions_on_old_version": {
+            "items": {
+              "$ref": "#/components/schemas/SessionOnOldVersion"
+            },
+            "title": "Sessions On Old Version",
+            "type": "array"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "version",
+          "updated_at",
+          "sessions_on_old_version"
+        ],
+        "title": "ProjectSecretView",
+        "type": "object"
+      },
       "ProjectView": {
         "properties": {
           "archived": {
@@ -4239,6 +4291,31 @@
           "message_id"
         ],
         "title": "SessionMessageQueued",
+        "type": "object"
+      },
+      "SessionOnOldVersion": {
+        "description": "An active session whose snapshot still names an older version of a project secret.",
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "slug",
+          "version"
+        ],
+        "title": "SessionOnOldVersion",
         "type": "object"
       },
       "SessionPeer": {
@@ -13485,6 +13562,147 @@
           }
         },
         "summary": "Patch Project"
+      }
+    },
+    "/api/v1/projects/{slug}/secrets": {
+      "get": {
+        "description": "The project's live secrets, metadata only, with the active sessions still on an older\nversion. Archived projects keep answering.",
+        "operationId": "list_project_secrets_api_v1_projects__slug__secrets_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ProjectSecretView"
+                  },
+                  "title": "Response List Project Secrets Api V1 Projects  Slug  Secrets Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Project Secrets"
+      }
+    },
+    "/api/v1/projects/{slug}/secrets/{name}": {
+      "delete": {
+        "operationId": "delete_project_secret_api_v1_projects__slug__secrets__name__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Project Secret"
+      },
+      "put": {
+        "operationId": "set_project_secret_api_v1_projects__slug__secrets__name__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SecretIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectSecretSet"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Project Secret"
       }
     },
     "/api/v1/proposals": {

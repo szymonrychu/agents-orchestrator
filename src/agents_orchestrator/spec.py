@@ -50,6 +50,22 @@ _LABEL_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 _ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _RESERVED_ENV_PREFIXES = ("CCW_", "CLAUDE_", "ANTHROPIC_", "ORCH_")
 _RESERVED_ENV_SUFFIXES = ("_PROXY", "_BASE_URL")
+ENV_NAME_RULE = (
+    "env keys must match [A-Z_][A-Z0-9_]* and must not be POD_NAME, CCW_*, CLAUDE_*, "
+    "ANTHROPIC_*, ORCH_*, *_PROXY or *_BASE_URL"
+)
+
+
+def env_name_allowed(key: str) -> bool:
+    """The `spec.env` name rule (`ENV_NAME_RULE`); project secret names follow it too."""
+    return (
+        _ENV_KEY_RE.fullmatch(key) is not None
+        and key != "POD_NAME"
+        and not key.startswith(_RESERVED_ENV_PREFIXES)
+        and not key.endswith(_RESERVED_ENV_SUFFIXES)
+    )
+
+
 _QUANTITY_RE = re.compile(
     r"([+-]?(?:\d+\.?\d*|\.\d+))(Ki|Mi|Gi|Ti|Pi|Ei|[numkMGTPE]|[eE][+-]?\d+)?"
 )
@@ -834,20 +850,9 @@ class SessionSpec(BaseModel):
     @field_validator("env")
     @classmethod
     def _env(cls, v: dict[str, EnvVar]) -> dict[str, EnvVar]:
-        bad = []
-        for key in v:
-            if (
-                not _ENV_KEY_RE.fullmatch(key)
-                or key == "POD_NAME"
-                or key.startswith(_RESERVED_ENV_PREFIXES)
-                or key.endswith(_RESERVED_ENV_SUFFIXES)
-            ):
-                bad.append(key)
+        bad = [key for key in v if not env_name_allowed(key)]
         if bad:
-            raise ValueError(
-                "env keys must match [A-Z_][A-Z0-9_]* and must not be POD_NAME, CCW_*, CLAUDE_*, "
-                "ANTHROPIC_*, ORCH_*, *_PROXY or *_BASE_URL: " + ", ".join(sorted(bad))
-            )
+            raise ValueError(f"{ENV_NAME_RULE}: " + ", ".join(sorted(bad)))
         protected = sum(1 for e in v.values() if e.protected)
         if protected > PROTECTED_MAX:
             raise ValueError(f"env has {protected} protected variables, at most {PROTECTED_MAX}")

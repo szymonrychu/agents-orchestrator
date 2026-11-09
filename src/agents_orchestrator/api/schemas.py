@@ -152,6 +152,30 @@ class ProjectView(BaseModel):
     sessions: int | None = None
 
 
+class SessionOnOldVersion(BaseModel):
+    """An active session whose snapshot still names an older version of a project secret."""
+
+    id: uuid.UUID
+    slug: str
+    version: int
+
+
+class ProjectSecretView(BaseModel):
+    """Metadata of a project secret (plan 3.16); the value is never returned."""
+
+    name: str
+    version: int
+    updated_at: datetime
+    sessions_on_old_version: list[SessionOnOldVersion]
+
+
+class ProjectSecretSet(BaseModel):
+    """The version a project secret write stored."""
+
+    name: str
+    version: int
+
+
 class PresetView(BaseModel):
     id: uuid.UUID
     name: str

@@ -929,6 +929,18 @@ One project view, with the `presets` and `sessions` counts on the main port. Err
 
 Body with any of `name`, `description`, `archived` (other keys, the slug included, are 422 `invalid_request`). `archived: true` archives the project, `false` restores it; archiving the `default` project is 409 `default_project`. Response 200 with the project view. Errors: 404 `not_found`.
 
+### `GET /api/v1/projects/{slug}/secrets`
+
+Lists the project's live (not deleted) secrets by name, metadata only: `[{"name", "version", "updated_at", "sessions_on_old_version": [{"id", "slug", "version"}]}]`. `sessions_on_old_version` are the active sessions whose snapshot still names an older version of that secret, so they can be discarded or recreated to pick up the current one. Archived projects keep answering. Errors: 404 `not_found`. Main port only (the agent port answers 404, the service port 403).
+
+### `PUT /api/v1/projects/{slug}/secrets/{name}`
+
+Sets the value of a project secret: body `{"value": "<text>"}` (1 byte to 1 MiB, extra fields rejected). Every preset of the project receives the project's secrets at session create; a preset variable of the same name wins. `{name}` follows the `spec.env` name rule. Each call writes a new immutable Kubernetes Secret version; running sessions keep the version they were created with. At most 100 secrets per project. Response 200 `{"name", "version"}`; the value is never returned, logged or echoed in an error. Errors: 404 `not_found`, 413 `secret_too_large`, 422 `invalid_request` (name outside the rule), `too_many_secrets`, `project_archived`, 502 `secret_store_failed`. Main port only.
+
+### `DELETE /api/v1/projects/{slug}/secrets/{name}`
+
+Deletes a project secret: new sessions no longer get it, running sessions keep their snapshot, and each version's Kubernetes Secret is removed once no session names it. Response 204. Errors: 404 `not_found` (unknown project, or no such secret), 422 `project_archived`. Main port only.
+
 ### `PUT /api/v1/presets/{preset}/secrets/{name}`
 
 Sets the value of one protected variable of a preset: body `{"value": "<text>"}` (1 byte to 1 MiB, extra fields rejected). `{preset}` is the preset id or its name; `{name}` must be a variable the preset declares with `protected: true` (422 `invalid_request` otherwise, also for an invalid name). Each call writes a new immutable Kubernetes Secret version; sessions created before keep the version they were created with until they are discarded. Response 200 is metadata only: `{"name", "set": true, "version", "updated_at"}`; the value is never returned, logged or echoed in an error. Errors: 404 `not_found`, 413 `secret_too_large`, 422 `invalid_request`, 502 `secret_store_failed` (a generic message, nothing of the Kubernetes error). Main port only.

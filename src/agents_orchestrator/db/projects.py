@@ -205,3 +205,33 @@ async def project_counts(conn: psycopg.AsyncConnection, slug: str) -> dict[str, 
     )
     n_presets, n_sessions = await cur.fetchone()
     return {"presets": n_presets, "sessions": n_sessions}
+
+
+# The Secret name prefix of a project secret, `k8s.secrets.secret_name` without the version:
+# `prs-<sha256(project)[:8]>-<sha256(name)[:6]>-v`. A session snapshot value that starts with it
+# is a version of that secret (the snapshot keys are env names, which a preset variable shares).
+_PROJECT_SECRET_PREFIX = (
+    "'prs-' || left(encode(sha256(convert_to(ps.project, 'UTF8')), 'hex'), 8)"
+    " || '-' || left(encode(sha256(convert_to(ps.name, 'UTF8')), 'hex'), 6) || '-v'"
+)
+
+
+async def secrets_overview(conn: psycopg.AsyncConnection, slug: str) -> list[dict[str, Any]]:
+    """The project's live secrets by name: `{name, version, updated_at,
+    sessions_on_old_version: [{id, slug, version}]}`, the active sessions whose snapshot still
+    names an older version (plan 3.16). Metadata only; the table holds no value."""
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT ps.name, ps.version, ps.updated_at, coalesce(("
+            "  SELECT jsonb_agg(jsonb_build_object('id', o.id, 'slug', o.slug,"
+            "   'version', o.version) ORDER BY o.slug, o.id) FROM ("
+            "   SELECT s.id, s.slug, substring(e.value FROM '-v([0-9]+)$')::int AS version"
+            "   FROM sessions s, jsonb_each_text(s.secret_versions) e"
+            f"   WHERE s.{_ACTIVE_SESSION}"
+            f"   AND starts_with(e.value, {_PROJECT_SECRET_PREFIX})) o"
+            "  WHERE o.version < ps.version), '[]'::jsonb) AS sessions_on_old_version"
+            " FROM project_secrets ps"
+            " WHERE ps.project = %s AND ps.retired_at IS NULL ORDER BY ps.name",
+            (slug,),
+        )
+        return await cur.fetchall()
