@@ -18,7 +18,7 @@ def _upto_0040(dsn, tmp_path):
     run_migrations(dsn, tmp_path)
 
 
-def _seed(dsn, name, spec, vault_reattach=None):
+def _seed(dsn, name, spec):
     with psycopg.connect(dsn, autocommit=True) as c:
         c.execute(
             "INSERT INTO presets (id, name, spec) VALUES (gen_random_uuid(), %s, %s)",
@@ -50,6 +50,19 @@ def test_reattach_lists_protected_names_and_keeps_the_spec(empty_dsn, tmp_path):
     assert _preset(empty_dsn, "p1") == (spec, ["B", "Z"])
     assert _preset(empty_dsn, "p2")[1] == []
     assert _preset(empty_dsn, "p3")[1] == []
+
+
+def test_non_object_env_does_not_fail_the_migration(empty_dsn, tmp_path):
+    _upto_0040(empty_dsn, tmp_path)
+    _seed(empty_dsn, "ok", {"env": {"B": {"protected": True}}})
+    _seed(empty_dsn, "noenv", {"model": "opus"})
+    _seed(empty_dsn, "strenv", {"env": "oops"})
+    _seed(empty_dsn, "arrenv", {"env": [1, 2]})
+    _seed(empty_dsn, "nullenv", {"env": None})
+    assert run_migrations(empty_dsn) == ["0041"]
+    assert _preset(empty_dsn, "ok")[1] == ["B"]
+    for name in ("noenv", "strenv", "arrenv", "nullenv"):
+        assert _preset(empty_dsn, name)[1] == []
 
 
 def test_rerun_is_a_noop_and_keeps_existing_names(empty_dsn, tmp_path):

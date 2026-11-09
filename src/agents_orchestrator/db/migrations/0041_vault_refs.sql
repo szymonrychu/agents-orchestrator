@@ -20,6 +20,8 @@ SET vault_reattach = (
 )
 WHERE jsonb_typeof(spec -> 'env') = 'object'
   AND EXISTS (
-    SELECT 1 FROM jsonb_each(spec -> 'env') AS e
+    SELECT 1
+    FROM jsonb_each(CASE WHEN jsonb_typeof(spec -> 'env') = 'object'
+                         THEN spec -> 'env' ELSE '{}'::jsonb END) AS e
     WHERE jsonb_typeof(e.value) = 'object' AND e.value -> 'protected' = 'true'::jsonb
   );
