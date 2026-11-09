@@ -63,21 +63,38 @@ def background_busy(alias: str) -> str:
 
 BACKGROUND_BUSY = background_busy("s")
 
-# One successor rule (voluntary-handover 3.2), shared by every pick of the leadership pass and
-# the leader's `handover_due` candidate list, so a moved leader is always the agent the note
-# would have named and nobody hands leadership straight back. Among ELIGIBLE agents: not
-# background-busy first, idle first, lowest `context_pct` (unknown last), then ordinal.
-# Aliases `a` (agents) and `s` (LEFT JOINed agent_status).
-SUCCESSOR_ORDER = (
-    f"({BACKGROUND_BUSY}), (s.state = 'idle') IS NOT TRUE, s.context_pct ASC NULLS LAST, a.ordinal"
+# Hard limit: the effective compaction point (the spec's `auto_compact_pct`, else `%(compact)s`,
+# ORCH_DEFAULT_AUTO_COMPACT_PCT) less FIRM_MARGIN_PCT. Alias `c` (sessions).
+# `dispatcher/hive.levels` is the same formula in Python.
+FIRM_MARGIN_PCT = 5
+HARD_PCT = f"(coalesce((c.spec->>'auto_compact_pct')::int, %(compact)s) - {FIRM_MARGIN_PCT})"
+
+# A successor must start with room: its context at least MIN_HEADROOM_TOKENS below the hard limit
+# (MIN_HEADROOM_PCT points when the token gauge is unknown), so it is not due at once. Aliases
+# `s` (LEFT JOINed agent_status) and `c` (sessions).
+MIN_HEADROOM_TOKENS = 50000
+MIN_HEADROOM_PCT = 10
+HEADROOM = (
+    "(CASE WHEN s.context_used_tokens IS NOT NULL AND s.context_window_tokens > 0"
+    f" THEN s.context_used_tokens <= {HARD_PCT} / 100.0 * s.context_window_tokens"
+    f" - {MIN_HEADROOM_TOKENS}"
+    f" ELSE coalesce(s.context_pct, 0) <= {HARD_PCT} - {MIN_HEADROOM_PCT} END)"
 )
 
-# Context % above which a leader should hand over instead of compacting: the effective compaction
-# point (the spec's `auto_compact_pct`, else `%(compact)s`, ORCH_DEFAULT_AUTO_COMPACT_PCT) less
-# HANDOVER_MARGIN_PCT, at least 1. Alias `c` (sessions). `dispatcher/hive.handover_threshold` is
-# the same formula in Python.
-HANDOVER_MARGIN_PCT = 15
-THRESHOLD = (
-    "greatest(coalesce((c.spec->>'auto_compact_pct')::int, %(compact)s)"
-    f" - {HANDOVER_MARGIN_PCT}, 1)"
+# True when the agent's pod awaits its rollout (its ordinal is in `status.rollout.pending`, JSON
+# ints). Aliases `a` (agents) and `c` (sessions).
+ROLLOUT_PENDING = "coalesce(c.status->'rollout'->'pending' @> to_jsonb(a.ordinal), false)"
+
+# One successor rule (voluntary-handover 3.2), shared by every pick of the leadership pass and
+# the leader's `handover_due` candidate list, so a moved leader is always the agent the note
+# would have named and nobody hands leadership straight back. Among ELIGIBLE agents: not awaiting
+# a rollout first, not background-busy, idle first, lowest `context_pct` (unknown last), then
+# ordinal. Aliases `a` (agents), `s` (LEFT JOINed agent_status) and `c` (sessions).
+SUCCESSOR_ORDER = (
+    f"({ROLLOUT_PENDING}), ({BACKGROUND_BUSY}), (s.state = 'idle') IS NOT TRUE,"
+    " s.context_pct ASC NULLS LAST, a.ordinal"
 )
+
+# Context % margin below the compaction point used as the percent fallback of the soft handover
+# rule (a leader whose token gauge is unknown). `dispatcher/hive.levels` applies it.
+HANDOVER_MARGIN_PCT = 15

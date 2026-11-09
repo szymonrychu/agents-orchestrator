@@ -51,7 +51,13 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from agents_orchestrator.db import leadership
-from agents_orchestrator.db.eligibility import ELIGIBLE, HANDOVER_MARGIN_PCT, SUCCESSOR_ORDER
+from agents_orchestrator.db.eligibility import (
+    ELIGIBLE,
+    FIRM_MARGIN_PCT,
+    HANDOVER_MARGIN_PCT,
+    HEADROOM,
+    SUCCESSOR_ORDER,
+)
 from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE
 from agents_orchestrator.dispatcher import feed
 from agents_orchestrator.settings import Settings
@@ -75,14 +81,16 @@ PULL_SENTENCE = (
 
 ClientFactory = Callable[[uuid.UUID, str], WrapperClient]
 
-# Who could take over from a leader that is due: ELIGIBLE agents other than the leader that are
-# themselves below the threshold (a due candidate would hand leadership straight back), in the
-# leadership pass's successor order (eligibility.SUCCESSOR_ORDER), so the first one is the agent
-# the pass picks for an untargeted handover. Params: session, leader, threshold.
+# Who could take over from a leader that is due: ELIGIBLE agents other than the leader that have
+# headroom (eligibility.HEADROOM; a candidate without it would hand leadership straight back), in
+# the leadership pass's successor order (eligibility.SUCCESSOR_ORDER), so the first one is the
+# agent the pass picks for an untargeted handover. Params: session, leader, compact (the pods'
+# default compaction point).
 _CANDIDATES = f"""
 SELECT a.pod_name, a.wrapper_session_id, coalesce(s.state, 'unknown') AS state, s.context_pct
 FROM agents a LEFT JOIN agent_status s ON s.agent_id = a.id
-WHERE a.session_id = %s AND a.id <> %s AND {ELIGIBLE} AND coalesce(s.context_pct, 0) < %s
+JOIN sessions c ON c.id = a.session_id
+WHERE a.session_id = %(session)s AND a.id <> %(leader)s AND {ELIGIBLE} AND {HEADROOM}
 ORDER BY {SUCCESSOR_ORDER}
 """
 
@@ -92,8 +100,6 @@ DueKey = tuple[uuid.UUID, int, int, bool, tuple[tuple[str, str], ...]]
 
 # What the dispatcher last told a leader about a rollout: (leader agent id, epoch, revision).
 RolloutKey = tuple[uuid.UUID, int, str]
-
-FIRM_MARGIN_PCT = 5
 
 
 @dataclass
@@ -313,7 +319,14 @@ async def _read(
         candidates = None
         lead = next((m for m in members if m["pod_name"] == leader["leader"]), None)
         if lead is not None and _is_due(lead, threshold):
-            await cur.execute(_CANDIDATES, (cid, leader["agent_id"], threshold))
+            await cur.execute(
+                _CANDIDATES,
+                {
+                    "session": cid,
+                    "leader": leader["agent_id"],
+                    "compact": settings.default_auto_compact_pct,
+                },
+            )
             candidates = await cur.fetchall()
         await cur.execute(
             "SELECT id, from_agent_id, status, reject_reason FROM leadership_requests"

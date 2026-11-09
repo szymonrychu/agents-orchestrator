@@ -360,6 +360,26 @@ async def test_handover_due_candidates_ranked(env):
         assert left_out["pod_name"] not in text.split("Candidates", 1)[1]
 
 
+async def test_candidates_exclude_no_headroom_and_rank_pending_last(env):
+    c, (a0, a1, a2) = await env.hive()
+    await env.run(
+        "UPDATE sessions SET spec = spec || jsonb_build_object('auto_compact_pct', 25),"
+        " status = %s WHERE id = %s",
+        (json.dumps({"rollout": {"pending": [1]}}), c["id"]),
+    )
+    await set_agent_status(env.pool, a0["id"], state="idle", context_pct=19)
+    await set_agent_status(env.pool, a1["id"], state="idle", context_pct=2)  # pending: last
+    await set_agent_status(env.pool, a2["id"], state="idle", context_pct=8)
+    await env.push()
+    (text,) = env.notes(a0, DUE)
+    assert "Candidates, best first: " + ", ".join(a["pod_name"] for a in (a2, a1)) + "." in text
+
+    await set_agent_status(env.pool, a2["id"], state="idle", context_pct=15)  # no headroom
+    await env.push()  # the candidate list changed, so a new note goes out
+    text = env.notes(a0, DUE)[-1]
+    assert a2["pod_name"] not in text.split("Candidates", 1)[1]
+
+
 async def test_handover_due_resend_rules(env):
     c, (a0, a1, a2) = await env.hive()
     await set_agent_status(env.pool, a0["id"], state="idle", context_pct=82)

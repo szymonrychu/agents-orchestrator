@@ -37,10 +37,10 @@ from agents_orchestrator.db.eligibility import (
     DEAD,
     ELIGIBLE,
     HANDOVER_TRIGGER,
+    HEADROOM,
     LEAVING,
     READY_STAYS,
     SUCCESSOR_ORDER,
-    THRESHOLD,
 )
 from agents_orchestrator.db.pool import notify
 from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE, enqueue_command
@@ -168,15 +168,15 @@ WHERE c.desired = 'active' AND {_HIVE} AND (
 ORDER BY c.id
 """
 
-# The successor (eligibility.SUCCESSOR_ORDER) for every pick that names nobody: agents below
-# the handover threshold first, so a forced pick falls back to the lowest context above it only
-# when every peer is there. Any idle state is acceptable: a hive whose other members are all
+# The successor (eligibility.SUCCESSOR_ORDER) for every pick that names nobody: agents with
+# headroom (eligibility.HEADROOM) first, so a forced pick falls back to the best agent without it
+# only when every peer lacks it. Any idle state is acceptable: a hive whose other members are all
 # busy still gets a leader.
 _SUCCESSOR = f"""
 SELECT a.id FROM agents a LEFT JOIN agent_status s ON s.agent_id = a.id
 JOIN sessions c ON c.id = a.session_id
 WHERE a.session_id = %(session)s AND {ELIGIBLE} AND a.id <> %(other)s
-ORDER BY coalesce(s.context_pct, 0) >= {THRESHOLD}, {SUCCESSOR_ORDER}
+ORDER BY NOT {HEADROOM}, {SUCCESSOR_ORDER}
 LIMIT 1
 """
 
@@ -277,10 +277,13 @@ async def _set_leader(
     row = await _one(
         conn,
         "INSERT INTO session_leaders (session_id, agent_id, epoch, since, reason,"
-        " previous_agent_id) VALUES (%(c)s, %(a)s, 1, now(), %(r)s, %(p)s)"
+        " previous_agent_id, start_context_tokens) VALUES (%(c)s, %(a)s, 1, now(), %(r)s, %(p)s,"
+        "  (SELECT context_used_tokens FROM agent_status WHERE agent_id = %(a)s))"
         " ON CONFLICT (session_id) DO UPDATE SET agent_id = EXCLUDED.agent_id,"
         "  epoch = session_leaders.epoch + 1, since = now(), reason = EXCLUDED.reason,"
-        "  unready_since = NULL, previous_agent_id = EXCLUDED.previous_agent_id"
+        "  unready_since = NULL, previous_agent_id = EXCLUDED.previous_agent_id,"
+        "  previous_since = session_leaders.since,"
+        "  start_context_tokens = EXCLUDED.start_context_tokens"
         " RETURNING epoch",
         {"c": session_id, "a": agent_id, "r": reason, "p": previous},
     )
