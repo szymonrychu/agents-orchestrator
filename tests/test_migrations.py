@@ -1114,7 +1114,7 @@ def test_preset_secrets_migration_adds_table_and_snapshot_column(empty_dsn, tmp_
     }  # fmt: skip
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         assert c.execute("SELECT secret_versions FROM sessions").fetchall() == [(None,)]
-    assert run_migrations(empty_dsn) == ["0041", "0042"]
+    assert run_migrations(empty_dsn) == ["0041", "0042", "0043"]
     assert _columns(empty_dsn, "preset_secrets") == set()
     assert "secret_versions" in _columns(empty_dsn, "sessions")
 
@@ -1265,7 +1265,7 @@ def test_cache_sweep_tables_apply_after_a_database_already_at_0027(empty_dsn, tm
 
 def test_session_close_columns_apply_after_a_database_already_at_0027(empty_dsn, tmp_path):
     # 0030 backfills close_kind from close_requested_at, so it waits for 0026 as well; 0035 and
-    # 0038 need the messages.notice column of 0030, 0041 the proposal tables of 0038, and 0043 the messages.notice column
+    # 0038 and 0043 need the messages.notice column of 0030, 0041 the proposal tables of 0038
     for path in MIGRATIONS_DIR.glob("*.sql"):
         if not path.name.startswith(("0026_", "0030_", "0035_", "0038_", "0041_", "0043_")):
             shutil.copy(path, tmp_path)
@@ -1548,7 +1548,16 @@ def test_chat_relay_migration_adds_columns_and_index_idempotently(empty_dsn, tmp
     run_migrations(empty_dsn, tmp_path)
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         c.execute("INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), 'old', '{}')")
-    assert run_migrations(empty_dsn) == ["0036", "0037", "0038", "0039", "0040", "0041", "0042", "0043"]
+    assert run_migrations(empty_dsn) == [
+        "0036",
+        "0037",
+        "0038",
+        "0039",
+        "0040",
+        "0041",
+        "0042",
+        "0043",
+    ]
     assert run_migrations(empty_dsn) == []
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         c.execute((MIGRATIONS_DIR / "0036_chat_relay.sql").read_text())  # second run: no-op
