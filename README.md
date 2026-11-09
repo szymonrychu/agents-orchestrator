@@ -29,6 +29,7 @@ Every process reads `ORCH_*` variables (the contract `agents-orchestrator-settin
 | `ORCH_AGENT_PORT` | `8001` | api | second listener (same server) serving only `/agent/v1/*`, `/healthz` and `/readyz` to agent pods; the source allowlist is skipped there |
 | `ORCH_SERVICE_PORT` | `8002` | api | third listener (same server) for in-cluster services; every request but `/healthz` and `/readyz` needs `Authorization: Bearer <service token>`, only the trigger-service routes answer (others 403), never `/agent/v1/*` or a WebSocket; the source allowlist is skipped there. Must differ from `ORCH_HTTP_PORT` and `ORCH_AGENT_PORT` |
 | `ORCH_SERVICE_TOKENS` | empty | api | CSV of `<name>:<sha256 hex of the token>` (name `^[a-z0-9][a-z0-9-]{0,62}$`, 64 lowercase hex, names unique); empty refuses every service request with 401 |
+| `ORCH_SERVICE_SCOPES` | empty | api | JSON object: service name to the list of service-port routes (`<METHOD> <path template>`) it may call; unlisted services keep every route; outside the scope `403 service_scope` |
 | `ORCH_SERVICE_TOKENS_FILE` | empty | api | file holding the ORCH_SERVICE_TOKENS entries (comma or newline separated); wins over ORCH_SERVICE_TOKENS |
 | `ORCH_AGENT_API_URL` | unset | api, reconciler | URL agent pods use to reach the agent port (set by the chart to the agents Service) |
 | `ORCH_NAMESPACE` | `agents` | api, reconciler, dispatcher | the one namespace of the orchestrator and every agent session |
@@ -351,6 +352,7 @@ In-cluster trigger services (agents-webhook, agents-schedule) call the orchestra
 - Send `Authorization: Bearer <token>` on every request. Only the sha256 of each token is configured in the orchestrator (`ORCH_SERVICE_TOKENS`, `<name>:<sha256 hex>` entries, or `ORCH_SERVICE_TOKENS_FILE`); the token itself lives only in the calling service. Hashes are compared in constant time and the token never reaches a log line or error body.
 - Missing, malformed or unknown token (and an empty token list): `401 unauthorized` with `WWW-Authenticate: Bearer`.
 - A valid token on any route outside the list below: `403 forbidden`. The port never serves `/agent/v1/*` and refuses WebSocket upgrades. `GET` and `HEAD` of `/healthz` and `/readyz` need no token.
+- Per-service scope: `ORCH_SERVICE_SCOPES` (JSON object, chart value `serviceApi.scopes`) maps a service name to the routes it may call, each written `<METHOD> <path template>` as in the list below (for example `{"agents-vault": ["GET /api/v1/presets", "GET /api/v1/sessions"]}`). A request on a listed route outside the service's scope answers `403 service_scope`. A service without an entry keeps every route below (the default), an empty list denies all, and an unknown route or a name without a token fails startup naming `ORCH_SERVICE_SCOPES`.
 - Routes served (same behaviour and bodies as on the main port):
   - `GET /api/v1/meta`
   - `GET /api/v1/presets`
@@ -1026,7 +1028,7 @@ Replaces the session's init scripts. Body `{"scripts": ["<shell script>", ...]}`
 
 ### `PATCH /api/v1/sessions/{session_id}/labels`
 
-Replaces the session's labels. Body `{"labels": ["<label>", ...]}` (extra fields rejected). A label is trimmed and lowercased, 1 to 40 characters of `a-z`, `0-9`, `-`, `_`, `.`, `:`; the list is deduplicated keeping the first-seen order and holds at most 20 labels, else 422 `invalid_request`. Labels are not part of the spec: no generation bump, no pod roll. Response 200 with the session view (`labels`). Errors: 404 `not_found`, 422 `invalid_request`.
+Replaces the session's labels. Body `{"labels": ["<label>", ...]}` (extra fields rejected). A label is trimmed and lowercased, 1 to 40 characters of `a-z`, `0-9`, `-`, `_`, `.`, `:`; a label starting with `project:` is reserved and refused with 422 `invalid_request` on every preset and session label write (stored ones were removed by migration 0042); the list is deduplicated keeping the first-seen order and holds at most 20 labels, else 422 `invalid_request`. Labels are not part of the spec: no generation bump, no pod roll. Response 200 with the session view (`labels`). Errors: 404 `not_found`, 422 `invalid_request`.
 
 ### `PATCH /api/v1/sessions/{session_id}/project`
 

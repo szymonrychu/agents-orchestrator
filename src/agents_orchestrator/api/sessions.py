@@ -330,7 +330,7 @@ async def list_sessions(
     lists), and with `superleaders=include` every superleader session is added; `slug` is an
     exact match. The filters combine."""
     try:
-        wanted = normalize_labels(label) if label else None
+        wanted = normalize_labels(label, allow_reserved=True) if label else None
     except ValueError as exc:
         raise ApiError(422, "invalid_request", str(exc)) from None
     async with pool.connection() as conn:

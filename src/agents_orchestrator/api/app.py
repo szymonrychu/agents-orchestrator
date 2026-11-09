@@ -160,6 +160,7 @@ def create_app(
         ServiceGate,
         service_port=settings.service_port,
         token_hashes=settings.service_token_hashes(),
+        scopes=settings.service_scopes,
     )
     app.add_middleware(PortGate, agent_port=settings.agent_port, service_port=settings.service_port)
     return app

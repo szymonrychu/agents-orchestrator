@@ -302,3 +302,18 @@ async def test_admin_copy_keeps_or_sets_project(call):
     assert moved.status_code == 201 and moved.json()["project"] == "beta"
     lost = await call("POST", f"{A}/{src['id']}/copy", json={"name": "clost", "project": "nope"})
     assert_error(lost, 422, "unknown_project")
+
+
+async def test_admin_preset_writes_refuse_reserved_project_label(call):
+    made = (await call("POST", A, json={"name": "lbl", "spec": {}, "labels": ["x"]})).json()
+    one = f"{A}/{made['id']}"
+    for method, path, body in (
+        ("POST", A, {"name": "lbl2", "spec": {}, "labels": ["project:other"]}),
+        ("PUT", one, {"name": "lbl", "spec": {}, "labels": ["x", "Project:other"]}),
+        ("PATCH", one, {"labels": ["project:other"]}),
+    ):
+        r = await call(method, path, json=body)
+        assert_error(r, 422, "invalid_request")
+        assert "'project:' prefix is reserved" in r.text
+    got = await main_call(call.app, "GET", f"{M}/{made['id']}")
+    assert got.json()["labels"] == ["x"]

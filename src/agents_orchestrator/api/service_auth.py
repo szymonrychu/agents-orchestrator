@@ -6,6 +6,9 @@ configured (ORCH_SERVICE_TOKENS), compared in constant time against every entry.
 serves a fixed list of method and path pairs and never a WebSocket; the token value never
 reaches a log line or an error body. `DELETE /api/v1/sessions/{id}` is on the list, but the
 route lets a service discard only a session it created itself (any other answers 404).
+
+ORCH_SERVICE_SCOPES optionally narrows one service to a subset of that list (403
+`service_scope` outside it); a service without an entry keeps the whole list.
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ import hashlib
 import hmac
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 
 from starlette.requests import Request
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -29,26 +32,34 @@ log = logging.getLogger(__name__)
 _UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 _INT = r"[0-9]+"
 
+ROUTE_TEMPLATES: tuple[tuple[str, str], ...] = (
+    ("GET", "/api/v1/meta"),
+    ("GET", "/api/v1/presets"),
+    ("GET", "/api/v1/presets/{uuid}"),
+    ("GET", "/api/v1/projects"),
+    ("GET", "/api/v1/projects/[a-z0-9][a-z0-9-]{0,39}"),
+    ("GET", "/api/v1/sessions"),
+    ("POST", "/api/v1/sessions"),
+    ("GET", "/api/v1/sessions/{uuid}"),
+    ("DELETE", "/api/v1/sessions/{uuid}"),
+    ("GET", "/api/v1/sessions/{uuid}/messages"),
+    ("POST", "/api/v1/sessions/{uuid}/messages"),
+    ("GET", "/api/v1/sessions/{uuid}/files/download"),
+    ("POST", "/api/v1/sessions/{uuid}/agent-token/verify"),
+    ("GET", "/api/v1/messages/{int}"),
+    ("GET", "/api/v1/stream"),
+)
+
 ALLOWED_ROUTES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
     (method, re.compile(path.replace("{uuid}", _UUID).replace("{int}", _INT)))
-    for method, path in (
-        ("GET", "/api/v1/meta"),
-        ("GET", "/api/v1/presets"),
-        ("GET", "/api/v1/presets/{uuid}"),
-        ("GET", "/api/v1/projects"),
-        ("GET", "/api/v1/projects/[a-z0-9][a-z0-9-]{0,39}"),
-        ("GET", "/api/v1/sessions"),
-        ("POST", "/api/v1/sessions"),
-        ("GET", "/api/v1/sessions/{uuid}"),
-        ("DELETE", "/api/v1/sessions/{uuid}"),
-        ("GET", "/api/v1/sessions/{uuid}/messages"),
-        ("POST", "/api/v1/sessions/{uuid}/messages"),
-        ("GET", "/api/v1/sessions/{uuid}/files/download"),
-        ("POST", "/api/v1/sessions/{uuid}/agent-token/verify"),
-        ("GET", "/api/v1/messages/{int}"),
-        ("GET", "/api/v1/stream"),
-    )
+    for method, path in ROUTE_TEMPLATES
 )
+
+# The names a per-service scope may list (ORCH_SERVICE_SCOPES): "<METHOD> <path template>".
+ROUTE_NAMES: frozenset[str] = frozenset(f"{m} {p}" for m, p in ROUTE_TEMPLATES)
+_SCOPED_ROUTES: dict[str, tuple[str, re.Pattern[str]]] = {
+    f"{m} {p}": (m, c) for (m, p), (_, c) in zip(ROUTE_TEMPLATES, ALLOWED_ROUTES, strict=True)
+}
 
 HEALTH_METHODS = frozenset({"GET", "HEAD"})
 
@@ -66,6 +77,14 @@ def route_allowed(method: str, path: str) -> bool:
     return any(m == method and p.fullmatch(path) for m, p in ALLOWED_ROUTES)
 
 
+def scope_allows(scope_routes: Collection[str], method: str, path: str) -> bool:
+    """True when one of the scope's route names (`<METHOD> <path template>`) matches the request."""
+    return any(
+        m == method and p.fullmatch(path)
+        for m, p in (_SCOPED_ROUTES[name] for name in scope_routes if name in _SCOPED_ROUTES)
+    )
+
+
 def _bearer(scope: Scope) -> str | None:
     for name, value in scope.get("headers", []):
         if name.lower() == b"authorization":
@@ -78,8 +97,16 @@ def _bearer(scope: Scope) -> str | None:
 class ServiceGate:
     """Bearer service-token gate, active only for connections accepted on `service_port`."""
 
-    def __init__(self, app: ASGIApp, service_port: int, token_hashes: Mapping[str, str]):
+    def __init__(
+        self,
+        app: ASGIApp,
+        service_port: int,
+        token_hashes: Mapping[str, str],
+        scopes: Mapping[str, Collection[str]] | None = None,
+    ):
         self.app = app
+        # service name to its allowed route names; a service without an entry keeps every route
+        self.scopes = dict(scopes or {})
         self.service_port = service_port
         self.hashes = [(name, digest.encode()) for name, digest in token_hashes.items()]
 
@@ -120,6 +147,20 @@ class ServiceGate:
                 "service request service=%s method=%s path=%r status=403", service, method, path
             )
             response = error_response(403, "forbidden", "route is not served on the service port")
+            await response(scope, receive, send)
+            return
+
+        own = self.scopes.get(service)
+        if own is not None and not scope_allows(own, method, path):
+            log.info(
+                "service request service=%s method=%s path=%r status=403 scope",
+                service,
+                method,
+                path,
+            )
+            response = error_response(
+                403, "service_scope", "route is not in this service token's scope"
+            )
             await response(scope, receive, send)
             return
 

@@ -48,3 +48,14 @@ async def test_invalid_label_422(http):
         assert_error(
             await http.post(P, json={"name": "bad", "labels": bad}), 422, "invalid_request"
         )
+
+
+async def test_reserved_project_label_refused_on_every_preset_write(http):
+    msg = "'project:' prefix is reserved"
+    pid = (await http.post(P, json={"name": "res", "labels": ["x"]})).json()["id"]
+    r = await http.post(P, json={"name": "res2", "labels": ["x", "project:other"]})
+    assert_error(r, 422, "invalid_request")
+    assert msg in r.text
+    r = await http.put(f"{P}/{pid}", json={"name": "res", "spec": {}, "labels": ["Project:other"]})
+    assert_error(r, 422, "invalid_request")
+    assert (await http.get(f"{P}/{pid}")).json()["labels"] == ["x"]

@@ -73,11 +73,18 @@ agentApi:
 # Becomes ORCH_SERVICE_PORT. ORCH_SERVICE_TOKENS comes from existingSecret/existingSecretKey,
 # or from the chart Secret built from tokenHashes (service name -> sha256 hex of its token;
 # each service's values file adds its own key). existingSecret wins when set.
+# scopes (ORCH_SERVICE_SCOPES) narrows a service to a list of routes, each "<METHOD> <path
+# template>" exactly as in the README service-port list; outside it the service gets 403
+# service_scope. A service without an entry keeps every route (the default), an empty list
+# denies all, a name without a token fails startup. Example:
+#   scopes:
+#     agents-vault: ["GET /api/v1/presets", "GET /api/v1/sessions"]
 serviceApi:
   port: 8002
   existingSecret: ""
   existingSecretKey: service-tokens
   tokenHashes: {}
+  scopes: {}
 
 # The reconciler Role and RoleBinding (namespaced, release namespace only). The Role is
 # bound to the <fullname>-reconciler ServiceAccount.

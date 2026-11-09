@@ -120,3 +120,23 @@ def test_malformed_hash_fails_render() -> None:
     for bad in ("short", "A" * 64, "g" * 64, "a" * 63):
         err = render_error({**BASE, "serviceApi": {"tokenHashes": {"svc": bad}}})
         assert "tokenHashes" in err
+
+
+def test_service_scopes_env_rendered_only_when_set() -> None:
+    def scopes(values: dict) -> list[dict]:
+        return [
+            e for e in _api_container(_docs(values))["env"] if e["name"] == "ORCH_SERVICE_SCOPES"
+        ]
+
+    assert scopes({}) == []
+    got = scopes(
+        {
+            "serviceApi": {
+                "tokenHashes": {"agents-vault": H_A},
+                "scopes": {"agents-vault": ["GET /api/v1/presets", "GET /api/v1/sessions"]},
+            }
+        }
+    )
+    assert [e["value"] for e in got] == [
+        '{"agents-vault":["GET /api/v1/presets","GET /api/v1/sessions"]}'
+    ]

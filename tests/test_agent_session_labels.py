@@ -99,7 +99,17 @@ async def test_cannot_target_other_session(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "labels", [["bad label"], ["UPPER!"], [""], ["a" * 41], [f"l{i}" for i in range(21)], "x"]
+    "labels",
+    [
+        ["bad label"],
+        ["project:other"],
+        ["ok", "Project:x"],
+        ["UPPER!"],
+        [""],
+        ["a" * 41],
+        [f"l{i}" for i in range(21)],
+        "x",
+    ],
 )
 async def test_invalid_label_422(monkeypatch, labels):
     rig = Rig(monkeypatch)
