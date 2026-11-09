@@ -19,6 +19,8 @@ TIMEOUT_SECONDS = 10.0
 LABELS_MAX = 20
 #: Vault 422 codes that are the caller's refs to fix; any other 422 is our contract bug.
 REFUSAL_CODES = ("vault_entry_unknown", "vault_env_unknown", "vault_label_mismatch")
+#: The only extra keys of a refusal that reach the caller (env names and entry ids).
+REFUSAL_EXTRA = ("envs", "entries")
 
 
 class VaultUnavailable(Exception):
@@ -122,7 +124,7 @@ class VaultClient:
             # a request the vault cannot parse is our bug, never the caller's: names only
             log.warning("vault refused the request shape: code=%s", code)
             raise VaultUnavailable("contract mismatch")
-        extra = {k: v for k, v in error.items() if k not in ("code", "message")}
+        extra = {k: v for k, v in error.items() if k in REFUSAL_EXTRA}
         raise VaultRefused(code, extra)
 
     async def _json(self, method: str, path: str, **kwargs: Any) -> Any:
