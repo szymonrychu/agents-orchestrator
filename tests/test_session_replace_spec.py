@@ -299,11 +299,11 @@ async def test_bind_writes_declaration_and_secret_name_with_one_bump(pool, dsn):
         got = await lis.payloads()
     assert written is True
     assert out.spec == PROTECTED and out.generation == gen + 1
-    assert out.secret_versions == {"OLD": "ps-old-v1", "TOK": staged}
+    assert out.secret_versions == {"TOK": staged}  # OLD is not declared protected: pruned
     assert got == [json.dumps({"session_id": str(s.id)})]
     spec, gen2, _ = await _row(pool, s.id)
     assert spec == PROTECTED.model_dump(mode="json", exclude_none=True) and gen2 == gen + 1
-    assert await _versions(pool, s.id) == {"OLD": "ps-old-v1", "TOK": staged}
+    assert await _versions(pool, s.id) == {"TOK": staged}
     assert await _states(pool, preset_id) == [("TOK", 1, "bound")]
 
 
@@ -327,13 +327,17 @@ async def test_an_equal_binding_and_spec_write_nothing(pool, dsn):
     s, _, staged = await _staged_session(pool, {})
     async with pool.connection() as conn:
         await conn.execute(
-            "UPDATE sessions SET secret_versions = %s WHERE id = %s",
-            (Jsonb({"TOK": staged}), s.id),
+            "UPDATE sessions SET spec = %s, secret_versions = %s WHERE id = %s",
+            (
+                Jsonb(PROTECTED.model_dump(mode="json", exclude_none=True)),
+                Jsonb({"TOK": staged}),
+                s.id,
+            ),
         )
     before = await _row(pool, s.id)
     async with _Listener(dsn) as lis, pool.connection() as conn:
         _, written = await sessions.replace_spec(
-            conn, s.id, before[0], BASE, _noop, secret_versions={"TOK": staged}
+            conn, s.id, before[0], PROTECTED, _noop, secret_versions={"TOK": staged}
         )
         got = await lis.payloads()
     assert written is False and got == []

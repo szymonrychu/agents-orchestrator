@@ -863,7 +863,9 @@ async def replace_spec(
     nothing.
 
     `secret_versions` ({ENV_NAME: Secret name}, from `k8s.secrets.bind_staged` in the caller's
-    transaction) is merged into the stored map in the same UPDATE; a changed map is a change on
+    transaction) is merged into the stored map in the same UPDATE, which then keeps only the names
+    the written spec declares protected (a removed variable frees its Secret for
+    `collect_bound`, and a re-declared one needs a fresh value); a changed map is a change on
     its own. Returns the row and whether it was written. A caller that binds holds more locks
     before this call: the preset FOR SHARE, then the variable advisory locks (`bind_staged`),
     then this row (presets, variables, sessions), because `set_secret` takes the preset FOR
@@ -876,7 +878,12 @@ async def replace_spec(
         # decided before the recheck, which gets the stored dict itself
         dumped = _dump(spec)
         stored_versions = row["secret_versions"] or {}
-        versions = {**stored_versions, **(secret_versions or {})}
+        protected = {n for n, e in dumped.obj.get("env", {}).items() if e.get("protected")}
+        versions = {
+            n: s
+            for n, s in {**stored_versions, **(secret_versions or {})}.items()
+            if n in protected
+        }
         unchanged = dumped.obj == row["spec"] and versions == stored_versions
         await recheck(LockedSession(row["spec"], row["preset_id"], stored_versions))
         if unchanged:

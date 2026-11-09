@@ -608,3 +608,34 @@ async def test_view_of_a_session_proposal_reports_stale(
     async with pool.connection() as conn:
         await sessions_repo.set_replicas(conn, target.id, 1)
     assert (await proposals_view(pool, settings, view.id, boss)).stale is True
+
+
+async def test_removing_a_bound_protected_var_prunes_secret_versions_and_frees_the_secret(
+    pool, kube, settings, boss, preset, target, canary
+):
+    view = await _filed(pool, kube, settings, boss, canary)
+    await _review(pool, kube, settings, view.id, 1, APPROVE_ALL)
+    staged = store.secret_name(preset.id, "TOKEN", 2)
+    assert (await _row(pool, target.id))[1] == {"TOKEN": staged}
+    assert await store.collect_bound(pool, kube, NS) == 0
+    removal, _, _ = await _create(
+        pool, kube, settings, boss, kind="session", target=SLUG, patch={"env": {"TOKEN": None}}
+    )
+    done = await _review(pool, kube, settings, removal.id, 1, {"env.TOKEN": "approve"})
+    assert done.status == "applied"
+    spec, versions, _, _ = await _row(pool, target.id)
+    assert "TOKEN" not in spec["env"] and not versions
+    assert await store.collect_bound(pool, kube, NS) == 1
+    assert staged not in _secrets(kube)
+    # declared protected again without a value: refused, the old Secret is not silently rebound
+    with pytest.raises(ApiError) as exc:
+        await _create(
+            pool,
+            kube,
+            settings,
+            boss,
+            kind="session",
+            target=SLUG,
+            patch={"env": {"TOKEN": {"protected": True}}},
+        )
+    _error(exc, 422, "secret_unset")

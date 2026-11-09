@@ -396,3 +396,60 @@ async def test_collect_bound_deletes_a_replace_spec_binding_only_after_the_sessi
     assert await store.collect_bound(pool, kube, NS) == 1
     assert bound not in secret_objects(kube)
     assert await reservations(pool, pid) == []
+
+
+async def _replace(pool, session_id, spec, versions=None):
+    async with pool.connection() as conn:
+        _, stored = await sessions.get_stored(conn, session_id)
+
+        async def recheck(_locked):
+            return None
+
+        return await sessions.replace_spec(
+            conn, session_id, stored, spec, recheck, secret_versions=versions
+        )
+
+
+async def _versions(pool, session_id) -> dict:
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT secret_versions FROM sessions WHERE id = %s", (session_id,)
+        )
+        return (await cur.fetchone())[0] or {}
+
+
+async def test_replace_spec_prunes_a_removed_protected_var_and_collect_bound_deletes_it(
+    pool, kube, canary
+):
+    s, pid, bound = await _bound_by_replace(pool, kube, canary)
+    await _replace(pool, s.id, SessionSpec(image="img:1"))
+    assert await _versions(pool, s.id) == {}
+    assert await store.collect_bound(pool, kube, NS) == 1
+    assert bound not in secret_objects(kube)
+    assert await reservations(pool, pid) == []
+
+
+async def test_replace_spec_removal_bumps_the_generation_even_with_an_equal_spec_otherwise(
+    pool, kube, canary
+):
+    s, _, _ = await _bound_by_replace(pool, kube, canary)
+    before = (
+        await _replace(pool, s.id, SessionSpec(image="img:1", env={"TOK": {"protected": True}}))
+    )[0]
+    assert not await _was_written(pool, s.id, before.generation)
+    saved, written = await _replace(pool, s.id, SessionSpec(image="img:1"))
+    assert written and saved.generation == before.generation + 1
+
+
+async def _was_written(pool, session_id, generation) -> bool:
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT generation FROM sessions WHERE id = %s", (session_id,))
+        return (await cur.fetchone())[0] != generation
+
+
+async def test_replace_spec_keeps_the_version_of_an_unchanged_protected_var(pool, kube, canary):
+    s, _, bound = await _bound_by_replace(pool, kube, canary)
+    spec = SessionSpec(image="img:2", env={"TOK": {"protected": True}})
+    _, written = await _replace(pool, s.id, spec)
+    assert written
+    assert await _versions(pool, s.id) == {"TOK": bound}
