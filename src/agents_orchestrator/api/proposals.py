@@ -886,8 +886,8 @@ _CLOSED_TEXT = {
     " Revise it against the current {kind} with proposal_revise {id}.",
     "expired": "expired before it was reviewed; nothing was applied."
     " File it again with proposal_create if it is still needed.",
-    "target_gone": "was closed: the {kind} no longer exists or is no longer open to superleader"
-    " changes; nothing was applied.",
+    "target_gone": "was closed: the {kind} no longer exists or is no longer open to changes from"
+    " you; nothing was applied.",
 }
 
 

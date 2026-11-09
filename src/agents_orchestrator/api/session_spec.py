@@ -33,6 +33,12 @@ from agents_orchestrator.spec import SessionSpec, default_cache_key
 _TRIES = 3
 
 
+def _proposable(exc: ApiError) -> ApiError:
+    """The refusal marked as one a proposal can carry (a protected value or declaration)."""
+    exc.extra = {**(exc.extra or {}), "proposable": True}
+    return exc
+
+
 def not_superleader() -> ApiError:
     return ApiError(403, "not_superleader", "another session's spec needs a superleader session")
 
@@ -112,14 +118,19 @@ async def patch(
         protected = {n for n, e in new.get("env", {}).items() if e.get("protected")}
         if unset := sorted(protected - set(versions)):
             note_fields(request, [f"env.{n}" for n in unset])
-            raise _secret_unset(unset)
+            raise _proposable(_secret_unset(unset))
 
     for _ in range(_TRIES):
         found = await repo.get_stored(conn, target.id)
         if found is None:
             raise not_found("session")
         session, stored = found
-        _, model = merged_spec_in(stored, body.spec)
+        try:
+            _, model = merged_spec_in(stored, body.spec)
+        except ApiError as exc:
+            if exc.code != "secret_in_spec":
+                raise
+            raise _proposable(exc) from None
         spec, values = model.split()
         new = spec.model_dump(mode="json", exclude_unset=True)
         guards(stored, new, values, session.secret_versions)

@@ -732,6 +732,8 @@ async def test_regular_leader_proposes_a_grant_and_a_value_for_its_own_session(
     caplog.set_level(logging.INFO)
     lead = await _leader_of(pool, "pr-lead", preset.id)
     patch = {"session_messaging": True, "env": {"TOKEN": {"protected": True}}}
+    q = "SELECT spec, generation, secret_versions FROM sessions WHERE id = %s"
+    before = await _rows(pool, q, (lead.id,))
     r = await agent(app, lead, "POST", P, json=own(lead, patch=patch, secrets={"TOKEN": canary}))
     assert r.status_code == 201, r.text
     view = r.json()
@@ -745,6 +747,9 @@ async def test_regular_leader_proposes_a_grant_and_a_value_for_its_own_session(
     assert sorted(items) == ["env.TOKEN", "session_messaging"]
     assert (items["session_messaging"]["grant"], items["env.TOKEN"]["secret"]) == (True, "set")
     assert store.secret_name(preset.id, "TOKEN", 2) in kube.names("Secret")
+    after = await _rows(pool, q, (lead.id,))
+    assert "session_messaging" not in after[0][0]  # filing applies nothing
+    assert after == before
     [row] = await audits(pool, lead.id)
     assert (row["status"], row["secrets"], row["fields"]) == (
         201,
