@@ -84,6 +84,7 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     # superleader any it may manage
     ("GET", f"{_ADMIN}/sessions/{{slug}}"): "own",
     ("PATCH", f"{_ADMIN}/sessions/{{slug}}"): "own",
+    ("POST", f"{_ADMIN}/sessions/{{slug}}/leadership/withdraw"): "own",
     # proposals: the proposer's own proposals only (`proposal_routes`)
     ("POST", f"{_ADMIN}/proposals"): "own",
     ("GET", f"{_ADMIN}/proposals"): "own",
