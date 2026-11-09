@@ -118,7 +118,30 @@ def _add(tar: tarfile.TarFile, path: str, rel: str, real_root: str) -> bool:
     return False
 
 
-def pack(workdir: Path, out: BinaryIO, *, exclude: list[str], max_bytes: int) -> Packed:
+SESSION_FILE = "session.json"
+SESSION_CONFIG = "config"
+REDACTED_MARKER = ".redacted"
+
+
+def _holds_unmarked_config(dirpath: str) -> bool:
+    """True for a session dir (`session.json` and `config/`) with no `.redacted` file."""
+    config = os.path.join(dirpath, SESSION_CONFIG)
+    if not os.path.isdir(config) or os.path.islink(config):
+        return False
+    if not os.path.isfile(os.path.join(dirpath, SESSION_FILE)):
+        return False
+    marker = os.path.join(dirpath, REDACTED_MARKER)
+    return not (os.path.isfile(marker) and not os.path.islink(marker))
+
+
+def pack(
+    workdir: Path,
+    out: BinaryIO,
+    *,
+    exclude: list[str],
+    max_bytes: int,
+    require_redacted: bool = False,
+) -> Packed:
     """Write `workdir` as a zstd-compressed tar to `out`; return the bytes and skipped links.
 
     Members are workdir-relative POSIX paths. `.agent-init` and each `exclude` glob (fnmatch on
@@ -126,6 +149,11 @@ def pack(workdir: Path, out: BinaryIO, *, exclude: list[str], max_bytes: int) ->
     target is absolute or resolves outside the workdir (directly or through other links) is
     skipped and counted, logged as one count line, never the targets. Raises TooLarge as soon
     as the compressed output would pass `max_bytes`.
+
+    With `require_redacted`, the `config/` subtree of a wrapper session dir (a dir holding
+    `session.json` and `config/`) is packed only when the dir also holds a `.redacted` marker
+    file; otherwise it is left out and one fixed line naming the session id (the dir name) is
+    logged.
     """
     _require_workdir(workdir)
     root = os.fspath(workdir)
@@ -141,8 +169,18 @@ def pack(workdir: Path, out: BinaryIO, *, exclude: list[str], max_bytes: int) ->
         for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
             base = os.path.relpath(dirpath, root)
             kept = []
+            hold_config = (
+                require_redacted and SESSION_CONFIG in dirnames and _holds_unmarked_config(dirpath)
+            )
+            if hold_config:
+                _log.warning(
+                    "session config left out of the archive: no redacted marker (session %s)",
+                    os.path.basename(dirpath),
+                )
             for name in sorted(dirnames):
                 rel = name if base == "." else f"{base}/{name}"
+                if hold_config and name == SESSION_CONFIG:
+                    continue
                 if not _excluded(rel, patterns):
                     kept.append(name)
                     skipped += _add(tar, os.path.join(dirpath, name), rel, real_root)

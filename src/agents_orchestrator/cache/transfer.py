@@ -106,6 +106,10 @@ def _max_bytes(env: Mapping[str, str]) -> int:
     return value
 
 
+def _require_redacted(env: Mapping[str, str]) -> bool:
+    return env.get("CACHE_REQUIRE_REDACTED") == "1"
+
+
 def _exclude(env: Mapping[str, str]) -> list[str]:
     raw = env.get("CACHE_EXCLUDE", "")
     if not raw:
@@ -231,7 +235,13 @@ def save(env: Mapping[str, str], *, transport: httpx.BaseTransport | None = None
         scratch.mkdir(parents=True, exist_ok=True)
         try:
             with path.open("wb") as out:
-                packed = archive.pack(Path(workdir_text), out, exclude=exclude, max_bytes=max_bytes)
+                packed = archive.pack(
+                    Path(workdir_text),
+                    out,
+                    exclude=exclude,
+                    max_bytes=max_bytes,
+                    require_redacted=_require_redacted(env),
+                )
         except archive.TooLarge:
             _emit("failed", reason="too_large")
             return EXIT_FAILED

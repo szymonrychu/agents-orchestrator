@@ -72,8 +72,11 @@ def test_sessions_save_job_render():
     env = _env(job)
     assert env["CACHE_DIR"] == render.SESSIONS_ROOT == "/sessions"
     assert json.loads(env["CACHE_EXCLUDE"]) == list(SESSIONS_EXCLUDE)
-    assert {k: v for k, v in env.items() if k not in ("CACHE_DIR", "CACHE_EXCLUDE")} == {
-        k: v for k, v in _env(workdir).items() if k not in ("CACHE_DIR", "CACHE_EXCLUDE")
+    assert env["CACHE_REQUIRE_REDACTED"] == "1"
+    assert "CACHE_REQUIRE_REDACTED" not in _env(workdir)
+    own = ("CACHE_DIR", "CACHE_EXCLUDE", "CACHE_REQUIRE_REDACTED")
+    assert {k: v for k, v in env.items() if k not in own} == {
+        k: v for k, v in _env(workdir).items() if k not in own
     }
 
     # Exactly one URL: a presigned PUT of <prefix>sessions/<slug>.tar.zst.

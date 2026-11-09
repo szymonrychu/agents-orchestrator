@@ -333,3 +333,82 @@ def test_pack_leaves_no_finalizer_error_after_out_is_closed(tmp_path, monkeypatc
         pack(work, out, exclude=[], max_bytes=BIG)
     gc.collect()
     assert unraisable == []
+
+
+# ------------------------------------------------ session config needs the redacted marker
+
+
+def _session_dir(root: Path, pod: str, sid: str, *, marker: bool) -> Path:
+    d = root / pod / sid
+    (d / "config" / "projects" / "p").mkdir(parents=True)
+    (d / "config" / "projects" / "p" / "t.jsonl").write_text("{}\n")
+    (d / "config" / ".credentials.json").write_text("{}")
+    (d / "session.json").write_text("{}")
+    (d / "events.jsonl").write_text("e\n")
+    if marker:
+        (d / ".redacted").write_text('{"format": 1}')
+    return d
+
+
+def _names(data: bytes) -> set[str]:
+    return set(_members(data))
+
+
+def _pack_sessions(root: Path) -> bytes:
+    out = io.BytesIO()
+    pack(
+        root,
+        out,
+        exclude=list(SESSIONS_EXCLUDE),
+        max_bytes=BIG,
+        require_redacted=True,
+    )
+    return out.getvalue()
+
+
+def test_session_config_packed_only_with_marker(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = tmp_path / "sessions"
+    _session_dir(root, "pod-0", "marked", marker=True)
+    _session_dir(root, "pod-0", "plain", marker=False)
+    with caplog.at_level(logging.WARNING):
+        names = _names(_pack_sessions(root))
+
+    assert "pod-0/marked/config/projects/p/t.jsonl" in names
+    assert "pod-0/marked/.redacted" in names
+    assert not any("/.credentials.json" in n for n in names)
+    assert "pod-0/plain/session.json" in names and "pod-0/plain/events.jsonl" in names
+    assert not any(n.startswith("pod-0/plain/config") for n in names)
+    msgs = [r.getMessage() for r in caplog.records]
+    assert msgs == ["session config left out of the archive: no redacted marker (session plain)"]
+
+
+def test_session_config_marker_symlink_does_not_count(tmp_path: Path) -> None:
+    root = tmp_path / "sessions"
+    d = _session_dir(root, "pod-0", "linked", marker=False)
+    os.symlink(d / "events.jsonl", d / ".redacted")
+    assert not any(n.startswith("pod-0/linked/config") for n in _names(_pack_sessions(root)))
+
+
+def test_config_dir_without_session_file_is_ordinary(tmp_path: Path) -> None:
+    root = tmp_path / "sessions"
+    (root / "pod-0" / "config").mkdir(parents=True)
+    (root / "pod-0" / "config" / "x").write_text("1")
+    assert "pod-0/config/x" in _names(_pack_sessions(root))
+
+
+def test_marker_not_required_by_default(tmp_path: Path) -> None:
+    root = tmp_path / "sessions"
+    _session_dir(root, "pod-0", "plain", marker=False)
+    assert "pod-0/plain/config/projects/p/t.jsonl" in _names(_packed(root))
+
+
+def test_restore_of_archive_without_config(tmp_path: Path) -> None:
+    root = tmp_path / "sessions"
+    _session_dir(root, "pod-0", "plain", marker=False)
+    dst = tmp_path / "restored"
+    count = unpack(io.BytesIO(_pack_sessions(root)), dst)
+    assert count > 0
+    assert (dst / "pod-0" / "plain" / "session.json").is_file()
+    assert not (dst / "pod-0" / "plain" / "config").exists()
