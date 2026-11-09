@@ -25,6 +25,10 @@ class VaultUnavailable(Exception):
     """The vault cannot answer (unreachable, timeout, 5xx, 401/403, bad body, contract bug)."""
 
 
+class VaultShape(VaultUnavailable):
+    """The vault answered 2xx with a body of the wrong shape."""
+
+
 class VaultRefused(Exception):
     """The vault refused the refs with a 422; `code` and `extra` pass through to the caller."""
 
@@ -166,7 +170,7 @@ class VaultClient:
     async def entries(self, q: str | None) -> list[dict]:
         data = await self._json("GET", "/vault/v1/entries", params={"q": q} if q else None)
         if not isinstance(data, list):
-            raise VaultUnavailable("bad entries answer")
+            raise VaultShape("bad entries answer")
         return data
 
 

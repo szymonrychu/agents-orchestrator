@@ -34,12 +34,17 @@ class ListingVault(FakeVault):
         super().__init__()
         self.entries[HARBOR] = ("harbor", {"HARBOR_PASSWORD", "HARBOR_USER"}, None)
         self.listed = 0
+        self.listing = None  # O8: a canned answer for GET /vault/v1/entries
+        self.queries = []
 
     def handler(self, req: httpx.Request) -> httpx.Response:
         if self.down:
             return httpx.Response(503, text="down")
         if req.method == "GET":
             self.listed += 1
+            self.queries.append(req.url.params.get("q"))
+            if self.listing is not None:
+                return httpx.Response(200, json=self.listing)
             return httpx.Response(
                 200,
                 json=[
@@ -364,3 +369,124 @@ async def test_concurrent_change_is_retried(app, call, monkeypatch):
     assert r.status_code == 200, r.text
     assert r.json()["id"] == made["id"]
     assert r.json()["spec"]["env"] == {"PLAIN": {"value": "q"}, "TOKEN": ref()}
+
+
+# ----------------------------------------------------------------------- O8: vault_list relay
+
+V = f"{ADMIN_PREFIX}/vault"
+READABLE = "canary-readable-host.example"
+E_OPEN, E_OTHER, E_FREE, E_HIDDEN = (
+    f"{n}{n}{n}{n}{n}{n}{n}{n}-0000-4000-8000-000000000000" for n in "abcd"
+)
+
+
+def listed(eid, name, labels, attachments, protected=False):
+    return {
+        "id": eid,
+        "name": name,
+        "labels": labels,
+        "envs": [
+            {"env": "HOST", "protected": protected, "value": None if protected else READABLE},
+            {"env": "TOKEN", "protected": True, "value": None},
+        ],
+        "attachments": attachments,
+    }
+
+
+def att(preset_id, name="p"):
+    return {"preset_id": preset_id, "preset_name": name, "env": "HOST", "entry_env": "HOST"}
+
+
+async def test_vault_list_scopes_entries_to_the_callers_project(app, call, vault):
+    mine = await make(app, "mine")
+    vault.listing = [
+        listed(E_OPEN, "open", [], [att(mine["id"])]),
+        listed(E_FREE, "tagged", ["team-a"], [att(mine["id"])]),
+        listed(E_OTHER, "other-project", ["project:other"], [att(mine["id"])]),
+        listed(E_HIDDEN, "own-project", ["project:default", "project:other"], []),
+    ]
+    r = await call("GET", V)
+    assert r.status_code == 200, r.text
+    assert [e["name"] for e in r.json()["entries"]] == ["open", "tagged", "own-project"]
+    assert "other-project" not in r.text
+
+
+async def test_vault_list_hides_readable_values_unless_attached_to_a_manageable_preset(
+    app, call, vault
+):
+    mine = await make(app, "mine")
+    locked = await make(app, "locked", manageable=False)
+    vault.listing = [
+        listed(E_OPEN, "attached", [], [att(mine["id"]), att(locked["id"], "locked")]),
+        listed(E_FREE, "unattached", [], []),
+        listed(E_OTHER, "only-hidden", [], [att(locked["id"], "locked")]),
+        listed(E_HIDDEN, "unknown-attachments", [], None),
+    ]
+    r = await call("GET", V)
+    assert r.status_code == 200, r.text
+    got = {e["name"]: e for e in r.json()["entries"]}
+    assert {e["env"]: e["value"] for e in got["attached"]["envs"]} == {
+        "HOST": READABLE,
+        "TOKEN": None,
+    }
+    for name in ("unattached", "only-hidden", "unknown-attachments"):
+        assert [(e["env"], e["protected"], e["value"]) for e in got[name]["envs"]] == [
+            ("HOST", False, None),
+            ("TOKEN", True, None),
+        ]
+    assert [a["preset_id"] for a in got["attached"]["attachments"]] == [mine["id"]]
+    assert got["only-hidden"]["attachments"] == []
+    assert got["unknown-attachments"]["attachments"] is None
+    assert r.text.count(READABLE) == 1
+
+
+async def test_vault_list_to_reattach_names_manageable_presets_only(app, call, pool):
+    mine = await make(app, "mine")
+    locked = await make(app, "locked", manageable=False)
+    await make(app, "clean")
+    async with pool.connection() as conn:
+        await repo.set_vault_reattach(conn, uuid.UUID(mine["id"]), ["B_KEY", "A_KEY"])
+        await repo.set_vault_reattach(conn, uuid.UUID(locked["id"]), ["X_KEY"])
+    r = await call("GET", V)
+    assert r.json()["to_reattach"] == [
+        {"preset_id": mine["id"], "preset_name": "mine", "envs": ["A_KEY", "B_KEY"]}
+    ]
+
+
+async def test_vault_list_forwards_q(call, vault):
+    vault.listing = []
+    r = await call("GET", V, params={"q": "harbor"})
+    assert r.status_code == 200 and r.json() == {"entries": [], "to_reattach": []}
+    assert vault.queries == ["harbor"]
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
+async def test_vault_list_other_methods_405_and_never_reach_the_vault(call, vault, method):
+    r = await call(method, V)
+    assert r.status_code == 405
+    assert vault.calls == [] and vault.listed == 0
+
+
+async def test_vault_list_not_superleader_403(pool, app, vault):
+    plain = await alone(pool, "o8-plain")
+    async with agent_client(app, plain.leader_ip) as http:
+        r = await http.get(V, headers=headers(plain.id))
+    assert_error(r, 403, "not_superleader")
+    assert vault.listed == 0
+
+
+async def test_vault_list_upstream_failures(call, vault):
+    vault.down = True
+    assert_error(await call("GET", V), 503, "upstream_unavailable")
+    vault.down = False
+    vault.listing = {"not": "a list"}
+    assert_error(await call("GET", V), 502, "upstream_shape")
+    vault.listing = ["not-an-object"]
+    assert_error(await call("GET", V), 502, "upstream_shape")
+
+
+async def test_vault_list_unconfigured_503(pool, dsn, boss):
+    app = create_app(agent_settings(dsn), pool)
+    async with agent_client(app, boss.leader_ip) as http:
+        r = await http.get(V, headers=headers(boss.id))
+    assert_error(r, 503, "upstream_unconfigured")

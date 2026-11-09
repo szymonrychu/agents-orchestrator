@@ -184,6 +184,7 @@ def _sent_secrets(body: schemas.PresetIn) -> list[str]:
 # "proposal" routes see only the caller's own proposals on targets it may manage (404 otherwise).
 ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("GET", f"{ADMIN_PREFIX}/presets"): "list",
+    ("GET", f"{ADMIN_PREFIX}/vault"): "list",
     ("POST", f"{ADMIN_PREFIX}/presets"): "create",
     ("GET", f"{ADMIN_PREFIX}/presets/{{ref}}"): "preset",
     ("PUT", f"{ADMIN_PREFIX}/presets/{{ref}}"): "preset",
