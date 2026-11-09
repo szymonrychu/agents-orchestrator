@@ -37,14 +37,15 @@
   data:
     config.yaml: "server:\n  auth_token: ${CCW_AUTH_TOKEN}\npaths:\n  workdir_root:\
       \ /workdir\n  sessions_root: /sessions\nclaude:\n  passthrough_env:\n  - ORCH_AGENT_TOKEN\n\
-      \  - ORCH_AGENT_URL\n  - ORCH_SESSION_ID\n  - POD_NAME\n  env:\n    claude_code_oauth_token:\
-      \ ${CLAUDE_CODE_OAUTH_TOKEN}\n    disable_autoupdater: true\n    claude_autocompact_pct_override:\
-      \ 95\n  model: sonnet\n  main_agent_only_tools:\n  - mcp__any-mcp__orchestrator_*\n\
-      \  permissions:\n    deny:\n    - EnterPlanMode\n    - ExitPlanMode\n    - AskUserQuestion\n\
-      \  mcp_servers:\n    any-mcp:\n      type: stdio\n      command: /opt/any-mcp/bin/any-mcp\n\
-      \      args:\n      - --config\n      - /opt/any-mcp/etc/any-mcp.yaml\nhooks:\n\
-      \  onStart:\n  - type: command\n    run: sh /etc/ccw/on-start.sh\n    blocking:\
-      \ true\n    on_error: allow\n    timeout_seconds: 600.0\nsessions:\n  max_sessions:\
+      \  - ORCH_AGENT_URL\n  - ORCH_SESSION_ID\n  - POD_NAME\n  secret_env: []\n \
+      \ env:\n    claude_code_oauth_token: ${CLAUDE_CODE_OAUTH_TOKEN}\n    disable_autoupdater:\
+      \ true\n    claude_autocompact_pct_override: 95\n  model: sonnet\n  main_agent_only_tools:\n\
+      \  - mcp__any-mcp__orchestrator_*\n  permissions:\n    deny:\n    - EnterPlanMode\n\
+      \    - ExitPlanMode\n    - AskUserQuestion\n  mcp_servers:\n    any-mcp:\n \
+      \     type: stdio\n      command: /opt/any-mcp/bin/any-mcp\n      args:\n  \
+      \    - --config\n      - /opt/any-mcp/etc/any-mcp.yaml\nhooks:\n  onStart:\n\
+      \  - type: command\n    run: sh /etc/ccw/on-start.sh\n    blocking: true\n \
+      \   on_error: allow\n    timeout_seconds: 600.0\nsessions:\n  max_sessions:\
       \ 1\n  resume_on_start: true\n  idle_timeout_seconds: 0\n  ask_user_question:\
       \ deny\n  restart_continue_prompt: Claude was restarted. Continue the task where\
       \ you left\n    off.\n  interrupt_settle_seconds: 20.0\n  commands:\n    client:\n\
@@ -108,7 +109,7 @@
           agents.szymonrichert.pl/session: solo
           app.kubernetes.io/managed-by: agents-orchestrator
         annotations:
-          agents.szymonrichert.pl/config-hash: 9a8968ed026e4037900d5e4a0d71bf7d8bcb8eebef35bccf684b4ab810255086
+          agents.szymonrichert.pl/config-hash: ce9f086a693a4deae4f630df51582de0bf10b5aba07646e02ca2f161c0bdd977
       spec:
         imagePullSecrets:
         - name: regcred

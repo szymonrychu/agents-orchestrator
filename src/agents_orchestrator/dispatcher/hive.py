@@ -55,7 +55,7 @@ from agents_orchestrator.db.eligibility import ELIGIBLE, HANDOVER_MARGIN_PCT, SU
 from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE
 from agents_orchestrator.dispatcher import feed
 from agents_orchestrator.settings import Settings
-from agents_orchestrator.spec import SessionSpec
+from agents_orchestrator.spec import SessionSpec, legacy_context
 from agents_orchestrator.wrapper.client import NoteOutcome, WrapperClient
 
 log = logging.getLogger(__name__)
@@ -323,7 +323,7 @@ async def _read(
             (cid, OUTCOME_WINDOW_SECONDS),
         )
         outcomes = await cur.fetchall()
-    typed = SessionSpec.model_validate(spec)
+    typed = SessionSpec.model_validate(spec, context=legacy_context(session.get("secret_versions")))
     rollout = (session.get("status") or {}).get("rollout") or {}
     return _Plan(
         session_id=cid,

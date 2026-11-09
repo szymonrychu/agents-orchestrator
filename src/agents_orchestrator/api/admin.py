@@ -49,6 +49,7 @@ def _admit(
     """Hand the admitted caller to the route and the audit."""
     request.state.admin_caller = (agent, session)
     request.state.admin_secrets = []
+    request.state.admin_vault = []
     return session
 
 
@@ -97,15 +98,18 @@ async def _audit(request: Request, status: int) -> None:
         return  # refused at the gate: not an admin call
     agent, session = admitted
     secrets = sorted(set(request.state.admin_secrets))
+    vault = sorted({(v["env"], v["entry"], v["entry_env"]) for v in request.state.admin_vault})
+    vault = [{"env": e, "entry": i, "entry_env": x} for e, i, x in vault]
     fields = getattr(request.state, "preset_fields", None)
     path = request.url.path
     log.info(
-        "admin %s %s -> %s session=%s secrets=%s%s",
+        "admin %s %s -> %s session=%s secrets=%s%s%s",
         request.method,
         path,
         status,
         session.slug,
         secrets,
+        f" vault={vault}" if vault else "",
         "" if fields is None else f" fields={fields}",
     )
     data = {
@@ -115,6 +119,8 @@ async def _audit(request: Request, status: int) -> None:
         "session": session.slug,
         "secrets": secrets,
     }
+    if vault:
+        data["vault"] = vault
     if fields is not None:
         data["fields"] = fields
     try:
@@ -169,22 +175,20 @@ def touched(request: Request, *names: str) -> None:
     request.state.admin_secrets.extend(names)
 
 
-def _sent_secrets(body: schemas.PresetIn) -> list[str]:
-    return [n for n, e in body.spec.env.items() if e.protected and e.value is not None]
-
-
 # What each non-relay admin route hides from the superleader: "preset" and "session" routes
 # answer 404 for a target outside its remit, "list" and "create" are filtered or forced,
 # "proposal" routes see only the caller's own proposals on targets it may manage (404 otherwise).
 ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("GET", f"{ADMIN_PREFIX}/presets"): "list",
+    ("GET", f"{ADMIN_PREFIX}/vault"): "list",
     ("POST", f"{ADMIN_PREFIX}/presets"): "create",
     ("GET", f"{ADMIN_PREFIX}/presets/{{ref}}"): "preset",
     ("PUT", f"{ADMIN_PREFIX}/presets/{{ref}}"): "preset",
     ("PATCH", f"{ADMIN_PREFIX}/presets/{{ref}}"): "preset",
     ("DELETE", f"{ADMIN_PREFIX}/presets/{{ref}}"): "preset",
     ("POST", f"{ADMIN_PREFIX}/presets/{{ref}}/copy"): "preset",
-    ("PUT", f"{ADMIN_PREFIX}/presets/{{ref}}/secrets/{{name}}"): "preset",
+    ("PUT", f"{ADMIN_PREFIX}/presets/{{ref}}/vault/{{entry_id}}"): "preset",
+    ("DELETE", f"{ADMIN_PREFIX}/presets/{{ref}}/vault/{{entry_id}}"): "preset",
     ("GET", f"{ADMIN_PREFIX}/sessions/{{slug}}"): "session",
     ("PATCH", f"{ADMIN_PREFIX}/sessions/{{slug}}"): "session",
     ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/leadership/withdraw"): "session",
@@ -223,7 +227,6 @@ async def list_presets(pool: Pool) -> list[schemas.PresetView]:
 async def create_preset(
     body: schemas.PresetIn, request: Request, pool: Pool, settings: Cfg
 ) -> schemas.PresetView:
-    touched(request, *_sent_secrets(body))
     async with pool.connection() as conn:
         return await presets_api.create(request, conn, settings, body, superleader=True)
 
@@ -239,7 +242,6 @@ async def get_preset(ref: str, pool: Pool) -> schemas.PresetView:
 async def replace_preset(
     ref: str, body: schemas.PresetIn, request: Request, pool: Pool, settings: Cfg
 ) -> schemas.PresetView:
-    touched(request, *_sent_secrets(body))
     async with pool.connection() as conn:
         found = await manageable_preset(conn, ref)
         return await presets_api.replace(request, conn, settings, found.id, body, superleader=True)
@@ -255,10 +257,10 @@ async def patch_preset(
 
 
 @router.delete("/presets/{ref}", status_code=204, response_model=None)
-async def delete_preset(ref: str, request: Request, pool: Pool, settings: Cfg) -> Response:
+async def delete_preset(ref: str, request: Request, pool: Pool) -> Response:
     async with pool.connection() as conn:
         found = await manageable_preset(conn, ref)
-        await presets_api.remove(request, conn, settings, found.id, superleader=True)
+        await presets_api.remove(request, conn, found.id, superleader=True)
     return Response(status_code=204)
 
 
@@ -274,16 +276,40 @@ async def copy_preset(
         )
 
 
-@router.put("/presets/{ref}/secrets/{name}", response_model=schemas.SecretView)
-async def set_preset_secret(
-    ref: str, name: str, body: schemas.SecretIn, request: Request, pool: Pool, settings: Cfg
-) -> schemas.SecretView:
-    touched(request, name)
+@router.put("/presets/{ref}/vault/{entry_id}", response_model=schemas.VaultAttachView)
+async def attach_vault(
+    ref: str,
+    entry_id: uuid.UUID,
+    body: schemas.VaultAttachIn,
+    request: Request,
+    pool: Pool,
+    settings: Cfg,
+) -> schemas.VaultAttachView:
+    """Attach a vault entry as refs, in one save, on a manageable preset (privileged ones too).
+    `envs` maps entry env to preset env; one entry env may back several preset envs through
+    repeated calls, which keep the refs already there. Without `envs` every env of the entry is
+    attached under its own name. A preset env that is taken is 409 `env_exists` unless
+    `replace`. The answer marks `attachment_privileged` (marked, never blocked)."""
     async with pool.connection() as conn:
         found = await manageable_preset(conn, ref)
-        return await presets_api.put_secret(
-            request, conn, settings, str(found.id), name, body, superleader=True
-        )
+        view = await presets_api.attach_vault(request, conn, settings, found.id, entry_id, body)
+    return schemas.VaultAttachView(**view.model_dump(), attachment_privileged=bool(view.privileged))
+
+
+@router.delete("/presets/{ref}/vault/{entry_id}", response_model=schemas.PresetView)
+async def detach_vault(
+    ref: str,
+    entry_id: uuid.UUID,
+    request: Request,
+    pool: Pool,
+    settings: Cfg,
+    env: str | None = None,
+) -> schemas.PresetView:
+    """Remove every ref to the entry from a manageable preset, or only the one under preset env
+    `?env=`; 404 `not_attached` when nothing matches."""
+    async with pool.connection() as conn:
+        found = await manageable_preset(conn, ref)
+        return await presets_api.detach_vault(request, conn, settings, found.id, entry_id, env)
 
 
 # ---------------------------------------------------------------- sessions (O7)
@@ -375,7 +401,12 @@ async def create_session(
     recorded as the creator and `created_by_service` stays empty."""
     _, caller = caller_of(request)
     return await sessions_api.create(
-        pool, settings, body, created_by_session=caller.id, usage=usage
+        pool,
+        settings,
+        body,
+        created_by_session=caller.id,
+        usage=usage,
+        vault=request.app.state.vault,
     )
 
 

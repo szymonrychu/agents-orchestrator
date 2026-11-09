@@ -71,23 +71,13 @@ def test_permission_lists():
     assert human_only_changes({}, p(["A"], None)) == ["wrapper.permissions.allow"]
 
 
-def test_protected_env_removal_is_human_only():
-    """Decision 7 b: removing or unprotecting a stored protected variable is human-only;
-    adding one (and setting its value through the secret route) is not."""
+def test_env_changes_are_not_human_only():
+    """The stored-protected rule is gone (decision Q4): removing or changing an env entry is
+    not a human-only change; a privileged target limits it separately."""
     stored = {"env": {"K": {"protected": True}}}
-    assert human_only_changes(stored, {"env": {}}) == ["env.K"]
-    assert human_only_changes(stored, {}) == ["env.K"]
-    assert human_only_changes(stored, {"env": {"K": {"value": "v"}}}) == ["env.K"]
-    assert human_only_changes(stored, {"env": {"K": {"value": "v", "protected": False}}}) == [
-        "env.K"
-    ]
-    assert human_only_changes(stored, {"env": {"K": {"protected": True}}}) == []
-    assert human_only_changes({}, {"env": {"J": {"protected": True}}}) == []
-    assert human_only_changes({"env": {"P": {"value": "x"}}}, {}) == []
-    assert (
-        human_only_changes(stored, {"env": {"K": {"protected": True}, "N": {"protected": True}}})
-        == []
-    )
+    assert human_only_changes(stored, {"env": {}}) == []
+    assert human_only_changes(stored, {}) == []
+    assert human_only_changes(stored, {"env": {"K": {"value": "v"}}}) == []
 
 
 def test_several_fields_sorted():
@@ -184,17 +174,22 @@ def test_privileged_target_changes():
     assert ptc(stored, {**stored, "env": {**stored["env"], "N": {"value": "1"}}}) == ["env.N"]
 
 
-def test_privileged_target_refuses_secret_values():
-    """A value for a protected variable of a privileged preset (credential substitution in a
-    pod with a grant) is refused even though the stored spec does not change."""
+def test_privileged_target_env_ref_paths_are_not_security():
+    """An env.<NAME> path whose stored and new entries are each a ref or absent is allowed on a
+    privileged target (Q4); a plain or protected entry on either side stays security."""
     from agents_orchestrator.preset_policy import privileged_target_changes as ptc
 
-    stored = {"kube_cluster_access": True, "env": {"K": {"protected": True}}}
-    assert ptc(stored, stored, ["K"]) == ["env.K"]
-    assert ptc(stored, {**stored, "start_prompt": "p"}, ["K"]) == ["env.K", "start_prompt"]
-    assert (
-        ptc({"env": {"K": {"protected": True}}}, {"env": {"K": {"protected": True}}}, ["K"]) == []
-    )
+    ref = {"vault": "11111111-1111-4111-8111-111111111111", "env": "TOKEN"}
+    other = {"vault": "22222222-2222-4222-8222-222222222222", "env": "TOKEN"}
+    stored = {"kube_cluster_access": True, "env": {"R": ref, "P": {"value": "x"}}}
+    keep = {"P": {"value": "x"}}
+    assert ptc(stored, {**stored, "env": {**keep, "R": other}}) == []  # re-point
+    assert ptc(stored, {**stored, "env": keep}) == []  # detach
+    assert ptc(stored, {**stored, "env": {**stored["env"], "N": ref}}) == []  # attach
+    assert ptc(stored, {**stored, "env": {**stored["env"], "N": {"value": "1"}}}) == ["env.N"]
+    assert ptc(stored, {**stored, "env": {"R": ref}}) == ["env.P"]  # plain removed
+    assert ptc(stored, {**stored, "env": {**stored["env"], "R": {"value": "v"}}}) == ["env.R"]
+    assert ptc(stored, {**stored, "env": {**keep, "R": {"protected": True}}}) == ["env.R"]
 
 
 NS = "kube_namespace_access"

@@ -42,6 +42,7 @@ from agents_orchestrator.api.origin import OriginAllowlist
 from agents_orchestrator.api.secret_store import KubeApi
 from agents_orchestrator.api.service_auth import ServiceGate
 from agents_orchestrator.api.usage_gate import UsageSource
+from agents_orchestrator.api.vault_client import VaultClient
 from agents_orchestrator.db.pool import open_pool
 from agents_orchestrator.settings import Settings
 
@@ -68,6 +69,7 @@ def create_app(
     stream_poll_seconds: float = streams.DEFAULT_POLL_SECONDS,
     kube: KubeApi | None = None,
     usage_transport: httpx.AsyncBaseTransport | None = None,
+    vault_transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
     owns_pool = pool is None
     listener = Listener(settings.database_url)
@@ -80,6 +82,12 @@ def create_app(
             transport=usage_transport,
         )
         if settings.usage_available
+        else None
+    )
+
+    vault = (
+        VaultClient(settings.vault_url, settings.vault_token, transport=vault_transport)
+        if settings.vault_available
         else None
     )
 
@@ -107,6 +115,8 @@ def create_app(
             await secret_store.close_kube(app)
             if usage is not None:
                 await usage.aclose()
+            if vault is not None:
+                await vault.aclose()
             if owns_pool:
                 await app.state.pool.close()
 
@@ -128,6 +138,7 @@ def create_app(
     app.state.kube = kube  # given (tests) or built on first use by api.secret_store
     app.state.kube_owned = False
     app.state.stream_poll_seconds = stream_poll_seconds
+    app.state.vault = vault  # the agents-vault client; None when unconfigured
     app.state.usage = usage  # the usage gate's source; None when the gate is off
     errors.install(app)
     app.include_router(sessions.router)

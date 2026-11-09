@@ -78,7 +78,7 @@ def test_fresh_database_gets_all_tables(empty_dsn):
         "0032",
         "0035",
         "0036",
-        "0037", "0038", "0039", "0040", "0042",
+        "0037", "0038", "0039", "0040", "0041", "0042",
     ]  # fmt: skip
 
 
@@ -128,6 +128,7 @@ def test_presets_migration_on_existing_sessions(empty_dsn, tmp_path):
         "0038",
         "0039",
         "0040",
+        "0041",
         "0042",
     ]
     with psycopg.connect(empty_dsn) as c:
@@ -153,7 +154,7 @@ def test_superleader_manageable_defaults_false_on_existing_rows(empty_dsn, tmp_p
         c.execute("INSERT INTO presets (id, name, spec) VALUES (gen_random_uuid(), 'old', '{}')")
     assert run_migrations(empty_dsn) == [
         "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0035",
-        "0036", "0037", "0038", "0039", "0040", "0042",
+        "0036", "0037", "0038", "0039", "0040", "0041", "0042",
     ]  # fmt: skip
     with psycopg.connect(empty_dsn) as c:
         rows = c.execute("SELECT superleader_manageable FROM presets").fetchall()
@@ -619,7 +620,7 @@ def test_0005_renames_clusters_to_sessions(empty_dsn, tmp_path):
         "0032",
         "0035",
         "0036",
-        "0037", "0038", "0039", "0040", "0042",
+        "0037", "0038", "0039", "0040", "0041", "0042",
     ]  # fmt: skip
     with psycopg.connect(empty_dsn) as c:
         assert c.execute(
@@ -869,7 +870,7 @@ def test_escape_template_tokens_migration(empty_dsn, tmp_path):
         "0032",
         "0035",
         "0036",
-        "0037", "0038", "0039", "0040", "0042",
+        "0037", "0038", "0039", "0040", "0041", "0042",
     ]  # fmt: skip
     with psycopg.connect(empty_dsn) as c:
         stored = [
@@ -880,8 +881,8 @@ def test_escape_template_tokens_migration(empty_dsn, tmp_path):
             )
         ]
     for got in stored:
-        # not a template field (0019 then wraps the plaintext value)
-        assert got["env"] == {"A": {"value": "{{keep}}", "protected": False, "expand": False}}
+        # not a template field (0019 then wraps the plaintext value, 0041 drops `protected`)
+        assert got["env"] == {"A": {"value": "{{keep}}", "expand": False}}
         assert got["init_scripts"][2] == "plain"
         assert got["wrapper"]["restart_continue_prompt"] == "go"
         ctx = {}
@@ -933,7 +934,7 @@ def test_escape_template_tokens_migration_never_aborts_at_the_limit(empty_dsn, t
         "0032",
         "0035",
         "0036",
-        "0037", "0038", "0039", "0040", "0042",
+        "0037", "0038", "0039", "0040", "0041", "0042",
     ]  # fmt: skip
     with psycopg.connect(empty_dsn) as c:
         got = c.execute("SELECT spec FROM sessions WHERE slug='big'").fetchone()[0]
@@ -994,6 +995,7 @@ def test_cache_keys_migration_splits_the_single_key(empty_dsn, tmp_path):
         "0038",
         "0039",
         "0040",
+        "0041",
         "0042",
     ]
     expected = {
@@ -1058,6 +1060,7 @@ def test_self_restart_migration_adds_nullable_column_idempotently(empty_dsn, tmp
         "0038",
         "0039",
         "0040",
+        "0041",
         "0042",
     ]
     with psycopg.connect(empty_dsn, autocommit=True) as c:
@@ -1067,13 +1070,19 @@ def test_self_restart_migration_adds_nullable_column_idempotently(empty_dsn, tmp
 
 
 def test_preset_secrets_migration_adds_table_and_snapshot_column(empty_dsn, tmp_path):
+    """0018 adds the table and the column; 0041 drops the table again and keeps the column."""
+    before, upto = tmp_path / "before", tmp_path / "upto"
+    before.mkdir()
+    upto.mkdir()
     for path in MIGRATIONS_DIR.glob("*.sql"):
         if path.name < "0018":
-            shutil.copy(path, tmp_path)
-    run_migrations(empty_dsn, tmp_path)
+            shutil.copy(path, before)
+        if path.name < "0041":
+            shutil.copy(path, upto)
+    run_migrations(empty_dsn, before)
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         c.execute("INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), 'old', '{}')")
-    assert run_migrations(empty_dsn) == [
+    assert run_migrations(empty_dsn, upto) == [
         "0018",
         "0019",
         "0020",
@@ -1095,13 +1104,15 @@ def test_preset_secrets_migration_adds_table_and_snapshot_column(empty_dsn, tmp_
         "0038",
         "0039",
         "0040",
-        "0042",
     ]
     assert _columns(empty_dsn, "preset_secrets") == {
         "preset_id", "name", "version", "swept", "retired_at", "updated_at",
     }  # fmt: skip
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         assert c.execute("SELECT secret_versions FROM sessions").fetchall() == [(None,)]
+    assert run_migrations(empty_dsn) == ["0041", "0042"]
+    assert _columns(empty_dsn, "preset_secrets") == set()
+    assert "secret_versions" in _columns(empty_dsn, "sessions")
 
 
 def test_env_entries_migration_wraps_plaintext_values(empty_dsn, tmp_path):
@@ -1124,8 +1135,8 @@ def test_env_entries_migration_wraps_plaintext_values(empty_dsn, tmp_path):
                     (slug, json.dumps(spec)),
                 )
 
-    def entry(value):
-        return {"value": value, "protected": False, "expand": False}
+    def entry(value):  # 0041 then drops the `protected` key
+        return {"value": value, "expand": False}
 
     expected = {
         "plain": {
@@ -1134,7 +1145,7 @@ def test_env_entries_migration_wraps_plaintext_values(empty_dsn, tmp_path):
         },
         "none": fixture["none"],
         "emptyenv": fixture["emptyenv"],
-        "done": fixture["done"],
+        "done": {"env": {"A": {"value": "x", "expand": True}}},
         "mixed": {"env": {"A": entry("one"), "B": entry("y")}},
     }
     assert run_migrations(empty_dsn) == [
@@ -1144,7 +1155,7 @@ def test_env_entries_migration_wraps_plaintext_values(empty_dsn, tmp_path):
         "0032",
         "0035",
         "0036",
-        "0037", "0038", "0039", "0040", "0042",
+        "0037", "0038", "0039", "0040", "0041", "0042",
     ]  # fmt: skip
 
     def stored():
@@ -1193,6 +1204,7 @@ def test_created_by_session_migration_adds_nullable_column_idempotently(empty_ds
         "0038",
         "0039",
         "0040",
+        "0041",
         "0042",
     ]
     with psycopg.connect(empty_dsn, autocommit=True) as c:
@@ -1209,7 +1221,7 @@ def test_command_issuer_migration_adds_nullable_columns_idempotently(empty_dsn, 
     assert run_migrations(empty_dsn) == [
         "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031",
         "0032", "0035", "0036",
-        "0037", "0038", "0039", "0040", "0042",
+        "0037", "0038", "0039", "0040", "0041", "0042",
     ]  # fmt: skip
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         c.execute((MIGRATIONS_DIR / "0022_command_issuer.sql").read_text())  # second run: no-op
@@ -1224,7 +1236,7 @@ def test_permission_mode_state_migration_adds_nullable_columns_idempotently(empt
     run_migrations(empty_dsn, tmp_path)
     assert run_migrations(empty_dsn) == [
         "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0035", "0036",
-        "0037", "0038", "0039", "0040", "0042",
+        "0037", "0038", "0039", "0040", "0041", "0042",
     ]  # fmt: skip
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         c.execute(
@@ -1248,13 +1260,13 @@ def test_cache_sweep_tables_apply_after_a_database_already_at_0027(empty_dsn, tm
 
 def test_session_close_columns_apply_after_a_database_already_at_0027(empty_dsn, tmp_path):
     # 0030 backfills close_kind from close_requested_at, so it waits for 0026 as well; 0035 and
-    # 0038 need the messages.notice column of 0030
+    # 0038 need the messages.notice column of 0030, and 0041 the proposal tables of 0038
     for path in MIGRATIONS_DIR.glob("*.sql"):
-        if not path.name.startswith(("0026_", "0030_", "0035_", "0038_")):
+        if not path.name.startswith(("0026_", "0030_", "0035_", "0038_", "0041_")):
             shutil.copy(path, tmp_path)
     run_migrations(empty_dsn, tmp_path)
     assert _columns(empty_dsn, "sessions") & {"close_requested_at", "close_reason"} == set()
-    assert run_migrations(empty_dsn) == ["0026", "0030", "0035", "0038"]
+    assert run_migrations(empty_dsn) == ["0026", "0030", "0035", "0038", "0041"]
     assert {"close_requested_at", "close_reason"} <= _columns(empty_dsn, "sessions")
 
 
@@ -1287,6 +1299,7 @@ def test_migration_adds_columns_and_gin_index(empty_dsn, tmp_path):
         "0038",
         "0039",
         "0040",
+        "0041",
         "0042",
     ]
     with psycopg.connect(empty_dsn, autocommit=True) as c:
@@ -1372,6 +1385,7 @@ def test_inactivity_migration_backfills_now(empty_dsn, tmp_path):
         "0038",
         "0039",
         "0040",
+        "0041",
         "0042",
     ]
     with psycopg.connect(empty_dsn) as c:
@@ -1414,6 +1428,7 @@ def test_inactivity_migration_moves_discard_after_idle(empty_dsn, tmp_path):
         "0038",
         "0039",
         "0040",
+        "0041",
         "0042",
     ]
     want = {
@@ -1452,6 +1467,7 @@ def test_discard_force_migration_adds_nullable_column_idempotently(empty_dsn, tm
         "0038",
         "0039",
         "0040",
+        "0041",
         "0042",
     ]
     with psycopg.connect(empty_dsn, autocommit=True) as c:
@@ -1491,6 +1507,7 @@ def test_kube_cluster_access_migration_renames_field_idempotently(empty_dsn, tmp
         "0038",
         "0039",
         "0040",
+        "0041",
         "0042",
     ]
 
@@ -1521,7 +1538,7 @@ def test_chat_relay_migration_adds_columns_and_index_idempotently(empty_dsn, tmp
     run_migrations(empty_dsn, tmp_path)
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         c.execute("INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), 'old', '{}')")
-    assert run_migrations(empty_dsn) == ["0036", "0037", "0038", "0039", "0040", "0042"]
+    assert run_migrations(empty_dsn) == ["0036", "0037", "0038", "0039", "0040", "0041", "0042"]
     assert run_migrations(empty_dsn) == []
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         c.execute((MIGRATIONS_DIR / "0036_chat_relay.sql").read_text())  # second run: no-op
@@ -1599,7 +1616,9 @@ def test_0035_strips_leader_lease(empty_dsn, tmp_path):
             "INSERT INTO presets (id, name, spec) VALUES (gen_random_uuid(), 'old', %s)",
             (json.dumps(spec),),
         )
-    assert run_migrations(empty_dsn) == ["0035", "0036", "0037", "0038", "0039", "0040", "0042"]
+    assert run_migrations(empty_dsn) == [
+        "0035", "0036", "0037", "0038", "0039", "0040", "0041", "0042",
+    ]  # fmt: skip
 
     def read():
         with psycopg.connect(empty_dsn) as c:
@@ -1635,7 +1654,7 @@ def test_0039_command_kind_clear(empty_dsn, tmp_path):
         if path.name < "0039":
             shutil.copy(path, tmp_path)
     run_migrations(empty_dsn, tmp_path)
-    assert run_migrations(empty_dsn) == ["0039", "0040", "0042"]
+    assert run_migrations(empty_dsn) == ["0039", "0040", "0041", "0042"]
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         c.execute((MIGRATIONS_DIR / "0039_command_clear.sql").read_text())  # second run: no-op
         c.execute("INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), 's', '{}')")
@@ -1658,7 +1677,7 @@ def test_reserved_project_labels_are_stripped(empty_dsn, tmp_path):
     for f in MIGRATIONS_DIR.glob("*.sql"):
         if f.name < "0042":
             shutil.copy(f, tmp_path / f.name)
-    assert run_migrations(empty_dsn, tmp_path)[-1] == "0040"
+    assert run_migrations(empty_dsn, tmp_path)[-1] == "0041"
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         c.execute(
             "INSERT INTO presets (id, name, spec, labels) VALUES"
@@ -1677,3 +1696,14 @@ def test_reserved_project_labels_are_stripped(empty_dsn, tmp_path):
         sessions = dict(c.execute("SELECT slug, labels FROM sessions"))
     assert presets == {"p1": ["b", "a"], "p2": ["keep", "x-project:z"], "p3": []}
     assert sessions == {"s1": ["c", "d"], "s2": ["e"]}
+
+
+def test_0041_applies_after_a_database_that_already_holds_0042(empty_dsn, tmp_path):
+    """The runner keys on the set of applied versions, so 0041 (vault refs) still runs, once, on
+    a database that got 0042 (reserved labels) first."""
+    for f in MIGRATIONS_DIR.glob("*.sql"):
+        if not f.name.startswith("0041_"):
+            shutil.copy(f, tmp_path / f.name)
+    assert run_migrations(empty_dsn, tmp_path)[-1] == "0042"
+    assert run_migrations(empty_dsn) == ["0041"]
+    assert run_migrations(empty_dsn) == []

@@ -4,7 +4,7 @@ One `session` record (`id`, `slug`, `spec`, `created_at`, the provenance `preset
 `preset_name`, `created_by_service`, `created_by_session`, the close request
 `close_requested_at`, `close_reason`, `close_kind` and `close_deadline_at`, and the inactivity
 `inactivity_reminded_at` and `last_update_at` (the api-written update stamp, not the computed
-quiet clock), each null when unset), then the
+quiet clock), each null when unset; never the vault pins), then the
 `agent`, `message`, `turn`, `command`, `check` and `event` records of that session, each kind in
 id order (turns in started_at order). Every kind is read through a server-side cursor, so a long
 history is never held in memory.
@@ -20,8 +20,6 @@ from typing import Any
 
 import psycopg
 from psycopg.rows import dict_row
-
-from agents_orchestrator.secret_view import redact_spec_dict, session_metas
 
 FETCH_SIZE = 500
 
@@ -66,7 +64,7 @@ async def export_session_history(
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
                 "SELECT id, slug, spec, created_at, preset_id, preset_name, created_by_service,"
-                " created_by_session, secret_versions, close_requested_at, close_reason,"
+                " created_by_session, close_requested_at, close_reason,"
                 " close_kind, close_deadline_at, inactivity_reminded_at, last_update_at"
                 " FROM sessions WHERE id = %s",
                 (session_id,),
@@ -74,8 +72,6 @@ async def export_session_history(
             row = await cur.fetchone()
         if row is None:
             return
-        metas = session_metas(row.pop("secret_versions") or {}, row["created_at"])
-        row["spec"] = redact_spec_dict(row["spec"], metas)
         yield _line("session", row)
         for kind, query in QUERIES:
             async with conn.cursor(name=f"export_{kind}", row_factory=dict_row) as cur:

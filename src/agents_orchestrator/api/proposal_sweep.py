@@ -1,68 +1,42 @@
-"""Proposals sweeper (preset-change-proposals 3.4 step 6, D3): staged values must go when a
-proposal expires or goes stale even if nobody opens it, so the api runs this beside autoclose.
+"""Proposals sweeper (preset-change-proposals 3.4 step 6, D3): proposals must expire, go stale or
+lose their target even if nobody opens them, so the api runs this beside autoclose.
 
 Each pass runs the steps below in turn (a failed step is logged and retried next pass, the next
-step still runs). A step reads its list on one connection and commits; then every unit (a
-proposal, a proposal revision, a reservation, a variable) runs in its own committed transaction on
-its own pooled connection, so its row and advisory locks are released at its own commit, never
-held across the other units' Kubernetes calls:
+step still runs). A step reads its list on one connection and commits; then every proposal runs
+in its own committed transaction on its own pooled connection, so its row lock is released at its
+own commit:
 
 1. expire: active proposals past `expires_at` on the database clock become `expired`;
 2. stale: open preset and session proposals whose live fingerprint differs from the current
    revision's become `stale` (also the ones a review's SKIP LOCKED pass left unmarked);
 3. target_gone: active preset proposals whose preset is deleted or no longer manageable, and
-   active session proposals whose session is purged or being deleted;
-4. release: the staged reservations of every proposal no longer open and of superseded
-   revisions, Secret first (a missing one is fine, a failed delete keeps the row);
-5. collect_bound: bound reservations no session names any more;
-6. reap (on the first pass and then every `REAP_SECONDS`): staged Secrets whose reservation row
-   never committed.
+   active session proposals whose session is purged or being deleted.
 
-Each proposal is handled under `FOR UPDATE SKIP LOCKED`: a proposal a
-review (or revise, withdraw) holds is left to it and seen again next pass. Every transition is
-status-guarded and notifies the proposer once; a `NotInState` (another writer won) is skipped.
-Schedule proposals have no staged values; their staleness is checked at review only (views
-read `stale: false`).
-
-The Kubernetes client is built only when a step has a Secret to delete.
+Each proposal is handled under `FOR UPDATE SKIP LOCKED`: a proposal a review (or revise,
+withdraw) holds is left to it and seen again next pass. Every transition is status-guarded and
+notifies the proposer once; a `NotInState` (another writer won) is skipped. A proposal holds no
+value and no Secret, so the sweeper never touches Kubernetes. Schedule proposals' staleness is
+checked at review only (views read `stale: false`).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import time
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Any, cast
+from typing import Any
 
 from fastapi import FastAPI
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from agents_orchestrator.api import proposals, secret_store
-from agents_orchestrator.api.secret_store import KubeApi
+from agents_orchestrator.api import proposals
 from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.db import proposals as repo
 from agents_orchestrator.settings import Settings
 
 log = logging.getLogger(__name__)
-
-REAP_SECONDS = 3600.0  # orphans only come from failed rollbacks: an hourly probe is enough
-
-
-class _LazyKube:
-    """Builds the client on the first call a step makes, so a pass with nothing to delete never
-    needs Kubernetes access."""
-
-    def __init__(self, kube_of: Callable[[], KubeApi]) -> None:
-        self._kube_of = kube_of
-        self._kube: KubeApi | None = None
-
-    def __getattr__(self, name: str) -> Any:
-        if self._kube is None:
-            self._kube = self._kube_of()
-        return getattr(self._kube, name)
 
 
 async def _read(
@@ -117,7 +91,7 @@ async def _live(conn: AsyncConnection, p: repo.Proposal) -> str | None:
     preset = await presets_repo.get(conn, uuid.UUID(p.target_id))
     if preset is None or not preset.superleader_manageable:
         return None
-    return await proposals.live_fingerprint(conn, preset)
+    return proposals.fingerprint_preset(preset)
 
 
 async def _ids(conn: AsyncConnection, statuses: tuple[str, ...]) -> list[int]:
@@ -147,39 +121,13 @@ async def _target_gone(pool: AsyncConnectionPool) -> None:
     await _each(pool, ids, "target_gone", act)
 
 
-async def _release(pool: AsyncConnectionPool, kube: KubeApi, namespace: str) -> None:
-    """One committed transaction per proposal revision, on its own connection."""
-    for proposal_id, revision in await _read(pool, secret_store.releasable):
-        try:
-            async with pool.connection() as conn, conn.transaction():
-                await secret_store.release(
-                    conn, kube, namespace, proposal_id=proposal_id, revision=revision
-                )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            log.exception("proposal sweep release failed for proposal %d", proposal_id)
-
-
-async def sweep_once(
-    pool: AsyncConnectionPool,
-    kube_of: Callable[[], KubeApi],
-    settings: Settings,
-    *,
-    reap: bool = False,
-) -> None:
-    """One pass of the steps in the module docstring; `reap` adds the orphan probe."""
-    kube = cast(KubeApi, _LazyKube(kube_of))
-    ns = settings.namespace
+async def sweep_once(pool: AsyncConnectionPool) -> None:
+    """One pass of the steps in the module docstring."""
     steps: list[tuple[str, Callable[[AsyncConnectionPool], Awaitable[object]]]] = [
         ("expire", _expire),
         ("stale", _stale),
         ("target_gone", _target_gone),
-        ("release", lambda pool_: _release(pool_, kube, ns)),
-        ("collect_bound", lambda pool_: secret_store.collect_bound(pool_, kube, ns)),
     ]
-    if reap:
-        steps.append(("reap", lambda pool_: secret_store.reap_unreserved(pool_, kube, ns)))
     for name, step in steps:
         try:
             await step(pool)
@@ -190,14 +138,8 @@ async def sweep_once(
 
 
 async def sweep(app: FastAPI) -> None:
-    """Until cancelled: a pass every `proposal_sweep_seconds`, reaping on the first pass and
-    then every `REAP_SECONDS`."""
+    """Until cancelled: a pass every `proposal_sweep_seconds`."""
     settings: Settings = app.state.settings
-    reaped_at: float | None = None
     while True:
-        now = time.monotonic()
-        reap = reaped_at is None or now - reaped_at >= REAP_SECONDS
-        if reap:
-            reaped_at = now
-        await sweep_once(app.state.pool, lambda: secret_store.kube_of_app(app), settings, reap=reap)
+        await sweep_once(app.state.pool)
         await asyncio.sleep(settings.proposal_sweep_seconds)

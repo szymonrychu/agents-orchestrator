@@ -2,33 +2,31 @@
 gate, own proposals on visible targets only, `AdminRoute` audit) and the human-only main-port
 routes (list, read, review), which neither the agent port nor the service port serves.
 
-Every call that sends a value checks the canary never reaches a response, a table row, an
-`events` row or the log."""
+A proposal carries no secret value: a body with `secrets` is a 422, and a canary sent in a
+refused body never reaches a response, a table row, an `events` row or the log."""
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import secrets as stdlib_secrets
 import uuid
 
+import httpx
 import pytest
 from fakes.fake_kube import FakeKube
-from pydantic import SecretStr
 from test_admin_session_patch import audits
 from test_agent_session_messaging import Sess, alone, hive
 from test_api_agent import client_for, headers, make_settings
+from test_api_presets_vault import GONE, OTHER, FakeVault
 from test_api_sessions import assert_error
 from test_api_sessions import client_for as main_client
-from test_proposal_sweep import _advisory_held
-from test_proposals_service import MCP_PATCH, TABLES, _rows
+from test_proposals_service import MCP_PATCH, TABLES, _rows, vault  # noqa: F401
 
-from agents_orchestrator.api import proposal_routes, proposals, secret_store
+from agents_orchestrator.api import proposal_routes, proposals
 from agents_orchestrator.api.admin import ADMIN_PREFIX
 from agents_orchestrator.api.app import create_app
 from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.k8s import on_start
-from agents_orchestrator.k8s import secrets as store
 
 NS = "agents"
 P = f"{ADMIN_PREFIX}/proposals"
@@ -78,11 +76,10 @@ async def other_boss(pool):
 
 @pytest.fixture
 async def preset(pool, kube, canary):
-    """A privileged manageable preset with a protected TOKEN whose value is set (version 1)."""
-    spec = {"docker": True, "env": {"TOKEN": {"protected": True}, "PLAIN": {"value": "plain"}}}
+    """A privileged manageable preset with a plain TOKEN."""
+    spec = {"docker": True, "env": {"TOKEN": {"value": "token"}, "PLAIN": {"value": "plain"}}}
     async with pool.connection() as conn:
         found = await presets_repo.create(conn, "infra", spec, superleader_manageable=True)
-        await store.set_secret(conn, kube, NS, found.id, "TOKEN", SecretStr(canary + "-live"))
     return found
 
 
@@ -159,18 +156,16 @@ async def test_non_leader_agent_of_a_superleader_passes(app, pool, preset):
 # ---------------------------------------------------------------- create
 
 
-async def test_create_201_audited_with_fields_and_secret_names_only(
-    app, pool, kube, boss, preset, canary, caplog
-):
+async def test_create_201_audited_with_fields_only(app, pool, kube, boss, preset, canary, caplog):
     caplog.set_level(logging.INFO)
-    r = await agent(app, boss, "POST", P, json=body(secrets={"TOKEN": canary}))
+    r = await agent(app, boss, "POST", P, json=body(patch={**MCP_PATCH, **PLAIN_PATCH}))
     assert r.status_code == 201, r.text
     view = r.json()
     assert view["status"] == "open" and view["revision"] == 1
     assert view["proposer_slug"] == boss.slug and view["target_name"] == "infra"
     items = {i["path"]: i for i in view["revisions"][0]["items"]}
-    assert set(items) == {"env.TOKEN", "wrapper.mcp_servers"}
-    assert items["env.TOKEN"]["secret"] == "changed"
+    assert set(items) == {"env.PLAIN", "wrapper.mcp_servers"}
+    assert all("secret" not in i for i in items.values())
     rows = await audits(pool, boss.id)
     assert len(rows) == 1
     assert rows[0] == {
@@ -178,29 +173,51 @@ async def test_create_201_audited_with_fields_and_secret_names_only(
         "path": P,
         "status": 201,
         "session": boss.slug,
-        "secrets": ["TOKEN"],
-        "fields": ["env.TOKEN", "wrapper.mcp_servers"],
+        "secrets": [],
+        "fields": ["env.PLAIN", "wrapper.mcp_servers"],
     }
     lines = [x.getMessage() for x in caplog.records if x.getMessage().startswith("admin ")]
     assert lines == [
-        f"admin POST {P} -> 201 session={boss.slug} secrets=['TOKEN']"
-        " fields=['env.TOKEN', 'wrapper.mcp_servers']"
+        f"admin POST {P} -> 201 session={boss.slug} secrets=[]"
+        " fields=['env.PLAIN', 'wrapper.mcp_servers']"
     ]
+    assert kube.names("Secret") == []  # filing writes nothing to Kubernetes
     await assert_nowhere(pool, canary, r.text, caplog.text)
 
 
-async def test_replay_answers_200_with_the_first_proposal(app, pool, kube, boss, preset, canary):
-    first = await filed(app, boss, client_key="k1", secrets={"TOKEN": canary})
-    staged = kube.names("Secret")
-    r = await agent(app, boss, "POST", P, json=body(client_key="k1", secrets={"TOKEN": canary}))
+async def test_proposal_secrets_field_refused(app, pool, kube, boss, preset, canary, caplog):
+    """A body with `secrets` is 422 on create and on revise: the field is gone, and the error
+    names the field, never the value."""
+    caplog.set_level(logging.INFO)
+    view = await filed(app, boss)
+    created = await agent(app, boss, "POST", P, json=body(secrets={"TOKEN": canary}))
+    revised = await agent(
+        app,
+        boss,
+        "POST",
+        f"{P}/{view['id']}/revise",
+        json={"patch": PLAIN_PATCH, "secrets": {"TOKEN": canary}},
+    )
+    for r in (created, revised):
+        assert_error(r, 422, "invalid_request")
+        assert "secrets" in r.json()["error"]["message"]
+    assert [
+        v["revision"] for v in [(await agent(app, boss, "GET", f"{P}/{view['id']}")).json()]
+    ] == [1]
+    assert len(await _rows(pool, "SELECT id FROM change_proposals")) == 1
+    await assert_nowhere(pool, canary, created.text, revised.text, caplog.text)
+
+
+async def test_replay_answers_200_with_the_first_proposal(app, pool, kube, boss, preset):
+    first = await filed(app, boss, client_key="k1")
+    r = await agent(app, boss, "POST", P, json=body(client_key="k1"))
     assert r.status_code == 200, r.text
     assert r.json()["id"] == first["id"]
-    assert kube.names("Secret") == staged  # nothing staged again
     assert [(a["status"], a["secrets"]) for a in await audits(pool, boss.id)] == [
-        (201, ["TOKEN"]),
-        (200, ["TOKEN"]),
+        (201, []),
+        (200, []),
     ]
-    await assert_nowhere(pool, canary, r.text)
+    assert len(await _rows(pool, "SELECT id FROM change_proposals")) == 1
 
 
 async def test_hidden_and_unknown_preset_answer_alike(app, pool, boss, preset):
@@ -221,6 +238,34 @@ async def test_refused_patch_is_proposable_and_files_as_a_proposal(app, pool, bo
     assert r.json()["error"]["proposable"] is True
     view = await filed(app, boss)
     assert [i["path"] for i in view["revisions"][0]["items"]] == ["wrapper.mcp_servers"]
+
+
+async def test_preset_proposal_with_a_vault_ref_over_http(pool, settings, kube, boss, preset):
+    """A preset proposal may carry a ref: the vault checks it at create (422 with the vault's
+    codes and `envs`) and at the human review, which writes the ref into the preset."""
+    fake = FakeVault()
+    vault_app = create_app(
+        settings.model_copy(update={"vault_url": "http://vault", "vault_token": "t"}),
+        pool,
+        kube=kube,
+        vault_transport=httpx.MockTransport(fake.handler),
+    )
+    ref = {"vault": OTHER, "env": "TOKEN"}
+    bad = await agent(
+        vault_app, boss, "POST", P, json=body(patch={"env": {"GH": {**ref, "vault": GONE}}})
+    )
+    assert_error(bad, 422, "vault_entry_unknown")
+    assert bad.json()["error"]["envs"] == ["GH"]
+    view = await filed(vault_app, boss, patch={"env": {"GH": ref}})
+    assert view["revisions"][0]["items"][0]["after"] == ref
+    review = {"revision": 1, "items": [{"path": "env.GH", "decision": "approve"}]}
+    r = await human(vault_app, "POST", f"{M}/{view['id']}/review", json=review)
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "applied"
+    async with pool.connection() as conn:
+        found = await presets_repo.get(conn, preset.id)
+    assert found is not None and found.spec["env"]["GH"] == ref
+    assert len(fake.calls) == 3  # the refused create, the create, the review's save path
 
 
 # ---------------------------------------------------------------- own proposals only
@@ -260,9 +305,9 @@ async def test_status_filter_and_bad_status(app, pool, boss, preset):
     assert (await audits(pool, boss.id))[-1]["status"] == 422
 
 
-async def test_hidden_target_answers_404_like_unknown(app, pool, kube, boss, preset, canary):
+async def test_hidden_target_answers_404_like_unknown(app, pool, kube, boss, preset):
     """A target the superleader may no longer manage hides its proposals on every agent route."""
-    view = await filed(app, boss, secrets={"TOKEN": canary})
+    view = await filed(app, boss)
     await hide(pool, preset.id)
     unknown = await agent(app, boss, "GET", f"{P}/999999")
     for method, suffix, kw in [
@@ -276,8 +321,6 @@ async def test_hidden_target_answers_404_like_unknown(app, pool, kube, boss, pre
     assert (await agent(app, boss, "GET", P)).json() == []
     r = await human(app, "GET", f"{M}/{view['id']}")
     assert r.json()["status"] == "open" and r.json()["revision"] == 1
-    reserved = await _rows(pool, "SELECT state FROM change_proposal_secrets")
-    assert reserved == [("staged",)]
 
 
 async def test_deleted_target_stays_readable(app, pool, boss, preset):
@@ -296,13 +339,7 @@ async def test_deleted_target_stays_readable(app, pool, boss, preset):
 async def test_revise_and_withdraw_audited(app, pool, kube, boss, preset, canary, caplog):
     caplog.set_level(logging.INFO)
     view = await filed(app, boss)
-    r = await agent(
-        app,
-        boss,
-        "POST",
-        f"{P}/{view['id']}/revise",
-        json={"patch": PLAIN_PATCH, "secrets": {"TOKEN": canary}},
-    )
+    r = await agent(app, boss, "POST", f"{P}/{view['id']}/revise", json={"patch": PLAIN_PATCH})
     assert r.status_code == 200, r.text
     assert r.json()["revision"] == 2 and r.json()["status"] == "open"
     w = await agent(app, boss, "POST", f"{P}/{view['id']}/withdraw")
@@ -312,231 +349,55 @@ async def test_revise_and_withdraw_audited(app, pool, kube, boss, preset, canary
     rows = await audits(pool, boss.id)
     assert [(a["status"], a["secrets"], a.get("fields")) for a in rows] == [
         (201, [], ["wrapper.mcp_servers"]),
-        (200, ["TOKEN"], ["env.PLAIN", "env.TOKEN"]),
+        (200, [], ["env.PLAIN"]),
         (200, [], None),
         (409, [], None),
     ]
     assert rows[1]["path"] == f"{P}/{view['id']}/revise"
-    assert await _rows(pool, "SELECT name FROM change_proposal_secrets") == []
     await assert_nowhere(pool, canary, r.text, caplog.text)
-
-
-async def _staged_without_secret(pool, kube) -> list:
-    """Staged reservations whose Secret is gone: an approve would make such a version live."""
-    rows = await _rows(
-        pool,
-        "SELECT preset_id, name, version FROM change_proposal_secrets WHERE state = 'staged'",
-    )
-    present = {k[2] for k in kube.objects if k[0] == "Secret"}
-    return [r for r in rows if store.secret_name(*r) not in present]
-
-
-def _release_after_commit(pool, preset_id, seen: list):
-    """Wrap `release`: record what a second connection sees (the committed proposal state) and
-    whether any session still holds the variable's lock when the release starts."""
-    real = secret_store.release
-
-    async def spy(conn, kube_, namespace, *, proposal_id, revision=None):
-        [state] = await _rows(
-            pool, "SELECT revision, status FROM change_proposals WHERE id = %s", (proposal_id,)
-        )
-        seen.append((*state, await _advisory_held(pool, preset_id, "TOKEN")))
-        return await real(conn, kube_, namespace, proposal_id=proposal_id, revision=revision)
-
-    return spy
 
 
 async def _broken_view(*args, **kwargs):
     raise RuntimeError("connection lost")
 
 
-async def test_revise_failing_after_the_release_leaves_a_consistent_proposal(
-    app, pool, kube, boss, preset, canary, monkeypatch
+async def test_revise_failing_after_the_commit_leaves_the_new_revision_current(
+    app, pool, kube, boss, preset, monkeypatch
 ):
-    """Important 1 (final review A-O): the route reads first (`_own`), and the old revision's
-    staged Secret is released only once the new revision has committed and its locks are gone.
-    A request that then fails leaves r2 current with its own Secret, r1 released."""
-    view = await filed(app, boss, secrets={"TOKEN": canary})
-    r1, r2 = (store.secret_name(preset.id, "TOKEN", v) for v in (2, 3))
-    seen: list = []
-    monkeypatch.setattr(secret_store, "release", _release_after_commit(pool, preset.id, seen))
+    """The response is built after the commit: a request that then fails leaves r2 current."""
+    view = await filed(app, boss)
     monkeypatch.setattr(proposals, "get_view", _broken_view)
     try:
-        r = await agent(
-            app,
-            boss,
-            "POST",
-            f"{P}/{view['id']}/revise",
-            json={"patch": MCP_PATCH, "secrets": {"TOKEN": canary + "2"}},
-        )
+        r = await agent(app, boss, "POST", f"{P}/{view['id']}/revise", json={"patch": PLAIN_PATCH})
         assert r.status_code == 500
     except RuntimeError:
         pass  # the transport re-raises the app error
-    assert seen == [(2, "open", 0)]  # committed, no lock held across the release
     assert await _rows(
         pool, "SELECT revision, status FROM change_proposals WHERE id = %s", (view["id"],)
     ) == [(2, "open")]
-    secrets = {k[2] for k in kube.objects if k[0] == "Secret"}
-    assert r1 not in secrets and r2 in secrets
-    assert await _staged_without_secret(pool, kube) == []
-    await assert_nowhere(pool, canary)
 
 
-async def test_revise_failing_before_the_commit_keeps_the_previous_staged_secret(
-    app, pool, kube, boss, preset, canary, monkeypatch
+async def test_withdraw_that_fails_leaves_the_proposal_open(
+    app, pool, kube, boss, preset, monkeypatch
 ):
-    """A revise that fails inside its transaction (after staging) rolls back to r1 with r1's
-    staged Secret intact; r2's staged Secret is deleted again and nothing is released."""
-    view = await filed(app, boss, secrets={"TOKEN": canary})
-    r1, r2 = (store.secret_name(preset.id, "TOKEN", v) for v in (2, 3))
-    real_stage = proposals._stage
-
-    async def stage_then_fail(*args, **kwargs):
-        await real_stage(*args, **kwargs)
-        raise RuntimeError("connection lost")
-
-    released: list = []
-    monkeypatch.setattr(proposals, "_stage", stage_then_fail)
-    monkeypatch.setattr(secret_store, "release", _release_after_commit(pool, preset.id, released))
-    try:
-        r = await agent(
-            app,
-            boss,
-            "POST",
-            f"{P}/{view['id']}/revise",
-            json={"patch": MCP_PATCH, "secrets": {"TOKEN": canary + "2"}},
-        )
-        assert r.status_code == 500
-    except RuntimeError:
-        pass
-    assert released == []
-    assert await _rows(
-        pool, "SELECT revision, status FROM change_proposals WHERE id = %s", (view["id"],)
-    ) == [(1, "open")]
-    secrets = {k[2] for k in kube.objects if k[0] == "Secret"}
-    assert r1 in secrets and r2 not in secrets
-    assert await _rows(pool, "SELECT version, revision, state FROM change_proposal_secrets") == [
-        (2, 1, "staged")
-    ]
-    assert await _staged_without_secret(pool, kube) == []
-
-
-async def test_withdraw_releases_only_after_the_commit(
-    app, pool, kube, boss, preset, canary, monkeypatch
-):
-    """Withdraw commits `withdrawn` before any staged Secret goes: a request that fails after the
-    release leaves a withdrawn proposal, never an open one whose staged Secret is gone."""
-    view = await filed(app, boss, secrets={"TOKEN": canary})
-    staged = store.secret_name(preset.id, "TOKEN", 2)
-    seen: list = []
-    monkeypatch.setattr(secret_store, "release", _release_after_commit(pool, preset.id, seen))
-    monkeypatch.setattr(proposals, "get_view", _broken_view)
-    try:
-        r = await agent(app, boss, "POST", f"{P}/{view['id']}/withdraw")
-        assert r.status_code == 500
-    except RuntimeError:
-        pass
-    assert seen == [(1, "withdrawn", 0)]
-    assert staged not in {k[2] for k in kube.objects if k[0] == "Secret"}
-    assert await _rows(pool, "SELECT name FROM change_proposal_secrets") == []
-
-
-async def test_withdraw_that_fails_leaves_the_staged_secret(
-    app, pool, kube, boss, preset, canary, monkeypatch
-):
-    """A withdraw whose transaction fails releases nothing: still open, Secret and row intact."""
-    view = await filed(app, boss, secrets={"TOKEN": canary})
-    staged = store.secret_name(preset.id, "TOKEN", 2)
+    view = await filed(app, boss)
 
     async def broken_transition(*args, **kwargs):
         raise RuntimeError("connection lost")
 
-    released: list = []
     monkeypatch.setattr(proposals.repo, "transition", broken_transition)
-    monkeypatch.setattr(secret_store, "release", _release_after_commit(pool, preset.id, released))
     try:
         r = await agent(app, boss, "POST", f"{P}/{view['id']}/withdraw")
         assert r.status_code == 500
     except RuntimeError:
         pass
-    assert released == []
     assert await _rows(
         pool, "SELECT revision, status FROM change_proposals WHERE id = %s", (view["id"],)
     ) == [(1, "open")]
-    assert staged in {k[2] for k in kube.objects if k[0] == "Secret"}
-    assert await _rows(pool, "SELECT version, state FROM change_proposal_secrets") == [
-        (2, "staged")
-    ]
 
 
-async def _advisory_waiters(pool, count: int) -> None:
-    """Return once `count` backends of this database wait on an advisory lock (no sleeps: each
-    poll is a query)."""
-
-    async def poll() -> None:
-        async with pool.connection() as conn:
-            while True:
-                cur = await conn.execute(
-                    "SELECT count(*) FROM pg_locks l JOIN pg_database d ON d.oid = l.database"
-                    " WHERE d.datname = current_database() AND l.locktype = 'advisory'"
-                    " AND NOT l.granted"
-                )
-                row = await cur.fetchone()
-                await conn.rollback()
-                if row is not None and row[0] >= count:
-                    return
-
-    await asyncio.wait_for(poll(), timeout=10)
-
-
-async def test_concurrent_stagings_on_one_preset_do_not_deadlock(
-    app, pool, kube, boss, other_boss, preset, canary
-):
-    """Important 1(b) (final review A-O): a revise staging B whose previous revision staged A,
-    and a create staging A then B on the same preset. A blocker holds B so both queue on it
-    (revise first, pg_locks says when) while the create holds A. Once B is free the revise stages
-    B and commits before it releases A, so it never waits on A while holding B."""
-    env = {"A": {"protected": True}, "B": {"protected": True}}
-    first = await filed(app, boss, patch={"env": env}, secrets={"A": canary})
-    old_a = store.secret_name(preset.id, "A", 1)
-    async with pool.connection() as blocker, blocker.transaction():
-        await blocker.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"{preset.id}/B",)
-        )
-        revise = asyncio.create_task(
-            agent(
-                app,
-                boss,
-                "POST",
-                f"{P}/{first['id']}/revise",
-                json={"patch": {"env": env}, "secrets": {"B": canary}},
-            )
-        )
-        await _advisory_waiters(pool, 1)
-        create = asyncio.create_task(
-            agent(
-                app,
-                other_boss,
-                "POST",
-                P,
-                json=body(patch={"env": env}, secrets={"A": canary, "B": canary}),
-            )
-        )
-        await _advisory_waiters(pool, 2)
-    revised, created = await asyncio.wait_for(asyncio.gather(revise, create), timeout=30)
-    assert revised.status_code == 200, revised.text
-    assert created.status_code == 201, created.text
-    assert await _rows(
-        pool,
-        "SELECT name, version, proposal_id, revision FROM change_proposal_secrets"
-        " WHERE state = 'staged' ORDER BY name, version",
-    ) == [
-        ("A", 2, created.json()["id"], 1),
-        ("B", 1, first["id"], 2),
-        ("B", 2, created.json()["id"], 1),
-    ]
-    assert old_a not in {k[2] for k in kube.objects if k[0] == "Secret"}
-    assert await _staged_without_secret(pool, kube) == []
+async def _broken_view(*args, **kwargs):
+    raise RuntimeError("connection lost")
 
 
 # ---------------------------------------------------------------- main port, human only
@@ -545,7 +406,7 @@ async def test_concurrent_stagings_on_one_preset_do_not_deadlock(
 async def test_main_port_lists_reads_and_reviews_without_agent_auth(
     app, pool, kube, boss, other_boss, preset, canary
 ):
-    mine = await filed(app, boss, secrets={"TOKEN": canary})
+    mine = await filed(app, boss)
     theirs = await filed(app, other_boss, patch=PLAIN_PATCH)
     r = await human(app, "GET", M)
     assert r.status_code == 200, r.text
@@ -726,15 +587,15 @@ def own(sess: Sess, **over) -> dict:
 PLAIN_ENV = {"env": {"PLAIN": {"value": "x"}}}
 
 
-async def test_regular_leader_proposes_a_grant_and_a_value_for_its_own_session(
+async def test_regular_leader_proposes_a_grant_for_its_own_session(
     app, pool, kube, preset, canary, caplog
 ):
     caplog.set_level(logging.INFO)
     lead = await _leader_of(pool, "pr-lead", preset.id)
-    patch = {"session_messaging": True, "env": {"TOKEN": {"protected": True}}}
+    patch = {"session_messaging": True, "env": {"PLAIN": {"value": "x"}}}
     q = "SELECT spec, generation, secret_versions FROM sessions WHERE id = %s"
     before = await _rows(pool, q, (lead.id,))
-    r = await agent(app, lead, "POST", P, json=own(lead, patch=patch, secrets={"TOKEN": canary}))
+    r = await agent(app, lead, "POST", P, json=own(lead, patch=patch))
     assert r.status_code == 201, r.text
     view = r.json()
     assert (view["kind"], view["target_id"], view["target_name"]) == (
@@ -744,17 +605,17 @@ async def test_regular_leader_proposes_a_grant_and_a_value_for_its_own_session(
     )
     assert view["proposer_superleader"] is False
     items = {i["path"]: i for i in view["revisions"][0]["items"]}
-    assert sorted(items) == ["env.TOKEN", "session_messaging"]
-    assert (items["session_messaging"]["grant"], items["env.TOKEN"]["secret"]) == (True, "set")
-    assert store.secret_name(preset.id, "TOKEN", 2) in kube.names("Secret")
+    assert sorted(items) == ["env.PLAIN", "session_messaging"]
+    assert items["session_messaging"]["grant"] is True
+    assert kube.names("Secret") == []  # filing writes nothing to Kubernetes
     after = await _rows(pool, q, (lead.id,))
     assert "session_messaging" not in after[0][0]  # filing applies nothing
     assert after == before
     [row] = await audits(pool, lead.id)
     assert (row["status"], row["secrets"], row["fields"]) == (
         201,
-        ["TOKEN"],
-        ["env.TOKEN", "session_messaging"],
+        [],
+        ["env.PLAIN", "session_messaging"],
     )
     await assert_nowhere(pool, canary, r.text, caplog.text)
 
@@ -766,9 +627,9 @@ async def test_regular_leader_off_its_own_session_is_403_alike(app, pool, kube, 
     other = await _leader_of(pool, "pr-other-lead", preset.id)
     staged = kube.names("Secret")
     bodies = [
-        body(kind="session", target=other.slug, patch=PLAIN_ENV, secrets={"TOKEN": canary}),
+        body(kind="session", target=other.slug, patch=PLAIN_ENV),
         body(kind="session", target="no-such-session", patch=PLAIN_ENV),
-        body(kind="preset", target="infra", patch=PLAIN_ENV, secrets={"TOKEN": canary}),
+        body(kind="preset", target="infra", patch=PLAIN_ENV),
         body(kind="preset", target="no-such-preset", patch=PLAIN_ENV),
         body(kind="schedule", target=str(uuid.uuid4()), patch={"prompt": "x"}),
     ]

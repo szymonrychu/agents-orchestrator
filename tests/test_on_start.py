@@ -66,7 +66,8 @@ ADMIN_TOOLS = [
     "schedule_preview", "chat_admin_rooms", "chat_room_settings", "chat_rules",
     "chat_rule_add", "chat_rule_delete",
     "chat_admin_room", "chat_users", "chat_room_allow", "chat_open", "chat_open_status",
-    "chat_open_confirm", "secret_set", "history_search", "history_get",
+    "chat_open_confirm", "vault_list", "vault_attach", "vault_detach",
+    "history_search", "history_get",
     "history_records", "usage_get",
     *PROPOSAL,
 ]  # fmt: skip
@@ -501,7 +502,7 @@ def test_config_write_failure_still_fails(tmp_path):
 
 
 def test_golden_allowlist_superleader_leader_and_service_session():
-    """Golden rendered allowlists: the admin tools and secret_set exactly when session_messaging
+    """Golden rendered allowlists: the admin tools exactly when session_messaging
     is on, whoever created the session; a plain leader never gets them."""
     hive = [*HIVE_TOOLS, "scale", *TAIL_TOOLS]
     admin = [t for t in ADMIN_TOOLS if t != "leadership_withdraw"]  # listed once, as a hive tool

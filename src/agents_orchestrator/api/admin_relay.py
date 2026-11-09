@@ -44,6 +44,14 @@ upstream's next cursor in `X-Next-Before-Id` (also on an empty page, so a caller
 paging" from "end"). The records of a session are checked against one upstream lookup of that
 single session (`GET /sessions/{session_id}`): hidden, null-preset or unknown is 404 and the
 records are never requested.
+
+The vault list (`GET /agent/v1/admin/vault`, `vault_list`) is read-only too (any other method is
+405) and is scoped to the caller: it answers only the entries whose labels match the caller
+session's project (`labels_match` against `project:<project>`; an entry without a `project:` label
+stays visible, as attach allows it). An entry's `attachments` keep only presets the superleader
+may manage, and an env's readable value is kept only for an entry attached to such a preset;
+otherwise the env shows its name and `protected` flag with `value: null`. `to_reattach` lists, per
+manageable preset, the env names a user still has to re-attach.
 """
 
 from __future__ import annotations
@@ -55,17 +63,19 @@ from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import quote
 
+from agents_common.labels import PROJECT_PREFIX, labels_match
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import SecretStr
 
-from agents_orchestrator.api import chat_requests, secret_store
+from agents_orchestrator.api import chat_requests, secret_store, vault_client, vault_refs
 from agents_orchestrator.api import forward as forward_core
 from agents_orchestrator.api.admin import caller_of, router, touched
 from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.scope import projects_header
 from agents_orchestrator.api.sessions import Cfg
 from agents_orchestrator.db import presets as presets_repo
+from agents_orchestrator.preset_policy import privileged
 from agents_orchestrator.settings import Settings
 
 LOCAL_TOOL_HEADER = "x-orch-tool"
@@ -535,6 +545,78 @@ def _register() -> None:
                 summary=f"{method} {service} {template}",
                 tags=["admin"],
             )
+
+
+_VAULT_SHAPE = ApiError(502, "upstream_shape", "the vault upstream answered an unexpected shape")
+
+
+def _scoped_entry(
+    entry: Any, project_labels: list[str], visible: set[str], marked: set[str]
+) -> dict | None:
+    """The entry as the superleader may see it, or None when its project labels exclude the
+    caller. Attachments keep manageable presets, each marked `privileged` when its preset is in
+    `marked`; readable values need one of them."""
+    if not isinstance(entry, dict):
+        raise _VAULT_SHAPE
+    labels = entry.get("labels")
+    if not isinstance(labels, list) or not labels_match(
+        (x for x in labels if isinstance(x, str)), project_labels
+    ):
+        return None
+    attachments = entry.get("attachments")
+    if isinstance(attachments, list):
+        attachments = [
+            {**a, "privileged": str(a["preset_id"]) in marked}
+            for a in attachments
+            if isinstance(a, dict) and str(a.get("preset_id")) in visible
+        ]
+        entry = {**entry, "attachments": attachments}
+    elif attachments is not None:
+        raise _VAULT_SHAPE
+    if not attachments:
+        entry = {
+            **entry,
+            "envs": [
+                {**e, "value": None} if isinstance(e, dict) and not e.get("protected") else e
+                for e in entry.get("envs") or []
+            ],
+        }
+    return entry
+
+
+@router.get(
+    "/vault",
+    response_class=Response,
+    operation_id="admin_vault_list",
+    summary="GET vault entries",
+    tags=["admin"],
+)
+async def vault_list(request: Request, q: str | None = None) -> Response:
+    """The vault entries in the caller's project scope and the env names to re-attach."""
+    _, session = caller_of(request)
+    client = request.app.state.vault
+    if client is None:
+        raise ApiError(503, "upstream_unconfigured", "no vault upstream is configured")
+    try:
+        listed = await client.entries(q)
+    except vault_client.VaultShape:
+        raise _VAULT_SHAPE from None
+    except vault_client.VaultUnavailable:
+        raise ApiError(503, "upstream_unavailable", "the vault upstream is unavailable") from None
+    except vault_client.VaultRefused:
+        raise vault_refs.unavailable() from None
+    visible = await _visible(request)
+    project_labels = [f"{PROJECT_PREFIX}{session.project}"]
+    async with request.app.state.pool.connection() as conn:
+        presets = await presets_repo.list_presets(conn)
+    marked = {str(p.id) for p in presets if privileged(p.spec)}
+    entries = [e for e in (_scoped_entry(x, project_labels, visible, marked) for x in listed) if e]
+    to_reattach = [
+        {"preset_id": str(p.id), "preset_name": p.name, "envs": sorted(p.vault_reattach)}
+        for p in presets
+        if p.vault_reattach and str(p.id) in visible
+    ]
+    return JSONResponse({"entries": entries, "to_reattach": to_reattach})
 
 
 _register()

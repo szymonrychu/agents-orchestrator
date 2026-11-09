@@ -3,7 +3,7 @@ revise and the human review that applies to agents-schedule with `If-Match`.
 
 The schedule upstream is a stateful `FakeUpstream` held to the vendored agents-schedule document
 (as `test_admin_relay` builds it): a PUT checks `If-Match` against the stored `updated_at` (412)
-and bumps it. Service level: real Postgres, no kube (a schedule has no protected values)."""
+and bumps it. Service level: real Postgres, no kube (a proposal holds no value)."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import uuid
 from types import SimpleNamespace
 
 import httpx
+import pydantic
 import pytest
 from fakes import fake_upstream as fu
 from fastapi.exceptions import RequestValidationError
@@ -174,7 +175,7 @@ async def test_create_records_one_classified_item_per_field_and_the_updated_at(p
     assert sorted(items) == ["cron", "prompt"]
     assert (items["cron"].before, items["cron"].after) == ("0 3 * * *", "0 4 * * *")
     assert (items["cron"].security, items["prompt"].security) == (False, True)
-    assert not any(i.grant or i.secret for i in items.values())
+    assert not any(i.grant for i in items.values())
     [(fingerprint, base)] = await _rows(
         pool,
         "SELECT fingerprint, base FROM change_proposal_revisions WHERE proposal_id = %s",
@@ -208,10 +209,10 @@ async def test_a_key_outside_schedule_in_is_422(pool, rig):
     assert "id" in _error(exc, 422, "invalid_request").message
 
 
-async def test_secrets_are_refused_with_422(pool, rig):
-    with pytest.raises(proposals.ApiError) as exc:
+async def test_secrets_are_an_unknown_field(pool, rig):
+    with pytest.raises(pydantic.ValidationError) as exc:
         await _create(pool, rig, secrets={"TOKEN": "v"})
-    _error(exc, 422, "invalid_request")
+    assert [e["type"] for e in exc.value.errors(include_input=False)] == ["extra_forbidden"]
     assert await _rows(pool, "SELECT id FROM change_proposals") == []
 
 
@@ -364,7 +365,7 @@ async def test_rework_and_deny_write_nothing_upstream(pool, rig):
     assert rig.sched.puts() == []
 
 
-async def test_revise_rebases_on_the_schedule_now_and_refuses_secrets(pool, rig):
+async def test_revise_rebases_on_the_schedule_now(pool, rig):
     view = await _create(pool, rig)
     rig.sched.obj["name"] = "renamed"
     rig.sched.bump()
@@ -383,14 +384,6 @@ async def test_revise_rebases_on_the_schedule_now_and_refuses_secrets(pool, rig)
     done = await _review(pool, rig, revised)
     assert done.status == "applied"
     assert rig.sched.puts()[0].json()["name"] == "renamed"
-    bad = schemas.ProposalRevise.model_validate(
-        {"patch": {"cron": "0 6 * * *"}, "secrets": {"A": "v"}}
-    )
-    view = await _create(pool, rig, patch={"enabled": False})
-    with pytest.raises(proposals.ApiError) as exc:
-        async with pool.connection() as conn:
-            await proposals.revise(_request(rig), conn, rig.settings, view.id, bad, caller=rig.boss)
-    _error(exc, 422, "invalid_request")
 
 
 async def test_applying_one_schedule_proposal_makes_another_on_it_stale(pool, rig):

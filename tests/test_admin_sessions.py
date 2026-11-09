@@ -156,23 +156,6 @@ async def test_own_session_visible_without_preset(call, boss):
     assert (await call("GET", f"{S}/{boss.slug}")).status_code == 200
 
 
-async def test_create_applies_the_secret_rules(call, pool, canary):
-    unset = {"env": {"API_KEY": {"protected": True}}}
-    preset = (await call("POST", P, json={"name": "needs-key", "spec": unset})).json()
-    r = await call("POST", S, json={"preset_id": preset["id"], "slug": "child-bad"})
-    assert_error(r, 422, "secret_unset")
-    assert r.json()["error"]["fields"] == ["env.API_KEY"]
-    assert await row(pool, "child-bad") is None
-    # a spec without a preset is refused outright
-    r = await call("POST", S, json={"slug": "child-bad2", "spec": unset})
-    assert_error(r, 422, "preset_required")
-    # once the value is set, create works and shows no value
-    await call("PUT", f"{P}/needs-key/secrets/API_KEY", json={"value": canary})
-    r = await call("POST", S, json={"preset_id": preset["id"], "slug": "child-good"})
-    assert r.status_code == 201, r.text
-    assert canary not in r.text
-
-
 async def test_discard_another_session(call, pool):
     preset = (await call("POST", P, json={"name": "vict", "spec": {}})).json()
     await call("POST", S, json={"slug": "victim", "preset_id": preset["id"]})

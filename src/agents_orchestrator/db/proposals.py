@@ -5,11 +5,10 @@ Every status change goes through `transition`, one status-guarded UPDATE
 tables do. Times come from the database clock (`now()`).
 
 Transactions: each writing function runs in `conn.transaction()`. On an idle connection that is
-its own transaction; inside a caller's open transaction it is a savepoint and the caller commits
-(create, revise and review also write Secret reservations in that same transaction).
+its own transaction; inside a caller's open transaction it is a savepoint and the caller commits.
 
-No value of a protected variable is ever stored here: an `env.NAME` item carries the redacted
-declaration and `secret` ('set' or 'changed') only.
+No secret value is ever stored here: an `env.NAME` item carries a plain variable or a vault
+reference (entry id and entry env) only.
 """
 
 from __future__ import annotations
@@ -52,7 +51,6 @@ class Item:
     after: Any
     security: bool
     grant: bool
-    secret: str | None
     decision: str = "pending"
     note: str | None = None
 
@@ -113,8 +111,8 @@ async def _write_revision(
     async with conn.cursor() as cur:
         await cur.executemany(
             "INSERT INTO change_proposal_items (proposal_id, revision, path, before, after,"
-            ' security, "grant", secret, decision, note)'
-            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            ' security, "grant", decision, note)'
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
             [
                 (
                     proposal_id,
@@ -124,7 +122,6 @@ async def _write_revision(
                     _json(i.after),
                     i.security,
                     i.grant,
-                    i.secret,
                     i.decision,
                     i.note,
                 )
@@ -295,7 +292,6 @@ def _item(row: dict[str, Any]) -> Item:
         after=row["after"],
         security=row["security"],
         grant=row["grant"],
-        secret=row["secret"],
         decision=row["decision"],
         note=row["note"],
     )
