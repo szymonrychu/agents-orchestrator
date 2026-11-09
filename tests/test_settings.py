@@ -692,7 +692,7 @@ def test_proposal_settings_defaults_and_bounds(monkeypatch):
 
 def test_handover_transcript_defaults_and_bounds(monkeypatch):
     s = Settings()
-    assert (s.handover_transcript_bytes, s.handover_output_chars) == (65536, 500)
+    assert (s.handover_transcript_bytes, s.handover_output_chars) == (16384, 500)
     cases = {
         "ORCH_HANDOVER_TRANSCRIPT_BYTES": (("8192", "1048576"), ("8191", "1048577", "-1")),
         "ORCH_HANDOVER_OUTPUT_CHARS": (("100", "4000"), ("99", "4001", "0")),
@@ -784,3 +784,13 @@ def test_vault_url_admin_rules(monkeypatch):
         with pytest.raises(SettingsError) as exc:
             Settings()
         assert "ORCH_VAULT_URL" in exc.value.problems, bad
+
+
+def test_handover_defaults_and_budget_floor(monkeypatch):
+    s = Settings()
+    assert s.handover_budget_tokens == 150000
+    assert s.handover_min_tenure_seconds == 1200
+    assert s.handover_transcript_bytes == 16384
+    monkeypatch.setenv("ORCH_HANDOVER_BUDGET_TOKENS", "9999")
+    with pytest.raises(SettingsError):
+        Settings()

@@ -17,6 +17,10 @@ from typing import Any
 NOTICE_HANDOVER = "handover"
 # The web recognises the notice in the chat log by this prefix.
 HANDOVER_PREFIX = "Orchestrator notice (leadership handover):"
+REREAD_RULE = (
+    "Decision and approval states are never taken from a summary or transcript: re-read them "
+    "from the source (orchestrator_task_get, the PR, the proposal) before acting."
+)
 PROSE_CHARS = 4000
 CALL_CHARS = 200
 _LAUNCH_TOOLS = ("Agent", "Task")
