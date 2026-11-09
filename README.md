@@ -1196,6 +1196,30 @@ Lists the shells of every ready agent of the session. The agents are queried con
 
 Closes one shell and everything it started. Guarded by the Origin allowlist like the create route. `terminal_id` must be `term_` plus 12 lowercase hex digits, else `422 invalid_request` before any wrapper call. Response 204 without a body. Errors: 403 `forbidden_origin`, 404 `not_found` (agent), 404 `terminal_not_found`, 409 `agent_not_ready`, 422 `invalid_request`, 502 `wrapper_unreachable`, 502 `wrapper_error`, 503 `unavailable`.
 
+### `GET /api/v1/agents/{agent_id}/dialog`
+
+What the agent's claude is waiting on, read from its wrapper (`GET /v1/sessions/{id}/dialog`, wrapper 0.11.0). Human-only: the route is served on the main port and is not on the agent port (`/agent/v1`) nor the service-token allowlist, so no agent can answer its own prompt. Response 200:
+
+```json
+{
+  "kind": "permission", "since": "2026-11-09T10:00:00Z",
+  "permission": {
+    "request_id": "perm_0123456789ab", "tool_name": "Bash", "tool_input": "{\"command\": \"ls\"}",
+    "truncated": false, "suggestions": [], "agent_id": null,
+    "since": "2026-11-09T10:00:00Z", "expires_at": "2026-11-09T10:30:00Z"
+  },
+  "tail": null, "agent_id": "0c1d...", "session_id": "5b7e..."
+}
+```
+
+`kind` is `permission` (a held PermissionRequest; `permission` is set, or null with a `tail` when only the footer was seen), `dialog` (a TUI dialog; `tail` is the redacted screen end), `usage_wait` (a usage-limit wait, never dismissable) or `none`. Errors: 404 `not_found` (agent), 409 `agent_not_ready`, 502 `wrapper_unreachable`, 502 `wrapper_error`, 503 `unavailable`. Not guarded by the Origin allowlist (a read).
+
+### `POST /api/v1/agents/{agent_id}/dialog`
+
+Answers the open dialog. Body (extra keys are refused): `{"action": "allow" | "deny" | "dismiss", "request_id": "perm_...", "expect_since": "...", "message": "..."}`. `request_id` is required by the wrapper for `allow` and `deny`; `expect_since` guards a `dismiss` against a dialog that changed; `message` (at most 2000 characters) is the deny reason shown to the model. Guarded by the Origin allowlist like the terminal POST. The body is forwarded to the wrapper unchanged. Response 200: `{"status": "answered" | "dismissed" | "still_open", "request_id": null, "behavior": null, "escape_sent": null, "agent_id": "0c1d..."}`.
+
+Errors: 403 `forbidden_origin`, 404 `not_found` (agent), 409 `agent_not_ready`, 409 `no_dialog`, 409 `dialog_changed`, 409 `permission_resolved`, 409 `not_dismissable` (the last four are the wrapper's, passed through), 422 `invalid_request`, 502 `wrapper_unreachable`, 502 `wrapper_error`, 503 `unavailable`. Each answer is logged at INFO (`dialog answer peer=... agent=... pod=... action=... request_id=... status=...`), never with the message text or the tool input.
+
 ### `WS /api/v1/agents/{agent_id}/terminals/{terminal_id}/attach`
 
 Attaches to one shell created with `POST /api/v1/agents/{agent_id}/terminals`. WebSocket routes are not in OpenAPI, so this section is the contract. The api relays the socket to the agent's wrapper (`/v1/sessions/{session_id}/terminals/{terminal_id}/attach`), adding the session's wrapper bearer itself: the client never sees or sends a wrapper token, and the token appears in no frame, close reason or log line.

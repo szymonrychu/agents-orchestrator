@@ -427,6 +427,49 @@ class AgentAttention(BaseModel):
     since: datetime | None
 
 
+class DialogPermissionView(BaseModel):
+    """A held PermissionRequest of the agent's claude (wrapper 0.11.0)."""
+
+    request_id: str
+    tool_name: str
+    tool_input: str
+    truncated: bool
+    suggestions: list[Any] = Field(default_factory=list)
+    agent_id: str | None = None
+    since: str
+    expires_at: str
+
+
+class DialogView(BaseModel):
+    """What the agent's claude waits on: the wrapper's dialog state plus the agent identity."""
+
+    kind: Literal["permission", "dialog", "usage_wait", "none"]
+    since: str | None = None
+    permission: DialogPermissionView | None = None
+    tail: str | None = None
+    agent_id: uuid.UUID
+    session_id: uuid.UUID
+
+
+class DialogAnswer(BaseModel):
+    """A person's answer to the open dialog; forwarded to the wrapper unchanged."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["allow", "deny", "dismiss"]
+    request_id: str | None = None
+    expect_since: str | None = None
+    message: str | None = Field(None, max_length=2000)
+
+
+class DialogAnswerResult(BaseModel):
+    status: Literal["answered", "dismissed", "still_open"]
+    request_id: str | None = None
+    behavior: str | None = None
+    escape_sent: bool | None = None
+    agent_id: uuid.UUID
+
+
 class AgentBootstrapStep(BaseModel):
     """A wrapper bootstrap step. `message` is set on failure only: redacted by the wrapper and
     truncated here."""

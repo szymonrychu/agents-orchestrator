@@ -589,6 +589,70 @@ async def delete_terminal(
     return Response(status_code=204)
 
 
+# ------------------------------------------------------------------ dialog relay (T-98, O5)
+# Human-only: registered here on the main port, never on the agent port nor the service
+# allowlist, so an agent cannot answer its own permission prompt.
+
+
+def _dialog_path(target: WrapperTarget) -> str:
+    return f"/sessions/{quote(target.wrapper_session_id, safe='')}/dialog"
+
+
+def _dialog_model[M: BaseModel](target: WrapperTarget, model: type[M], body: Any, **ids: Any) -> M:
+    try:
+        return model.model_validate({**body, **ids})
+    except (ValidationError, TypeError):
+        raise ApiError(
+            502, "wrapper_error", f"wrapper of {target.pod_name} answered an unexpected body"
+        ) from None
+
+
+@router.get("/agents/{agent_id}/dialog", response_model=schemas.DialogView)
+async def get_dialog(
+    request: Request, pool: Pool, settings: Cfg, agent_id: uuid.UUID
+) -> schemas.DialogView:
+    """What the agent's claude is waiting on (a permission request, a dialog, a usage wait)."""
+    async with pool.connection() as conn:
+        target = await resolve_agent(conn, settings, agent_id=agent_id)
+    body = await forward(request.app, target, "GET", _dialog_path(target))
+    return _dialog_model(
+        target, schemas.DialogView, body, agent_id=target.agent_id, session_id=target.session_id
+    )
+
+
+@router.post(
+    "/agents/{agent_id}/dialog", response_model=schemas.DialogAnswerResult, dependencies=guarded
+)
+async def answer_dialog(
+    request: Request, pool: Pool, settings: Cfg, agent_id: uuid.UUID, body: schemas.DialogAnswer
+) -> schemas.DialogAnswerResult:
+    """Allow, deny or dismiss the open dialog; the wrapper's 4xx (409 `no_dialog`,
+    `dialog_changed`, `permission_resolved`, `not_dismissable`) pass through. The log line
+    carries no message text and no tool input. The main port has no user identity (the
+    source allowlist is the auth), so the caller is the peer address."""
+    async with pool.connection() as conn:
+        target = await resolve_agent(conn, settings, agent_id=agent_id)
+    sent = body.model_dump(exclude_none=True)
+    outcome: str | int = "-"
+    try:
+        answered = await forward(request.app, target, "POST", _dialog_path(target), json=sent)
+        outcome = answered.get("status", "-") if isinstance(answered, dict) else "-"
+    except ApiError as exc:
+        outcome = exc.status
+        raise
+    finally:
+        log.info(
+            "dialog answer peer=%s agent=%s pod=%s action=%s request_id=%s status=%s",
+            request.client.host if request.client else "-",
+            target.agent_id,
+            target.pod_name,
+            body.action,
+            body.request_id or "-",
+            outcome,
+        )
+    return _dialog_model(target, schemas.DialogAnswerResult, answered, agent_id=target.agent_id)
+
+
 # ------------------------------------------------------------------- terminal relay (D2, D6)
 
 CLOSE_UNKNOWN = 4404  # unknown agent, or the wrapper does not know the session or terminal
