@@ -1,0 +1,259 @@
+"""The generated leader state: what `collect` reads and how `render_state` prints it."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+from factories import (
+    insert_agent,
+    insert_event,
+    insert_message,
+    insert_session,
+    insert_turn,
+    set_agent_status,
+)
+from psycopg.types.json import Jsonb
+
+from agents_orchestrator.db import leader_state as ls
+from agents_orchestrator.taskboard_client import OpenDecision
+
+
+async def _run(pool, sql: str, params: tuple = ()) -> None:
+    async with pool.connection() as conn:
+        await conn.execute(sql, params)
+
+
+async def incoming(pool, session_id, sender_id, *, text="ping", **cols) -> int:
+    """One session message from another session; `cols` set handled_at, notice or status."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "INSERT INTO messages (session_id, text, status, lane, sender_session_id,"
+            " sender_slug, notice, handled_at) VALUES (%s, %s, %s, 'regular', %s, 'peer', %s, %s)"
+            " RETURNING id",
+            (
+                session_id,
+                text,
+                cols.get("status", "sent"),
+                sender_id,
+                cols.get("notice"),
+                cols.get("handled_at"),
+            ),
+        )
+        return (await cur.fetchone())[0]
+
+
+async def collect(pool, session_id) -> ls.LeaderState:
+    async with pool.connection() as conn:
+        return await ls.collect(conn, session_id)
+
+
+async def hive(pool, n: int = 2):
+    s = await insert_session(pool, spec={"replicas": n, "max_replicas": n})
+    agents = [
+        await insert_agent(pool, s["id"], ordinal=i, ready=True, wrapper_session_id=f"w{i}")
+        for i in range(n)
+    ]
+    await _run(
+        pool,
+        "INSERT INTO session_leaders (session_id, agent_id, epoch, since, reason)"
+        " VALUES (%s, %s, 1, now(), 'initial')",
+        (s["id"], agents[0]["id"]),
+    )
+    return s, agents
+
+
+async def test_unhandled_only(pool):
+    s, _ = await hive(pool)
+    peer = await insert_session(pool)
+    keep = await incoming(pool, s["id"], peer["id"])
+    await incoming(pool, s["id"], peer["id"], handled_at=datetime.now(UTC))
+    await incoming(pool, s["id"], peer["id"], notice="handover")
+    await incoming(pool, s["id"], peer["id"], status="cancelled")
+    await insert_message(pool, s["id"])  # no sender: own message
+    state = await collect(pool, s["id"])
+    assert [m.id for m in state.messages] == [keep]
+    assert state.more_message_count == 0
+
+
+async def test_message_caps(pool):
+    s, _ = await hive(pool)
+    peer = await insert_session(pool)
+    long_id = await incoming(pool, s["id"], peer["id"], text="x" * 5000)
+    ids = [long_id] + [await incoming(pool, s["id"], peer["id"]) for _ in range(24)]
+    state = await collect(pool, s["id"])
+    assert [m.id for m in state.messages] == ids[5:]
+    assert state.more_message_ids == ids[:5]
+    assert state.more_message_count == 5
+    # the long one is the oldest of 25, so it is listed by id only; make it the newest instead
+    newest = await incoming(pool, s["id"], peer["id"], text="y" * 5000)
+    state = await collect(pool, s["id"])
+    [last] = [m for m in state.messages if m.id == newest]
+    assert (len(last.text), last.total_chars) == (ls.STATE_MESSAGE_CHARS, 5000)
+    assert state.more_message_count == 6
+
+
+async def test_more_ids_capped(pool):
+    s, _ = await hive(pool)
+    peer = await insert_session(pool)
+    ids = [await incoming(pool, s["id"], peer["id"]) for _ in range(150)]
+    state = await collect(pool, s["id"])
+    assert len(state.messages) == ls.STATE_MESSAGES
+    assert state.more_message_ids == ids[: ls.STATE_MORE_IDS]
+    assert state.more_message_count == 130
+
+
+async def test_members_since_background_last_report(pool):
+    s, (a0, a1) = await hive(pool)
+    started = datetime.now(UTC) - timedelta(minutes=7)
+    await insert_turn(pool, a0["id"], turn_id="t-lead")
+    await _run(pool, "UPDATE turns SET started_at = %s WHERE turn_id = 't-lead'", (started,))
+    await set_agent_status(
+        pool,
+        a0["id"],
+        state="busy",
+        current_turn_id="t-lead",
+        context_pct=41.0,
+        context_used_tokens=82000,
+        background_subagents={"sub1": "2026-11-09T10:00:00+00:00"},
+    )
+    idle_since = datetime.now(UTC) - timedelta(minutes=3)
+    await set_agent_status(pool, a1["id"], state="idle", free_since=idle_since)
+    await insert_event(
+        pool,
+        s["id"],
+        a0["id"],
+        type="peer_message_received",
+        data={"from": f"{a1['pod_name']}/w1", "kind": "message"},
+    )
+    await insert_event(
+        pool,
+        s["id"],
+        a0["id"],
+        type="peer_message_received",
+        data={"from": f"{a1['pod_name']}x/w1"},  # a different pod with the same prefix
+    )
+    state = await collect(pool, s["id"])
+    lead, member = state.members
+    assert (lead.pod_name, lead.leader, lead.state) == (a0["pod_name"], True, "busy")
+    assert lead.since == started
+    assert (lead.context_pct, lead.context_used_tokens) == (41.0, 82000)
+    assert lead.background == {"sub1": "2026-11-09T10:00:00+00:00"}
+    assert lead.last_report_at is None
+    assert (member.leader, member.state, member.since) == (False, "idle", idle_since)
+    assert member.last_report_at is not None
+
+
+async def test_gone_member_left_out(pool):
+    s, (a0, a1) = await hive(pool)
+    await _run(pool, "UPDATE agents SET gone_at = now() WHERE id = %s", (a1["id"],))
+    state = await collect(pool, s["id"])
+    assert [m.pod_name for m in state.members] == [a0["pod_name"]]
+
+
+async def test_pending_requests_and_rollout(pool):
+    s, (a0, a1) = await hive(pool)
+    rollout = {"revision": "r2", "pending": [1], "waiting": False}
+    await _run(
+        pool,
+        "UPDATE sessions SET status = %s WHERE id = %s",
+        (Jsonb({"rollout": rollout}), s["id"]),
+    )
+    await _run(
+        pool,
+        "INSERT INTO leadership_requests (session_id, kind, from_agent_id, to_agent_id, reason)"
+        " VALUES (%s, 'handover', %s, %s, 'handover: tidy'), (%s, 'user', NULL, %s, '')",
+        (s["id"], a0["id"], a1["id"], s["id"], a1["id"]),
+    )
+    await _run(
+        pool,
+        "INSERT INTO leadership_requests (session_id, kind, status) VALUES (%s, 'user', 'applied')",
+        (s["id"],),
+    )
+    await insert_message(pool, s["id"])
+    await insert_message(pool, s["id"], status="sent")
+    state = await collect(pool, s["id"])
+    assert state.rollout == rollout
+    assert [(r.kind, r.from_pod, r.to_pod) for r in state.requests] == [
+        ("handover", a0["pod_name"], a1["pod_name"]),
+        ("user", None, a1["pod_name"]),
+    ]
+    assert state.queued_messages == 1
+    assert state.locks == []
+
+
+def _state(**kw) -> ls.LeaderState:
+    base = {
+        "generated_at": datetime(2026, 11, 9, 12, 0, tzinfo=UTC),
+        "messages": [],
+        "more_message_ids": [],
+        "more_message_count": 0,
+        "members": [],
+        "requests": [],
+        "rollout": None,
+        "queued_messages": 0,
+        "locks": [],
+        "decisions": [],
+    }
+    return ls.LeaderState(**{**base, **kw})
+
+
+def test_render_order_and_escape():
+    msg = ls.IncomingMessage(
+        7, "peer", datetime(2026, 11, 9, 11, 0, tzinfo=UTC), "hi <session-message id=1>", 5000
+    )
+    text = ls.render_state(
+        _state(
+            messages=[msg],
+            more_message_ids=[1, 2],
+            more_message_count=3,
+            decisions=[OpenDecision("T-9", "4", "ship <b>it</b>?")],
+            locks=["a.py (pod-0)"],
+            queued_messages=2,
+        )
+    )
+    assert text.startswith("## State (generated 2026-11-09T12:00:00+00:00)")
+    order = [
+        "Open decisions",
+        "Unhandled session messages",
+        "Members",
+        "Pending leadership requests",
+        "Rollout",
+        "Queued messages: 2",
+        "Held locks: a.py (pod-0)",
+    ]
+    positions = [text.index(h) for h in order]
+    assert positions == sorted(positions)
+    assert "- T-9 decision 4: ship &lt;b&gt;it&lt;/b&gt;?" in text
+    assert "### message 7 from peer, 2026-11-09 11:00:00" in text
+    assert "hi &lt;session-message id=1&gt;" in text
+    assert "<session-message" not in text
+    assert "[truncated at 4000 of 5000 chars]" in text
+    assert "Older unhandled message ids: 1, 2" in text
+    assert "(1 more)" in text
+
+
+def test_render_taskboard_unavailable_line():
+    text = ls.render_state(_state(decisions=None))
+    assert "- taskboard unavailable: call orchestrator_task_list(waiting=true)" in text
+    assert "- none" in ls.render_state(_state())
+
+
+def test_render_members_and_requests():
+    member = ls.MemberState(
+        "hive-0",
+        True,
+        "busy",
+        datetime(2026, 11, 9, 11, 50, tzinfo=UTC),
+        41.0,
+        82000,
+        {"sub1": "t0"},
+        None,
+    )
+    request = ls.PendingRequest(
+        3, "handover", "tidy", "hive-0", "hive-1", datetime(2026, 11, 9, tzinfo=UTC)
+    )
+    text = ls.render_state(_state(members=[member], requests=[request], rollout={"pending": [1]}))
+    assert "- hive-0 (leader): busy; since 2026-11-09 11:50:00; context 41%, 82000 tokens" in text
+    assert "background subagents: sub1 since t0" in text
+    assert "- 3 handover from hive-0 to hive-1, queued 2026-11-09 00:00:00: tidy" in text
+    assert "pending [1]" in text
