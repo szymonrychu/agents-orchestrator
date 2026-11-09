@@ -285,6 +285,6 @@ async def test_create_from_preset_moving_between_projects_409(pool, dsn, monkeyp
         monkeypatch.setattr(api_sessions.presets, "get", stale_get)
         assert_error(await http.post(C, json={"preset_id": pid}), 409, "conflict")
         monkeypatch.setattr(api_sessions.presets, "get", real_get)
-        assert len(peeks) == 3
+        assert len(peeks) == 1 + 3  # the vault pin read, then one per placement try
         listed = (await http.get(C)).json()
         assert [s for s in listed if s["preset_id"] == pid] == []

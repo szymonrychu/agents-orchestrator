@@ -1181,7 +1181,7 @@
           "spec": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/SessionSpecIn"
+                "$ref": "#/components/schemas/SessionSpec-Input"
               },
               {
                 "type": "null"
@@ -1241,39 +1241,55 @@
         "title": "DeleteArchives",
         "type": "object"
       },
-      "EnvVar": {
-        "additionalProperties": true,
-        "type": "object"
-      },
-      "EnvVarIn": {
+      "EnvVar-Input": {
         "additionalProperties": false,
-        "description": "The request form of an env variable: a protected one may carry its new value.\n\nOnly the api sees it; `SessionSpecIn.split` moves the value out so a `SessionSpec` never holds\none. Without a value a protected variable keeps its stored one.",
+        "description": "One session env variable, GitLab CI style: `{value, expand}`, or a vault reference.\n\nA plain variable carries its value; `expand` gates `$` handling of it. A vault reference\n`{vault, env}` names an agents-vault entry and its env; the entry's value is resolved by the\nvault at session create. A reference carries nothing else.",
         "properties": {
+          "env": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Env"
+          },
           "expand": {
             "default": false,
             "title": "Expand",
             "type": "boolean"
           },
-          "protected": {
-            "default": false,
-            "title": "Protected",
-            "type": "boolean"
-          },
           "value": {
             "anyOf": [
               {
-                "format": "password",
-                "type": "string",
-                "writeOnly": true
+                "type": "string"
               },
               {
                 "type": "null"
               }
             ],
             "title": "Value"
+          },
+          "vault": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vault"
           }
         },
-        "title": "EnvVarIn",
+        "title": "EnvVar",
+        "type": "object"
+      },
+      "EnvVar-Output": {
+        "additionalProperties": true,
         "type": "object"
       },
       "EventView": {
@@ -3256,7 +3272,7 @@
             "title": "Project"
           },
           "spec": {
-            "$ref": "#/components/schemas/SessionSpecIn",
+            "$ref": "#/components/schemas/SessionSpec-Input",
             "default": {
               "env": {},
               "init_scripts": [],
@@ -3393,6 +3409,13 @@
             "format": "date-time",
             "title": "Updated At",
             "type": "string"
+          },
+          "vault_reattach": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Vault Reattach",
+            "type": "array"
           }
         },
         "required": [
@@ -3403,6 +3426,7 @@
           "labels",
           "project",
           "privileged",
+          "vault_reattach",
           "spec",
           "created_at",
           "updated_at"
@@ -3639,7 +3663,7 @@
       },
       "ProposalIn": {
         "additionalProperties": false,
-        "description": "A change proposal (plan 3.4): an RFC 7396 merge `patch` of the target's spec, plus new\nvalues of protected variables in `secrets`; a value is never stored or echoed.",
+        "description": "A change proposal (plan 3.4): an RFC 7396 merge `patch` of the target's spec, which\nmay carry vault references (never a value).",
         "properties": {
           "client_key": {
             "anyOf": [
@@ -3672,16 +3696,6 @@
             "minLength": 1,
             "title": "Reason",
             "type": "string"
-          },
-          "secrets": {
-            "additionalProperties": {
-              "format": "password",
-              "type": "string",
-              "writeOnly": true
-            },
-            "default": {},
-            "title": "Secrets",
-            "type": "object"
           },
           "target": {
             "title": "Target",
@@ -3734,21 +3748,6 @@
             "title": "Path",
             "type": "string"
           },
-          "secret": {
-            "anyOf": [
-              {
-                "enum": [
-                  "set",
-                  "changed"
-                ],
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Secret"
-          },
           "security": {
             "title": "Security",
             "type": "boolean"
@@ -3760,7 +3759,6 @@
           "after",
           "security",
           "grant",
-          "secret",
           "decision",
           "note"
         ],
@@ -3788,16 +3786,6 @@
               }
             ],
             "title": "Reason"
-          },
-          "secrets": {
-            "additionalProperties": {
-              "format": "password",
-              "type": "string",
-              "writeOnly": true
-            },
-            "default": {},
-            "title": "Secrets",
-            "type": "object"
           }
         },
         "required": [
@@ -4095,54 +4083,6 @@
         "title": "ScaleResult",
         "type": "object"
       },
-      "SecretIn": {
-        "additionalProperties": false,
-        "description": "The new value of one protected variable; it is never echoed.",
-        "properties": {
-          "value": {
-            "format": "password",
-            "minLength": 1,
-            "title": "Value",
-            "type": "string",
-            "writeOnly": true
-          }
-        },
-        "required": [
-          "value"
-        ],
-        "title": "SecretIn",
-        "type": "object"
-      },
-      "SecretView": {
-        "description": "Metadata of a protected variable's stored value; the value is never returned.",
-        "properties": {
-          "name": {
-            "title": "Name",
-            "type": "string"
-          },
-          "set": {
-            "title": "Set",
-            "type": "boolean"
-          },
-          "updated_at": {
-            "format": "date-time",
-            "title": "Updated At",
-            "type": "string"
-          },
-          "version": {
-            "title": "Version",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "name",
-          "set",
-          "version",
-          "updated_at"
-        ],
-        "title": "SecretView",
-        "type": "object"
-      },
       "SessionBackup": {
         "description": "What a discard would save now; each flag is true only when that save would really run.\n\n`reason` is null when both run, else `no_session_cache` (no `spec.cache`),\n`cache_not_configured` (no S3 cache configured) or the save's skip reason, the workdir's first.",
         "properties": {
@@ -4344,7 +4284,7 @@
         "title": "SessionRestartAccepted",
         "type": "object"
       },
-      "SessionSpec": {
+      "SessionSpec-Input": {
         "additionalProperties": false,
         "properties": {
           "any_mcp_config": {
@@ -4480,7 +4420,7 @@
           },
           "env": {
             "additionalProperties": {
-              "$ref": "#/components/schemas/EnvVar"
+              "$ref": "#/components/schemas/EnvVar-Input"
             },
             "default": {},
             "title": "Env",
@@ -4683,9 +4623,8 @@
         "title": "SessionSpec",
         "type": "object"
       },
-      "SessionSpecIn": {
+      "SessionSpec-Output": {
         "additionalProperties": false,
-        "description": "A spec as the api receives it: protected variables may carry a value (`EnvVarIn`).",
         "properties": {
           "any_mcp_config": {
             "anyOf": [
@@ -4820,7 +4759,7 @@
           },
           "env": {
             "additionalProperties": {
-              "$ref": "#/components/schemas/EnvVarIn"
+              "$ref": "#/components/schemas/EnvVar-Output"
             },
             "default": {},
             "title": "Env",
@@ -5020,7 +4959,7 @@
             ]
           }
         },
-        "title": "SessionSpecIn",
+        "title": "SessionSpec",
         "type": "object"
       },
       "SessionSpecPatch": {
@@ -5404,7 +5343,7 @@
             "type": "string"
           },
           "spec": {
-            "$ref": "#/components/schemas/SessionSpec"
+            "$ref": "#/components/schemas/SessionSpec-Output"
           },
           "static": {
             "title": "Static",
@@ -5417,6 +5356,14 @@
           },
           "summary": {
             "$ref": "#/components/schemas/SessionSummary"
+          },
+          "vault": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/VaultPinView"
+            },
+            "default": {},
+            "title": "Vault",
+            "type": "object"
           }
         },
         "required": [
@@ -5868,6 +5815,167 @@
           "type"
         ],
         "title": "ValidationError",
+        "type": "object"
+      },
+      "VaultAttachIn": {
+        "additionalProperties": false,
+        "description": "Attach a vault entry to a preset: `envs` maps entry env to preset env (every env of the\nentry under its own name when omitted); `replace` lets it overwrite an existing preset env.",
+        "properties": {
+          "envs": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "minProperties": 1,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Envs"
+          },
+          "replace": {
+            "default": false,
+            "title": "Replace",
+            "type": "boolean"
+          }
+        },
+        "title": "VaultAttachIn",
+        "type": "object"
+      },
+      "VaultAttachView": {
+        "description": "The preset view an admin vault attach answers. `attachment_privileged` marks a preset\nwhose session can read every Secret in the namespace (`privileged` is not empty); marked,\nnever blocked.",
+        "properties": {
+          "attachment_privileged": {
+            "title": "Attachment Privileged",
+            "type": "boolean"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "is_default": {
+            "title": "Is Default",
+            "type": "boolean"
+          },
+          "labels": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Labels",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "privileged": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Privileged",
+            "type": "array"
+          },
+          "project": {
+            "title": "Project",
+            "type": "string"
+          },
+          "spec": {
+            "additionalProperties": true,
+            "title": "Spec",
+            "type": "object"
+          },
+          "superleader_manageable": {
+            "title": "Superleader Manageable",
+            "type": "boolean"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "vault_reattach": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Vault Reattach",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "is_default",
+          "superleader_manageable",
+          "labels",
+          "project",
+          "privileged",
+          "vault_reattach",
+          "spec",
+          "created_at",
+          "updated_at",
+          "attachment_privileged"
+        ],
+        "title": "VaultAttachView",
+        "type": "object"
+      },
+      "VaultPinView": {
+        "description": "What a session was pinned to for one vault env variable; never a value.",
+        "properties": {
+          "entry": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entry"
+          },
+          "entry_env": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entry Env"
+          },
+          "protected": {
+            "title": "Protected",
+            "type": "boolean"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          }
+        },
+        "required": [
+          "entry",
+          "entry_env",
+          "version",
+          "protected"
+        ],
+        "title": "VaultPinView",
         "type": "object"
       },
       "WebhookHook": {
@@ -7856,9 +7964,10 @@
         ]
       }
     },
-    "/agent/v1/admin/presets/{ref}/secrets/{name}": {
-      "put": {
-        "operationId": "set_preset_secret_agent_v1_admin_presets__ref__secrets__name__put",
+    "/agent/v1/admin/presets/{ref}/vault/{entry_id}": {
+      "delete": {
+        "description": "Remove every ref to the entry from a manageable preset, or only the one under preset env\n`?env=`; 404 `not_attached` when nothing matches.",
+        "operationId": "detach_vault_agent_v1_admin_presets__ref__vault__entry_id__delete",
         "parameters": [
           {
             "in": "path",
@@ -7871,10 +7980,110 @@
           },
           {
             "in": "path",
-            "name": "name",
+            "name": "entry_id",
             "required": true,
             "schema": {
-              "title": "Name",
+              "format": "uuid",
+              "title": "Entry Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "env",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Env"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PresetView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Detach Vault",
+        "tags": [
+          "admin"
+        ]
+      },
+      "put": {
+        "description": "Attach a vault entry as refs, in one save, on a manageable preset (privileged ones too).\n`envs` maps entry env to preset env; one entry env may back several preset envs through\nrepeated calls, which keep the refs already there. Without `envs` every env of the entry is\nattached under its own name. A preset env that is taken is 409 `env_exists` unless\n`replace`. The answer marks `attachment_privileged` (marked, never blocked).",
+        "operationId": "attach_vault_agent_v1_admin_presets__ref__vault__entry_id__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ref",
+            "required": true,
+            "schema": {
+              "title": "Ref",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "entry_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Entry Id",
               "type": "string"
             }
           },
@@ -7915,7 +8124,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/SecretIn"
+                "$ref": "#/components/schemas/VaultAttachIn"
               }
             }
           },
@@ -7926,7 +8135,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SecretView"
+                  "$ref": "#/components/schemas/VaultAttachView"
                 }
               }
             },
@@ -7943,7 +8152,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Set Preset Secret",
+        "summary": "Attach Vault",
         "tags": [
           "admin"
         ]
@@ -9558,6 +9767,82 @@
         },
         "summary": "Get Usage",
         "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/agent/v1/admin/vault": {
+      "get": {
+        "description": "The vault entries in the caller's project scope and the env names to re-attach.",
+        "operationId": "admin_vault_list",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Q"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "GET vault entries",
+        "tags": [
+          "admin",
           "admin"
         ]
       }
@@ -13260,64 +13545,6 @@
           }
         },
         "summary": "Copy Preset"
-      }
-    },
-    "/api/v1/presets/{preset}/secrets/{name}": {
-      "put": {
-        "operationId": "set_preset_secret_api_v1_presets__preset__secrets__name__put",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "preset",
-            "required": true,
-            "schema": {
-              "title": "Preset",
-              "type": "string"
-            }
-          },
-          {
-            "in": "path",
-            "name": "name",
-            "required": true,
-            "schema": {
-              "title": "Name",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SecretIn"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SecretView"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Set Preset Secret"
       }
     },
     "/api/v1/projects": {

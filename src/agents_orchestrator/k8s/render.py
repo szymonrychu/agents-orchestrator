@@ -387,7 +387,7 @@ def _apply_wrapper(cfg: dict[str, Any], wrapper: WrapperSettings, session: Sessi
     _render_texts(user, session)
     raw = copy.deepcopy(user)
     user = _escape(user)
-    names = frozenset(session.spec.env)
+    names = frozenset(session.spec.env) | frozenset(_legacy_pins(session))
     for event, actions in raw.get("hooks", {}).items():
         for action, escaped in zip(actions, user["hooks"][event], strict=True):
             if action.get("type") == "webhook":
@@ -429,7 +429,10 @@ def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
             ("DOCKER_CONFIG",) if settings.image_pull_secret else ()
         )
     claude: dict[str, Any] = {
-        "passthrough_env": sorted([*spec.env, *AGENT_PASSTHROUGH_ENV, *kube_env, *docker_env]),
+        "passthrough_env": sorted(
+            {*spec.env, *session.secret_versions, *AGENT_PASSTHROUGH_ENV, *kube_env, *docker_env}
+        ),
+        "secret_env": secret_env_names(session),
         "env": {
             "claude_code_oauth_token": "${CLAUDE_CODE_OAUTH_TOKEN}",
             "disable_autoupdater": True,
@@ -514,6 +517,62 @@ def _meta(slug: str, kind_name: str, settings: Settings) -> dict[str, Any]:
     }
 
 
+_PIN_SECRET_RE = re.compile(r"^vault-[0-9a-f-]{36}-v\d+$")
+_PIN_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
+# A legacy pin: the ps-* Secret of a protected variable, snapshotted at a create before migration
+# 0041; its value sits under the key `value`.
+_LEGACY_SECRET_RE = re.compile(r"^ps-[0-9a-f]{8}-[0-9a-f]{6}-v\d+$")
+_LEGACY_KEY = "value"
+
+
+def _pins(session: Session) -> dict[str, dict[str, Any]]:
+    """The pins the spec references: only a vault ref in `spec.env` renders its pin.
+
+    A Secret pin's name and key are checked against the vault grammar before they reach a pod
+    spec; a mismatch raises with the env name only.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for name, pin in session.secret_versions.items():
+        var = session.spec.env.get(name)
+        if not isinstance(pin, dict) or var is None or not var.is_ref:
+            continue
+        if "secret" in pin and not (
+            isinstance(pin["secret"], str)
+            and isinstance(pin.get("key"), str)
+            and _PIN_SECRET_RE.fullmatch(pin["secret"])
+            and _PIN_KEY_RE.fullmatch(pin["key"])
+        ):
+            raise ValueError(f"vault variable {name} has an invalid pin")
+        out[name] = pin
+    return out
+
+
+def _legacy_pins(session: Session) -> dict[str, str]:
+    """The legacy pins that render: a session created before migration 0041 keeps the ps-*
+    Secret its protected variable was snapshotted to (0041 removed the variable from the spec
+    and left the pin as it was), so its pods render unchanged. 0041 dropped the pins whose entry
+    was no longer protected. An env of the same name in the spec, set since, wins; if that env is
+    removed again the pin renders again (pins are never pruned on a spec write). The Secret
+    name is checked against the ps-* grammar before it reaches a pod spec; a mismatch raises
+    with the env name only.
+    """
+    out: dict[str, str] = {}
+    for name, pin in session.secret_versions.items():
+        if not isinstance(pin, str) or name in session.spec.env:
+            continue
+        if not _LEGACY_SECRET_RE.fullmatch(pin):
+            raise ValueError(f"variable {name} has an invalid legacy pin")
+        out[name] = pin
+    return out
+
+
+def secret_env_names(session: Session) -> list[str]:
+    """Env names the wrapper redacts by value: Secret pins and legacy pins."""
+    names = {name for name, pin in _pins(session).items() if "secret" in pin}
+    names.update(_legacy_pins(session))
+    return sorted(names)
+
+
 def _secret_ref(name: str, key: str) -> dict[str, Any]:
     return {"valueFrom": {"secretKeyRef": {"name": name, "key": key}}}
 
@@ -521,21 +580,29 @@ def _secret_ref(name: str, key: str) -> dict[str, Any]:
 def env_entries(session: Session) -> list[dict[str, Any]]:
     """The session's own env variables as container env, sorted by name.
 
-    A protected variable is a `secretKeyRef` to the Secret version snapshotted at create. A plain
-    one with `expand` false has its `$` doubled (the kubelet reads `$$` as a literal `$`, so
-    `$(VAR)` stays text); with `expand` true it is emitted as is, so `$(VAR)` references work.
+    Vault pins in `secret_versions` render by shape: `{secret, key}` is a `secretKeyRef`,
+    `{value}` is a readable value with `$` doubled (a readable value never expands). A legacy
+    pin (`_legacy_pins`) is a `secretKeyRef` to its ps-* Secret. A plain variable with `expand`
+    false has its `$` doubled (the kubelet reads `$$` as a literal `$`, so `$(VAR)` stays text);
+    with `expand` true it is emitted as is. A vault ref in the spec without a pin is refused; a
+    pin renders only for a vault ref in the spec.
     """
-    out: list[dict[str, Any]] = []
-    for name, var in sorted(session.spec.env.items()):
-        if var.protected:
-            secret = session.secret_versions.get(name)
-            if secret is None:
-                raise ValueError(f"protected variable {name} has no stored secret")
-            out.append({"name": name, **_secret_ref(secret, "value")})
+    out: dict[str, dict[str, Any]] = {
+        name: _secret_ref(secret, _LEGACY_KEY) for name, secret in _legacy_pins(session).items()
+    }
+    for name, var in session.spec.env.items():
+        if var.is_ref:
+            if not isinstance(session.secret_versions.get(name), dict):
+                raise ValueError(f"vault variable {name} has no pin")
         else:
             value = var.value or ""
-            out.append({"name": name, "value": value if var.expand else value.replace("$", "$$")})
-    return out
+            out[name] = {"value": value if var.expand else value.replace("$", "$$")}
+    for name, pin in _pins(session).items():
+        if "secret" in pin:
+            out[name] = _secret_ref(pin["secret"], pin["key"])
+        else:
+            out[name] = {"value": pin["value"].replace("$", "$$")}
+    return [{"name": name, **out[name]} for name in sorted(out)]
 
 
 def _container(session: Session, settings: Settings, names: dict[str, str]) -> dict[str, Any]:

@@ -1,7 +1,7 @@
 {{- if .Values.rbac.create }}
-# The api writes the Secrets that hold protected variables of presets (write-only, immutable
-# versions named by the orchestrator): create, patch (server-side apply) and delete, no get, list
-# or watch, in the release namespace only.
+# The api writes the Secrets that hold webhook endpoint credentials only (write-only,
+# `webhook-<id>-password`, named by the orchestrator): create, patch (server-side apply) and
+# delete, no get, list or watch, in the release namespace only.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

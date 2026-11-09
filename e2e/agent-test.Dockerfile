@@ -3,9 +3,9 @@
 # (tests/fakes/real_wrapper.py) and kind-e2e. Build from the repo root:
 #   docker build -f e2e/agent-test.Dockerfile -t agents-orchestrator-agent-test:local .
 # Run it with e2e/agent-test.config.yaml mounted at /etc/ccw/config.yaml.
-ARG BASE_IMAGE=harbor.szymonrichert.pl/containers/claude-code-wrapper:0.10.0
+ARG BASE_IMAGE=harbor.szymonrichert.pl/containers/claude-code-wrapper:0.12.0
 # Wrapper commit whose tests/fake_claude is copied; keep it equal to the BASE_IMAGE sha.
-ARG WRAPPER_SHA=cd5ca3d0026b57a2423e4fe77850ca3658e5f59e
+ARG WRAPPER_SHA=d97701aa8400906de0c1b4ced1d8d2440f346015
 
 FROM ${BASE_IMAGE}
 ARG WRAPPER_SHA

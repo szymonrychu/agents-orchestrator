@@ -15,14 +15,14 @@ from agents_orchestrator.settings import (
     SWEEP_KEEP_NEWEST_MAX,
     SWEEP_RETENTION_DAYS_MAX,
 )
-from agents_orchestrator.spec import SessionSpec, SessionSpecIn
+from agents_orchestrator.spec import SessionSpec
 
 
 class CreateSession(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     slug: str | None = None
-    spec: SessionSpecIn | None = None
+    spec: SessionSpec | None = None
     preset_id: uuid.UUID | None = None
     # None: the preset's project, or the default project for a spec-only session
     project: str | None = None
@@ -32,7 +32,7 @@ class PresetIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
-    spec: SessionSpecIn = SessionSpecIn()
+    spec: SessionSpec = SessionSpec()
     superleader_manageable: bool | None = None
     # None keeps the stored labels on PUT and means none on POST
     labels: list[str] | None = None
@@ -43,6 +43,23 @@ class PresetIn(BaseModel):
     @classmethod
     def _labels(cls, value: list[str] | None) -> list[str] | None:
         return None if value is None else normalize_labels(value)
+
+
+class VaultAttachIn(BaseModel):
+    """Attach a vault entry to a preset: `envs` maps entry env to preset env (every env of the
+    entry under its own name when omitted); `replace` lets it overwrite an existing preset env."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    envs: dict[str, str] | None = Field(default=None, min_length=1)
+    replace: bool = False
+
+    @field_validator("envs")
+    @classmethod
+    def _distinct(cls, value: dict[str, str] | None) -> dict[str, str] | None:
+        if value is not None and len(set(value.values())) != len(value):
+            raise ValueError("two entry envs map to the same preset env")
+        return value
 
 
 class PresetPatch(BaseModel):
@@ -99,23 +116,6 @@ class AgentTokenVerified(BaseModel):
     session_id: uuid.UUID
 
 
-class SecretIn(BaseModel):
-    """The new value of one protected variable; it is never echoed."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    value: SecretStr = Field(min_length=1)
-
-
-class SecretView(BaseModel):
-    """Metadata of a protected variable's stored value; the value is never returned."""
-
-    name: str
-    set: bool
-    version: int
-    updated_at: datetime
-
-
 class CopyPreset(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -161,21 +161,30 @@ class PresetView(BaseModel):
     project: str
     # the privileged grants on (preset_policy.privileged), so a client never names the fields
     privileged: list[str]
+    # env names to re-attach as vault references (set by migration 0041)
+    vault_reattach: list[str]
     spec: dict[str, Any]
     created_at: datetime
     updated_at: datetime
 
 
+class VaultAttachView(PresetView):
+    """The preset view an admin vault attach answers. `attachment_privileged` marks a preset
+    whose session can read every Secret in the namespace (`privileged` is not empty); marked,
+    never blocked."""
+
+    attachment_privileged: bool
+
+
 class ProposalIn(BaseModel):
-    """A change proposal (plan 3.4): an RFC 7396 merge `patch` of the target's spec, plus new
-    values of protected variables in `secrets`; a value is never stored or echoed."""
+    """A change proposal (plan 3.4): an RFC 7396 merge `patch` of the target's spec, which
+    may carry vault references (never a value)."""
 
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal["preset", "schedule", "session"]
     target: str  # preset id or name, schedule id, session slug
     patch: dict[str, Any]
-    secrets: dict[str, SecretStr] = {}
     reason: str = Field(min_length=1, max_length=4000)
     client_key: str | None = Field(default=None, max_length=200)
 
@@ -200,7 +209,6 @@ class ProposalRevise(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     patch: dict[str, Any]
-    secrets: dict[str, SecretStr] = {}
     reason: str | None = Field(default=None, min_length=1, max_length=4000)
 
 
@@ -227,7 +235,6 @@ class ProposalItemView(BaseModel):
     after: Any
     security: bool
     grant: bool
-    secret: Literal["set", "changed"] | None
     decision: Literal["pending", "approved", "rework", "denied"]
     note: str | None
 
@@ -314,10 +321,21 @@ class SessionBackup(BaseModel):
 CloseKind = Literal["self", "inactivity"]
 
 
+class VaultPinView(BaseModel):
+    """What a session was pinned to for one vault env variable; never a value."""
+
+    entry: uuid.UUID | None
+    entry_env: str | None
+    version: int | None
+    protected: bool
+
+
 class SessionView(BaseModel):
     id: uuid.UUID
     slug: str
     spec: SessionSpec
+    # the session's vault pins by env name (empty without vault refs)
+    vault: dict[str, VaultPinView] = {}
     desired: Literal["active", "deleting"]
     status: dict[str, Any]
     generation: int

@@ -160,50 +160,6 @@ async def test_put_unchanged_grants_passes(call, human, seed):
     assert r.json()["spec"]["kube_cluster_access"] is True
 
 
-async def _protected_seed(human, seed, canary, spec=None):
-    """A preset with protected K set to the canary (version 1); returns its id and the human
-    view."""
-    pid = await seed({**(spec or {}), "env": {"K": {"protected": True}}})
-    r = await human("PUT", f"{M}/{pid}/secrets/K", json={"value": canary})
-    assert r.status_code == 200 and r.json()["version"] == 1, r.text
-    return pid, (await human("GET", f"{M}/{pid}")).json()
-
-
-async def _refused_untouched(human, kube, pid, before, secrets_before, r, status, code, fields):
-    assert_error(r, status, code)
-    assert r.json()["error"]["fields"] == fields
-    assert (await human("GET", f"{M}/{pid}")).json() == before
-    assert kube.names("Secret") == secrets_before
-
-
-async def test_admin_put_cannot_remove_protected_env(call, human, seed, kube, canary, pool, boss):
-    pid, before = await _protected_seed(human, seed, canary)
-    secrets_before = kube.names("Secret")
-    r = await call("PUT", f"{A}/{pid}", json={"name": "seeded", "spec": {"env": {}}})
-    await _refused_untouched(
-        human, kube, pid, before, secrets_before, r, 403, "human_only_field", ["env.K"]
-    )
-    last = (await events(pool, boss.id))[-1]
-    assert last["data"]["status"] == 403 and last["data"]["fields"] == ["env.K"]
-    assert canary not in r.text
-
-
-@pytest.mark.parametrize("verb", ["PUT", "PATCH"])
-async def test_unprotect_403(call, human, seed, kube, canary, verb):
-    """S2: an agent may not turn a protected variable plain and give it a value of its own."""
-    pid, before = await _protected_seed(human, seed, canary)
-    secrets_before = kube.names("Secret")
-    plain = {"env": {"K": {"value": canary + "-plain", "protected": False}}}
-    if verb == "PUT":
-        r = await call("PUT", f"{A}/{pid}", json={"name": "seeded", "spec": plain})
-    else:
-        r = await call("PATCH", f"{A}/{pid}", json={"spec": plain})
-    await _refused_untouched(
-        human, kube, pid, before, secrets_before, r, 403, "human_only_field", ["env.K"]
-    )
-    assert canary not in r.text
-
-
 async def test_put_against_changed_row_is_409(pool, settings, seed, monkeypatch):
     pid = uuid.UUID(await seed({"kube_cluster_access": True}))
     async with pool.connection() as conn:
@@ -260,27 +216,20 @@ async def test_main_port_sets_every_human_only_field(human):
     assert r.status_code == 200, r.text
 
 
-async def test_refusal_has_no_side_effect_and_is_audited(
-    call, human, seed, pool, boss, canary, kube
-):
-    pid = await seed({"env": {"K": {"protected": True}}})
-    r = await human("PUT", f"{M}/{pid}/secrets/K", json={"value": canary})
-    assert r.status_code == 200, r.text
+async def test_refusal_has_no_side_effect_and_is_audited(call, human, seed, pool, boss):
+    pid = await seed({"env": {"K": {"value": "v"}}})
     before = (await human("GET", f"{M}/{pid}")).json()
-    secrets_before = kube.names("Secret")
-    assert secrets_before
     r = await call(
         "PUT",
         f"{A}/{pid}",
         json={
             "name": "seeded",
-            "spec": {"kube_cluster_access": True, "env": {"K": {"protected": True}}},
+            "spec": {"kube_cluster_access": True, "env": {"K": {"value": "w"}}},
         },
     )
     assert_error(r, 403, "human_only_field")
     after = (await human("GET", f"{M}/{pid}")).json()
     assert after["updated_at"] == before["updated_at"] and after == before
-    assert kube.names("Secret") == secrets_before
     last = (await events(pool, boss.id))[-1]
     assert last["type"] == "admin_call"
     assert last["data"]["status"] == 403 and last["data"]["fields"] == ["kube_cluster_access"]
@@ -357,17 +306,12 @@ async def test_patch_refuses_each_human_only_field(call, human, seed, path, fiel
     assert (await human("GET", f"{M}/{pid}")).json() == before
 
 
-async def test_patch_usage_quota_keeps_secret(call, human, seed, canary):
-    pid = await seed({"env": {"K": {"protected": True}, "P": {"value": "x"}}})
-    r = await human("PUT", f"{M}/{pid}/secrets/K", json={"value": canary})
-    assert r.status_code == 200 and r.json()["version"] == 1, r.text
+async def test_patch_usage_quota_keeps_env(call, seed):
+    pid = await seed({"env": {"P": {"value": "x"}}})
     quota = {"five_hour_pct": 80, "seven_day_pct": 80}
     r = await call("PATCH", f"{A}/{pid}", json={"spec": {"usage_quota": quota}})
     assert r.status_code == 200, r.text
-    env = r.json()["spec"]["env"]
-    assert env["K"]["set"] is True and env["K"]["version"] == 1
-    assert env["P"]["value"] == "x"
-    assert canary not in r.text
+    assert r.json()["spec"]["env"] == {"P": {"value": "x"}}
 
 
 async def test_patch_merge_semantics(call, seed):
@@ -398,44 +342,6 @@ async def test_patch_merge_semantics(call, seed):
     assert "start_prompt" not in spec
     assert spec["init_scripts"] == ["c"]
     assert spec["wrapper"] == {"permissions": {"deny": ["D"]}, "system_append": "s2"}
-
-
-async def test_patch_secret_in_spec(call, seed, kube):
-    pid = await seed({})
-    before = kube.names("Secret")
-    r = await call(
-        "PATCH", f"{A}/{pid}", json={"spec": {"env": {"K": {"protected": True, "value": "v"}}}}
-    )
-    assert_error(r, 422, "secret_in_spec")
-    assert "protected variable K carries a value" in r.json()["error"]["message"]
-    assert kube.names("Secret") == before
-
-
-async def test_patch_value_on_stored_protected_is_secret_in_spec(call, human, seed, kube):
-    pid = await seed({"env": {"K": {"protected": True}}})
-    before_secrets = kube.names("Secret")
-    before = (await human("GET", f"{M}/{pid}")).json()
-    r = await call("PATCH", f"{A}/{pid}", json={"spec": {"env": {"K": {"value": "x"}}}})
-    assert_error(r, 422, "secret_in_spec")
-    assert kube.names("Secret") == before_secrets
-    assert (await human("GET", f"{M}/{pid}")).json() == before
-
-
-async def test_patch_adds_protected_declaration(call, seed):
-    pid = await seed({})
-    r = await call("PATCH", f"{A}/{pid}", json={"spec": {"env": {"N": {"protected": True}}}})
-    assert r.status_code == 200, r.text
-    assert r.json()["spec"]["env"]["N"]["protected"] is True
-
-
-@pytest.mark.parametrize("patch", [{"env": {"K": None}}, {"env": None}])
-async def test_patch_null_on_protected_env_403(call, human, seed, kube, canary, patch):
-    pid, before = await _protected_seed(human, seed, canary)
-    secrets_before = kube.names("Secret")
-    r = await call("PATCH", f"{A}/{pid}", json={"spec": patch})
-    await _refused_untouched(
-        human, kube, pid, before, secrets_before, r, 403, "human_only_field", ["env.K"]
-    )
 
 
 async def test_patch_inactivity_is_an_ordinary_editable_field(call, seed):
@@ -618,203 +524,13 @@ async def test_privileged_target_turn_off_alone_passes(call, human, seed):
     assert r.status_code == 200, r.text
 
 
-async def test_privileged_target_resend_with_protected_env_passes(call, human, seed):
-    pid = await seed({**KUBE, "env": {"K": {"protected": True}}})
-    got = (await human("GET", f"{M}/{pid}")).json()
-    spec = {**got["spec"], "env": {"K": {"protected": True}}}
-    r = await _put_spec(call, pid, spec)
-    assert r.status_code == 200, r.text
-
-
-@pytest.mark.parametrize(("flag", "grant"), FLAGS)
-@pytest.mark.parametrize("verb", ["PUT", "PATCH"])
-async def test_privileged_unprotect_403(call, human, seed, kube, canary, flag, grant, verb):
-    """Residual (a): unprotecting a credential of a privileged preset is refused like on any
-    other preset (human-only runs first)."""
-    pid, before = await _protected_seed(human, seed, canary, grant)
-    secrets_before = kube.names("Secret")
-    plain = {"env": {"K": {"value": canary + "-plain", "protected": False}}}
-    if verb == "PUT":
-        r = await _put_spec(call, pid, {**grant, **plain})
-    else:
-        r = await call("PATCH", f"{A}/{pid}", json={"spec": plain})
-    await _refused_untouched(
-        human, kube, pid, before, secrets_before, r, 403, "human_only_field", ["env.K"]
-    )
-    assert canary not in r.text
-
-
-@pytest.mark.parametrize(("flag", "grant"), FLAGS)
-async def test_privileged_put_secret_value_403(
-    call, human, seed, kube, canary, pool, boss, flag, grant
-):
-    """Residual (a): a PUT carrying a new value for a stored protected variable of a privileged
-    preset would swap the credential the granted pod runs with: 403, no Secret version."""
-    pid, before = await _protected_seed(human, seed, canary, grant)
-    secrets_before = kube.names("Secret")
-    spec = {**grant, "env": {"K": {"protected": True, "value": canary + "-new"}}}
-    r = await _put_spec(call, pid, spec)
-    await _refused_untouched(
-        human, kube, pid, before, secrets_before, r, 403, "privileged_target", ["env.K"]
-    )
-    assert canary not in r.text
-    last = (await events(pool, boss.id))[-1]
-    assert last["data"]["status"] == 403 and last["data"]["fields"] == ["env.K"]
-
-
-@pytest.mark.parametrize(("flag", "grant"), FLAGS)
-async def test_privileged_secret_route_403(
-    call, human, seed, kube, canary, pool, boss, flag, grant
-):
-    pid, before = await _protected_seed(human, seed, canary, grant)
-    secrets_before = kube.names("Secret")
-    r = await call("PUT", f"{A}/{pid}/secrets/K", json={"value": canary + "-new"})
-    await _refused_untouched(
-        human, kube, pid, before, secrets_before, r, 403, "privileged_target", ["env.K"]
-    )
-    assert r.json()["error"]["proposable"] is True
-    assert canary not in r.text
-    last = (await events(pool, boss.id))[-1]
-    assert last["data"]["status"] == 403 and last["data"]["fields"] == ["env.K"]
-    assert last["data"]["secrets"] == ["K"]
-
-
-async def test_secret_route_grant_flipped_between_check_and_write_403(
-    call, human, seed, kube, canary, pool, boss, monkeypatch
-):
-    """TOCTOU: a human turns kube_cluster_access on after the route read the preset but before the
-    Secret write. The write re-reads the row under lock and refuses: 403, no Secret version."""
-    pid, _ = await _protected_seed(human, seed, canary)
-    secrets_before = kube.names("Secret")
-    real = presets_api.by_ref
-    reads = []
-
-    async def flip_after_read(conn, ref):
-        found = await real(conn, ref)
-        reads.append(ref)
-        if len(reads) < 2:  # the route's manageable lookup, then put_secret's own read
-            return found
-        async with pool.connection() as other:
-            await other.execute(
-                "UPDATE presets SET spec = spec || '{\"kube_cluster_access\": true}'::jsonb"
-                " WHERE id = %s",
-                (uuid.UUID(pid),),
-            )
-        return found
-
-    monkeypatch.setattr(presets_api, "by_ref", flip_after_read)
-    r = await call("PUT", f"{A}/{pid}/secrets/K", json={"value": canary + "-new"})
-    assert_error(r, 403, "privileged_target")
-    assert r.json()["error"]["fields"] == ["env.K"]
-    assert canary not in r.text
-    assert kube.names("Secret") == secrets_before
-    assert (await human("GET", f"{M}/{pid}")).json()["spec"]["env"]["K"]["version"] == 1
-    last = (await events(pool, boss.id))[-1]
-    assert last["data"]["status"] == 403 and last["data"]["fields"] == ["env.K"]
-    assert last["data"]["secrets"] == ["K"]
-
-
-@pytest.mark.parametrize("flip", ["unprotect", "remove"])
-async def test_secret_route_entry_dropped_between_check_and_write_422(
-    call, human, seed, kube, canary, pool, flip, monkeypatch
-):
-    """TOCTOU: a human unprotects or removes the entry after the route read the preset but before
-    the Secret write. The declared-entry check re-runs on the locked row: 422, no Secret version,
-    no live preset_secrets row for the undeclared name."""
-    pid, _ = await _protected_seed(human, seed, canary)
-    secrets_before = kube.names("Secret")
-    rows_before = await _secret_rows(pool, pid)
-    real = presets_api.by_ref
-    reads = []
-    change = (
-        "jsonb_set(spec, '{env,K,protected}', 'false'::jsonb)"
-        if flip == "unprotect"
-        else "spec #- '{env,K}'"
-    )
-
-    async def flip_after_read(conn, ref):
-        found = await real(conn, ref)
-        reads.append(ref)
-        if len(reads) < 2:  # the route's manageable lookup, then put_secret's own read
-            return found
-        async with pool.connection() as other:
-            await other.execute(
-                f"UPDATE presets SET spec = {change} WHERE id = %s",  # noqa: S608
-                (uuid.UUID(pid),),
-            )
-        return found
-
-    monkeypatch.setattr(presets_api, "by_ref", flip_after_read)
-    r = await call("PUT", f"{A}/{pid}/secrets/K", json={"value": canary + "-new"})
-    assert_error(r, 422, "invalid_request")
-    assert canary not in r.text
-    assert kube.names("Secret") == secrets_before
-    assert await _secret_rows(pool, pid) == rows_before
-
-
-@pytest.mark.parametrize("flip", ["unprotect", "remove"])
-async def test_main_secret_route_entry_dropped_between_check_and_write_422(
-    human, seed, kube, canary, pool, flip, monkeypatch
-):
-    """The main-port twin: a human secret PUT that races a human unprotect or removal is 422 under
-    the row lock, with no Secret version and no live preset_secrets row for the undeclared name."""
-    pid, _ = await _protected_seed(human, seed, canary)
-    secrets_before = kube.names("Secret")
-    rows_before = await _secret_rows(pool, pid)
-    real = presets_api.by_ref
-    change = (
-        "jsonb_set(spec, '{env,K,protected}', 'false'::jsonb)"
-        if flip == "unprotect"
-        else "spec #- '{env,K}'"
-    )
-
-    async def flip_after_read(conn, ref):
-        found = await real(conn, ref)  # put_secret's own read, the only one on the main port
-        async with pool.connection() as other:
-            await other.execute(
-                f"UPDATE presets SET spec = {change} WHERE id = %s",  # noqa: S608
-                (uuid.UUID(pid),),
-            )
-        return found
-
-    monkeypatch.setattr(presets_api, "by_ref", flip_after_read)
-    r = await human("PUT", f"{M}/{pid}/secrets/K", json={"value": canary + "-new"})
-    assert_error(r, 422, "invalid_request")
-    assert canary not in r.text
-    assert kube.names("Secret") == secrets_before
-    assert await _secret_rows(pool, pid) == rows_before
-
-
-async def _secret_rows(pool, pid):
-    async with pool.connection() as conn:
-        cur = await conn.execute(
-            "SELECT name, version, retired_at FROM preset_secrets WHERE preset_id = %s"
-            " ORDER BY name",
-            (uuid.UUID(pid),),
-        )
-        return await cur.fetchall()
-
-
-async def test_privileged_add_protected_env_403(call, human, seed):
+async def test_privileged_add_env_403(call, human, seed):
     pid = await seed({**KUBE})
     before = (await human("GET", f"{M}/{pid}")).json()
-    r = await call("PATCH", f"{A}/{pid}", json={"spec": {"env": {"J": {"protected": True}}}})
+    r = await call("PATCH", f"{A}/{pid}", json={"spec": {"env": {"J": {"value": "v"}}}})
     assert_error(r, 403, "privileged_target")
     assert r.json()["error"]["fields"] == ["env.J"]
     assert (await human("GET", f"{M}/{pid}")).json() == before
-
-
-async def test_non_privileged_secret_set_passes(call, human, seed, kube, canary):
-    """7 b keeps the agent path for a value: the secret route and a PUT value on a preset with
-    no grant still write a new version."""
-    pid, _ = await _protected_seed(human, seed, canary)
-    r = await call("PUT", f"{A}/{pid}/secrets/K", json={"value": canary + "-2"})
-    assert r.status_code == 200 and r.json()["version"] == 2, r.text
-    spec = {"env": {"K": {"protected": True, "value": canary + "-3"}}}
-    r = await _put_spec(call, pid, spec)
-    assert r.status_code == 200, r.text
-    assert r.json()["spec"]["env"]["K"]["version"] == 3
-    assert canary not in r.text
 
 
 async def test_non_privileged_preset_edits_unaffected(call, seed):
@@ -989,7 +705,6 @@ GUARDED_PRESET_WRITES: dict[tuple[str, str], str] = {
     ("PUT", f"{A}/{{ref}}"): "guard",
     ("PATCH", f"{A}/{{ref}}"): "guard",
     ("POST", f"{A}/{{ref}}/copy"): "strip",
-    ("PUT", f"{A}/{{ref}}/secrets/{{name}}"): "secret",
 }
 GRANT_FIELDS = ("kube_cluster_access", "session_messaging")
 QUOTA = {"usage_quota": {"five_hour_pct": 80}}
@@ -1003,17 +718,19 @@ GUARDED_COLUMN_WRITES: dict[tuple[str, str], tuple[str, ...]] = {
 
 
 def _admin_preset_writes() -> set[tuple[str, str]]:
+    """The routes that take a spec; the vault attach carries none, so it has no grant to refuse
+    (its rules are in test_admin_vault.py)."""
     return {
         (method, route.path)
         for route in admin.router.routes
-        if route.path.startswith(A)
+        if route.path.startswith(A) and "/vault/" not in route.path
         for method in route.methods & {"POST", "PUT", "PATCH"}
     }
 
 
 def test_every_admin_preset_write_route_is_classified():
     assert set(GUARDED_PRESET_WRITES) == _admin_preset_writes()
-    assert set(GUARDED_PRESET_WRITES.values()) == {"guard", "strip", "secret"}
+    assert set(GUARDED_PRESET_WRITES.values()) == {"guard", "strip"}
 
 
 async def test_patch_non_superleader_403(app, human, seed, pool):
@@ -1081,16 +798,12 @@ async def test_grant_refused_on_every_admin_preset_write(call, human, seed, kube
         return
     pid = await seed({})
     before = (await human("GET", f"{M}/{pid}")).json()
-    if kind == "secret":
-        r = await call(method, path.format(ref=pid, name=field), json={"value": "v"})
-        assert_error(r, 422, "invalid_request")
-    else:
-        body = {"spec": {field: True}}
-        if method == "PUT":
-            body["name"] = "seeded"
-        r = await call(method, path.format(ref=pid), json=body)
-        assert_error(r, 403, "human_only_field")
-        assert r.json()["error"]["fields"] == [field]
+    body = {"spec": {field: True}}
+    if method == "PUT":
+        body["name"] = "seeded"
+    r = await call(method, path.format(ref=pid), json=body)
+    assert_error(r, 403, "human_only_field")
+    assert r.json()["error"]["fields"] == [field]
     assert (await human("GET", f"{M}/{pid}")).json() == before
     assert kube.names("Secret") == secrets_before
 
@@ -1167,74 +880,40 @@ async def _all_events(pool):
         return [row["data"] for row in await cur.fetchall()]
 
 
-async def test_canary_never_echoed(call, human, seed, pool, kube, canary, caplog):
+async def test_canary_never_echoed_in_refusals(call, seed, pool, canary, caplog):
+    """A value sent in a refused write never comes back in the answer, a log or an event."""
     caplog.set_level(logging.DEBUG)
-    key = "SSH_PRIVATE_KEY_B64"
-    protected = {"env": {key: {"protected": True}}}
-    pid = await seed(protected)
-    answers = [await call("PUT", f"{A}/{pid}/secrets/{key}", json={"value": canary})]
-    assert answers[0].status_code == 200 and answers[0].json()["version"] == 1, answers[0].text
-    answers.append(await call("GET", f"{A}/{pid}"))
-    answers.append(await call("GET", A))
-    answers.append(await call("PATCH", f"{A}/{pid}", json={"spec": QUOTA}))
-    answers.append(await call("PATCH", f"{A}/{pid}", json={"name": "renamed"}))
-    answers.append(await call("POST", f"{A}/{pid}/copy", json={"name": "canary-copy"}))
-    answers.append(await call("PUT", f"{A}/{pid}", json={"name": "renamed", "spec": protected}))
-    assert [a.status_code for a in answers] == [200, 200, 200, 200, 200, 201, 200]
-
+    pid = await seed({})
+    env = {"K": {"value": canary}}
     refused = [
-        (403, "human_only_field", {"spec": {"kube_cluster_access": True}}),
-        (422, "secret_in_spec", {"spec": {"env": {key: {"value": canary + "x"}}}}),
-        # the body fails validation before the route: an unknown field next to the value
-        (422, "invalid_request", {"spec": {"env": {key: {"value": canary + "y"}}}, "replicas": 99}),
+        ("PATCH", 403, "human_only_field", {"spec": {"kube_cluster_access": True, "env": env}}),
+        (
+            "PATCH",
+            422,
+            "invalid_request",
+            {"spec": {"env": {"K": {**env["K"], "protected": True}}}},
+        ),
+        ("PATCH", 422, "invalid_request", {"spec": {"env": env}, "replicas": 99}),
+        ("PUT", 422, "invalid_request", {"name": "seeded", "spec": {"env": env, "replicas": 99}}),
     ]
-    for status, code, body in refused:
-        secrets_before = kube.names("Secret")
-        r = await call("PATCH", f"{A}/{pid}", json=body)
+    for method, status, code, body in refused:
+        r = await call(method, f"{A}/{pid}", json=body)
         assert_error(r, status, code)
-        assert kube.names("Secret") == secrets_before
-        answers.append(r)
-    # a PUT may carry a value; an invalid spec next to it writes no Secret version
-    secrets_before = kube.names("Secret")
-    spec = {"env": {key: {"protected": True, "value": canary + "y"}}, "replicas": 99}
-    r = await call("PUT", f"{A}/{pid}", json={"name": "renamed", "spec": spec})
-    assert_error(r, 422, "invalid_request")
-    assert kube.names("Secret") == secrets_before
-    answers.append(r)
-
-    for a in answers:
-        assert canary not in a.text, a.request.url
-        assert canary not in str(a.headers), a.request.url
+        assert canary not in r.text and canary not in str(r.headers)
     assert canary not in caplog.text
-    assert not [r for r in caplog.records if canary in r.getMessage()]
     assert canary not in str(await _all_events(pool))
-    entry = (await human("GET", f"{M}/{pid}")).json()["spec"]["env"][key]
-    assert entry["set"] is True and entry["version"] == 1
-
-
-async def test_secret_route_answer_is_metadata_only(call, seed, canary):
-    pid = await seed({"env": {"K": {"protected": True}}})
-    r = await call("PUT", f"{A}/{pid}/secrets/K", json={"value": canary})
-    assert r.status_code == 200, r.text
-    assert set(r.json()) == {"name", "set", "version", "updated_at"}
-    assert canary not in r.text
 
 
 @pytest.mark.parametrize(("flag", "grant"), FLAGS)
-async def test_privileged_delete_is_403(call, human, seed, kube, canary, pool, boss, flag, grant):
-    """A superleader may not delete a privileged preset: 403 before the delete and before any
-    Secret cleanup, the row, its Secret version and its preset_secrets rows stay."""
-    pid, before = await _protected_seed(human, seed, canary, grant)
-    secrets_before = kube.names("Secret")
-    rows_before = await _secret_rows(pool, pid)
+async def test_privileged_delete_is_403(call, human, seed, pool, boss, flag, grant):
+    """A superleader may not delete a privileged preset: 403 before the delete, the row stays."""
+    pid = await seed({**grant, "env": {"K": {"value": "v"}}})
+    before = (await human("GET", f"{M}/{pid}")).json()
     r = await call("DELETE", f"{A}/{pid}")
     assert_error(r, 403, "privileged_target")
     assert r.json()["error"]["fields"] == [flag]
     assert "proposable" not in r.json()["error"]  # a delete is not a proposal item
-    assert canary not in r.text
     assert (await human("GET", f"{M}/{pid}")).json() == before
-    assert kube.names("Secret") == secrets_before
-    assert await _secret_rows(pool, pid) == rows_before
     last = (await events(pool, boss.id))[-1]
     assert last["data"]["status"] == 403 and last["data"]["fields"] == [flag]
 
@@ -1254,14 +933,11 @@ async def test_privileged_delete_by_name_is_403(call, human, seed):
     assert (await human("GET", f"{M}/{pid}")).status_code == 200
 
 
-async def test_non_privileged_delete_unchanged(call, human, seed, kube, canary, pool):
-    pid, _ = await _protected_seed(human, seed, canary)
+async def test_non_privileged_delete_unchanged(call, human, seed):
+    pid = await seed({"env": {"K": {"value": "v"}}})
     r = await call("DELETE", f"{A}/{pid}")
     assert r.status_code == 204, r.text
     assert (await human("GET", f"{M}/{pid}")).status_code == 404
-    # the cleanup ran as before: the rows are retired and collected, their Secret versions gone
-    assert await _secret_rows(pool, pid) == []
-    assert kube.names("Secret") == []
 
 
 async def test_privileged_turned_off_then_delete_passes(call, human, seed):
@@ -1278,13 +954,11 @@ async def test_human_delete_of_privileged_unchanged(human, seed, flag, grant):
 
 
 async def test_delete_grant_flipped_between_check_and_delete_403(
-    call, human, seed, kube, canary, pool, monkeypatch
+    call, human, seed, pool, monkeypatch
 ):
     """TOCTOU: a human turns kube_cluster_access on after the route read the preset but before the
     delete. The delete re-reads the row under lock and refuses: 403, nothing deleted."""
-    pid, before = await _protected_seed(human, seed, canary)
-    secrets_before = kube.names("Secret")
-    rows_before = await _secret_rows(pool, pid)
+    pid = await seed({"env": {"K": {"value": "v"}}})
     real = admin.manageable_preset
 
     async def flip_after_read(conn, ref):
@@ -1301,10 +975,7 @@ async def test_delete_grant_flipped_between_check_and_delete_403(
     r = await call("DELETE", f"{A}/{pid}")
     assert_error(r, 403, "privileged_target")
     assert r.json()["error"]["fields"] == ["kube_cluster_access"]
-    assert canary not in r.text
     assert (await human("GET", f"{M}/{pid}")).json()["spec"]["kube_cluster_access"] is True
-    assert kube.names("Secret") == secrets_before
-    assert await _secret_rows(pool, pid) == rows_before
 
 
 def test_every_guarded_column_is_human_only():

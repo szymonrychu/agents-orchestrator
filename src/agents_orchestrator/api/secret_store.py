@@ -1,9 +1,9 @@
-"""The api's seam to the preset secret store (superleader-crud D5, D7).
+"""The api's seam to Kubernetes for webhook endpoint credentials (superleader-crud D9).
 
 The only api module that imports `agents_orchestrator.k8s` (pinned by
 `tests/test_api_sessions.py::test_api_never_imports_k8s_or_wrapper`), as `workspace.py` is for
-wrappers. Routes call the store through here; the Kubernetes client is built on first use, so an
-api that never writes a secret never needs Kubernetes access.
+wrappers. The Kubernetes client is built on first use, so an api that never writes a credential
+never needs Kubernetes access.
 """
 
 from __future__ import annotations
@@ -12,59 +12,21 @@ from fastapi import FastAPI, Request
 
 from agents_orchestrator.k8s.kube import KubeApi, LightkubeApi
 from agents_orchestrator.k8s.secrets import (
-    PresetNotFound,
-    SecretMeta,
     SecretStoreError,
-    SecretUnset,
-    StagedStale,
-    bind_staged,
-    collect_bound,
     delete_webhook_credential,
-    forget_unsaved,
-    gc,
-    has_rows,
-    list_metas,
-    promote_staged,
     put_webhook_credential,
-    reap_unreserved,
-    releasable,
-    release,
-    secret_name,
-    secret_version,
-    set_secret,
-    snapshot_versions,
-    stage_secret,
-    sync_declared,
+    webhook_secret_name,
 )
 
 __all__ = [
     "KubeApi",
-    "PresetNotFound",
-    "SecretMeta",
     "SecretStoreError",
-    "SecretUnset",
-    "StagedStale",
-    "bind_staged",
     "close_kube",
-    "collect_bound",
     "delete_webhook_credential",
-    "forget_unsaved",
-    "gc",
-    "secret_name",
-    "secret_version",
-    "has_rows",
     "kube_of",
     "kube_of_app",
-    "list_metas",
-    "promote_staged",
     "put_webhook_credential",
-    "reap_unreserved",
-    "releasable",
-    "release",
-    "set_secret",
-    "snapshot_versions",
-    "stage_secret",
-    "sync_declared",
+    "webhook_secret_name",
 ]
 
 
@@ -75,7 +37,7 @@ def kube_of(request: Request) -> KubeApi:
 
 def kube_of_app(app: FastAPI) -> KubeApi:
     """The app's Kubernetes client: the one given to `create_app`, else one built on first use.
-    Routes reach it through `kube_of`; the proposals sweeper, which has no request, directly."""
+    Routes reach it through `kube_of`."""
     state = app.state
     if state.kube is None:
         state.kube = LightkubeApi()

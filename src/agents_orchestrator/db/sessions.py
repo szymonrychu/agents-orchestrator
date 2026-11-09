@@ -20,7 +20,7 @@ from agents_orchestrator.db.projects import DEFAULT, UnknownProject
 from agents_orchestrator.db.queue import SessionBeingDeleted, enqueue_message
 from agents_orchestrator.db.start_state import start_reason, start_state
 from agents_orchestrator.inactivity import NOTICE_CLOSE, NOTICE_REMINDER, close_reason
-from agents_orchestrator.spec import SessionSpec, validate_slug
+from agents_orchestrator.spec import SessionSpec, legacy_context, validate_slug
 
 CHANNEL = "session_changed"
 
@@ -66,8 +66,9 @@ class Session:
     preset_id: uuid.UUID | None = None
     preset_name: str | None = None
     created_by_service: str | None = None
-    # {ENV_NAME: Secret name} of the protected variables, snapshotted at create
-    secret_versions: dict[str, str] = field(default_factory=dict)
+    # the vault pins by env name, taken at create: {secret, key, version} or {value}; a session
+    # created before migration 0041 may still hold legacy pins, a ps-* Secret name (str)
+    secret_versions: dict[str, Any] = field(default_factory=dict)
     # the superleader session that created it through the admin routes
     created_by_session: uuid.UUID | None = None
     # a pending self-close request from the session's leader (hive-self-close); the api sets and
@@ -97,7 +98,9 @@ def _from_row(row: dict[str, Any]) -> Session:
     return Session(
         id=row["id"],
         slug=row["slug"],
-        spec=SessionSpec.model_validate(row["spec"]),
+        spec=SessionSpec.model_validate(
+            row["spec"], context=legacy_context(row["secret_versions"])
+        ),
         generation=row["generation"],
         observed_generation=row["observed_generation"],
         desired=row["desired"],
@@ -141,10 +144,11 @@ async def create(
     preset_id: uuid.UUID | None = None,
     preset_name: str | None = None,
     created_by_service: str | None = None,
-    secret_versions: dict[str, str] | None = None,
+    secret_versions: dict[str, Any] | None = None,
     created_by_session: uuid.UUID | None = None,
     labels: list[str] | None = None,
     project: str = DEFAULT,
+    session_id: uuid.UUID | None = None,
 ) -> Session:
     validate_slug(slug)
     try:
@@ -155,7 +159,7 @@ async def create(
                 " secret_versions, created_by_session, labels, project)"
                 " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
                 (
-                    uuid.uuid4(),
+                    session_id or uuid.uuid4(),
                     slug,
                     _dump(spec),
                     preset_id,
@@ -841,7 +845,7 @@ class SpecChanged(Exception):
 class LockedSession:
     spec: dict[str, Any]  # the stored JSONB, as stored
     preset_id: uuid.UUID | None
-    secret_versions: dict[str, str]
+    secret_versions: dict[str, Any]
 
 
 async def replace_spec(
@@ -850,7 +854,6 @@ async def replace_spec(
     expected: dict[str, Any],
     spec: SessionSpec,
     recheck: Callable[[LockedSession], Awaitable[None]],
-    secret_versions: dict[str, str] | None = None,
 ) -> tuple[Session, bool]:
     """Replace the whole session spec in one transaction, under the row lock.
 
@@ -860,16 +863,8 @@ async def replace_spec(
     order within this call is the session row first; `recheck` may then take `presets` FOR SHARE
     (sessions, then presets, as `set_init_scripts`). A spec that differs from the stored one is
     written with generation + 1 and NOTIFY session_changed; an equal one writes and notifies
-    nothing.
-
-    `secret_versions` ({ENV_NAME: Secret name}, from `k8s.secrets.bind_staged` in the caller's
-    transaction) is merged into the stored map in the same UPDATE, which then keeps only the names
-    the written spec declares protected (a removed variable frees its Secret for
-    `collect_bound`, and a re-declared one needs a fresh value); a changed map is a change on
-    its own. Returns the row and whether it was written. A caller that binds holds more locks
-    before this call: the preset FOR SHARE, then the variable advisory locks (`bind_staged`),
-    then this row (presets, variables, sessions), because `set_secret` takes the preset FOR
-    UPDATE and then the variable lock; binding before the preset lock can deadlock with it.
+    nothing. The pins (`secret_versions`) are never changed here. Returns the row and whether
+    it was written.
     """
     async with conn.transaction():
         row = await _lock_row(conn, session_id)
@@ -877,22 +872,14 @@ async def replace_spec(
             raise SpecChanged(str(session_id))
         # decided before the recheck, which gets the stored dict itself
         dumped = _dump(spec)
-        stored_versions = row["secret_versions"] or {}
-        protected = {n for n, e in dumped.obj.get("env", {}).items() if e.get("protected")}
-        versions = {
-            n: s
-            for n, s in {**stored_versions, **(secret_versions or {})}.items()
-            if n in protected
-        }
-        unchanged = dumped.obj == row["spec"] and versions == stored_versions
-        await recheck(LockedSession(row["spec"], row["preset_id"], stored_versions))
+        unchanged = dumped.obj == row["spec"]
+        await recheck(LockedSession(row["spec"], row["preset_id"], row["secret_versions"] or {}))
         if unchanged:
             return _from_row(row), False
         rows = await _fetch(
             conn,
-            "UPDATE sessions SET spec = %s, secret_versions = %s, generation = generation + 1"
-            " WHERE id = %s RETURNING *",
-            (dumped, Jsonb(versions) if versions else None, session_id),
+            "UPDATE sessions SET spec = %s, generation = generation + 1 WHERE id = %s RETURNING *",
+            (dumped, session_id),
         )
         await _notify(conn, session_id)
     return rows[0], True

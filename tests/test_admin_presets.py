@@ -46,9 +46,8 @@ def call(pool, dsn, boss):
     return go
 
 
-def spec(value=None):
-    entry = {"protected": True} if value is None else {"protected": True, "value": value}
-    return {"env": {"API_KEY": entry, "PLAIN": {"value": "visible"}}}
+def spec(value="visible"):
+    return {"env": {"PLAIN": {"value": value}}}
 
 
 async def events(pool, session_id):
@@ -59,67 +58,46 @@ async def events(pool, session_id):
         return list(await cur.fetchall())
 
 
-async def test_crud_by_name_matches_the_main_port(call, canary):
-    r = await call("POST", A, json={"name": "alpha", "spec": spec(canary)})
+async def test_crud_by_name_matches_the_main_port(call):
+    r = await call("POST", A, json={"name": "alpha", "spec": spec()})
     assert r.status_code == 201, r.text
-    assert canary not in r.text
     pid = r.json()["id"]
-    entry = r.json()["spec"]["env"]["API_KEY"]
-    assert entry["protected"] and entry["set"] and entry["version"] == 1 and "value" not in entry
+    assert r.json()["spec"] == spec()
 
     got = await call("GET", f"{A}/alpha")
-    assert got.status_code == 200 and canary not in got.text
+    assert got.status_code == 200
     async with main_client(call.app) as main:
         assert got.json() == (await main.get(f"{M}/{pid}")).json()
     assert (await call("GET", f"{A}/{pid}")).json() == got.json()
     listed = await call("GET", A)
     assert [p["name"] for p in listed.json()].count("alpha") == 1
 
-    # keep-on-untouched: no value sent, version stays
-    put = await call("PUT", f"{A}/alpha", json={"name": "alpha", "spec": spec()})
+    put = await call("PUT", f"{A}/alpha", json={"name": "alpha", "spec": spec("other")})
     assert put.status_code == 200, put.text
-    assert put.json()["spec"]["env"]["API_KEY"]["version"] == 1
-    # overwrite: new version
-    put = await call("PUT", f"{A}/alpha", json={"name": "alpha", "spec": spec(canary + "2")})
-    assert put.json()["spec"]["env"]["API_KEY"]["version"] == 2
-    assert canary not in put.text
+    assert put.json()["spec"] == spec("other")
 
     copy = await call("POST", f"{A}/alpha/copy", json={"name": "beta"})
     assert copy.status_code == 201, copy.text
-    assert copy.json()["spec"]["env"]["API_KEY"]["set"] is False
+    assert copy.json()["spec"] == spec("other")
 
     assert (await call("DELETE", f"{A}/beta")).status_code == 204
     assert_error(await call("GET", f"{A}/beta"), 404, "not_found")
 
 
-async def test_secret_set_returns_metadata_only(call, canary):
-    await call("POST", A, json={"name": "gamma", "spec": spec()})
-    value = canary + "-new"
-    r = await call("PUT", f"{A}/gamma/secrets/API_KEY", json={"value": value})
-    assert r.status_code == 200, r.text
-    assert value not in r.text
-    assert r.json()["set"] is True and r.json()["version"] == 1
-    bad = await call("PUT", f"{A}/gamma/secrets/PLAIN", json={"value": value})
-    assert_error(bad, 422, "invalid_request")
-    assert value not in bad.text
-
-
 async def test_audit_line_and_event_row_carry_no_values(call, pool, boss, canary, caplog):
     caplog.set_level(logging.INFO)
     await call("POST", A, json={"name": "delta", "spec": spec(canary)})
-    await call("PUT", f"{A}/delta/secrets/API_KEY", json={"value": canary + "-2"})
     await call("GET", f"{A}/missing")
     rows = await events(pool, boss.id)
-    assert [r["type"] for r in rows] == ["admin_call"] * 3
-    first, second, third = (r["data"] for r in rows)
+    assert [r["type"] for r in rows] == ["admin_call"] * 2
+    first, second = (r["data"] for r in rows)
     assert (first["method"], first["status"]) == ("POST", 201)
     assert first["session"] == "adm-boss" and first["path"] == A
-    assert first["secrets"] == ["API_KEY"]
-    assert second["secrets"] == ["API_KEY"] and second["path"] == f"{A}/delta/secrets/API_KEY"
-    assert third["status"] == 404 and third["secrets"] == []
+    assert first["secrets"] == [] and first["fields"] == ["env.PLAIN", "name"]
+    assert second["status"] == 404 and second["secrets"] == []
     assert canary not in str(rows)
     lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("admin ")]
-    assert len(lines) == 3 and "adm-boss" in lines[0] and "API_KEY" in lines[0]
+    assert len(lines) == 2 and "adm-boss" in lines[0]
     assert canary not in " ".join(r.getMessage() for r in caplog.records)
 
 
@@ -156,7 +134,6 @@ HIDDEN_CALLS = [
     ("PUT", "{ref}", {"name": "hidden", "spec": {}}),
     ("DELETE", "{ref}", None),
     ("POST", "{ref}/copy", None),
-    ("PUT", "{ref}/secrets/API_KEY", {"value": "v"}),
 ]
 
 

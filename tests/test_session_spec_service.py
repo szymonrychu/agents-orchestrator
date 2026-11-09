@@ -5,7 +5,6 @@ real Postgres, a fake request)."""
 from __future__ import annotations
 
 import asyncio
-import logging
 import secrets as stdlib_secrets
 import uuid
 from types import SimpleNamespace
@@ -13,6 +12,7 @@ from types import SimpleNamespace
 import psycopg
 import pytest
 from factories import attach_preset
+from fastapi.exceptions import RequestValidationError
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from test_agent_session_messaging import Sess, alone, hive
@@ -23,7 +23,12 @@ from agents_orchestrator.api.errors import ApiError
 from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.db import sessions as sessions_repo
-from agents_orchestrator.spec import SessionSpec, default_cache_key, fill_resource_defaults
+from agents_orchestrator.spec import (
+    SessionSpec,
+    default_cache_key,
+    fill_resource_defaults,
+    legacy_context,
+)
 
 GRAFANA = {"type": "stdio", "command": "mise", "args": ["x", "mcp-grafana@0.1.0", "--", "-t"]}
 NEW_ARGS = ["x", "mcp-grafana@0.2.0", "--", "-t", "--disable-write"]
@@ -54,7 +59,8 @@ async def _seed(pool, settings, sess: Sess, extra: dict, *, versions: dict | Non
     """Store `extra` over the helper's replica fields as a full dump, as `sessions.create`
     would; returns the stored dict."""
     base = dict(sess.row["spec"])
-    spec = fill_resource_defaults(SessionSpec.model_validate({**base, **extra}), settings)
+    parsed = SessionSpec.model_validate({**base, **extra}, context=legacy_context(versions))
+    spec = fill_resource_defaults(parsed, settings)
     stored = spec.model_dump(mode="json", exclude_none=True)
     async with pool.connection() as conn:
         await conn.execute(
@@ -125,7 +131,7 @@ async def _refused(
     if fields is not None:
         assert request.state.preset_fields == fields
         assert exc.extra["fields"] == fields
-    if code in ("human_only_field", "privileged_target", "secret_in_spec", "secret_unset"):
+    if code in ("human_only_field", "privileged_target"):
         assert exc.extra["proposable"] is True
     if code in ("human_only_field", "privileged_target"):
         assert exc.message.endswith("; send it as a proposal: proposal_create")
@@ -153,14 +159,16 @@ async def _managed(pool, settings, slug: str, extra: dict, **kw) -> tuple[Sess, 
 async def test_own_privileged_session_replaces_mcp_args(pool, settings, superleader):
     """The use case: a kube_cluster_access, auto-mode session's leader edits its own MCP args.
     Arrays replace, the rest of the server entry is kept, generation bumps once, the source
-    preset is untouched, and a stored protected variable is resent unchanged."""
+    preset is untouched, and a legacy pin (a session created before migration 0041) and the
+    MCP server that names it stay valid and unchanged."""
     me = await alone(pool, "svc-own", superleader=superleader)
+    legacy = {"type": "stdio", "command": "c", "env": {"T": "${K}"}}
     extra = {
         "kube_cluster_access": True,
-        "wrapper": {"permission_mode": "auto", "mcp_servers": {"grafana": GRAFANA}},
-        "env": {"K": {"protected": True}},
+        "wrapper": {"permission_mode": "auto", "mcp_servers": {"grafana": GRAFANA, "k": legacy}},
     }
-    await _seed(pool, settings, me, extra, versions={"K": "agents-k-1"})
+    pins = {"K": "ps-00000000-0a0b0c-v1"}
+    await _seed(pool, settings, me, extra, versions=pins)
     preset_id = await attach_preset(pool, me.id)
     preset_before = await _preset_row(pool, preset_id)
     before = await _row(pool, me.id)
@@ -182,7 +190,9 @@ async def test_own_privileged_session_replaces_mcp_args(pool, settings, superlea
     after = await _row(pool, me.id)
     assert after["generation"] == before["generation"] + 1
     assert after["spec"]["wrapper"]["mcp_servers"]["grafana"]["args"] == NEW_ARGS
-    assert after["spec"]["env"] == {"K": {"protected": True, "expand": False}}
+    assert after["spec"]["wrapper"]["mcp_servers"]["k"] == legacy
+    async with pool.connection() as conn:
+        assert (await sessions_repo.get(conn, me.id)).secret_versions == pins
     assert request.state.preset_fields == ["wrapper.mcp_servers"]
     assert await _preset_row(pool, preset_id) == preset_before
 
@@ -378,54 +388,16 @@ async def test_fixed_field_refused(pool, settings, path, patch):
 # ---------------------------------------------------------------- protected variables
 
 
-async def test_new_protected_declaration_refused(pool, settings):
-    me = await alone(pool, "svc-new-protected")
+async def test_protected_flag_is_an_unknown_field(pool, settings):
+    """O10: `protected` left the env model; a patch carrying it fails validation, no write."""
+    me = await alone(pool, "svc-protected-flag")
     await _seed(pool, settings, me, {})
-    exc = await _refused(
-        pool,
-        settings,
-        me,
-        me,
-        {"env": {"NEW": {"protected": True}}},
-        422,
-        "secret_unset",
-        ["env.NEW"],
-    )
-    assert "NEW" in exc.message
-
-
-@pytest.mark.parametrize(
-    "patch",
-    [{"env": {"K": None}}, {"env": {"K": {"protected": False, "value": "plain"}}}],
-    ids=["remove", "unprotect"],
-)
-async def test_protected_removal_or_unprotect_refused(pool, settings, patch):
-    me = await alone(pool, "svc-unprotect")
-    await _seed(pool, settings, me, {"env": {"K": {"protected": True}}}, versions={"K": "s-1"})
-    await _refused(pool, settings, me, me, patch, 403, "human_only_field", ["env.K"])
-
-
-@pytest.mark.parametrize(
-    "patch",
-    [
-        lambda c: {"env": {"K": {"value": c}}},
-        lambda c: {"env": {"NEW": {"protected": True, "value": c}}},
-    ],
-    ids=["stored", "new"],
-)
-async def test_secret_canary_refused_and_never_echoed(pool, settings, canary, caplog, patch):
-    me = await alone(pool, "svc-canary")
-    await _seed(pool, settings, me, {"env": {"K": {"protected": True}}}, versions={"K": "s-1"})
-    caplog.set_level(logging.DEBUG)
-    exc = await _refused(pool, settings, me, me, patch(canary), 422, "secret_in_spec")
-    assert canary not in exc.message and canary not in repr(exc.extra)
-    assert canary not in caplog.text
-    async with pool.connection() as conn:
-        cur = await conn.execute(
-            "SELECT count(*) FROM events WHERE data::text LIKE %s", (f"%{canary}%",)
-        )
-        assert (await cur.fetchone())[0] == 0
-    assert canary not in str((await _row(pool, me.id))["spec"])
+    before = await _row(pool, me.id)
+    with pytest.raises(RequestValidationError) as caught:
+        await _patch(pool, settings, me, me, {"env": {"NEW": {"value": "v", "protected": True}}})
+    locs = [e["loc"] for e in caught.value.errors()]
+    assert ("body", "spec", "env", "NEW", "protected") in locs
+    assert await _row(pool, me.id) == before
 
 
 # ---------------------------------------------------------------- leader tighten-only
@@ -660,22 +632,6 @@ async def test_race_leadership_moved_403(pool, settings, monkeypatch):
 
     _between_read_and_write(monkeypatch, hand_over)
     await _refused_after_change(pool, settings, me, me, {"peers": False}, 403, "not_leader")
-
-
-async def test_race_secret_versions_dropped_422(pool, settings, monkeypatch):
-    """The spec is unchanged, so only the guards re-run on the locked row see that the
-    protected variable lost its Secret: 422 secret_unset, nothing written."""
-    me = await alone(pool, "svc-race-versions")
-    await _seed(pool, settings, me, {"env": {"K": {"protected": True}}}, versions={"K": "s-1"})
-
-    async def drop_versions():
-        await _exec(pool, "UPDATE sessions SET secret_versions = '{}' WHERE id = %s", (me.id,))
-
-    calls = _between_read_and_write(monkeypatch, drop_versions)
-    await _refused_after_change(
-        pool, settings, me, me, {"peers": False}, 422, "secret_unset", ["env.K"]
-    )
-    assert len(calls) == 1
 
 
 async def test_race_session_deleting_409(pool, settings, monkeypatch):
