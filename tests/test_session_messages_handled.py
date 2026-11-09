@@ -85,6 +85,20 @@ async def test_handover_marks_handled(pool, dsn):
     assert await handled_ids(pool) == {m1}
 
 
+async def test_non_leader_handover_marks_nothing(pool, dsn):
+    mine = await hive(pool, "hd-mine6")
+    peer = await alone(pool, "hd-peer6")
+    m1 = await incoming(pool, mine, peer)
+    async with client_for(_app(pool, dsn), mine.member_ip) as http:
+        r = await http.post(
+            "/agent/v1/leadership/handover",
+            json={"reason": "context is full", "epoch": 1, "handled": [m1]},
+            headers=headers(mine.id),
+        )
+    assert (r.status_code, r.json()["error"]["code"]) == (409, "not_leader")
+    assert await handled_ids(pool) == set()
+
+
 async def test_handled_max_50(pool, dsn):
     mine = await hive(pool, "hd-mine5")
     peer = await alone(pool, "hd-peer5")
