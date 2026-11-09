@@ -299,6 +299,30 @@ async def test_successor_needs_token_headroom(pool):
     assert change is not None and change.agent_id == a2["id"]
 
 
+async def test_headroom_margin_clamped_on_small_window(pool):
+    # compaction 40 on a 200k window: hard 70k, margin min(50k, 35k) = 35k, so 30k used qualifies
+    # (an unclamped 50k margin would make the limit 20k and nobody would qualify)
+    c, (a0, a1, a2) = await hive(pool)
+    await run(
+        pool,
+        "UPDATE sessions SET spec = spec || jsonb_build_object('auto_compact_pct', 40)"
+        " WHERE id = %s",
+        (c["id"],),
+    )
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
+    await status(pool, a1["id"], "idle", 15)
+    await status(pool, a2["id"], "idle", 5)
+    await run(
+        pool,
+        "UPDATE agent_status SET context_window_tokens = 200000, context_used_tokens ="
+        " CASE agent_id WHEN %s THEN 30000 ELSE 100000 END WHERE agent_id IN (%s, %s)",
+        (a1["id"], a1["id"], a2["id"]),
+    )
+    await request(pool, c["id"], "handover", a0["id"], None, "done", 3)
+    change = await lpass(pool, c["id"])
+    assert change is not None and change.agent_id == a1["id"]
+
+
 async def test_headroom_percent_fallback(pool):
     # tokens unknown: hard 20% less 10 pct of headroom leaves 10%
     c, (a0, a1, a2) = await hive(pool)

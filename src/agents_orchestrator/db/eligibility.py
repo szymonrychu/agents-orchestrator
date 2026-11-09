@@ -74,10 +74,13 @@ HARD_PCT = f"(coalesce((c.spec->>'auto_compact_pct')::int, %(compact)s) - {FIRM_
 # `s` (LEFT JOINed agent_status) and `c` (sessions).
 MIN_HEADROOM_TOKENS = 50000
 MIN_HEADROOM_PCT = 10
+_HARD_TOKENS = f"({HARD_PCT} / 100.0 * s.context_window_tokens)"
+# The margin is clamped to half the hard limit, so a small window or a low compaction point never
+# drives the threshold negative.
 HEADROOM = (
     "(CASE WHEN s.context_used_tokens IS NOT NULL AND s.context_window_tokens > 0"
-    f" THEN s.context_used_tokens <= {HARD_PCT} / 100.0 * s.context_window_tokens"
-    f" - {MIN_HEADROOM_TOKENS}"
+    f" THEN s.context_used_tokens <= {_HARD_TOKENS}"
+    f" - least({MIN_HEADROOM_TOKENS}, 0.5 * {_HARD_TOKENS})"
     f" ELSE coalesce(s.context_pct, 0) <= {HARD_PCT} - {MIN_HEADROOM_PCT} END)"
 )
 
