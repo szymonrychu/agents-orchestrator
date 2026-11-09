@@ -81,6 +81,9 @@ def app(pool, dsn, vault):
             "vault_url": "http://vault",
             "vault_token": "t",
             "kube_cluster_access_enabled": True,
+            "docker_image": "docker:27-dind",
+            "kube_namespace_access_namespaces": ["media"],
+            "kube_namespace_access_tiers": ["read"],
         }
     )
     return create_app(settings, pool, vault_transport=httpx.MockTransport(vault.handler))
@@ -472,6 +475,30 @@ async def test_vault_list_marks_privileged_attachments(app, call, vault):
         (kube["id"], True),
         (ns["id"], True),
     ]
+
+
+async def test_vault_list_privileged_marks_docker_and_namespace_access_flags(app, call, vault):
+    docker = await make(app, "docker-p", docker=True)
+    ns = await make(app, "nsacc-p", kube_namespace_access={"media": ["read"]})
+    vault.listing = [
+        listed(E_OPEN, "multi", [], [att(docker["id"], "docker-p"), att(ns["id"], "nsacc-p")])
+    ]
+    r = await call("GET", V)
+    assert r.status_code == 200, r.text
+    got = r.json()["entries"][0]["attachments"]
+    assert [(a["preset_id"], a["privileged"]) for a in got] == [
+        (docker["id"], True),
+        (ns["id"], True),
+    ]
+
+
+async def test_vault_list_null_attachments_stay_null_and_hide_values(call, vault):
+    vault.listing = [listed(E_OPEN, "null-att", [], None)]
+    r = await call("GET", V)
+    assert r.status_code == 200, r.text
+    entry = r.json()["entries"][0]
+    assert entry["attachments"] is None
+    assert [e["value"] for e in entry["envs"]] == [None, None]
 
 
 async def test_vault_list_to_reattach_names_manageable_presets_only(app, call, pool):

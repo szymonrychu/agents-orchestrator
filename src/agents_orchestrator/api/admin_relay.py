@@ -566,9 +566,10 @@ def _scoped_entry(
     attachments = entry.get("attachments")
     if isinstance(attachments, list):
         attachments = [
-            a for a in attachments if isinstance(a, dict) and str(a.get("preset_id")) in visible
+            {**a, "privileged": str(a["preset_id"]) in marked}
+            for a in attachments
+            if isinstance(a, dict) and str(a.get("preset_id")) in visible
         ]
-        attachments = [{**a, "privileged": str(a.get("preset_id")) in marked} for a in attachments]
         entry = {**entry, "attachments": attachments}
     elif attachments is not None:
         raise _VAULT_SHAPE
