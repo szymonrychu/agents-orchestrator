@@ -82,7 +82,9 @@ async def preset(pool, kube, canary):
     spec = {"docker": True, "env": {"TOKEN": {"protected": True}, "PLAIN": {"value": "plain"}}}
     async with pool.connection() as conn:
         found = await presets_repo.create(conn, "infra", spec, superleader_manageable=True)
-        await store.set_secret(conn, kube, NS, found.id, "TOKEN", SecretStr(canary + "-live"))
+        await store.set_secret(
+            conn, kube, NS, store.Owner.preset(found.id), "TOKEN", SecretStr(canary + "-live")
+        )
     return found
 
 
@@ -328,7 +330,7 @@ async def _staged_without_secret(pool, kube) -> list:
         "SELECT preset_id, name, version FROM change_proposal_secrets WHERE state = 'staged'",
     )
     present = {k[2] for k in kube.objects if k[0] == "Secret"}
-    return [r for r in rows if store.secret_name(*r) not in present]
+    return [r for r in rows if store.secret_name(store.Owner.preset(r[0]), *r[1:]) not in present]
 
 
 def _release_after_commit(pool, preset_id, seen: list):
@@ -357,7 +359,7 @@ async def test_revise_failing_after_the_release_leaves_a_consistent_proposal(
     staged Secret is released only once the new revision has committed and its locks are gone.
     A request that then fails leaves r2 current with its own Secret, r1 released."""
     view = await filed(app, boss, secrets={"TOKEN": canary})
-    r1, r2 = (store.secret_name(preset.id, "TOKEN", v) for v in (2, 3))
+    r1, r2 = (store.secret_name(store.Owner.preset(preset.id), "TOKEN", v) for v in (2, 3))
     seen: list = []
     monkeypatch.setattr(secret_store, "release", _release_after_commit(pool, preset.id, seen))
     monkeypatch.setattr(proposals, "get_view", _broken_view)
@@ -388,7 +390,7 @@ async def test_revise_failing_before_the_commit_keeps_the_previous_staged_secret
     """A revise that fails inside its transaction (after staging) rolls back to r1 with r1's
     staged Secret intact; r2's staged Secret is deleted again and nothing is released."""
     view = await filed(app, boss, secrets={"TOKEN": canary})
-    r1, r2 = (store.secret_name(preset.id, "TOKEN", v) for v in (2, 3))
+    r1, r2 = (store.secret_name(store.Owner.preset(preset.id), "TOKEN", v) for v in (2, 3))
     real_stage = proposals._stage
 
     async def stage_then_fail(*args, **kwargs):
@@ -427,7 +429,7 @@ async def test_withdraw_releases_only_after_the_commit(
     """Withdraw commits `withdrawn` before any staged Secret goes: a request that fails after the
     release leaves a withdrawn proposal, never an open one whose staged Secret is gone."""
     view = await filed(app, boss, secrets={"TOKEN": canary})
-    staged = store.secret_name(preset.id, "TOKEN", 2)
+    staged = store.secret_name(store.Owner.preset(preset.id), "TOKEN", 2)
     seen: list = []
     monkeypatch.setattr(secret_store, "release", _release_after_commit(pool, preset.id, seen))
     monkeypatch.setattr(proposals, "get_view", _broken_view)
@@ -446,7 +448,7 @@ async def test_withdraw_that_fails_leaves_the_staged_secret(
 ):
     """A withdraw whose transaction fails releases nothing: still open, Secret and row intact."""
     view = await filed(app, boss, secrets={"TOKEN": canary})
-    staged = store.secret_name(preset.id, "TOKEN", 2)
+    staged = store.secret_name(store.Owner.preset(preset.id), "TOKEN", 2)
 
     async def broken_transition(*args, **kwargs):
         raise RuntimeError("connection lost")
@@ -498,7 +500,7 @@ async def test_concurrent_stagings_on_one_preset_do_not_deadlock(
     B and commits before it releases A, so it never waits on A while holding B."""
     env = {"A": {"protected": True}, "B": {"protected": True}}
     first = await filed(app, boss, patch={"env": env}, secrets={"A": canary})
-    old_a = store.secret_name(preset.id, "A", 1)
+    old_a = store.secret_name(store.Owner.preset(preset.id), "A", 1)
     async with pool.connection() as blocker, blocker.transaction():
         await blocker.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"{preset.id}/B",)
@@ -746,7 +748,7 @@ async def test_regular_leader_proposes_a_grant_and_a_value_for_its_own_session(
     items = {i["path"]: i for i in view["revisions"][0]["items"]}
     assert sorted(items) == ["env.TOKEN", "session_messaging"]
     assert (items["session_messaging"]["grant"], items["env.TOKEN"]["secret"]) == (True, "set")
-    assert store.secret_name(preset.id, "TOKEN", 2) in kube.names("Secret")
+    assert store.secret_name(store.Owner.preset(preset.id), "TOKEN", 2) in kube.names("Secret")
     after = await _rows(pool, q, (lead.id,))
     assert "session_messaging" not in after[0][0]  # filing applies nothing
     assert after == before

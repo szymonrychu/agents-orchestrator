@@ -84,7 +84,7 @@ async def test_stage_writes_the_next_version_with_the_value_only_in_string_data(
     pid = await make_preset(pool)
     await put(pool, kube, pid, "TOK", canary + "live")
     got = await stage(pool, kube, pid, "TOK", canary, proposal_id=7, revision=2)
-    assert got == store.secret_name(pid, "TOK", 2)
+    assert got == store.secret_name(store.Owner.preset(pid), "TOK", 2)
     applied = [a for a in kube.applies if a.kind == "Secret" and a.name == got]
     assert len(applied) == 1
     obj = applied[0].obj
@@ -97,13 +97,15 @@ async def test_stage_writes_the_next_version_with_the_value_only_in_string_data(
     assert canary not in repr({k: v for k, v in obj.items() if k != "stringData"})
     assert await reservations(pool, pid) == [("TOK", 2, 7, 2, "staged")]
     async with pool.connection() as conn:
-        live = await store.list_secrets(conn, pid)
+        live = await store.list_metas(conn, store.Owner.preset(pid))
     assert [(m.name, m.version) for m in live] == [("TOK", 1)]  # staging does not go live
 
 
 async def test_stage_of_an_unset_name_starts_at_one(pool, kube, canary):
     pid = await make_preset(pool)
-    assert await stage(pool, kube, pid, "NEW", canary) == store.secret_name(pid, "NEW", 1)
+    assert await stage(pool, kube, pid, "NEW", canary) == store.secret_name(
+        store.Owner.preset(pid), "NEW", 1
+    )
     assert await reservations(pool, pid) == [("NEW", 1, 7, 1, "staged")]
 
 
@@ -112,13 +114,16 @@ async def test_second_stage_of_a_name_takes_the_next_number(pool, kube, canary):
     await put(pool, kube, pid, "TOK", canary)
     first = await stage(pool, kube, pid, "TOK", canary, proposal_id=7)
     second = await stage(pool, kube, pid, "TOK", canary, proposal_id=8)
-    assert (first, second) == (store.secret_name(pid, "TOK", 2), store.secret_name(pid, "TOK", 3))
+    assert (first, second) == (
+        store.secret_name(store.Owner.preset(pid), "TOK", 2),
+        store.secret_name(store.Owner.preset(pid), "TOK", 3),
+    )
     assert [r[1] for r in await reservations(pool, pid)] == [2, 3]
 
 
 async def test_stage_replaces_a_leftover_of_that_name(pool, kube, canary):
     pid = await make_preset(pool)
-    leftover = store.secret_name(pid, "TOK", 1)
+    leftover = store.secret_name(store.Owner.preset(pid), "TOK", 1)
     kube.seed({"apiVersion": "v1", "kind": "Secret", "metadata": {"name": leftover}})
     assert await stage(pool, kube, pid, "TOK", canary) == leftover
     assert ("Secret", NS, leftover) in kube.deletes
@@ -128,7 +133,11 @@ async def test_stage_replaces_a_leftover_of_that_name(pool, kube, canary):
 
 async def test_stage_kube_error_is_generic_and_reserves_nothing(pool, kube, canary):
     pid = await make_preset(pool)
-    kube.fail("Secret", store.secret_name(pid, "TOK", 1), KubeError(f"422: body {canary}"))
+    kube.fail(
+        "Secret",
+        store.secret_name(store.Owner.preset(pid), "TOK", 1),
+        KubeError(f"422: body {canary}"),
+    )
     with pytest.raises(store.SecretStoreError) as err:
         await stage(pool, kube, pid, "TOK", canary)
     assert canary not in str(err.value) and canary not in repr(err.value)
@@ -144,10 +153,10 @@ async def test_promote_makes_the_reserved_version_live_and_gc_collects_the_previ
     staged = await stage(pool, kube, pid, "TOK", canary + "s")
     assert await promote(pool, pid, "TOK") == 2
     async with pool.connection() as conn:
-        live = await store.list_secrets(conn, pid)
+        live = await store.list_metas(conn, store.Owner.preset(pid))
         assert [(m.name, m.version) for m in live] == [("TOK", 2)]
         assert await reservations(pool, pid) == []
-        await store.gc(conn, kube, NS, preset_id=pid)
+        await store.gc(conn, kube, NS, owner=store.Owner.preset(pid))
     assert set(secret_objects(kube)) == {staged}
 
 
@@ -158,13 +167,13 @@ async def test_promote_revives_a_retired_name(pool, kube, canary):
     async with pool.connection() as conn:
         await conn.execute(
             "UPDATE sessions SET secret_versions = %s WHERE id = %s",
-            (Jsonb({"TOK": store.secret_name(pid, "TOK", 1)}), s["id"]),
+            (Jsonb({"TOK": store.secret_name(store.Owner.preset(pid), "TOK", 1)}), s["id"]),
         )
         await store.sync_declared(conn, kube, NS, pid, [])
     await stage(pool, kube, pid, "TOK", canary)
     assert await promote(pool, pid, "TOK") == 2
     async with pool.connection() as conn:
-        assert [m.version for m in await store.list_secrets(conn, pid)] == [2]
+        assert [m.version for m in await store.list_metas(conn, store.Owner.preset(pid))] == [2]
 
 
 async def test_promote_at_or_below_the_live_version_is_stale_and_writes_nothing(pool, kube, canary):
@@ -175,7 +184,7 @@ async def test_promote_at_or_below_the_live_version_is_stale_and_writes_nothing(
     with pytest.raises(store.StagedStale):
         await promote(pool, pid, "TOK")
     async with pool.connection() as conn:
-        assert [m.version for m in await store.list_secrets(conn, pid)] == [3]
+        assert [m.version for m in await store.list_metas(conn, store.Owner.preset(pid))] == [3]
     assert await reservations(pool, pid) == [("TOK", 2, 7, 1, "staged")]
 
 
@@ -188,7 +197,7 @@ async def test_promote_with_the_wrong_proposal_or_revision_raises(
     with pytest.raises(store.StagedStale):
         await promote(pool, pid, "TOK", proposal_id=proposal_id, revision=revision)
     async with pool.connection() as conn:
-        assert await store.list_secrets(conn, pid) == []
+        assert await store.list_metas(conn, store.Owner.preset(pid)) == []
     assert await reservations(pool, pid) == [("TOK", 1, 7, 1, "staged")]
 
 
@@ -292,7 +301,7 @@ async def test_concurrent_stage_and_set_never_share_a_version(pool, kube, canary
             await lock_waiter(pool)
             assert not writer.done()
         meta = await writer
-    assert staged == store.secret_name(pid, "TOK", 2)
+    assert staged == store.secret_name(store.Owner.preset(pid), "TOK", 2)
     assert meta.version == 3
     results = await asyncio.gather(
         *(stage(pool, kube, pid, "TOK", canary, proposal_id=10 + i) for i in range(3)),
@@ -314,7 +323,7 @@ async def test_release_racing_a_promote_keeps_the_promoted_secret(pool, kube, ca
         assert await releasing == []
     assert staged in secret_objects(kube)  # the now live version survives
     async with pool.connection() as conn:
-        assert [m.version for m in await store.list_secrets(conn, pid)] == [1]
+        assert [m.version for m in await store.list_metas(conn, store.Owner.preset(pid))] == [1]
     assert await reservations(pool, pid) == []
 
 
@@ -344,13 +353,20 @@ async def test_reap_deletes_unreserved_versions_up_to_the_probe_depth(pool, kube
             (Jsonb({"env": {"NEW": {"protected": True}, "PLAIN": {"value": "x"}}}), pid),
         )
     top = 2 + store.ORPHAN_DEPTH
-    orphans = [store.secret_name(pid, "TOK", 3), store.secret_name(pid, "TOK", top)]
-    orphans.append(store.secret_name(pid, "NEW", 1))
-    beyond = store.secret_name(pid, "TOK", top + 1)
+    orphans = [
+        store.secret_name(store.Owner.preset(pid), "TOK", 3),
+        store.secret_name(store.Owner.preset(pid), "TOK", top),
+    ]
+    orphans.append(store.secret_name(store.Owner.preset(pid), "NEW", 1))
+    beyond = store.secret_name(store.Owner.preset(pid), "TOK", top + 1)
     for full in [*orphans, beyond]:
         await store._write(kube, NS, full, SecretStr(canary), {store.PROPOSAL_LABEL: "9"})
     assert sorted(await store.reap_unreserved(pool, kube, NS)) == sorted(orphans)
-    assert set(secret_objects(kube)) == {store.secret_name(pid, "TOK", live), staged, beyond}
+    assert set(secret_objects(kube)) == {
+        store.secret_name(store.Owner.preset(pid), "TOK", live),
+        staged,
+        beyond,
+    }
 
 
 async def _bound_by_replace(pool, kube, value):
@@ -380,8 +396,11 @@ async def test_gc_keeps_a_version_bound_through_replace_spec(pool, kube, canary)
     s, pid, bound = await _bound_by_replace(pool, kube, canary)
     await put(pool, kube, pid, "TOK", canary + "next")  # v3 live; gc runs for TOK
     async with pool.connection() as conn:
-        await store.gc(conn, kube, NS, preset_id=pid)
-    assert set(secret_objects(kube)) == {bound, store.secret_name(pid, "TOK", 3)}
+        await store.gc(conn, kube, NS, owner=store.Owner.preset(pid))
+    assert set(secret_objects(kube)) == {
+        bound,
+        store.secret_name(store.Owner.preset(pid), "TOK", 3),
+    }
     assert await reservations(pool, pid) == [("TOK", 2, 7, 1, "bound")]
 
 

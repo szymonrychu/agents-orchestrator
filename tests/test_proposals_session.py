@@ -77,7 +77,9 @@ async def preset(pool, kube, canary):
         found = await presets_repo.create(
             conn, "infra", {"env": {"TOKEN": {"protected": True}}}, superleader_manageable=True
         )
-        await store.set_secret(conn, kube, NS, found.id, "TOKEN", SecretStr(canary + "-live"))
+        await store.set_secret(
+            conn, kube, NS, store.Owner.preset(found.id), "TOKEN", SecretStr(canary + "-live")
+        )
     kube.reset_records()
     return found
 
@@ -94,7 +96,11 @@ async def target(pool, settings, preset):
     """A foreign privileged hive (2 replicas) of the manageable preset, running TOKEN v1."""
     sess = await hive(pool, SLUG)
     await _seed(
-        pool, settings, sess, EXTRA, versions={"TOKEN": store.secret_name(preset.id, "TOKEN", 1)}
+        pool,
+        settings,
+        sess,
+        EXTRA,
+        versions={"TOKEN": store.secret_name(store.Owner.preset(preset.id), "TOKEN", 1)},
     )
     await _attach(pool, sess.id, preset.id)
     return sess
@@ -178,7 +184,7 @@ async def test_create_stages_the_value_in_the_preset_family_and_records_items(
         None,
         {"grafana": GRAFANA},
     )
-    staged = store.secret_name(preset.id, "TOKEN", 2)
+    staged = store.secret_name(store.Owner.preset(preset.id), "TOKEN", 2)
     assert [a.name for a in kube.applied("Secret")] == [staged]
     assert await _reservations(pool, preset.id) == [("TOKEN", 2, view.id, 1, "staged")]
     assert await _row(pool, target.id) == before
@@ -213,7 +219,7 @@ async def test_hidden_or_unknown_session_is_404(pool, kube, settings, boss, pres
                 secrets={"TOKEN": canary},
             )
         _error(exc, 404, "not_found")
-    assert _secrets(kube) == {store.secret_name(preset.id, "TOKEN", 1)}
+    assert _secrets(kube) == {store.secret_name(store.Owner.preset(preset.id), "TOKEN", 1)}
 
 
 @pytest.mark.parametrize("patch", [{"replicas": 1}, {"workdir": "other"}])
@@ -332,7 +338,7 @@ async def test_approve_writes_the_spec_binds_the_secret_and_bumps_generation_onc
     assert generation_after == generation + 1
     assert spec["wrapper"]["mcp_servers"] == {"grafana": GRAFANA}
     assert spec["kube_cluster_access"] is True and spec["replicas"] == spec_before["replicas"]
-    staged = store.secret_name(preset.id, "TOKEN", 2)
+    staged = store.secret_name(store.Owner.preset(preset.id), "TOKEN", 2)
     assert versions == {"TOKEN": staged}
     assert await _reservations(pool, preset.id) == [("TOKEN", 2, view.id, 1, "bound")]
     assert staged in _secrets(kube)
@@ -342,7 +348,7 @@ async def test_approve_writes_the_spec_binds_the_secret_and_bumps_generation_onc
         == preset_before
     )
     async with pool.connection() as conn:
-        live = await store.list_secrets(conn, preset.id)
+        live = await store.list_metas(conn, store.Owner.preset(preset.id))
     assert [(m.name, m.version) for m in live] == [("TOKEN", 1)]
     [text] = await _notices(pool, boss.id)
     assert text.startswith(f"Proposal P-{view.id} r1 (session {SLUG}) was reviewed: applied ")
@@ -363,7 +369,7 @@ async def test_partial_approve_writes_only_the_approved_path_and_releases_the_va
     assert spec["wrapper"]["mcp_servers"] == {"grafana": GRAFANA}
     assert versions == versions_before and generation_after == generation + 1
     assert await _reservations(pool, preset.id) == []
-    assert store.secret_name(preset.id, "TOKEN", 2) not in _secrets(kube)
+    assert store.secret_name(store.Owner.preset(preset.id), "TOKEN", 2) not in _secrets(kube)
     await _assert_nowhere(pool, canary, done)
 
 
@@ -381,7 +387,7 @@ async def test_a_scale_between_create_and_review_is_stale_and_writes_nothing(
     assert await _row(pool, target.id) == before
     assert await _status(pool, view.id) == "stale"
     assert await _reservations(pool, preset.id) == []
-    assert store.secret_name(preset.id, "TOKEN", 2) not in _secrets(kube)
+    assert store.secret_name(store.Owner.preset(preset.id), "TOKEN", 2) not in _secrets(kube)
     [text] = await _notices(pool, boss.id)
     assert "is stale: the session changed" in text
     await _assert_nowhere(pool, canary)
@@ -475,7 +481,7 @@ async def test_deny_all_writes_nothing_and_releases(
     assert done.status == "denied"
     assert await _row(pool, target.id) == before
     assert await _reservations(pool, preset.id) == []
-    assert store.secret_name(preset.id, "TOKEN", 2) not in _secrets(kube)
+    assert store.secret_name(store.Owner.preset(preset.id), "TOKEN", 2) not in _secrets(kube)
 
 
 async def test_revise_rebases_and_releases_the_old_value_and_withdraw_releases(
@@ -490,7 +496,7 @@ async def test_revise_rebases_and_releases_the_old_value_and_withdraw_releases(
     )
     assert (revised.status, revised.revision, revised.stale) == ("open", 2, False)
     assert await _reservations(pool, preset.id) == [("TOKEN", 3, view.id, 2, "staged")]
-    assert store.secret_name(preset.id, "TOKEN", 2) not in _secrets(kube)
+    assert store.secret_name(store.Owner.preset(preset.id), "TOKEN", 2) not in _secrets(kube)
     done = await _withdraw(pool, kube, settings, boss, view.id)
     assert done.status == "withdrawn"
     assert await _reservations(pool, preset.id) == []
@@ -595,7 +601,7 @@ async def test_sweeper_marks_a_gone_session_target_gone_and_releases(
     await proposal_sweep.sweep_once(pool, lambda: kube, settings)
     assert await _status(pool, view.id) == "target_gone"
     assert await _reservations(pool, preset.id) == []
-    assert store.secret_name(preset.id, "TOKEN", 2) not in _secrets(kube)
+    assert store.secret_name(store.Owner.preset(preset.id), "TOKEN", 2) not in _secrets(kube)
     [text] = await _notices(pool, boss.id)
     assert "was closed" in text
 

@@ -32,7 +32,9 @@ async def preset_with_env(pool, name="p"):
 
 async def put(pool, kube, preset_id, value):
     async with pool.connection() as conn:
-        return await store.set_secret(conn, kube, NS, preset_id, "API_KEY", SecretStr(value))
+        return await store.set_secret(
+            conn, kube, NS, store.Owner.preset(preset_id), "API_KEY", SecretStr(value)
+        )
 
 
 async def stored_versions(pool, slug):
@@ -69,13 +71,15 @@ async def test_create_snapshots_the_current_secret_version(pool, dsn):
         r = await http.post(C, json={"preset_id": str(preset.id), "slug": "second"})
         assert r.status_code == 201, r.text
     assert await stored_versions(pool, "first") == {
-        "API_KEY": store.secret_name(preset.id, "API_KEY", 1)
+        "API_KEY": store.secret_name(store.Owner.preset(preset.id), "API_KEY", 1)
     }
     assert await stored_versions(pool, "second") == {
-        "API_KEY": store.secret_name(preset.id, "API_KEY", 2)
+        "API_KEY": store.secret_name(store.Owner.preset(preset.id), "API_KEY", 2)
     }
     # the first session still names v1, so a rotation never deleted it
-    assert store.secret_name(preset.id, "API_KEY", 1) in {k[2] for k in kube.objects}
+    assert store.secret_name(store.Owner.preset(preset.id), "API_KEY", 1) in {
+        k[2] for k in kube.objects
+    }
 
 
 async def test_session_row_loads_its_snapshot(pool, dsn):
@@ -86,7 +90,9 @@ async def test_session_row_loads_its_snapshot(pool, dsn):
         made = (await http.post(C, json={"preset_id": str(preset.id), "slug": "loaded"})).json()
     async with pool.connection() as conn:
         session = await sessions_repo.get_by_slug(conn, made["slug"])
-    assert session.secret_versions == {"API_KEY": store.secret_name(preset.id, "API_KEY", 1)}
+    assert session.secret_versions == {
+        "API_KEY": store.secret_name(store.Owner.preset(preset.id), "API_KEY", 1)
+    }
     assert SessionSpec.model_validate(made["spec"]).protected_env == ["API_KEY"]
 
 
@@ -96,9 +102,9 @@ async def test_rotation_waits_for_an_uncommitted_create_so_gc_keeps_its_version(
     kube = FakeKube(namespace=NS)
     preset = await preset_with_env(pool)
     await put(pool, kube, preset.id, stdlib_secrets.token_hex(8))
-    v1 = store.secret_name(preset.id, "API_KEY", 1)
+    v1 = store.secret_name(store.Owner.preset(preset.id), "API_KEY", 1)
     async with pool.connection() as conn, conn.transaction():
-        names = await store.snapshot_versions(conn, preset.id, ["API_KEY"])
+        names = await store.snapshot_versions(conn, store.Owner.preset(preset.id), ["API_KEY"])
         assert names == {"API_KEY": v1}
         rotation = asyncio.create_task(put(pool, kube, preset.id, stdlib_secrets.token_hex(8)))
         await asyncio.sleep(0.5)
@@ -126,12 +132,12 @@ async def test_gc_never_deletes_a_version_a_session_snapshots_after_it_read_the_
                 conn,
                 kube,
                 NS,
-                preset.id,
+                store.Owner.preset(preset.id),
                 "API_KEY",
                 SecretStr(stdlib_secrets.token_hex(8)),
                 collect=False,
             )
-    v2 = store.secret_name(preset.id, "API_KEY", 2)
+    v2 = store.secret_name(store.Owner.preset(preset.id), "API_KEY", 2)
     real = store._referenced
 
     async def referenced_then_create_and_rotate(conn):
@@ -143,11 +149,17 @@ async def test_gc_never_deletes_a_version_a_session_snapshots_after_it_read_the_
                 (Jsonb({"env": ENV}), Jsonb({"API_KEY": v2})),
             )
             await store.set_secret(
-                other, kube, NS, preset.id, "API_KEY", SecretStr("x" * 8), collect=False
+                other,
+                kube,
+                NS,
+                store.Owner.preset(preset.id),
+                "API_KEY",
+                SecretStr("x" * 8),
+                collect=False,
             )
         return names
 
     monkeypatch.setattr(store, "_referenced", referenced_then_create_and_rotate)
     async with pool.connection() as conn:
-        await store.gc(conn, kube, NS, preset_id=preset.id)
+        await store.gc(conn, kube, NS, owner=store.Owner.preset(preset.id))
     assert v2 in {k[2] for k in kube.objects}

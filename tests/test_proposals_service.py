@@ -88,7 +88,9 @@ async def preset(pool, kube, canary):
     }
     async with pool.connection() as conn:
         found = await presets_repo.create(conn, "infra", spec, superleader_manageable=True)
-        await store.set_secret(conn, kube, NS, found.id, "TOKEN", SecretStr(canary + "-live"))
+        await store.set_secret(
+            conn, kube, NS, store.Owner.preset(found.id), "TOKEN", SecretStr(canary + "-live")
+        )
     kube.reset_records()
     return found
 
@@ -197,7 +199,7 @@ async def test_create_stages_the_value_and_records_redacted_items(
     assert (mcp.security, mcp.grant, mcp.secret) == (True, False, None)
     assert (mcp.before, mcp.after) == (None, {"grafana": GRAFANA})
     # one staged Secret, the value only in its stringData
-    staged = store.secret_name(preset.id, "TOKEN", 2)
+    staged = store.secret_name(store.Owner.preset(preset.id), "TOKEN", 2)
     assert [a.name for a in kube.applied("Secret")] == [staged]
     assert kube.applied("Secret")[0].obj["stringData"] == {"value": canary}
     assert staged in _secrets(kube)
@@ -206,7 +208,7 @@ async def test_create_stages_the_value_and_records_redacted_items(
     after = await _rows(pool, "SELECT spec, updated_at FROM presets WHERE id = %s", (preset.id,))
     assert after == before
     async with pool.connection() as conn:
-        live = await store.list_secrets(conn, preset.id)
+        live = await store.list_metas(conn, store.Owner.preset(preset.id))
     assert [(m.name, m.version) for m in live] == [("TOKEN", 1)]
     # the audit gets names and paths only
     assert request.state.admin_secrets == ["TOKEN"]
@@ -226,7 +228,7 @@ async def test_a_new_protected_variable_is_a_set_item(pool, kube, settings, boss
     [item] = view.revisions[0].items
     assert (item.path, item.secret, item.before) == ("env.NEW", "set", None)
     assert item.after == {"protected": True, "expand": False}
-    assert store.secret_name(preset.id, "NEW", 1) in _secrets(kube)
+    assert store.secret_name(store.Owner.preset(preset.id), "NEW", 1) in _secrets(kube)
     await _assert_nowhere(pool, canary, view)
 
 
@@ -381,7 +383,10 @@ async def test_a_kube_failure_while_staging_leaves_no_rows_and_deletes_written_s
 ):
     env = {"A": {"protected": True}, "B": {"protected": True}}
     kube.fail(
-        "Secret", store.secret_name(preset.id, "B", 1), KubeError(f"500 {canary}"), verbs=["patch"]
+        "Secret",
+        store.secret_name(store.Owner.preset(preset.id), "B", 1),
+        KubeError(f"500 {canary}"),
+        verbs=["patch"],
     )
     with pytest.raises(ApiError) as exc:
         await _create(
@@ -393,7 +398,7 @@ async def test_a_kube_failure_while_staging_leaves_no_rows_and_deletes_written_s
             secrets={"A": canary, "B": canary},
         )
     _error(exc, 502, "secret_store_failed")
-    written = store.secret_name(preset.id, "A", 1)
+    written = store.secret_name(store.Owner.preset(preset.id), "A", 1)
     assert written in [a.name for a in kube.applied("Secret")]
     assert written not in _secrets(kube)  # deleted again after the rollback
     assert await _rows(pool, "SELECT id FROM change_proposals") == []
@@ -422,7 +427,7 @@ async def test_a_rollback_after_staging_deletes_the_staged_secrets(
             pool, kube, settings, boss, patch={"env": env}, secrets={"A": canary, "B": canary}
         )
     assert calls == ["A", "B"]
-    written = store.secret_name(preset.id, "A", 1)
+    written = store.secret_name(store.Owner.preset(preset.id), "A", 1)
     assert written in [a.name for a in kube.applied("Secret")]
     assert written not in _secrets(kube)
     assert await _rows(pool, "SELECT id FROM change_proposals") == []
@@ -436,7 +441,7 @@ async def test_rollback_cleanup_keeps_a_version_a_concurrent_set_made_live(
     `set_secret` takes v2, rewrites the Secret and commits before the cleanup runs. The cleanup
     rechecks under the variable lock and keeps the now-live Secret."""
     real_stage, real_forget = secret_store.stage_secret, proposals.presets_api.forget
-    live_v2 = store.secret_name(preset.id, "TOKEN", 2)
+    live_v2 = store.secret_name(store.Owner.preset(preset.id), "TOKEN", 2)
 
     async def stage_then_fail(*args, **kwargs):
         if args[4] == "ZED":  # TOKEN (sorted first) is staged, then the transaction fails
@@ -447,7 +452,12 @@ async def test_rollback_cleanup_keeps_a_version_a_concurrent_set_made_live(
         assert versions == [(preset.id, "TOKEN", 2)]
         async with pool.connection() as other:
             meta = await store.set_secret(
-                other, kube, NS, preset.id, "TOKEN", SecretStr(canary + "-rotated")
+                other,
+                kube,
+                NS,
+                store.Owner.preset(preset.id),
+                "TOKEN",
+                SecretStr(canary + "-rotated"),
             )
         assert meta.version == 2
         await real_forget(conn, kube_, namespace, versions)
@@ -580,8 +590,8 @@ async def test_a_kube_failure_while_revising_keeps_revision_one_and_stages_nothi
     view, _, _ = await _create(
         pool, kube, settings, boss, patch=MCP_PATCH, secrets={"TOKEN": canary}
     )
-    r1 = store.secret_name(preset.id, "TOKEN", 2)
-    r2 = store.secret_name(preset.id, "TOKEN", 3)
+    r1 = store.secret_name(store.Owner.preset(preset.id), "TOKEN", 2)
+    r2 = store.secret_name(store.Owner.preset(preset.id), "TOKEN", 3)
     before = await _reservations(pool, preset.id)
     kube.fail("Secret", r2, KubeError(f"500 {canary}"), verbs=["patch"])
     with pytest.raises(ApiError) as exc:
@@ -616,7 +626,7 @@ async def test_revise_from_rework_rebases_and_releases_the_old_value(
     view, _, _ = await _create(
         pool, kube, settings, boss, patch=MCP_PATCH, secrets={"TOKEN": canary}
     )
-    r1_secret = store.secret_name(preset.id, "TOKEN", 2)
+    r1_secret = store.secret_name(store.Owner.preset(preset.id), "TOKEN", 2)
     async with pool.connection() as conn:
         await proposals_repo.transition(
             conn, view.id, from_states=("open",), to="rework", outcome="rework"
@@ -644,14 +654,14 @@ async def test_revise_from_rework_rebases_and_releases_the_old_value(
     assert {i.path for i in r2.items} == {"env.TOKEN", "wrapper.mcp_servers"}
     async with pool.connection() as conn:
         stored = await proposals_repo.get(conn, view.id)
-        live = await store.list_metas(conn, [preset.id])
+        live = await store.list_metas(conn, store.Owner.preset(preset.id))
     assert stored is not None
-    versions = {m.name: m.version for m in live[preset.id]}
+    versions = {m.name: m.version for m in live}
     assert stored.revisions[1].fingerprint == proposals.fingerprint_preset(edited, versions)
     assert stored.revisions[0].fingerprint != stored.revisions[1].fingerprint
     assert stored.revisions[1].base["replicas"] == 2  # the base is the target read now
     # r1's value released after the commit, r2's staged
-    r2_secret = store.secret_name(preset.id, "TOKEN", 3)
+    r2_secret = store.secret_name(store.Owner.preset(preset.id), "TOKEN", 3)
     assert r1_secret not in _secrets(kube)
     assert r2_secret in _secrets(kube)
     assert await _reservations(pool, preset.id) == [("TOKEN", 3, view.id, 2, "staged")]
@@ -678,7 +688,7 @@ async def test_revise_of_a_terminal_proposal_is_409(pool, kube, settings, boss, 
 
 async def test_withdraw_releases_every_staged_value(pool, kube, settings, boss, preset, canary):
     view, _, _ = await _create(pool, kube, settings, boss, patch={}, secrets={"TOKEN": canary})
-    staged = store.secret_name(preset.id, "TOKEN", 2)
+    staged = store.secret_name(store.Owner.preset(preset.id), "TOKEN", 2)
     assert staged in _secrets(kube)
     done = await _withdraw(pool, kube, settings, boss, view.id)
     assert done.status == "withdrawn"
@@ -728,7 +738,9 @@ async def test_stale_after_any_preset_write_or_secret_rotation(
         elif write == "manageable":
             await presets_repo.update(conn, preset.id, "infra", preset.spec, True)
         else:
-            await store.set_secret(conn, kube, NS, preset.id, "TOKEN", SecretStr("rotated"))
+            await store.set_secret(
+                conn, kube, NS, store.Owner.preset(preset.id), "TOKEN", SecretStr("rotated")
+            )
     seen = await _get(pool, settings, view.id, boss.id)
     assert (seen.stale, seen.status) == (True, "open")  # read-only: the status stays
     async with pool.connection() as conn:

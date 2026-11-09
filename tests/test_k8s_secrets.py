@@ -37,7 +37,9 @@ async def make_preset(pool, name="p") -> uuid.UUID:
 
 async def put(pool, kube, preset_id, name, value):
     async with pool.connection() as conn:
-        return await store.set_secret(conn, kube, NS, preset_id, name, SecretStr(value))
+        return await store.set_secret(
+            conn, kube, NS, store.Owner.preset(preset_id), name, SecretStr(value)
+        )
 
 
 def secret_objects(kube):
@@ -56,7 +58,7 @@ async def rows(pool, preset_id):
 
 def test_secret_name_shape():
     pid = uuid.UUID("12345678-1234-5678-1234-567812345678")
-    got = store.secret_name(pid, "API_TOKEN", 3)
+    got = store.secret_name(store.Owner.preset(pid), "API_TOKEN", 3)
     assert got == f"ps-12345678-{hashlib.sha256(b'API_TOKEN').hexdigest()[:6]}-v3"
 
 
@@ -64,7 +66,7 @@ async def test_set_writes_an_immutable_secret_and_returns_metadata_only(pool, ku
     pid = await make_preset(pool)
     meta = await put(pool, kube, pid, "TOK", canary)
     assert (meta.name, meta.set, meta.version) == ("TOK", True, 1)
-    name = store.secret_name(pid, "TOK", 1)
+    name = store.secret_name(store.Owner.preset(pid), "TOK", 1)
     applied = [a for a in kube.applies if a.kind == "Secret"]
     assert [a.name for a in applied] == [name]
     obj = applied[0].obj
@@ -80,14 +82,14 @@ async def test_version_increments_and_old_unreferenced_version_is_collected(pool
     await put(pool, kube, pid, "TOK", canary)
     meta = await put(pool, kube, pid, "TOK", canary + "x")
     assert meta.version == 2
-    assert set(secret_objects(kube)) == {store.secret_name(pid, "TOK", 2)}
+    assert set(secret_objects(kube)) == {store.secret_name(store.Owner.preset(pid), "TOK", 2)}
     assert await rows(pool, pid) == [("TOK", 2, False)]
 
 
 async def test_version_referenced_by_a_session_snapshot_survives_gc(pool, kube, canary):
     pid = await make_preset(pool)
     await put(pool, kube, pid, "TOK", canary)
-    v1 = store.secret_name(pid, "TOK", 1)
+    v1 = store.secret_name(store.Owner.preset(pid), "TOK", 1)
     s = await insert_session(pool)
     async with pool.connection() as conn:
         await conn.execute(
@@ -95,25 +97,29 @@ async def test_version_referenced_by_a_session_snapshot_survives_gc(pool, kube, 
             (Jsonb({"TOK": v1}), s["id"]),
         )
     await put(pool, kube, pid, "TOK", canary + "x")
-    assert set(secret_objects(kube)) == {v1, store.secret_name(pid, "TOK", 2)}
+    assert set(secret_objects(kube)) == {v1, store.secret_name(store.Owner.preset(pid), "TOK", 2)}
     # the session goes away: the next pass collects the version
     async with pool.connection() as conn:
         await conn.execute("DELETE FROM sessions WHERE id = %s", (s["id"],))
         await store.gc(conn, kube, NS)
-    assert set(secret_objects(kube)) == {store.secret_name(pid, "TOK", 2)}
+    assert set(secret_objects(kube)) == {store.secret_name(store.Owner.preset(pid), "TOK", 2)}
 
 
 async def test_failure_leaves_the_old_version_live(pool, kube, canary):
     pid = await make_preset(pool)
     await put(pool, kube, pid, "TOK", canary)
-    kube.fail("Secret", store.secret_name(pid, "TOK", 2), KubeError(f"422: body {canary}"))
+    kube.fail(
+        "Secret",
+        store.secret_name(store.Owner.preset(pid), "TOK", 2),
+        KubeError(f"422: body {canary}"),
+    )
     with pytest.raises(store.SecretStoreError) as err:
         await put(pool, kube, pid, "TOK", canary + "x")
     assert canary not in str(err.value) and canary not in repr(err.value)
     assert err.value.__cause__ is None and err.value.__suppress_context__
     assert await rows(pool, pid) == [("TOK", 1, False)]
-    assert store.secret_name(pid, "TOK", 1) in secret_objects(kube)
-    kube.heal("Secret", store.secret_name(pid, "TOK", 2))
+    assert store.secret_name(store.Owner.preset(pid), "TOK", 1) in secret_objects(kube)
+    kube.heal("Secret", store.secret_name(store.Owner.preset(pid), "TOK", 2))
     assert (await put(pool, kube, pid, "TOK", canary + "y")).version == 2
 
 
@@ -124,13 +130,13 @@ async def test_removing_a_declared_name_deletes_rows_and_secrets(pool, kube, can
     async with pool.connection() as conn:
         await store.sync_declared(conn, kube, NS, pid, ["KEEP"])
     assert await rows(pool, pid) == [("KEEP", 1, False)]
-    assert set(secret_objects(kube)) == {store.secret_name(pid, "KEEP", 1)}
+    assert set(secret_objects(kube)) == {store.secret_name(store.Owner.preset(pid), "KEEP", 1)}
 
 
 async def test_removed_name_with_a_live_reference_is_retired_then_collected(pool, kube, canary):
     pid = await make_preset(pool)
     await put(pool, kube, pid, "DROP", canary)
-    v1 = store.secret_name(pid, "DROP", 1)
+    v1 = store.secret_name(store.Owner.preset(pid), "DROP", 1)
     s = await insert_session(pool)
     async with pool.connection() as conn:
         await conn.execute(
@@ -140,7 +146,7 @@ async def test_removed_name_with_a_live_reference_is_retired_then_collected(pool
     assert v1 in secret_objects(kube)
     assert await rows(pool, pid) == [("DROP", 1, True)]
     async with pool.connection() as conn:
-        assert await store.list_secrets(conn, pid) == []
+        assert await store.list_metas(conn, store.Owner.preset(pid)) == []
         await conn.execute("DELETE FROM sessions WHERE id = %s", (s["id"],))
         await store.gc(conn, kube, NS)
     assert secret_objects(kube) == {}
@@ -154,7 +160,7 @@ async def test_redeclared_retired_name_keeps_counting_up(pool, kube, canary):
     async with pool.connection() as conn:
         await conn.execute(
             "UPDATE sessions SET secret_versions = %s WHERE id = %s",
-            (Jsonb({"TOK": store.secret_name(pid, "TOK", 1)}), s["id"]),
+            (Jsonb({"TOK": store.secret_name(store.Owner.preset(pid), "TOK", 1)}), s["id"]),
         )
         await store.sync_declared(conn, kube, NS, pid, [])
     meta = await put(pool, kube, pid, "TOK", canary)
@@ -177,7 +183,7 @@ async def test_list_secrets_is_masked_metadata(pool, kube, canary):
     await put(pool, kube, pid, "B", canary)
     await put(pool, kube, pid, "A", canary)
     async with pool.connection() as conn:
-        got = await store.list_secrets(conn, pid)
+        got = await store.list_metas(conn, store.Owner.preset(pid))
     assert [(m.name, m.set, m.version) for m in got] == [("A", True, 1), ("B", True, 1)]
     assert all(m.updated_at is not None for m in got)
     assert canary not in repr(got)
@@ -187,7 +193,9 @@ async def test_nothing_logs_the_value(pool, kube, canary, caplog):
     caplog.set_level(logging.DEBUG)
     pid = await make_preset(pool)
     await put(pool, kube, pid, "TOK", canary)
-    kube.fail("Secret", store.secret_name(pid, "TOK", 2), KubeError(f"body {canary}"))
+    kube.fail(
+        "Secret", store.secret_name(store.Owner.preset(pid), "TOK", 2), KubeError(f"body {canary}")
+    )
     with pytest.raises(store.SecretStoreError):
         await put(pool, kube, pid, "TOK", canary + "x")
     assert canary not in caplog.text
@@ -245,11 +253,14 @@ async def test_set_during_a_reservation_takes_the_version_above_it(pool, kube, l
     pid = await make_preset(pool)
     await put(pool, kube, pid, "TOK", canary)
     staged = await stage(pool, kube, pid, "TOK", canary + "s")
-    assert staged == store.secret_name(pid, "TOK", 2)
+    assert staged == store.secret_name(store.Owner.preset(pid), "TOK", 2)
     meta = await put(pool, kube, pid, "TOK", canary + "x")
     assert meta.version == 3
     assert ("Secret", NS, staged) not in kube.deletes
-    assert set(secret_objects(kube)) == {staged, store.secret_name(pid, "TOK", 3)}
+    assert set(secret_objects(kube)) == {
+        staged,
+        store.secret_name(store.Owner.preset(pid), "TOK", 3),
+    }
 
 
 async def test_gc_after_a_rotation_keeps_staged_and_bound_versions(pool, kube, logged_canary):
@@ -262,6 +273,10 @@ async def test_gc_after_a_rotation_keeps_staged_and_bound_versions(pool, kube, l
         assert await store.bind_staged(conn, pid, "TOK", proposal_id=8, revision=1) == v3
     await put(pool, kube, pid, "TOK", canary)
     await put(pool, kube, pid, "TOK", canary)
-    assert set(secret_objects(kube)) == {v2, v3, store.secret_name(pid, "TOK", 5)}
+    assert set(secret_objects(kube)) == {
+        v2,
+        v3,
+        store.secret_name(store.Owner.preset(pid), "TOK", 5),
+    }
     deleted = {d[2] for d in kube.deletes if d[0] == "Secret"}
-    assert deleted == {store.secret_name(pid, "TOK", v) for v in (1, 4)}
+    assert deleted == {store.secret_name(store.Owner.preset(pid), "TOK", v) for v in (1, 4)}

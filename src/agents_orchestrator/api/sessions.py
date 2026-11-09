@@ -575,7 +575,9 @@ async def _create_from_preset(
         cache = spec.cache.model_copy(update={"restore_key": derived, "save_key": derived})
         spec = spec.model_copy(update={"cache": cache})
     try:
-        versions = await secret_store.snapshot_versions(conn, preset.id, spec.protected_env)
+        versions = await secret_store.snapshot_versions(
+            conn, secret_store.Owner.preset(preset.id), spec.protected_env
+        )
     except secret_store.SecretUnset as exc:
         raise _secret_unset(exc.names) from None
     provenance = {

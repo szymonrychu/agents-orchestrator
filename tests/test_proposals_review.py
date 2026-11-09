@@ -78,7 +78,9 @@ async def preset(pool, kube, canary):
         found = await presets_repo.create(
             conn, "infra", spec, superleader_manageable=True, labels=["team-a"]
         )
-        await store.set_secret(conn, kube, NS, found.id, "TOKEN", SecretStr(canary + "-live"))
+        await store.set_secret(
+            conn, kube, NS, store.Owner.preset(found.id), "TOKEN", SecretStr(canary + "-live")
+        )
     kube.reset_records()
     return found
 
@@ -156,8 +158,8 @@ async def test_approve_all_applies_the_spec_and_promotes_the_staged_secret(
     pool, kube, settings, boss, preset, canary
 ):
     view = await _filed(pool, kube, settings, boss, canary)
-    staged = store.secret_name(preset.id, "TOKEN", 2)
-    previous = store.secret_name(preset.id, "TOKEN", 1)
+    staged = store.secret_name(store.Owner.preset(preset.id), "TOKEN", 2)
+    previous = store.secret_name(store.Owner.preset(preset.id), "TOKEN", 1)
     assert {staged, previous} <= _secrets(kube)
     done = await _review(
         pool,
@@ -272,7 +274,7 @@ async def test_partial_approve_applies_only_approved_paths_and_releases_the_deni
     pool, kube, settings, boss, preset, canary
 ):
     view = await _filed(pool, kube, settings, boss, canary)
-    staged = store.secret_name(preset.id, "TOKEN", 2)
+    staged = store.secret_name(store.Owner.preset(preset.id), "TOKEN", 2)
     done = await _review(
         pool,
         kube,
@@ -287,7 +289,7 @@ async def test_partial_approve_applies_only_approved_paths_and_releases_the_deni
     assert await _live(pool, preset.id) == {"TOKEN": 1}
     assert await _reservations(pool, preset.id) == []
     assert staged not in _secrets(kube)
-    assert store.secret_name(preset.id, "TOKEN", 1) in _secrets(kube)
+    assert store.secret_name(store.Owner.preset(preset.id), "TOKEN", 1) in _secrets(kube)
     [(text, _, _)] = await _notices(pool, boss.id)
     assert "applied wrapper.mcp_servers" in text
     assert "denied env.TOKEN (value changed): keep the old token" in text
@@ -318,7 +320,7 @@ async def test_any_rework_writes_nothing_and_records_every_verdict(
     assert await _spec(pool, preset.id) == before
     assert await _live(pool, preset.id) == {"TOKEN": 1}
     assert await _reservations(pool, preset.id) == []
-    assert store.secret_name(preset.id, "TOKEN", 2) not in _secrets(kube)
+    assert store.secret_name(store.Owner.preset(preset.id), "TOKEN", 2) not in _secrets(kube)
     [(text, notice, _)] = await _notices(pool, boss.id)
     assert notice == "proposal"
     assert text.startswith(f"Proposal P-{view.id} r1 (preset infra) needs rework: ")
@@ -340,7 +342,7 @@ async def test_all_deny_closes_denied_and_releases_the_secret(
     assert done.revisions[0].outcome == "denied"
     assert await _spec(pool, preset.id) == before
     assert await _reservations(pool, preset.id) == []
-    assert store.secret_name(preset.id, "TOKEN", 2) not in _secrets(kube)
+    assert store.secret_name(store.Owner.preset(preset.id), "TOKEN", 2) not in _secrets(kube)
     [(text, _, _)] = await _notices(pool, boss.id)
     assert "denied env.TOKEN (value changed), wrapper.mcp_servers" in text
     assert "applied" not in text
@@ -465,7 +467,7 @@ async def test_a_failing_check_spec_keeps_the_staged_secret_and_the_live_version
     _error(exc, 422, "invalid_spec")
     assert await _live(pool, preset.id) == {"TOKEN": 1}
     assert [r[4] for r in await _reservations(pool, preset.id)] == ["staged"]
-    assert store.secret_name(preset.id, "TOKEN", 2) in _secrets(kube)
+    assert store.secret_name(store.Owner.preset(preset.id), "TOKEN", 2) in _secrets(kube)
     # the human fixes the selection: the same revision still applies
     done = await _review(
         pool,
@@ -544,7 +546,9 @@ async def _unrelated_write(pool, preset):
 
 async def _rotate(pool, kube, preset, canary):
     async with pool.connection() as conn:
-        await store.set_secret(conn, kube, NS, preset.id, "TOKEN", SecretStr(canary + "-rot"))
+        await store.set_secret(
+            conn, kube, NS, store.Owner.preset(preset.id), "TOKEN", SecretStr(canary + "-rot")
+        )
 
 
 @pytest.mark.parametrize("change", ["unrelated_path", "label", "rotation"])
@@ -552,7 +556,7 @@ async def test_any_change_to_the_target_makes_approve_409_stale_then_revise_appl
     pool, kube, settings, boss, preset, canary, change
 ):
     view = await _filed(pool, kube, settings, boss, canary)
-    staged = store.secret_name(preset.id, "TOKEN", 2)
+    staged = store.secret_name(store.Owner.preset(preset.id), "TOKEN", 2)
     if change == "unrelated_path":
         await _unrelated_write(pool, preset)
     elif change == "label":
@@ -661,7 +665,7 @@ async def test_applying_one_proposal_marks_another_open_one_stale_and_notifies_i
     second = await _filed(
         pool, kube, settings, other, canary, patch=PLAIN_PATCH, secrets={"TOKEN": canary + "b"}
     )
-    second_staged = store.secret_name(preset.id, "TOKEN", 3)
+    second_staged = store.secret_name(store.Owner.preset(preset.id), "TOKEN", 3)
     assert second_staged in _secrets(kube)
     done = await _review(
         pool,
@@ -720,7 +724,7 @@ async def test_a_failing_cleanup_of_one_proposal_does_not_undo_the_others(
         )
         == []
     )
-    assert store.secret_name(preset.id, "TOKEN", 3) not in _secrets(kube)
+    assert store.secret_name(store.Owner.preset(preset.id), "TOKEN", 3) not in _secrets(kube)
 
 
 # ---------------------------------------------------------------- lifecycle conflicts
@@ -779,7 +783,7 @@ async def test_an_expired_proposal_is_409_and_marked_expired(
     _error(exc, 409, "proposal_expired")
     assert (await _status(pool, view.id))[0] == "expired"
     assert await _reservations(pool, preset.id) == []
-    assert store.secret_name(preset.id, "TOKEN", 2) not in _secrets(kube)
+    assert store.secret_name(store.Owner.preset(preset.id), "TOKEN", 2) not in _secrets(kube)
     [(text, _, _)] = await _notices(pool, boss.id)
     assert "expired" in text
 
@@ -808,7 +812,7 @@ async def test_a_deleted_preset_is_409_target_gone_and_released(
         )
         == []
     )
-    assert store.secret_name(preset.id, "TOKEN", 2) not in _secrets(kube)
+    assert store.secret_name(store.Owner.preset(preset.id), "TOKEN", 2) not in _secrets(kube)
 
 
 @pytest.mark.parametrize("closed", ["applied", "denied", "withdrawn"])

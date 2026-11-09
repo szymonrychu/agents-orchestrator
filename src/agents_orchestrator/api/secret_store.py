@@ -1,4 +1,4 @@
-"""The api's seam to the preset secret store (superleader-crud D5, D7).
+"""The api's seam to the preset and project secret store (superleader-crud D5, D7; projects 3.16).
 
 The only api module that imports `agents_orchestrator.k8s` (pinned by
 `tests/test_api_sessions.py::test_api_never_imports_k8s_or_wrapper`), as `workspace.py` is for
@@ -12,7 +12,9 @@ from fastapi import FastAPI, Request
 
 from agents_orchestrator.k8s.kube import KubeApi, LightkubeApi
 from agents_orchestrator.k8s.secrets import (
+    Owner,
     PresetNotFound,
+    ProjectNotFound,
     SecretMeta,
     SecretStoreError,
     SecretUnset,
@@ -24,11 +26,13 @@ from agents_orchestrator.k8s.secrets import (
     gc,
     has_rows,
     list_metas,
+    list_preset_metas,
     promote_staged,
     put_webhook_credential,
     reap_unreserved,
     releasable,
     release,
+    retire,
     secret_name,
     secret_version,
     set_secret,
@@ -39,7 +43,9 @@ from agents_orchestrator.k8s.secrets import (
 
 __all__ = [
     "KubeApi",
+    "Owner",
     "PresetNotFound",
+    "ProjectNotFound",
     "SecretMeta",
     "SecretStoreError",
     "SecretUnset",
@@ -56,11 +62,13 @@ __all__ = [
     "kube_of",
     "kube_of_app",
     "list_metas",
+    "list_preset_metas",
     "promote_staged",
     "put_webhook_credential",
     "reap_unreserved",
     "releasable",
     "release",
+    "retire",
     "set_secret",
     "snapshot_versions",
     "stage_secret",

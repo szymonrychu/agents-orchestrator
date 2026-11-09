@@ -1,18 +1,21 @@
-"""The preset secret store (superleader-crud D5, D7).
+"""The secret store of presets and projects (superleader-crud D5, D7; projects 3.16).
 
-One immutable Kubernetes Secret per (preset, declared name, version), named
-`ps-<preset id8>-<hash6 of name>-v<version>`, single key `value`. A new value writes version N+1
-under a new name, so a failed write leaves the old version live and a partial write never needs
-to read another secret (the Role has no get). Metadata lives in `preset_secrets`.
+A secret belongs to an `Owner`: a preset (its protected `spec.env` variables) or a project (every
+preset of the project receives it). One immutable Kubernetes Secret per (owner, name, version),
+named `ps-<preset id8>-<hash6 of name>-v<version>` or
+`prs-<hash8 of project slug>-<hash6 of name>-v<version>`, single key `value`. A new value writes
+version N+1 under a new name, so a failed write leaves the old version live and a partial write
+never needs to read another secret (the Role has no get). Metadata lives in `preset_secrets` and
+`project_secrets`.
 
 A value is only ever held as a `SecretStr` until it goes into `stringData`; the apply response
 is dropped, nothing here logs a value or an exception body, and errors are generic.
 
-Change proposals stage a value (preset-change-proposals 3.6): it is written once, directly as the
-version it would become, and that number is reserved in `change_proposal_secrets` (`staged`)
-until the proposal is approved (`promote_staged` makes it current, `bind_staged` lets one session
-name it) or released. Every writer allocates above the reservations, and `gc` never deletes a
-reserved version.
+Change proposals stage a preset value (preset-change-proposals 3.6; project secrets are never
+staged): it is written once, directly as the version it would become, and that number is reserved
+in `change_proposal_secrets` (`staged`) until the proposal is approved (`promote_staged` makes it
+current, `bind_staged` lets one session name it) or released. Every writer allocates above the
+reservations, and `gc` never deletes a reserved version.
 """
 
 from __future__ import annotations
@@ -20,10 +23,10 @@ from __future__ import annotations
 import hashlib
 import logging
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 import psycopg
 from psycopg.rows import dict_row
@@ -37,6 +40,7 @@ log = logging.getLogger(__name__)
 
 VALUE_KEY = "value"
 PROPOSAL_LABEL = "orchestrator.proposal"
+PROJECT_LABEL = "project"
 
 
 class SecretStoreError(Exception):
@@ -55,6 +59,10 @@ class PresetNotFound(SecretStoreError):
     """The preset a secret is set on does not exist; nothing was written."""
 
 
+class ProjectNotFound(SecretStoreError):
+    """The project a secret is set on does not exist; nothing was written."""
+
+
 class StagedStale(SecretStoreError):
     """No `staged` reservation of this proposal revision, or it is not above the live version."""
 
@@ -67,9 +75,68 @@ class SecretMeta:
     updated_at: datetime
 
 
-def secret_name(preset_id: uuid.UUID, name: str, version: int) -> str:
+@dataclass(frozen=True)
+class Owner:
+    """Who a secret belongs to: a preset (its protected `spec.env` variables) or a project (every
+    preset of the project receives it). `key` is the preset id as a string, or the project slug."""
+
+    kind: Literal["preset", "project"]
+    key: str
+
+    @classmethod
+    def preset(cls, preset_id: uuid.UUID) -> Owner:
+        return cls("preset", str(preset_id))
+
+    @classmethod
+    def project(cls, slug: str) -> Owner:
+        return cls("project", slug)
+
+    @property
+    def param(self) -> uuid.UUID | str:
+        """The owner column value: the preset id as a UUID, or the slug."""
+        return uuid.UUID(self.key) if self.kind == "preset" else self.key
+
+    def lock_key(self, name: str) -> str:
+        """The advisory lock key of one variable; the two owners never share one."""
+        return f"{self.key}/{name}" if self.kind == "preset" else f"project:{self.key}/{name}"
+
+    def labels(self) -> dict[str, str]:
+        """The labels of every Secret version this owner writes."""
+        if self.kind == "preset":
+            return {MANAGED_BY_LABEL: MANAGED_BY}
+        return {MANAGED_BY_LABEL: MANAGED_BY, PROJECT_LABEL: self.key}
+
+    def short(self) -> str:
+        """The owner in a log line: preset id8 or the slug."""
+        return f"preset={self.key[:8]}" if self.kind == "preset" else f"project={self.key}"
+
+
+@dataclass(frozen=True)
+class _Table:
+    """The metadata table of one owner kind and the row it hangs off."""
+
+    rows: str  # the secrets table
+    column: str  # its owner column
+    parent: str  # the owner table
+    parent_key: str  # its key column
+
+
+_TABLES: dict[str, _Table] = {
+    "preset": _Table("preset_secrets", "preset_id", "presets", "id"),
+    "project": _Table("project_secrets", "project", "projects", "slug"),
+}
+
+
+def _owner_of(key: uuid.UUID | str) -> Owner:
+    """The owner of a row read from `preset_secrets` (a UUID) or `project_secrets` (a slug)."""
+    return Owner.preset(key) if isinstance(key, uuid.UUID) else Owner.project(key)
+
+
+def secret_name(owner: Owner, name: str, version: int) -> str:
     digest = hashlib.sha256(name.encode()).hexdigest()[:6]
-    return f"ps-{str(preset_id)[:8]}-{digest}-v{version}"
+    if owner.kind == "preset":
+        return f"ps-{owner.key[:8]}-{digest}-v{version}"
+    return f"prs-{hashlib.sha256(owner.key.encode()).hexdigest()[:8]}-{digest}-v{version}"
 
 
 def secret_version(full: str) -> int:
@@ -81,21 +148,48 @@ def _meta(row: dict) -> SecretMeta:
     return SecretMeta(row["name"], True, row["version"], row["updated_at"])
 
 
-async def _lock(conn: psycopg.AsyncConnection, preset_id: uuid.UUID, name: str) -> None:
+async def _lock(conn: psycopg.AsyncConnection, owner: Owner, name: str) -> None:
     """Serialise writers and session snapshots of one variable until the transaction ends."""
     await conn.execute(
-        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"{preset_id}/{name}",)
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (owner.lock_key(name),)
     )
 
 
-async def _next_version(conn: psycopg.AsyncConnection, preset_id: uuid.UUID, name: str) -> int:
+async def _lock_owner(conn: psycopg.AsyncConnection, owner: Owner) -> dict[str, Any] | None:
+    """Lock the owner's row FOR UPDATE; None when it does not exist.
+
+    Returns the preset's `spec`, or the project row (`slug`, `archived_at`). The row lock comes
+    before any variable lock (the order every writer of an owner and its secrets uses).
+    """
+    if owner.kind == "preset":
+        cur = await conn.execute(
+            "SELECT spec FROM presets WHERE id = %s FOR UPDATE", (owner.param,)
+        )
+        row = await cur.fetchone()
+        return None if row is None else row[0]
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT slug, archived_at FROM projects WHERE slug = %s FOR UPDATE", (owner.param,)
+        )
+        return await cur.fetchone()
+
+
+async def _next_version(conn: psycopg.AsyncConnection, owner: Owner, name: str) -> int:
     """The next free version: above the stored one and every reservation. Call under `_lock`."""
+    if owner.kind == "project":  # project secrets are never staged
+        cur = await conn.execute(
+            "SELECT COALESCE(max(version), 0) + 1 FROM project_secrets"
+            " WHERE project = %s AND name = %s",
+            (owner.param, name),
+        )
+        return (await cur.fetchone())[0]
+    pid = owner.param
     cur = await conn.execute(
         "SELECT COALESCE(GREATEST("
         " (SELECT max(version) FROM preset_secrets WHERE preset_id = %s AND name = %s),"
         " (SELECT max(version) FROM change_proposal_secrets WHERE preset_id = %s AND name = %s)"
         "), 0) + 1",
-        (preset_id, name, preset_id, name),
+        (pid, name, pid, name),
     )
     return (await cur.fetchone())[0]
 
@@ -122,42 +216,51 @@ async def _write(
 
 
 async def snapshot_versions(
-    conn: psycopg.AsyncConnection, preset_id: uuid.UUID, names: list[str]
+    conn: psycopg.AsyncConnection, owner: Owner, names: Iterable[str]
 ) -> dict[str, str]:
-    """The Secret names a new session must reference, one per protected variable.
+    """The Secret names a new session must reference, one per variable of `owner`.
 
     Call it inside the transaction that inserts the session. It takes the variable's lock, so a
     rotation or removal waits until the session row is committed and its collection then sees the
     reference (otherwise it could delete the version this session just read). Raises SecretUnset
     for a name with no live value.
     """
+    t = _TABLES[owner.kind]
     found: dict[str, str] = {}
     missing: list[str] = []
     for name in sorted(names):
-        await _lock(conn, preset_id, name)
+        await _lock(conn, owner, name)
         cur = await conn.execute(
-            "SELECT version FROM preset_secrets"
-            " WHERE preset_id = %s AND name = %s AND retired_at IS NULL",
-            (preset_id, name),
+            f"SELECT version FROM {t.rows}"  # noqa: S608
+            f" WHERE {t.column} = %s AND name = %s AND retired_at IS NULL",
+            (owner.param, name),
         )
         row = await cur.fetchone()
         if row is None:
             missing.append(name)
         else:
-            found[name] = secret_name(preset_id, name, row[0])
+            found[name] = secret_name(owner, name, row[0])
     if missing:
         raise SecretUnset(missing)
     return found
 
 
-async def list_secrets(conn: psycopg.AsyncConnection, preset_id: uuid.UUID) -> list[SecretMeta]:
-    return (await list_metas(conn, [preset_id])).get(preset_id, [])
+async def list_metas(conn: psycopg.AsyncConnection, owner: Owner) -> list[SecretMeta]:
+    """The live (not retired) secrets of one owner, by name."""
+    t = _TABLES[owner.kind]
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            f"SELECT name, version, updated_at FROM {t.rows}"  # noqa: S608
+            f" WHERE {t.column} = %s AND retired_at IS NULL ORDER BY name",
+            (owner.param,),
+        )
+        return [_meta(r) for r in await cur.fetchall()]
 
 
-async def list_metas(
+async def list_preset_metas(
     conn: psycopg.AsyncConnection, preset_ids: list[uuid.UUID]
 ) -> dict[uuid.UUID, list[SecretMeta]]:
-    """The live (not retired) secrets of each preset, by name."""
+    """`list_metas` of many presets in one query (the preset list view)."""
     out: dict[uuid.UUID, list[SecretMeta]] = {}
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
@@ -180,51 +283,72 @@ async def set_secret(
     conn: psycopg.AsyncConnection,
     kube: KubeApi,
     namespace: str,
-    preset_id: uuid.UUID,
+    owner: Owner,
     name: str,
     value: SecretStr,
     *,
     collect: bool = True,
     recheck: Callable[[dict[str, Any]], None] | None = None,
 ) -> SecretMeta:
-    """Store `value` as the next version of the preset's protected variable `name`.
+    """Store `value` as the next version of the owner's variable `name`.
 
-    Returns metadata only. The preset must exist: garbage collection treats a row with no preset
-    as dead and would delete the Secret just written. A caller whose transaction may still roll
-    back passes `collect=False` and calls `gc` after its commit, so the previous version is never
-    deleted for a write that did not stick.
+    Returns metadata only. The owner must exist (PresetNotFound, ProjectNotFound): garbage
+    collection treats a row with no owner as dead and would delete the Secret just written. A
+    caller whose transaction may still roll back passes `collect=False` and calls `gc` after its
+    commit, so the previous version is never deleted for a write that did not stick.
 
-    The preset row is locked first (the order every writer of a preset and its secrets uses), and
-    `recheck`, when given, sees the locked row's spec before anything is written: it raises to
-    refuse a write the caller decided on a spec that has since changed.
+    The owner row is locked first (the order every writer of an owner and its secrets uses), and
+    `recheck`, when given, sees the locked row before anything is written (the preset's spec, or
+    the project row): it raises to refuse a write the caller decided on a row that has since
+    changed.
     """
+    t = _TABLES[owner.kind]
     async with conn.transaction():
-        cur = await conn.execute("SELECT spec FROM presets WHERE id = %s FOR UPDATE", (preset_id,))
-        row = await cur.fetchone()
+        row = await _lock_owner(conn, owner)
         if row is None:
-            raise PresetNotFound(f"preset not found for secret {name}")
+            missing = PresetNotFound if owner.kind == "preset" else ProjectNotFound
+            raise missing(f"{owner.kind} not found for secret {name}")
         if recheck is not None:
-            recheck(row[0])
-        await _lock(conn, preset_id, name)
-        version = await _next_version(conn, preset_id, name)
-        full = secret_name(preset_id, name, version)
+            recheck(row)
+        await _lock(conn, owner, name)
+        version = await _next_version(conn, owner, name)
+        full = secret_name(owner, name, version)
         try:
-            await _write(kube, namespace, full, value, {MANAGED_BY_LABEL: MANAGED_BY})
+            await _write(kube, namespace, full, value, owner.labels())
         except KubeError as exc:
             log.warning("secret write failed: %s v%d (%s)", name, version, type(exc).__name__)
             raise SecretStoreError(f"could not store secret {name}") from None
         cur = await conn.execute(
-            "INSERT INTO preset_secrets (preset_id, name, version) VALUES (%s, %s, %s)"
-            " ON CONFLICT (preset_id, name) DO UPDATE"
+            f"INSERT INTO {t.rows} ({t.column}, name, version) VALUES (%s, %s, %s)"  # noqa: S608
+            f" ON CONFLICT ({t.column}, name) DO UPDATE"
             " SET version = excluded.version, retired_at = NULL, updated_at = now()"
             " RETURNING updated_at",
-            (preset_id, name, version),
+            (owner.param, name, version),
         )
         updated_at = (await cur.fetchone())[0]
-    log.info("secret set: preset=%s name=%s version=%d", str(preset_id)[:8], name, version)
+    log.info("secret set: %s name=%s version=%d", owner.short(), name, version)
     if collect:
-        await gc(conn, kube, namespace, preset_id=preset_id, name=name)
+        await gc(conn, kube, namespace, owner=owner, name=name)
     return SecretMeta(name, True, version, updated_at)
+
+
+async def retire(conn: psycopg.AsyncConnection, owner: Owner, name: str) -> None:
+    """Retire the owner's variable `name`: new sessions no longer get it.
+
+    The owner row, then the variable, are locked (the writers' order), so a session create that
+    snapshotted the current version commits first. `gc` deletes each version once no session
+    names it; a retired row set again counts up from its last version.
+    """
+    t = _TABLES[owner.kind]
+    async with conn.transaction():
+        await _lock_owner(conn, owner)
+        await _lock(conn, owner, name)
+        await conn.execute(
+            f"UPDATE {t.rows} SET retired_at = now(), updated_at = now()"  # noqa: S608
+            f" WHERE {t.column} = %s AND name = %s AND retired_at IS NULL",
+            (owner.param, name),
+        )
+    log.info("secret retired: %s name=%s", owner.short(), name)
 
 
 async def sync_declared(
@@ -236,10 +360,11 @@ async def sync_declared(
     *,
     collect: bool = True,
 ) -> None:
-    """Retire the secrets whose name left `declared`, the preset's protected variable names.
+    """Retire the preset's secrets whose name left `declared`, its protected variable names.
 
     Then delete what no session still names.
     """
+    owner = Owner.preset(preset_id)
     async with conn.transaction():
         cur = await conn.execute(
             "SELECT name FROM preset_secrets WHERE preset_id = %s AND retired_at IS NULL"
@@ -247,14 +372,14 @@ async def sync_declared(
             (preset_id, declared),
         )
         for (name,) in await cur.fetchall():
-            await _lock(conn, preset_id, name)
+            await _lock(conn, owner, name)
         await conn.execute(
             "UPDATE preset_secrets SET retired_at = now()"
             " WHERE preset_id = %s AND retired_at IS NULL AND NOT (name = ANY(%s))",
             (preset_id, declared),
         )
     if collect:
-        await gc(conn, kube, namespace, preset_id=preset_id)
+        await gc(conn, kube, namespace, owner=owner)
 
 
 async def _session_referenced(conn: psycopg.AsyncConnection) -> set[str]:
@@ -268,7 +393,7 @@ async def _session_referenced(conn: psycopg.AsyncConnection) -> set[str]:
 async def _referenced(conn: psycopg.AsyncConnection) -> set[str]:
     """Secret names `gc` keeps: those a session names, and every reserved (staged, bound) one."""
     cur = await conn.execute("SELECT preset_id, name, version FROM change_proposal_secrets")
-    reserved = {secret_name(*r) for r in await cur.fetchall()}
+    reserved = {secret_name(Owner.preset(r[0]), r[1], r[2]) for r in await cur.fetchall()}
     return reserved | await _session_referenced(conn)
 
 
@@ -277,44 +402,52 @@ async def gc(
     kube: KubeApi,
     namespace: str,
     *,
-    preset_id: uuid.UUID | None = None,
+    owner: Owner | None = None,
     name: str | None = None,
 ) -> None:
     """Delete, by name, every Secret version that is neither current nor named by a stored session.
 
+    Sweeps `preset_secrets` and `project_secrets`, or only the rows of `owner` (and `name`).
     Reads only our database, the current versions first and the session references after them
     (the order closes the race with a session being created). A retired row, or one whose
-    preset is gone, has no current version; its row is dropped once every version is deleted.
+    owner is gone, has no current version; its row is dropped once every version is deleted.
     """
-    where, params = "", []
-    if preset_id is not None:
-        where += " AND ps.preset_id = %s"
-        params.append(preset_id)
-    if name is not None:
-        where += " AND ps.name = %s"
-        params.append(name)
-    async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(
-            "SELECT ps.preset_id, ps.name, ps.version, ps.swept,"
-            " (ps.retired_at IS NOT NULL OR p.id IS NULL) AS dead"
-            " FROM preset_secrets ps LEFT JOIN presets p ON p.id = ps.preset_id"
-            f" WHERE true{where}",  # noqa: S608
-            params,
-        )
-        found = await cur.fetchall()
+    found: list[tuple[Owner, dict]] = []
+    for kind, t in _TABLES.items():
+        if owner is not None and owner.kind != kind:
+            continue
+        where, params = "", []
+        if owner is not None:
+            where += f" AND s.{t.column} = %s"
+            params.append(owner.param)
+        if name is not None:
+            where += " AND s.name = %s"
+            params.append(name)
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                f"SELECT s.{t.column} AS key, s.name, s.version, s.swept,"  # noqa: S608
+                f" (s.retired_at IS NOT NULL OR p.{t.parent_key} IS NULL) AS dead"
+                f" FROM {t.rows} s LEFT JOIN {t.parent} p ON p.{t.parent_key} = s.{t.column}"
+                f" WHERE true{where}",
+                params,
+            )
+            found += [(_owner_of(r["key"]), r) for r in await cur.fetchall()]
     # Read after the current versions: a create that snapshotted a version committed before the
     # rotation that made it old, so a reference list read now always includes it.
     referenced = await _referenced(conn)
-    for row in found:
-        await _sweep(conn, kube, namespace, row, referenced)
+    for row_owner, row in found:
+        await _sweep(conn, kube, namespace, row_owner, row, referenced)
 
 
-async def _sweep(conn, kube: KubeApi, namespace: str, row: dict, referenced: set[str]) -> None:
-    pid, name, current = row["preset_id"], row["name"], row["version"]
+async def _sweep(
+    conn, kube: KubeApi, namespace: str, owner: Owner, row: dict, referenced: set[str]
+) -> None:
+    t = _TABLES[owner.kind]
+    name, current = row["name"], row["version"]
     upto = current if row["dead"] else current - 1
     stuck: int | None = None  # the lowest version still present
     for version in range(row["swept"] + 1, upto + 1):
-        full = secret_name(pid, name, version)
+        full = secret_name(owner, name, version)
         if full in referenced:
             stuck = stuck or version
             continue
@@ -325,15 +458,16 @@ async def _sweep(conn, kube: KubeApi, namespace: str, row: dict, referenced: set
             stuck = stuck or version
     if row["dead"] and stuck is None:
         await conn.execute(
-            "DELETE FROM preset_secrets WHERE preset_id = %s AND name = %s AND version = %s",
-            (pid, name, current),
+            f"DELETE FROM {t.rows}"  # noqa: S608
+            f" WHERE {t.column} = %s AND name = %s AND version = %s",
+            (owner.param, name, current),
         )
         return
     swept = (stuck - 1) if stuck is not None else upto
     if swept > row["swept"]:
         await conn.execute(
-            "UPDATE preset_secrets SET swept = %s WHERE preset_id = %s AND name = %s",
-            (swept, pid, name),
+            f"UPDATE {t.rows} SET swept = %s WHERE {t.column} = %s AND name = %s",  # noqa: S608
+            (swept, owner.param, name),
         )
 
 
@@ -359,9 +493,9 @@ async def stage_secret(
     Secret name. Raises SecretStoreError, with a generic message, when the write fails.
     """
     async with conn.transaction():
-        await _lock(conn, preset_id, name)
-        version = await _next_version(conn, preset_id, name)
-        full = secret_name(preset_id, name, version)
+        await _lock(conn, Owner.preset(preset_id), name)
+        version = await _next_version(conn, Owner.preset(preset_id), name)
+        full = secret_name(Owner.preset(preset_id), name, version)
         labels = {MANAGED_BY_LABEL: MANAGED_BY, PROPOSAL_LABEL: str(proposal_id)}
         try:
             await _write(kube, namespace, full, value, labels)
@@ -398,7 +532,7 @@ async def _take_staged(
     revision: int,
 ) -> int:
     """Lock the variable and return the version this revision staged; StagedStale if none."""
-    await _lock(conn, preset_id, name)
+    await _lock(conn, Owner.preset(preset_id), name)
     cur = await conn.execute(
         "SELECT version FROM change_proposal_secrets WHERE preset_id = %s AND name = %s"
         " AND proposal_id = %s AND revision = %s AND state = 'staged'",
@@ -480,7 +614,7 @@ async def bind_staged(
         version,
         proposal_id,
     )
-    return secret_name(preset_id, name, version)
+    return secret_name(Owner.preset(preset_id), name, version)
 
 
 async def _drop_reservation(
@@ -494,9 +628,9 @@ async def _drop_reservation(
     Secret this then deletes. A Secret already gone is fine; a failed delete keeps the row.
     """
     preset_id, name, version, proposal_id = row
-    full = secret_name(preset_id, name, version)
+    full = secret_name(Owner.preset(preset_id), name, version)
     async with conn.transaction():
-        await _lock(conn, preset_id, name)
+        await _lock(conn, Owner.preset(preset_id), name)
         cur = await conn.execute(
             "SELECT 1 FROM change_proposal_secrets WHERE preset_id = %s AND name = %s"
             " AND version = %s AND proposal_id = %s AND state = %s",
@@ -579,7 +713,7 @@ async def collect_bound(pool: AsyncConnectionPool, kube: KubeApi, namespace: str
         referenced = await _session_referenced(conn)
     dropped = 0
     for row in bound:
-        if secret_name(row[0], row[1], row[2]) in referenced:
+        if secret_name(Owner.preset(row[0]), row[1], row[2]) in referenced:
             continue
         try:
             async with pool.connection() as conn, conn.transaction():
@@ -648,10 +782,10 @@ async def reap_unreserved(
     for preset_id, name in variables:
         try:
             async with pool.connection() as conn, conn.transaction():
-                await _lock(conn, preset_id, name)
-                top = await _next_version(conn, preset_id, name) - 1
+                await _lock(conn, Owner.preset(preset_id), name)
+                top = await _next_version(conn, Owner.preset(preset_id), name) - 1
                 for version in range(top + 1, top + 1 + depth):
-                    full = secret_name(preset_id, name, version)
+                    full = secret_name(Owner.preset(preset_id), name, version)
                     if full not in referenced and await _reap_one(kube, namespace, full):
                         log.info("orphan staged secret reaped: %s v%d", name, version)
                         dropped.append(full)
@@ -685,11 +819,11 @@ async def forget_unsaved(
     in `_lock_order`. A failure is logged; the reaper deletes what is left.
     """
     for preset_id, name, version in sorted(versions, key=_lock_order):
-        full = secret_name(preset_id, name, version)
+        full = secret_name(Owner.preset(preset_id), name, version)
         try:
             async with conn.transaction():
-                await _lock(conn, preset_id, name)
-                if version < await _next_version(conn, preset_id, name):
+                await _lock(conn, Owner.preset(preset_id), name)
+                if version < await _next_version(conn, Owner.preset(preset_id), name):
                     log.info("unsaved secret kept, taken again meanwhile: %s v%d", name, version)
                     continue
                 if full in await _session_referenced(conn):

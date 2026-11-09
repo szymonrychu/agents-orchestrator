@@ -175,7 +175,7 @@ async def test_secret_store_failure_is_generic(make_http, kube, canary):
         body = await create(http, "p", spec_with())
         kube.fail(
             "Secret",
-            store.secret_name(uuid.UUID(body["id"]), "API_KEY", 1),
+            store.secret_name(store.Owner.preset(uuid.UUID(body["id"])), "API_KEY", 1),
             KubeError(f"boom {canary}"),
         )
         r = await http.put(f"{P}/{body['id']}/secrets/API_KEY", json={"value": canary})
@@ -283,7 +283,7 @@ async def test_store_failure_on_put_leaves_the_old_state(make_http, kube, canary
         before = (await http.get(f"{P}/{body['id']}")).json()
         kube.fail(
             "Secret",
-            store.secret_name(uuid.UUID(body["id"]), "API_KEY", 2),
+            store.secret_name(store.Owner.preset(uuid.UUID(body["id"])), "API_KEY", 2),
             KubeError("boom"),
         )
         r = await http.put(
@@ -328,7 +328,7 @@ async def test_failure_after_the_writes_deletes_the_new_versions(
         )
         assert_error(r, 502, "secret_store_failed")
         assert (await http.get(f"{P}/{body['id']}")).json() == before
-    v2 = store.secret_name(uuid.UUID(body["id"]), "API_KEY", 2)
+    v2 = store.secret_name(store.Owner.preset(uuid.UUID(body["id"])), "API_KEY", 2)
     assert v2 in kube.deleted("Secret")
     assert secret_values(kube) == [canary]  # v1 is still live
 

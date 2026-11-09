@@ -148,7 +148,7 @@ def _check_values(secrets: Mapping[str, SecretStr]) -> None:
 
 
 async def _metas(conn, preset_id: uuid.UUID) -> dict[str, EnvMeta]:
-    found = (await secret_store.list_metas(conn, [preset_id])).get(preset_id, [])
+    found = await secret_store.list_metas(conn, secret_store.Owner.preset(preset_id))
     return {m.name: EnvMeta(m.version, m.updated_at) for m in found}
 
 
@@ -1261,7 +1261,10 @@ async def _after_commit(request: Request, conn, settings: Settings, done: _Done)
         try:
             async with conn.transaction():
                 await secret_store.gc(
-                    conn, secret_store.kube_of(request), settings.namespace, preset_id=done.gc
+                    conn,
+                    secret_store.kube_of(request),
+                    settings.namespace,
+                    owner=secret_store.Owner.preset(done.gc),
                 )
         except Exception as exc:  # the review committed; never turn it into an error
             log.warning("proposal cleanup after review failed: %s", type(exc).__name__)

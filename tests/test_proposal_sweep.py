@@ -66,7 +66,9 @@ async def preset(pool, kube, canary):
     spec = {"docker": True, "env": {"TOKEN": {"protected": True}, "PLAIN": {"value": "plain"}}}
     async with pool.connection() as conn:
         found = await presets_repo.create(conn, "infra", spec, superleader_manageable=True)
-        await store.set_secret(conn, kube, NS, found.id, "TOKEN", SecretStr(canary + "-live"))
+        await store.set_secret(
+            conn, kube, NS, store.Owner.preset(found.id), "TOKEN", SecretStr(canary + "-live")
+        )
     kube.reset_records()
     return found
 
@@ -384,8 +386,8 @@ async def test_bound_reservation_whose_session_is_gone_is_collected(
     pool, kube, settings, preset, canary
 ):
     holder = await _session(pool, "prop-holder")
-    gone = store.secret_name(preset.id, "TOKEN", 5)
-    kept = store.secret_name(preset.id, "TOKEN", 6)
+    gone = store.secret_name(store.Owner.preset(preset.id), "TOKEN", 5)
+    kept = store.secret_name(store.Owner.preset(preset.id), "TOKEN", 6)
     async with pool.connection() as conn:
         for version in (5, 6):
             await conn.execute(
@@ -395,7 +397,11 @@ async def test_bound_reservation_whose_session_is_gone_is_collected(
                 (preset.id, version),
             )
             await store._write(
-                kube, NS, store.secret_name(preset.id, "TOKEN", version), SecretStr(canary), {}
+                kube,
+                NS,
+                store.secret_name(store.Owner.preset(preset.id), "TOKEN", version),
+                SecretStr(canary),
+                {},
             )
         await conn.execute(
             "UPDATE sessions SET secret_versions = %s::jsonb WHERE id = %s",
@@ -426,8 +432,8 @@ async def test_orphan_staged_secret_without_reservation_is_reaped(
 ):
     """A create that rolled back after writing its staged Secret (and could not delete it) left
     `v2` with no reservation row: the reaper deletes it, never the live v1."""
-    live = store.secret_name(preset.id, "TOKEN", 1)
-    orphan = store.secret_name(preset.id, "TOKEN", 2)
+    live = store.secret_name(store.Owner.preset(preset.id), "TOKEN", 1)
+    orphan = store.secret_name(store.Owner.preset(preset.id), "TOKEN", 2)
     labels = {MANAGED_BY_LABEL: MANAGED_BY, store.PROPOSAL_LABEL: "77"}
     await store._write(kube, NS, orphan, SecretStr(canary), labels)
     await _sweep(pool, kube, settings)
@@ -443,8 +449,10 @@ async def test_reaper_keeps_reserved_current_and_session_named_secrets(
     """A staged reservation (v2), the current version (v1, promoted Secrets keep the proposal
     label) and a name a session references are never reaped."""
     pid, staged = await _staged(pool, kube, settings, boss, canary)
-    live = store.secret_name(preset.id, "TOKEN", 1)
-    named = store.secret_name(preset.id, "TOKEN", 3)  # above every row, but a session names it
+    live = store.secret_name(store.Owner.preset(preset.id), "TOKEN", 1)
+    named = store.secret_name(
+        store.Owner.preset(preset.id), "TOKEN", 3
+    )  # above every row, but a session names it
     await store._write(kube, NS, named, SecretStr(canary), {})
     async with pool.connection() as conn:
         await conn.execute(
@@ -494,8 +502,10 @@ async def test_reap_holds_only_the_variable_it_probes(pool, kube, settings, pres
     """The reap commits each variable before the next: while it is inside the Kubernetes delete
     of TOKEN, the lock of ALPHA (probed before it) is released, so a set_secret on ALPHA runs."""
     async with pool.connection() as conn:
-        await store.set_secret(conn, kube, NS, preset.id, "ALPHA", SecretStr(canary + "-a"))
-    probe = store.secret_name(preset.id, "TOKEN", 2)
+        await store.set_secret(
+            conn, kube, NS, store.Owner.preset(preset.id), "ALPHA", SecretStr(canary + "-a")
+        )
+    probe = store.secret_name(store.Owner.preset(preset.id), "TOKEN", 2)
     entered, proceed = asyncio.Event(), asyncio.Event()
     real_delete = kube.delete
 
@@ -513,24 +523,30 @@ async def test_reap_holds_only_the_variable_it_probes(pool, kube, settings, pres
         assert await _advisory_held(pool, preset.id, "ALPHA") == 0
         async with pool.connection() as conn:
             meta = await asyncio.wait_for(
-                store.set_secret(conn, kube, NS, preset.id, "ALPHA", SecretStr(canary + "-b")),
+                store.set_secret(
+                    conn, kube, NS, store.Owner.preset(preset.id), "ALPHA", SecretStr(canary + "-b")
+                ),
                 timeout=10,
             )
         assert meta.version == 2
     finally:
         proceed.set()
         await asyncio.wait_for(reaper, timeout=10)
-    assert store.secret_name(preset.id, "ALPHA", 2) in _secrets(kube)
+    assert store.secret_name(store.Owner.preset(preset.id), "ALPHA", 2) in _secrets(kube)
 
 
 async def test_a_failed_reap_unit_leaves_the_other_variables_reaped(
     pool, kube, settings, preset, canary
 ):
     async with pool.connection() as conn:
-        await store.set_secret(conn, kube, NS, preset.id, "ALPHA", SecretStr(canary + "-a"))
-    orphan = store.secret_name(preset.id, "TOKEN", 2)
+        await store.set_secret(
+            conn, kube, NS, store.Owner.preset(preset.id), "ALPHA", SecretStr(canary + "-a")
+        )
+    orphan = store.secret_name(store.Owner.preset(preset.id), "TOKEN", 2)
     await store._write(kube, NS, orphan, SecretStr(canary), {})
-    kube.fail("Secret", store.secret_name(preset.id, "ALPHA", 2), RuntimeError("boom"))
+    kube.fail(
+        "Secret", store.secret_name(store.Owner.preset(preset.id), "ALPHA", 2), RuntimeError("boom")
+    )
     await _sweep(pool, kube, settings, reap=True)
     assert orphan not in _secrets(kube)
 

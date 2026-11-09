@@ -157,11 +157,12 @@ async def _save(
         async with conn.transaction():
             await hold_project(conn, project)
             preset = await save()
+            owner = secret_store.Owner.preset(preset.id)
             if values or await secret_store.has_rows(conn, preset.id):
                 kube = secret_store.kube_of(request)
                 for name, value in values.items():
                     meta = await secret_store.set_secret(
-                        conn, kube, settings.namespace, preset.id, name, value, collect=False
+                        conn, kube, settings.namespace, owner, name, value, collect=False
                     )
                     created.append((preset.id, name, meta.version))
                 await secret_store.sync_declared(
@@ -177,8 +178,8 @@ async def _save(
             await forget(conn, kube, settings.namespace, created)
         raise
     if kube is not None:
-        await secret_store.gc(conn, kube, settings.namespace, preset_id=preset.id)
-    return preset, (await secret_store.list_metas(conn, [preset.id])).get(preset.id, [])
+        await secret_store.gc(conn, kube, settings.namespace, owner=owner)
+    return preset, await secret_store.list_metas(conn, owner)
 
 
 def _exists(name: str) -> ApiError:
@@ -215,7 +216,7 @@ async def list_all(
     presets = await repo.list_presets(conn, project=project)
     if only_manageable:
         presets = [p for p in presets if p.superleader_manageable]
-    metas = await secret_store.list_metas(conn, [p.id for p in presets])
+    metas = await secret_store.list_preset_metas(conn, [p.id for p in presets])
     return [_view(p, metas.get(p.id)) for p in presets]
 
 
@@ -257,7 +258,7 @@ async def get_one(conn, preset_id: uuid.UUID) -> schemas.PresetView:
     preset = await repo.get(conn, preset_id)
     if preset is None:
         raise not_found("preset")
-    secrets = (await secret_store.list_metas(conn, [preset_id])).get(preset_id)
+    secrets = await secret_store.list_metas(conn, secret_store.Owner.preset(preset_id))
     return _view(preset, secrets)
 
 
@@ -419,7 +420,8 @@ async def remove(
                     conn, kube, settings.namespace, preset_id, [], collect=False
                 )
         if collect:
-            await secret_store.gc(conn, kube, settings.namespace, preset_id=preset_id)
+            owner = secret_store.Owner.preset(preset_id)
+            await secret_store.gc(conn, kube, settings.namespace, owner=owner)
     except repo.PresetNotFound:
         raise not_found("preset") from None
     except repo.PresetDefault as exc:
@@ -573,7 +575,7 @@ async def put_secret(
             conn,
             kube,
             settings.namespace,
-            found.id,
+            secret_store.Owner.preset(found.id),
             name,
             body.value,
             recheck=recheck,
