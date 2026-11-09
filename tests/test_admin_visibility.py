@@ -23,6 +23,7 @@ BODIES = {
     ("PATCH", "/agent/v1/admin/sessions/{slug}"): {"spec": {}},
     ("POST", "/agent/v1/admin/sessions/{slug}/leadership/withdraw"): {},
     ("PUT", "/agent/v1/admin/presets/{ref}/secrets/{name}"): {"value": "v"},
+    ("PUT", "/agent/v1/admin/presets/{ref}/vault/{entry_id}"): {},
 }
 
 
@@ -78,6 +79,7 @@ async def test_every_scoped_admin_route_404s_for_hidden_target(pool, dsn, method
         .replace("{slug}", other.slug)
         .replace("{pod}", pod)
         .replace("{name}", "API_KEY")
+        .replace("{entry_id}", "11111111-1111-4111-8111-111111111111")
     )
     kw = {"json": BODIES[(method, path)]} if (method, path) in BODIES else {}
     async with client_for(app, boss.leader_ip) as http:

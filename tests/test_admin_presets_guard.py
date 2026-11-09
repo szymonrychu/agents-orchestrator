@@ -997,10 +997,12 @@ GUARDED_COLUMN_WRITES: dict[tuple[str, str], tuple[str, ...]] = {
 
 
 def _admin_preset_writes() -> set[tuple[str, str]]:
+    """The routes that take a spec or a value; the vault attach carries neither, so it has no
+    grant to refuse (its rules are in test_admin_vault.py)."""
     return {
         (method, route.path)
         for route in admin.router.routes
-        if route.path.startswith(A)
+        if route.path.startswith(A) and "/vault/" not in route.path
         for method in route.methods & {"POST", "PUT", "PATCH"}
     }
 

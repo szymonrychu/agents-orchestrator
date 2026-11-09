@@ -123,3 +123,13 @@ async def record_ref_events(
                 actor,
                 {"preset_id": str(preset_id), "env": env, "entry": entry, "entry_env": entry_env},
             )
+
+
+def note_vault(request: Any, attached: list[Change], detached: list[Change]) -> None:
+    """Hand the touched refs (names and entry ids) to the admin audit, when there is one."""
+    seen = getattr(getattr(request, "state", None), "admin_vault", None)
+    if seen is not None:
+        seen.extend(
+            {"env": env, "entry": entry, "entry_env": entry_env}
+            for env, entry, entry_env in [*attached, *detached]
+        )

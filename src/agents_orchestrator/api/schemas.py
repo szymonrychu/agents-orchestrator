@@ -45,6 +45,23 @@ class PresetIn(BaseModel):
         return None if value is None else normalize_labels(value)
 
 
+class VaultAttachIn(BaseModel):
+    """Attach a vault entry to a preset: `envs` maps entry env to preset env (every env of the
+    entry under its own name when omitted); `replace` lets it overwrite an existing preset env."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    envs: dict[str, str] | None = Field(default=None, min_length=1)
+    replace: bool = False
+
+    @field_validator("envs")
+    @classmethod
+    def _distinct(cls, value: dict[str, str] | None) -> dict[str, str] | None:
+        if value is not None and len(set(value.values())) != len(value):
+            raise ValueError("two entry envs map to the same preset env")
+        return value
+
+
 class PresetPatch(BaseModel):
     """Admin partial edit: `spec` is an RFC 7396 merge patch of the stored spec. A `project`
     other than the stored one is refused (human-only)."""

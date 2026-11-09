@@ -20,7 +20,14 @@ from agents_orchestrator.api.spec_edit import (
     merged_spec_in,
     note_fields,
 )
-from agents_orchestrator.api.vault_refs import check_refs, record_ref_events, ref_diff, refs_in
+from agents_orchestrator.api.vault_refs import (
+    check_refs,
+    note_vault,
+    record_ref_events,
+    ref_diff,
+    refs_in,
+    unavailable,
+)
 from agents_orchestrator.db import presets as repo
 from agents_orchestrator.db import projects
 from agents_orchestrator.preset_policy import (
@@ -219,6 +226,7 @@ async def _save(
                 await secret_store.sync_declared(
                     conn, kube, settings.namespace, preset.id, declared, collect=False
                 )
+        note_vault(request, *ref_diff(old_refs or {}, refs_in(spec)))
     except secret_store.SecretStoreError as exc:
         await forget(conn, kube, settings.namespace, created)
         if isinstance(exc, secret_store.PresetNotFound):
@@ -390,6 +398,148 @@ async def replace(
             paths.append("labels")
         note_fields(request, paths)
     return _view(preset, metas)
+
+
+async def _entry_envs(request: Request, entry_id: uuid.UUID) -> list[str]:
+    """The env names of a vault entry (fixed at create); 422 `vault_entry_unknown` when the vault
+    lists no such entry, 503 when it cannot answer."""
+    vault = vault_client.vault_of(request)
+    try:
+        listed = await vault.entries(None)
+    except vault_client.VaultUnavailable:
+        raise unavailable() from None
+    for entry in listed:
+        if isinstance(entry, dict) and str(entry.get("id")) == str(entry_id):
+            return sorted(e["env"] for e in entry.get("envs") or [])
+    raise _entry_unknown(entry_id)
+
+
+def _entry_unknown(entry_id: uuid.UUID) -> ApiError:
+    return ApiError(
+        422,
+        "vault_entry_unknown",
+        f"unknown vault entry: {entry_id}",
+        extra={"envs": [], "entries": [str(entry_id)]},
+    )
+
+
+def _attach_edit(
+    entry_id: uuid.UUID, mapping: dict[str, str], replace: bool
+) -> Callable[[dict[str, Any]], tuple[dict[str, Any], list[str]]]:
+    """The env edit of an attach: every `entry env -> preset env` of `mapping` becomes a ref;
+    the other envs, earlier refs included, stay. A preset env that exists and is not already
+    that very ref is a conflict, overwritten only with `replace`."""
+    wanted = {pe: {"vault": str(entry_id), "env": ee} for ee, pe in mapping.items()}
+
+    def edit(env: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+        conflicts = sorted(pe for pe, ref in wanted.items() if pe in env and env[pe] != ref)
+        return {**env, **wanted}, ([] if replace else conflicts)
+
+    return edit
+
+
+def _detach_edit(
+    entry_id: uuid.UUID, preset_env: str | None
+) -> Callable[[dict[str, Any]], tuple[dict[str, Any], list[str]]]:
+    """The env edit of a detach: the refs to the entry (only `preset_env` when given) go."""
+
+    def edit(env: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+        gone = {
+            pe
+            for pe, ref in refs_in({"env": env}).items()
+            if ref.vault == entry_id and preset_env in (None, pe)
+        }
+        if not gone:
+            raise ApiError(404, "not_attached", "the entry is not attached to the preset")
+        return {k: v for k, v in env.items() if k not in gone}, []
+
+    return edit
+
+
+async def attach_vault(
+    request: Request,
+    conn,
+    settings: Settings,
+    preset_id: uuid.UUID,
+    entry_id: uuid.UUID,
+    body: schemas.VaultAttachIn,
+) -> schemas.PresetView:
+    """Attach the entry's envs to a manageable preset as vault refs, all in one save. Without
+    `body.envs` every env of the entry goes in under its own name."""
+    if body.envs is None:
+        mapping = {e: e for e in await _entry_envs(request, entry_id)}
+        if not mapping:
+            raise _entry_unknown(entry_id)
+    else:
+        mapping = body.envs
+    return await _edit_refs(
+        request, conn, settings, preset_id, _attach_edit(entry_id, mapping, body.replace)
+    )
+
+
+async def detach_vault(
+    request: Request,
+    conn,
+    settings: Settings,
+    preset_id: uuid.UUID,
+    entry_id: uuid.UUID,
+    preset_env: str | None,
+) -> schemas.PresetView:
+    """Remove every ref to the entry from a manageable preset (only `preset_env` when given)."""
+    return await _edit_refs(request, conn, settings, preset_id, _detach_edit(entry_id, preset_env))
+
+
+async def _edit_refs(
+    request: Request,
+    conn,
+    settings: Settings,
+    preset_id: uuid.UUID,
+    edit: Callable[[dict[str, Any]], tuple[dict[str, Any], list[str]]],
+) -> schemas.PresetView:
+    """Superleader edit of a preset's env through `edit(env) -> (new env, conflicting envs)`,
+    saved like a patch: the vault checks the refs outside the lock, the locked row must still be
+    as read, a concurrent edit is re-read and retried. The conflicts are refused (409
+    `env_exists`) once the vault has had its say."""
+    for _ in range(_PATCH_TRIES):
+        stored = await repo.get(conn, preset_id)
+        if stored is None or not stored.superleader_manageable:
+            raise not_found("preset")
+        env, conflicts = edit(dict(stored.spec.get("env") or {}))
+        _, spec_in = merged_spec_in({**stored.spec, "env": env}, {})
+        body = schemas.PresetIn(name=stored.name, spec=spec_in, project=stored.project)
+        spec, values, model = await _validated(
+            body, settings, stored.spec, preset_id, human_only_base=stored.spec, request=request
+        )
+        await check_vault(request, model, stored.labels, stored.project)
+        if conflicts:
+            raise ApiError(
+                409,
+                "env_exists",
+                f"the preset already has: {', '.join(conflicts)}; send replace to overwrite",
+                extra={"envs": conflicts},
+            )
+        recheck = _unchanged_since(stored, labels=True, project=True)
+        try:
+            preset, metas = await _save(
+                request,
+                conn,
+                settings,
+                spec,
+                values,
+                stored.project,
+                lambda st=stored, sp=spec, rc=recheck: repo.update(
+                    conn, preset_id, st.name, sp, None, None, st.updated_at, st.project, rc
+                ),
+                _actor(request, True),
+                refs_in(stored.spec),
+            )
+        except repo.PresetNotFound:
+            raise not_found("preset") from None
+        except repo.PresetChanged:
+            continue
+        note_fields(request, changed_paths(stored.spec, spec))
+        return _view(preset, metas)
+    raise ApiError(409, "conflict", "the preset changed since it was read; retry")
 
 
 def _merged_body(stored: repo.Preset, body: schemas.PresetPatch) -> schemas.PresetIn:
