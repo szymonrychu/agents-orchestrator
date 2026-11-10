@@ -12974,6 +12974,12 @@
             },
             "description": "Successful Response"
           },
+          "404": {
+            "description": "Unknown agent"
+          },
+          "409": {
+            "description": "Agent not ready"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -12983,6 +12989,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "502": {
+            "description": "Wrapper unreachable or answered an unexpected body"
           }
         },
         "summary": "Get Dialog"
@@ -13023,6 +13032,15 @@
             },
             "description": "Successful Response"
           },
+          "403": {
+            "description": "Origin not allowed"
+          },
+          "404": {
+            "description": "Unknown agent"
+          },
+          "409": {
+            "description": "Agent not ready, or the wrapper's no_dialog, dialog_changed, permission_resolved or not_dismissable"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -13032,6 +13050,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "502": {
+            "description": "Wrapper unreachable or answered an unexpected body"
           }
         },
         "summary": "Answer Dialog"

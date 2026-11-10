@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import uuid
 from collections.abc import AsyncIterator
@@ -14,6 +16,7 @@ from test_api_files import KEY, token_of
 from test_api_sessions import assert_error, client_for, make_settings
 from test_api_terminals import GOOD_ORIGIN, TermRig
 from test_service_port import TOKENS, client
+from test_vault_canary import table_texts
 
 from agents_orchestrator.api import service_auth, workspace
 from agents_orchestrator.api.app import create_app
@@ -306,3 +309,58 @@ async def test_refused_answers_are_audited(rig, caplog):
     for want in ("status=403", f"agent={row['id']}", "action=deny"):
         assert want in lines[1]
     assert all("tool_input" not in m for m in lines)
+
+
+CANARY_INPUT = "CANARY-DIALOG-TOOL-INPUT-5d1e"
+CANARY_MESSAGE = "CANARY-DIALOG-DENY-MESSAGE-b82c"
+
+
+async def test_dialog_canary_never_leaks(rig, pool, caplog):
+    """Secrets canary (secrets-model, "New route or tool"). Listener: the human main port only
+    (see test_not_on_agent_or_service_port). Actor: the peer address, logged by the audit line;
+    the main port has no user identity. The relayed GET body is the human's own view and may
+    carry the permission's tool_input (positive control); nothing else may: no log record
+    (audit line included), no row of any table, no event, no error body, not even base64."""
+    fake, sid, row = await rig.agent(0)
+    caplog.set_level(logging.DEBUG)
+    state = permission_state()
+    state["permission"]["tool_input"] = json.dumps({"command": f"echo {CANARY_INPUT}"})
+    fake.set_dialog(state, sid)
+    allowed: list[str] = []
+    errors: list[str] = []
+
+    got = await rig.http.get(url(row))
+    assert got.status_code == 200 and CANARY_INPUT in got.text  # the human's view
+    allowed.append(got.text)
+    ok = await rig.http.post(
+        url(row), json={"action": "deny", "request_id": RID, "message": CANARY_MESSAGE}
+    )
+    assert ok.status_code == 200, ok.text
+    allowed.append(ok.text)
+    body = {"action": "allow", "request_id": RID, "message": CANARY_MESSAGE}
+    errors.append((await rig.http.post(url(row), json=body)).text)  # 409 permission_resolved
+    errors.append((await rig.http.post(url(row), json={**body, "request_id": "bad"})).text)  # 422
+    bad = {"Origin": "https://evil.example"}
+    errors.append((await rig.http.post(url(row), json=body, headers=bad)).text)  # 403
+    fake.set_dialog(state, sid)
+    errors.append(
+        (await rig.http.post(url(row), json={**body, "request_id": "perm_ffffffffffff"})).text
+    )
+    fake.set_dialog({"kind": "bogus", "since": None, "tool_input": CANARY_INPUT}, sid)
+    errors.append((await rig.http.get(url(row))).text)  # 502 wrapper_error
+    fake.set_dialog(None, sid)
+    errors.append((await rig.http.post(url(row), json=body)).text)  # 409 no_dialog
+    await fake.set_unreachable(True)
+    errors.append((await rig.http.get(url(row))).text)
+    errors.append((await rig.http.post(url(row), json=body)).text)
+    await fake.set_unreachable(False)
+
+    forbidden = [CANARY_INPUT, CANARY_MESSAGE]
+    forbidden += [base64.b64encode(x.encode()).decode().rstrip("=") for x in forbidden]
+    rows = await table_texts(pool)
+    assert any("dialog answer peer=" in r.getMessage() for r in caplog.records)  # audit line
+    for needle in forbidden:
+        assert not [e for e in errors if needle in e], f"{needle} in an error body"
+        assert needle not in caplog.text, f"{needle} in a log record"
+        assert not [t for t, r in rows if needle in r], f"{needle} in a row"
+    assert not [a for a in allowed[1:] if CANARY_INPUT in a]  # the answer echoes no tool input

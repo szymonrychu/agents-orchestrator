@@ -607,7 +607,16 @@ def _dialog_model[M: BaseModel](target: WrapperTarget, model: type[M], body: Any
         ) from None
 
 
-@router.get("/agents/{agent_id}/dialog", response_model=schemas.DialogView)
+_DIALOG_ERRORS: dict[int | str, dict[str, Any]] = {
+    404: {"description": "Unknown agent"},
+    409: {"description": "Agent not ready"},
+    502: {"description": "Wrapper unreachable or answered an unexpected body"},
+}
+
+
+@router.get(
+    "/agents/{agent_id}/dialog", response_model=schemas.DialogView, responses=_DIALOG_ERRORS
+)
 async def get_dialog(
     request: Request, pool: Pool, settings: Cfg, agent_id: uuid.UUID
 ) -> schemas.DialogView:
@@ -620,7 +629,18 @@ async def get_dialog(
     )
 
 
-@router.post("/agents/{agent_id}/dialog", response_model=schemas.DialogAnswerResult)
+@router.post(
+    "/agents/{agent_id}/dialog",
+    response_model=schemas.DialogAnswerResult,
+    responses={
+        **_DIALOG_ERRORS,
+        403: {"description": "Origin not allowed"},
+        409: {
+            "description": "Agent not ready, or the wrapper's no_dialog, dialog_changed, "
+            "permission_resolved or not_dismissable"
+        },
+    },
+)
 async def answer_dialog(
     request: Request, pool: Pool, settings: Cfg, agent_id: uuid.UUID, body: schemas.DialogAnswer
 ) -> schemas.DialogAnswerResult:
