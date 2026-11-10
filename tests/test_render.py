@@ -435,7 +435,8 @@ def test_ask_user_question_disabled():
     assert cfg["sessions"]["idle_timeout_seconds"] == 0
 
 
-def test_system_append_asks_in_writing():
+def test_system_append_asks_in_writing_without_taskboard():
+    # Rewritten for T-102: the ask-in-writing rule now holds only without a reachable taskboard.
     cfg = config_of(render.render_session(make_session(), make_settings(), TOKENS))
     text = cfg["prompts"]["system_append"]
     assert text == render.ASK_IN_WRITING_PROMPT
@@ -444,6 +445,36 @@ def test_system_append_asks_in_writing():
     assert "recommended answer" in low
     assert '"yes"' in text
     assert "askuserquestion" in low
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"taskboard_url": "http://tb", "taskboard_token": "t"},
+        {"agent_api_url": "http://orch/agent"},
+    ],
+)
+def test_system_append_asks_in_writing_with_only_half_the_gate(over):
+    cfg = config_of(render.render_session(make_session(), make_settings(**over), TOKENS))
+    assert cfg["prompts"]["system_append"] == render.ASK_IN_WRITING_PROMPT
+
+
+def test_system_append_asks_via_decisions_with_taskboard():
+    settings = make_settings(
+        agent_api_url="http://orch/agent", taskboard_url="http://tb", taskboard_token="t"
+    )
+    cfg = config_of(render.render_session(make_session(), settings, TOKENS))
+    text = cfg["prompts"]["system_append"]
+    assert text == render.ASK_VIA_DECISIONS_PROMPT
+    assert "orchestrator_decision_ask" in text
+    assert "recommended" in text
+    assert "askuserquestion" in text.lower()
+    assert "reply, chat" in text
+    assert "blocker" in text
+    assert "reason" in text
+    assert "superseded_by" in text
+    assert "answered_elsewhere" in text
+    assert "numbered list" not in text
 
 
 def test_shutdown_below_grace_and_resources():
@@ -693,6 +724,15 @@ FULL_WRAPPER = {
 def wrapper_cfg(wrapper, **spec) -> dict:
     session = make_session(wrapper=wrapper, max_replicas=2, replicas=2, **spec)
     return config_of(render.render_session(session, make_settings(agent_api_url=AGENT_URL), TOKENS))
+
+
+def test_wrapper_system_append_follows_decisions_prompt():
+    session = make_session(wrapper={"system_append": "Be terse."})
+    settings = make_settings(
+        agent_api_url=AGENT_URL, taskboard_url="http://tb", taskboard_token="t"
+    )
+    cfg = config_of(render.render_session(session, settings, TOKENS))
+    assert cfg["prompts"]["system_append"] == render.ASK_VIA_DECISIONS_PROMPT + "\n\nBe terse."
 
 
 def test_wrapper_settings_keep_reserved_entries():

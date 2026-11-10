@@ -64,6 +64,20 @@ ASK_IN_WRITING_PROMPT = (
     "Never wait on an interactive question tool."
 )
 
+ASK_VIA_DECISIONS_PROMPT = (
+    "The AskUserQuestion tool is disabled and nobody answers interactive questions. "
+    "Every question for the user goes through orchestrator_decision_ask, with options and "
+    "exactly one marked recommended, so the user can accept it with one answer. "
+    "Never ask a question only in your reply, chat or a session message: a question that is "
+    "not a decision is lost. A chat message may link to the task, but the question itself "
+    "exists only as a decision. Then stop and wait for the answer. "
+    "If a decision blocks you and a fix is possible without the user, make the fix and withdraw "
+    "that blocker with orchestrator_decision_withdraw. "
+    "Withdraw a decision only with a reason and either superseded_by (the id of the decision "
+    "that replaces it) or answered_elsewhere (where it was answered). "
+    "Never wait on an interactive question tool."
+)
+
 
 def workdir_path(spec: SessionSpec) -> str:
     return f"{WORKDIR_ROOT}/{spec.workdir}"
@@ -420,6 +434,13 @@ def _apply_wrapper(cfg: dict[str, Any], wrapper: WrapperSettings, session: Sessi
         cfg["claude"]["permission_mode"] = user["permission_mode"]
 
 
+def _ask_prompt(settings: Settings) -> str:
+    """Questions go through taskboard decisions when the agent relay and taskboard are reachable."""
+    if settings.agent_api_url and settings.taskboard_available:
+        return ASK_VIA_DECISIONS_PROMPT
+    return ASK_IN_WRITING_PROMPT
+
+
 def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
     spec, slug = session.spec, session.slug
     kube_env = KUBE_PASSTHROUGH_ENV if kube_granted(spec, settings) else ()
@@ -479,7 +500,7 @@ def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
             "interrupt_settle_seconds": settings.wrapper_interrupt_settle_seconds,
             "commands": {"client": list(CLIENT_COMMANDS)},
         },
-        "prompts": {"system_append": ASK_IN_WRITING_PROMPT},
+        "prompts": {"system_append": _ask_prompt(settings)},
         "limits": {
             "shutdown_timeout_seconds": _shutdown_timeout(settings.agent_termination_grace_seconds)
         },
