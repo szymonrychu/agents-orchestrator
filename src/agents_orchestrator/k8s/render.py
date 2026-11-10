@@ -66,13 +66,15 @@ ASK_IN_WRITING_PROMPT = (
 
 ASK_VIA_DECISIONS_PROMPT = (
     "The AskUserQuestion tool is disabled and nobody answers interactive questions. "
-    "Every question for the user goes through orchestrator_decision_ask, with options and "
+    "Every question for the user goes through orchestrator_decision_ask, one decision per "
+    "question, with options and "
     "exactly one marked recommended, so the user can accept it with one answer. "
     "Never ask a question only in your reply, chat or a session message: a question that is "
     "not a decision is lost. A chat message may link to the task, but the question itself "
     "exists only as a decision. Then stop and wait for the answer. "
-    "If a decision blocks you and a fix is possible without the user, make the fix and withdraw "
-    "that blocker with orchestrator_decision_withdraw. "
+    "When a tool, permission or sandbox block (a blocker) stopped the action a decision "
+    "unblocks, the "
+    "same decision also asks the user for the fix of that block, so one answer unblocks it. "
     "Withdraw a decision only with a reason and either superseded_by (the id of the decision "
     "that replaces it) or answered_elsewhere (where it was answered). "
     "Never wait on an interactive question tool."

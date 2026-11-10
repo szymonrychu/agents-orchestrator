@@ -471,6 +471,9 @@ def test_system_append_asks_via_decisions_with_taskboard():
     assert "askuserquestion" in text.lower()
     assert "reply, chat" in text
     assert "blocker" in text
+    assert "same decision also asks the user for the fix" in text
+    assert "withdraw that blocker" not in text
+    assert "one decision per question" in text
     assert "reason" in text
     assert "superseded_by" in text
     assert "answered_elsewhere" in text
