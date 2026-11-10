@@ -794,3 +794,19 @@ def test_handover_defaults_and_budget_floor(monkeypatch):
     monkeypatch.setenv("ORCH_HANDOVER_BUDGET_TOKENS", "9999")
     with pytest.raises(SettingsError):
         Settings()
+
+
+def test_wrapper_dialog_settings_defaults_and_bounds():
+    base = {"database_url": "postgresql://x", "master_key": "k" * 32}
+    s = Settings(**base)
+    assert s.wrapper_permission_hold_seconds == 1800
+    assert s.wrapper_dialog_auto_dismiss_seconds == 300
+    assert (
+        Settings(**base, wrapper_dialog_auto_dismiss_seconds=0).wrapper_dialog_auto_dismiss_seconds
+        == 0
+    )
+    with pytest.raises(SettingsError):
+        Settings(**base, wrapper_dialog_auto_dismiss_seconds=-1)
+    for bad in (0, -1, 86401):
+        with pytest.raises(SettingsError):
+            Settings(**base, wrapper_permission_hold_seconds=bad)

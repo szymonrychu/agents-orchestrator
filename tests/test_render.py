@@ -797,7 +797,12 @@ def test_wrapper_settings_mapped():
     assert s["turn_stall_seconds"] == 90
     assert s["max_restarts"] == 3
     assert s["restart_continue_prompt"] == "continue please"
-    assert s["commands"] == {"client": ["compact", "clear"], "agent": ["compact", "context"]}
+    assert s["commands"] == {
+        "client": ["compact", "clear"],
+        "agent": ["compact", "context"],
+        "permission_hold_seconds": 1800,
+        "dialog_auto_dismiss_seconds": 300,
+    }
     assert (s["max_sessions"], s["resume_on_start"], s["idle_timeout_seconds"]) == (1, True, 0)
     assert s["ask_user_question"] == "deny"
     assert cfg["limits"]["turn_max_seconds"] == 600
@@ -840,7 +845,11 @@ def test_no_wrapper_block_renders_unchanged():
         "ask_user_question": "deny",
         "restart_continue_prompt": "Claude was restarted. Continue the task where you left off.",
         "interrupt_settle_seconds": 20,
-        "commands": {"client": ["compact", "clear"]},
+        "commands": {
+            "client": ["compact", "clear"],
+            "permission_hold_seconds": 1800,
+            "dialog_auto_dismiss_seconds": 300,
+        },
     }
     assert cfg["claude"]["permissions"] == {
         "deny": ["EnterPlanMode", "ExitPlanMode", "AskUserQuestion"]
@@ -909,7 +918,11 @@ def test_hive_with_agent_commands_validates(tmp_path, monkeypatch):
 def test_client_commands_rendered_without_agent_commands():
     # the orchestrator's own `compact` and `clear` commands need the client allowlist
     cfg = wrapper_cfg({})
-    assert cfg["sessions"]["commands"] == {"client": ["compact", "clear"]}
+    assert cfg["sessions"]["commands"] == {
+        "client": ["compact", "clear"],
+        "permission_hold_seconds": 1800,
+        "dialog_auto_dismiss_seconds": 300,
+    }
 
 
 def test_interrupt_settle_comes_from_the_orchestrator_setting():
@@ -967,3 +980,12 @@ def test_permission_mode_shared_by_hive_members():
     assert sts_of(objs)["spec"]["replicas"] == 3
     assert [o["kind"] for o in objs].count("ConfigMap") == 1
     assert config_of(objs)["claude"]["permission_mode"] == "auto"
+
+
+def test_dialog_settings_rendered():
+    settings = make_settings(
+        wrapper_permission_hold_seconds=60, wrapper_dialog_auto_dismiss_seconds=5
+    )
+    cfg = config_of(render.render_session(make_session(), settings, TOKENS))
+    assert cfg["sessions"]["commands"]["permission_hold_seconds"] == 60
+    assert cfg["sessions"]["commands"]["dialog_auto_dismiss_seconds"] == 5

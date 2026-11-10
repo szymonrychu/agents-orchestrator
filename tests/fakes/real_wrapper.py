@@ -33,13 +33,15 @@ class RealWrapper:
         return done.stdout.strip()
 
     def start(self) -> None:
+        # create + cp instead of a bind mount: the docker daemon may not share this filesystem.
         self._docker(
-            "run", "-d", "--name", self.name,
+            "create", "--name", self.name,
             "-p", f"127.0.0.1::{INTERNAL_PORT}",
-            "-v", f"{CONFIG}:/etc/ccw/config.yaml:ro",
             self.image,
         )  # fmt: skip
         try:
+            self._docker("cp", str(CONFIG), f"{self.name}:/etc/ccw/config.yaml")
+            self._docker("start", self.name)
             port = self._docker("port", self.name, f"{INTERNAL_PORT}/tcp").splitlines()[0]
             self.base_url = f"http://127.0.0.1:{port.rsplit(':', 1)[1]}"
             self._wait_ready()

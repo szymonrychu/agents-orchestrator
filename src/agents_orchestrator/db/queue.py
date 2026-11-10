@@ -660,7 +660,7 @@ async def requeue(
     backoff_base: float = 0.0,
     backoff_max: float = 0.0,
 ) -> bool:
-    """409 busy/booting: back to queued, no attempt counted.
+    """409 busy/booting/dialog_open: back to queued, no attempt counted.
 
     A regular or priority message is not gated by agent_free, so it also waits a bounded
     exponential backoff (`backoff_base * 2^requeues`, at most `backoff_max`) and cannot be

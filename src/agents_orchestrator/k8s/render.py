@@ -500,7 +500,11 @@ def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
             "restart_continue_prompt": _escape(settings.default_restart_continue_prompt),
             # the priority send timeout is derived from it (Settings.priority_send_timeout_seconds)
             "interrupt_settle_seconds": settings.wrapper_interrupt_settle_seconds,
-            "commands": {"client": list(CLIENT_COMMANDS)},
+            "commands": {
+                "client": list(CLIENT_COMMANDS),
+                "permission_hold_seconds": settings.wrapper_permission_hold_seconds,
+                "dialog_auto_dismiss_seconds": settings.wrapper_dialog_auto_dismiss_seconds,
+            },
         },
         "prompts": {"system_append": _ask_prompt(settings)},
         "limits": {

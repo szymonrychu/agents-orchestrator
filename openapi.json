@@ -1241,6 +1241,237 @@
         "title": "DeleteArchives",
         "type": "object"
       },
+      "DialogAnswer": {
+        "additionalProperties": false,
+        "description": "A person's answer to the open dialog; forwarded to the wrapper unchanged.",
+        "properties": {
+          "action": {
+            "enum": [
+              "allow",
+              "deny",
+              "dismiss"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "expect_since": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expect Since"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "pattern": "^perm_[0-9a-f]{12}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Id"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "title": "DialogAnswer",
+        "type": "object"
+      },
+      "DialogAnswerResult": {
+        "properties": {
+          "agent_id": {
+            "format": "uuid",
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "behavior": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Behavior"
+          },
+          "escape_sent": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Escape Sent"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Id"
+          },
+          "status": {
+            "enum": [
+              "answered",
+              "dismissed",
+              "still_open"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "agent_id"
+        ],
+        "title": "DialogAnswerResult",
+        "type": "object"
+      },
+      "DialogPermissionView": {
+        "description": "A held PermissionRequest of the agent's claude (wrapper 0.11.0).",
+        "properties": {
+          "agent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Id"
+          },
+          "expires_at": {
+            "title": "Expires At",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "since": {
+            "title": "Since",
+            "type": "string"
+          },
+          "suggestions": {
+            "items": {},
+            "title": "Suggestions",
+            "type": "array"
+          },
+          "tool_input": {
+            "title": "Tool Input",
+            "type": "string"
+          },
+          "tool_name": {
+            "title": "Tool Name",
+            "type": "string"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "request_id",
+          "tool_name",
+          "tool_input",
+          "truncated",
+          "since",
+          "expires_at"
+        ],
+        "title": "DialogPermissionView",
+        "type": "object"
+      },
+      "DialogView": {
+        "description": "What the agent's claude waits on: the wrapper's dialog state plus the agent identity.",
+        "properties": {
+          "agent_id": {
+            "format": "uuid",
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "permission",
+              "dialog",
+              "usage_wait",
+              "none"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "permission": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DialogPermissionView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          },
+          "since": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Since"
+          },
+          "tail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tail"
+          }
+        },
+        "required": [
+          "kind",
+          "agent_id",
+          "session_id"
+        ],
+        "title": "DialogView",
+        "type": "object"
+      },
       "EnvVar-Input": {
         "additionalProperties": false,
         "description": "One session env variable, GitLab CI style: `{value, expand}`, or a vault reference.\n\nA plain variable carries its value; `expand` gates `$` handling of it. A vault reference\n`{vault, env}` names an agents-vault entry and its env; the entry's value is resolved by the\nvault at session create. A reference carries nothing else.",
@@ -12714,6 +12945,117 @@
           }
         },
         "summary": "Compact Agent"
+      }
+    },
+    "/api/v1/agents/{agent_id}/dialog": {
+      "get": {
+        "description": "What the agent's claude is waiting on (a permission request, a dialog, a usage wait).",
+        "operationId": "get_dialog_api_v1_agents__agent_id__dialog_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Agent Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DialogView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "Unknown agent"
+          },
+          "409": {
+            "description": "Agent not ready"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "502": {
+            "description": "Wrapper unreachable or answered an unexpected body"
+          }
+        },
+        "summary": "Get Dialog"
+      },
+      "post": {
+        "description": "Allow, deny or dismiss the open dialog; the wrapper's 4xx (409 `no_dialog`,\n`dialog_changed`, `permission_resolved`, `not_dismissable`) pass through. The log line\ncarries no message text and no tool input. The main port has no user identity (the\nsource allowlist is the auth), so the caller is the peer address. The origin guard runs\ninside the audited block so refused answers (403, 404, 409) are logged too.",
+        "operationId": "answer_dialog_api_v1_agents__agent_id__dialog_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Agent Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DialogAnswer"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DialogAnswerResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "Origin not allowed"
+          },
+          "404": {
+            "description": "Unknown agent"
+          },
+          "409": {
+            "description": "Agent not ready, or the wrapper's no_dialog, dialog_changed, permission_resolved or not_dismissable"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "502": {
+            "description": "Wrapper unreachable or answered an unexpected body"
+          }
+        },
+        "summary": "Answer Dialog"
       }
     },
     "/api/v1/agents/{agent_id}/interrupt": {

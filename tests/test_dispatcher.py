@@ -552,16 +552,27 @@ async def test_lane_is_sent_to_the_wrapper(env):
     assert env.fake.turn_lanes == ["idle"]
 
 
-async def test_dialog_open_fails_regular_message_with_reason(env):
+async def test_dialog_open_requeues_with_busy_backoff(env):
     agent = await env.agent()
     m = await env.msg(lane="regular")
     env.fake.set_turn_status(409, "dialog_open")
-    d = env.dispatcher()
+    d = env.dispatcher(retry_backoff_base_seconds=1.0, retry_backoff_max_seconds=3.0)
+    await d.drain()
+    row = (
+        await env.rows(
+            "SELECT status, attempts, error, extract(epoch FROM not_before - now()) AS gap"
+            " FROM messages WHERE id=%s",
+            (m["id"],),
+        )
+    )[0]
+    assert (row["status"], row["attempts"], row["error"]) == ("queued", 0, None)
+    assert 0 < float(row["gap"]) <= 1.0
+    assert (await env.agent_row(agent["id"]))["last_dispatched_at"] is None
+    env.fake.set_turn_status(None)
+    await env.exec("UPDATE messages SET not_before = NULL WHERE id=%s", (m["id"],))
     await d.drain()
     await d.aclose()
-    row = await env.message(m["id"])
-    assert (row["status"], row["error"]) == ("failed", "dialog_open")
-    assert (await env.agent_row(agent["id"]))["last_dispatched_at"] is None
+    assert (await env.message(m["id"]))["status"] == "sent"
 
 
 async def test_booting_and_busy_409_requeue_without_an_attempt(env):

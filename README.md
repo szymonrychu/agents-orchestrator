@@ -84,6 +84,8 @@ Every process reads `ORCH_*` variables (the contract `agents-orchestrator-settin
 | `ORCH_HANDOVER_MAX_WAIT_SECONDS` | `1800` | dispatcher | seconds (60 to 86400), the deadline of every `handover` request other than the forced `rollout` one: queued longer than this, background subagents stop holding it, and one still held by the leader's turn is rejected `expired` |
 | `ORCH_WRAPPER_SEND_TIMEOUT_SECONDS` | `15` | dispatcher, ingester | wrapper send timeout; at most half of dispatching_stale_seconds |
 | `ORCH_WRAPPER_INTERRUPT_SETTLE_SECONDS` | `20` | reconciler, dispatcher | rendered into every wrapper as `sessions.interrupt_settle_seconds`; the priority send timeout is `ORCH_WRAPPER_SEND_TIMEOUT_SECONDS + 3 * this + 14` s (89 s by default) |
+| `ORCH_WRAPPER_PERMISSION_HOLD_SECONDS` | `1800` | reconciler | rendered into every wrapper as `sessions.commands.permission_hold_seconds`: how long a permission request waits for an operator before the wrapper denies it (1 to 86400) |
+| `ORCH_WRAPPER_DIALOG_AUTO_DISMISS_SECONDS` | `300` | reconciler | rendered into every wrapper as `sessions.commands.dialog_auto_dismiss_seconds`: seconds an unanswered dialog stays open before the wrapper dismisses it (`0` = off) |
 | `ORCH_DISPATCHING_STALE_SECONDS` | `60` | dispatcher, ingester | dispatching row stale cutoff |
 | `ORCH_DISPATCHING_HEARTBEAT_SECONDS` | `5` | dispatcher, ingester | dispatching row heartbeat |
 | `ORCH_LOCK_HEARTBEAT_SECONDS` | `5` | all | singleton lock-held heartbeat |
@@ -179,7 +181,7 @@ One image, one `orch` entrypoint. Every command reads `ORCH_*` settings (see Con
 CI (`.github/workflows/ci.yaml`, job `images`) builds the orchestrator image from the root `Dockerfile` and smoke-tests it with `docker run --rm <image> --help`, but only after the `lint`, `test` and `e2e` jobs pass; a red build is never pushed. Only a push to `main` logs in to Harbor (secrets `HARBOR_USERNAME`, `HARBOR_PASSWORD`) and pushes it with `regctl`, in 50MB chunks. The `e2e` job builds and loads its own images and does not use the pushed one, so it does not wait for `images`.
 
 - Orchestrator image: `harbor.szymonrichert.pl/containers/agents-orchestrator:<sha7>`, where `<sha7>` is the first seven characters of the commit sha. Tags are immutable; there is no `latest`.
-- Agent image: no agent image is built here. Agent pods run the claude-code-wrapper image named by `ORCH_AGENT_IMAGE`; the recommended one is `harbor.szymonrichert.pl/containers/claude-code-wrapper:0.12.0`. This is the value for the chart's `agentImage` and agents-helmfile, and the commit the dev dependency `claude-code-wrapper` in `pyproject.toml` is pinned to, so config validation tests the wrapper the agents run.
+- Agent image: no agent image is built here. Agent pods run the claude-code-wrapper image named by `ORCH_AGENT_IMAGE`; the recommended one is `harbor.szymonrichert.pl/containers/claude-code-wrapper:0.13.0`. This is the value for the chart's `agentImage` and agents-helmfile, and the commit the dev dependency `claude-code-wrapper` in `pyproject.toml` is pinned to, so config validation tests the wrapper the agents run.
 - any-mcp: it reaches agent pods through the rendered onStart hook, not through an image. The `any-mcp` dependency in `pyproject.toml` and `ORCH_ANY_MCP_REF` pin the same release tag (`v0.5.0`). The dev dependency `any-mcp-tatara-orchestrator` in `pyproject.toml` (the orchestrator plugin from the plugins repo) and `ORCH_ANY_MCP_PLUGINS_REF` pin the same plugins release tag (`v0.31.0`).
 - The onStart script (`k8s/on_start.py`, ConfigMap key `on-start.sh`) runs before claude starts, on every pod start: it installs any-mcp into `/opt/any-mcp` when `/opt/any-mcp/.ref` differs from `ORCH_ANY_MCP_REF`, writes the session's any-mcp config to `/opt/any-mcp/etc/any-mcp.yaml`, runs `/opt/any-mcp/bin/any-mcp plugins install --config /opt/any-mcp/etc/any-mcp.yaml` (every run, so every `plugins[].source` of the config is installed into the any-mcp venv, branch and tag refs refreshed), then `/opt/any-mcp/bin/any-mcp --help`. The orchestrator plugin is one of those sources: the reserved entry is `source: git::<ORCH_ANY_MCP_PLUGINS_REPO>//orchestration/orchestrator?ref=<ORCH_ANY_MCP_PLUGINS_REF>` (no `plugin` key), installed as the package `any-mcp-tatara-orchestrator`. The rendered `plugins` list is the base config's entries (the spec's `any_mcp_config`, else the `ORCH_ANY_MCP_CONFIG_FILE` default), then one `{name, source}` per `spec.any_mcp_sources` entry in order, then the reserved entry (omitted without `ORCH_AGENT_API_URL`; the sources are rendered either way). A failed install does not block the session: the script logs `on-start: <step> failed (exit N)` to stderr, exits 0 and the hook is `on_error: allow`, so the pod stays Ready without the failed piece. Changing `ORCH_ANY_MCP_PLUGINS_REPO`, `ORCH_ANY_MCP_PLUGINS_REF` or a session's sources changes the config hash and rolls its pods.
 
@@ -1195,6 +1197,30 @@ Lists the shells of every ready agent of the session. The agents are queried con
 ### `DELETE /api/v1/agents/{agent_id}/terminals/{terminal_id}`
 
 Closes one shell and everything it started. Guarded by the Origin allowlist like the create route. `terminal_id` must be `term_` plus 12 lowercase hex digits, else `422 invalid_request` before any wrapper call. Response 204 without a body. Errors: 403 `forbidden_origin`, 404 `not_found` (agent), 404 `terminal_not_found`, 409 `agent_not_ready`, 422 `invalid_request`, 502 `wrapper_unreachable`, 502 `wrapper_error`, 503 `unavailable`.
+
+### `GET /api/v1/agents/{agent_id}/dialog`
+
+What the agent's claude is waiting on, read from its wrapper (`GET /v1/sessions/{id}/dialog`, wrapper 0.11.0). Human-only: the route is served on the main port and is not on the agent port (`/agent/v1`) nor the service-token allowlist, so no agent can answer its own prompt. Response 200:
+
+```json
+{
+  "kind": "permission", "since": "2026-11-09T10:00:00Z",
+  "permission": {
+    "request_id": "perm_0123456789ab", "tool_name": "Bash", "tool_input": "{\"command\": \"ls\"}",
+    "truncated": false, "suggestions": [], "agent_id": null,
+    "since": "2026-11-09T10:00:00Z", "expires_at": "2026-11-09T10:30:00Z"
+  },
+  "tail": null, "agent_id": "0c1d...", "session_id": "5b7e..."
+}
+```
+
+`kind` is `permission` (a held PermissionRequest; `permission` is set, or null with a `tail` when only the footer was seen), `dialog` (a TUI dialog; `tail` is the redacted screen end), `usage_wait` (a usage-limit wait, never dismissable) or `none`. Errors: 404 `not_found` (agent), 409 `agent_not_ready`, 502 `wrapper_unreachable`, 502 `wrapper_error`, 503 `unavailable`. Not guarded by the Origin allowlist (a read).
+
+### `POST /api/v1/agents/{agent_id}/dialog`
+
+Answers the open dialog. Body (extra keys are refused): `{"action": "allow" | "deny" | "dismiss", "request_id": "perm_...", "expect_since": "...", "message": "..."}`. `request_id` is required by the wrapper for `allow` and `deny`; `expect_since` guards a `dismiss` against a dialog that changed; `message` (at most 2000 characters) is the deny reason shown to the model. Guarded by the Origin allowlist like the terminal POST. The body is forwarded to the wrapper unchanged. Response 200: `{"status": "answered" | "dismissed" | "still_open", "request_id": null, "behavior": null, "escape_sent": null, "agent_id": "0c1d..."}`.
+
+Errors: 403 `forbidden_origin`, 404 `not_found` (agent), 409 `agent_not_ready`, 409 `no_dialog`, 409 `dialog_changed`, 409 `permission_resolved`, 409 `not_dismissable` (the last four are the wrapper's, passed through), 422 `invalid_request`, 502 `wrapper_unreachable`, 502 `wrapper_error`, 503 `unavailable`. Each answer is logged at INFO (`dialog answer peer=... agent=... pod=... action=... request_id=... status=...`), never with the message text or the tool input.
 
 ### `WS /api/v1/agents/{agent_id}/terminals/{terminal_id}/attach`
 

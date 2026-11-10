@@ -25,11 +25,13 @@ from agents_orchestrator.wrapper import (
     Ambiguous,
     Busy,
     ConfigError,
+    DialogState,
     Gone,
     Rejected,
     TurnAccepted,
     Unavailable,
     WrapperClient,
+    WrapperError,
 )
 
 TOKEN = "ci-token"
@@ -1098,3 +1100,84 @@ async def test_fake_notes_disabled_and_stopped_session(fake_leg: Leg, fake: Fake
     stopped = await leg.http.post(f"/v1/sessions/{sid}/notes", json={"text": "x"})
     assert stopped.status_code == 409 and stopped.json()["error"]["code"] == "invalid_state"
     assert fake.notes.get(sid) is None
+
+
+async def test_dialog_idle_is_none(leg: Leg) -> None:
+    sid = await leg.create()
+    await leg.wait_ready(sid)
+    state = await leg.client().get_dialog(sid)
+    assert isinstance(state, DialogState)
+    assert state.kind == "none"
+    assert state.permission is None
+
+
+async def test_dialog_dismiss_without_dialog_409_no_dialog(leg: Leg) -> None:
+    sid = await leg.create()
+    await leg.wait_ready(sid)
+    with pytest.raises(WrapperError) as err:
+        await leg.client().answer_dialog(sid, {"action": "dismiss"})
+    assert (err.value.status, err.value.code) == (409, "no_dialog")
+
+
+async def test_dialog_allow_without_dialog_409_no_dialog(leg: Leg) -> None:
+    sid = await leg.create()
+    await leg.wait_ready(sid)
+    with pytest.raises(WrapperError) as err:
+        await leg.client().answer_dialog(
+            sid, {"action": "allow", "request_id": "perm_0123456789ab"}
+        )
+    assert (err.value.status, err.value.code) == (409, "no_dialog")
+
+
+async def test_fake_dialog_controls(fake_leg: Leg, fake: FakeWrapper) -> None:
+    sid = await fake_leg.create()
+    client = fake_leg.client()
+    perm = {
+        "request_id": "perm_0123456789ab",
+        "tool_name": "Bash",
+        "tool_input": "ls",
+        "truncated": False,
+        "suggestions": [],
+        "agent_id": None,
+        "since": "2026-11-09T10:00:00Z",
+        "expires_at": "2026-11-09T10:30:00Z",
+    }
+    fake.set_dialog(
+        {"kind": "permission", "since": perm["since"], "permission": perm, "tail": None}
+    )
+    state = await client.get_dialog(sid)
+    assert state.kind == "permission" and state.permission is not None
+    assert state.permission.request_id == "perm_0123456789ab"
+    # permission and usage_wait cannot be dismissed
+    with pytest.raises(WrapperError) as err:
+        await client.answer_dialog(sid, {"action": "dismiss"})
+    assert (err.value.status, err.value.code) == (409, "not_dismissable")
+    # a wrong id while one is pending is dialog_changed
+    with pytest.raises(WrapperError) as err:
+        await client.answer_dialog(sid, {"action": "allow", "request_id": "perm_ffffffffffff"})
+    assert (err.value.status, err.value.code) == (409, "dialog_changed")
+    done = await client.answer_dialog(sid, {"action": "deny", "request_id": "perm_0123456789ab"})
+    assert (done.status, done.request_id, done.behavior) == (
+        "answered",
+        "perm_0123456789ab",
+        "deny",
+    )
+    assert fake.dialog_answers == [{"action": "deny", "request_id": "perm_0123456789ab"}]
+    assert ("POST", f"/v1/sessions/{sid}/dialog") in fake.requests
+    assert (await client.get_dialog(sid)).kind == "none"
+    # answering the same id again: permission_resolved
+    with pytest.raises(WrapperError) as err:
+        await client.answer_dialog(sid, {"action": "allow", "request_id": "perm_0123456789ab"})
+    assert (err.value.status, err.value.code) == (409, "permission_resolved")
+    # a plain dialog: stale expect_since is dialog_changed, the fresh one dismisses
+    fake.set_dialog({"kind": "dialog", "since": "s1", "permission": None, "tail": "Esc to cancel"})
+    with pytest.raises(WrapperError) as err:
+        await client.answer_dialog(sid, {"action": "dismiss", "expect_since": "old"})
+    assert (err.value.status, err.value.code) == (409, "dialog_changed")
+    res = await client.answer_dialog(sid, {"action": "dismiss", "expect_since": "s1"})
+    assert (res.status, res.escape_sent) == ("dismissed", True)
+    assert (await client.get_dialog(sid)).kind == "none"
+    fake.set_dialog({"kind": "usage_wait", "since": "s2", "permission": None, "tail": "x"})
+    with pytest.raises(WrapperError) as err:
+        await client.answer_dialog(sid, {"action": "dismiss"})
+    assert err.value.code == "not_dismissable"
