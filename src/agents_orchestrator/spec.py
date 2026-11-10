@@ -198,7 +198,7 @@ def source_plugin_name(source: str) -> str:
 
 
 INIT_SCRIPTS_MAX = 20
-VAULT_REFS_MAX = 50
+VAULT_REFS_MAX = 100
 _VAULT_ENV_RE = re.compile(r"[A-Z_][A-Z0-9_]{0,127}")
 
 CACHE_KEY_TEMPLATE_MAX = 256
