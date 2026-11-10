@@ -314,3 +314,6 @@ in the namespace, so an attached vault value is exposed to it. Decision: attach 
 (O7 replace-over-plain rule unchanged), the exposure is only marked. `vault_list` adds
 `privileged: bool` to each attachment; the attach answer (`VaultAttachView`) adds
 `attachment_privileged: bool`. Why not block: the user chose visibility over refusal.
+
+## 2026-11-10 agents ask through decisions when the taskboard is reachable (T-102)
+`render._ask_prompt` picks `ASK_VIA_DECISIONS_PROMPT` when `agent_api_url` and `taskboard_available` are both set, else the old `ASK_IN_WRITING_PROMPT` unchanged (the relay answers 503 without a taskboard). Why: a question asked only in a reply or chat is lost; as a decision it is tracked and answered once. Decisions: a withdraw needs a reason plus `superseded_by` or `answered_elsewhere`; a chat message may link the task but the question exists only as a decision; old withdrawals stay as they are. `test_system_append_asks_in_writing` encoded the old universal rule and was rewritten (renamed `..._without_taskboard`).
