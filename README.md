@@ -238,7 +238,7 @@ The taskboard relay is optional and follows the same shape. `taskboard.url` beco
 
 Annotations are per ServiceAccount: `serviceAccount.annotations` applies to the api and reconciler ServiceAccounts only; `agentServiceAccount.annotations` (default `{}`) to `<fullname>-agent` only; the per-session ServiceAccounts carry none. Cloud-identity annotations (IRSA, GKE Workload Identity) set on the api ServiceAccount therefore never reach agent pods or Jobs.
 
-`rbac.create` (default `true`) renders a namespaced Role `<fullname>-reconciler` in the release namespace and a RoleBinding to the ServiceAccount `<fullname>-reconciler`. Three more groups of objects render only behind a value, all also needing `rbac.create`: `kubeClusterAccess.enabled` (the ClusterRole and ClusterRoleBinding `<fullname>-kube-cluster-access`), a non-empty `kubeNamespaceAccess.namespaces` (the manager ClusterRole `<fullname>-kube-namespace-access`, its RoleBinding of the same name in each listed namespace, and the tier ClusterRoles) and `kubeClusterAccess.legacySharedServiceAccount` (the transition ServiceAccount and ClusterRoleBinding, below). See Kubernetes permissions for what they grant. The Role grants exactly:
+`rbac.create` (default `true`) renders a namespaced Role `<fullname>-reconciler` in the release namespace and a RoleBinding to the ServiceAccount `<fullname>-reconciler`. Two more groups of objects render only behind a value, all also needing `rbac.create`: `kubeClusterAccess.enabled` (the ClusterRole and ClusterRoleBinding `<fullname>-kube-cluster-access`), a non-empty `kubeNamespaceAccess.namespaces` (the manager ClusterRole `<fullname>-kube-namespace-access`, its RoleBinding of the same name in each listed namespace, and the tier ClusterRoles). See Kubernetes permissions for what they grant. The Role grants exactly:
 
 | Resource | Verbs |
 |---|---|
@@ -258,7 +258,6 @@ ServiceAccounts, all with `automountServiceAccountToken: false` except the recon
 | `<fullname>-reconciler` | `serviceAccount.create` | the reconciler (token mounted, bound to the Role) |
 | `<fullname>-agent` | `serviceAccount.create` | every agent pod without Kubernetes access and every init, check and cache Job; no binding |
 | `agent-<slug>-<sid>` | created by the reconciler per session, never by helm | agent pods of a session with cluster access or namespace access, which mount its token (`sid` is the first 8 hex digits of the session id); bound by the per-session bindings below |
-| `<fullname>-kube-access` | `kubeClusterAccess.legacySharedServiceAccount` (transition, below) | the pods of sessions that have not rolled yet; bound to `cluster-admin` when `rbac.create` |
 
 ### Ingress
 
@@ -463,10 +462,6 @@ Rules:
 - Bookkeeping is keyed by kind, namespace and name, so the same binding name in two namespaces is two objects. A live ServiceAccount or binding of the same slug but another `session-id` label (a slug reused after a discard) is deleted and recreated, never adopted.
 - The agents must pass `-n <namespace>` to kubectl: the pods' default namespace is the release namespace, where they hold no rights, and namespace access gives no cluster-scope list (no `kubectl get namespaces`).
 - An agent (a superleader) may shrink or remove a stored `kube_namespace_access` but may not add a namespace or a tier (403 `human_only_field`, below).
-
-### Transition: the shared ServiceAccount
-
-`kubeClusterAccess.legacySharedServiceAccount` (default `false`) is a one-stage transition flag, to be removed in the next release. It renders the old shared ServiceAccount `<fullname>-kube-access` and its ClusterRoleBinding to `cluster-admin` (with `rbac.create`) so pods created before the split, which still name that ServiceAccount, keep working until the Replacer rolls them at idle onto per-session identities. The orchestrator no longer reads `ORCH_KUBE_ACCESS_SERVICE_ACCOUNT` and sets the shared ServiceAccount on no new pod. Turn the flag off once every such pod has rolled.
 
 Applies are server-side applies with field manager `agents-orchestrator` and `force`, so the reconciler owns the fields it renders. An object is applied only when it changed: its render differs from the one the process last applied, or the live object no longer holds a rendered field (that re-apply is logged at INFO with the first differing path). A pass with nothing to change sends no PATCH. The session Secret is never read, so an unchanged one is re-applied every 10 minutes, which restores one deleted out of band. Every pod or StatefulSet the reconciler deletes or scales away is logged at INFO with the session slug, the object and the reason: an idle pod on an outdated revision (with the pod and update revision hashes), a restart command (with its id and issuing session), a scale-down (from, to and the pods removed), an object no longer rendered, or a discard.
 

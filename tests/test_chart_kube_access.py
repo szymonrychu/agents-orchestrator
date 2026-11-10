@@ -41,7 +41,7 @@ def _settings(docs: list[dict]) -> dict[str, str]:
 
 def test_defaults_render_no_kube_objects() -> None:
     values = yaml.safe_load((CHART / "values.yaml").read_text())
-    assert values["kubeClusterAccess"] == {"enabled": False, "legacySharedServiceAccount": False}
+    assert values["kubeClusterAccess"] == {"enabled": False}
     assert values["kubeNamespaceAccess"] == {
         "namespaces": [],
         "tiers": ["read", "port-forward", "exec", "edit", "admin"],
@@ -81,23 +81,6 @@ def test_cluster_access_without_rbac_create() -> None:
     docs = _docs({**WIDE, "rbac": {"create": False}})
     assert not {d["kind"] for d in docs} & {"ClusterRole", "ClusterRoleBinding", "Role"}
     assert _settings(docs)["ORCH_KUBE_CLUSTER_ACCESS_ENABLED"] == "true"
-
-
-def test_legacy_shared_sa_only_with_flag() -> None:
-    docs = _docs({"kubeClusterAccess": {"enabled": True, "legacySharedServiceAccount": True}})
-    crb = _named(docs, "ClusterRoleBinding")[f"{FULL}-kube-access"]
-    assert crb["roleRef"]["name"] == "cluster-admin"
-    assert crb["subjects"] == [
-        {"kind": "ServiceAccount", "name": f"{FULL}-kube-access", "namespace": NS}
-    ]
-    sa = _named(docs, "ServiceAccount")[f"{FULL}-kube-access"]
-    assert sa["automountServiceAccountToken"] is False
-    assert f"{FULL}-kube-access" not in _named(_docs(WIDE), "ServiceAccount")
-    nobind = _docs(
-        {"kubeClusterAccess": {"legacySharedServiceAccount": True}, "rbac": {"create": False}}
-    )
-    assert f"{FULL}-kube-access" in _named(nobind, "ServiceAccount")
-    assert f"{FULL}-kube-access" not in _named(nobind, "ClusterRoleBinding")
 
 
 def test_namespace_access_rbac() -> None:

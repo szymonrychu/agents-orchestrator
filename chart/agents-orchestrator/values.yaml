@@ -98,10 +98,6 @@ rbac:
 # namespace; rotate what it could read when discarding it. Becomes ORCH_KUBE_CLUSTER_ACCESS_ENABLED.
 kubeClusterAccess:
   enabled: false
-  # Transition only, removed by T-55 stage 2: renders the old shared ServiceAccount
-  # <fullname>-kube-access and its cluster-admin ClusterRoleBinding so running sessions keep
-  # working until the Replacer rolls them to per-session identities.
-  legacySharedServiceAccount: false
 
 # Namespace-scoped Kubernetes access for opted-in sessions (spec.kube_namespace_access). Only the
 # listed namespaces can be granted, and only the listed tiers (read, port-forward, exec, edit,
