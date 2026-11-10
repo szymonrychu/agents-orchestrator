@@ -74,13 +74,13 @@ def test_bad_vault_uuid_refused():
 
 def test_too_many_refs_refused():
     env = {f"K{i}": {"vault": str(uuid.uuid4()), "env": "X"} for i in range(VAULT_REFS_MAX + 1)}
-    with pytest.raises(ValidationError, match="env has 51 vault references, at most 50"):
+    with pytest.raises(ValidationError, match="env has 101 vault references, at most 100"):
         SessionSpec.model_validate({"env": env})
 
 
 def test_max_refs_accepted():
     env = {f"K{i}": {"vault": str(uuid.uuid4()), "env": "X"} for i in range(VAULT_REFS_MAX)}
-    assert len(SessionSpec.model_validate({"env": env}).vault_refs) == 50
+    assert len(SessionSpec.model_validate({"env": env}).vault_refs) == 100
 
 
 def test_non_object_entry_message():

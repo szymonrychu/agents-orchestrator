@@ -317,3 +317,4 @@ in the namespace, so an attached vault value is exposed to it. Decision: attach 
 
 ## 2026-11-10 agents ask through decisions when the taskboard is reachable (T-102)
 `render._ask_prompt` picks `ASK_VIA_DECISIONS_PROMPT` when `agent_api_url` and `taskboard_available` are both set, else the old `ASK_IN_WRITING_PROMPT` unchanged (the relay answers 503 without a taskboard). Why: a question asked only in a reply or chat is lost; as a decision it is tracked and answered once. Decisions: a withdraw needs a reason plus `superseded_by` or `answered_elsewhere`; a chat message may link the task but the question exists only as a decision; old withdrawals stay as they are. `test_system_append_asks_in_writing` encoded the old universal rule and was rewritten (renamed `..._without_taskboard`).
+- 2026-11-10 the per-preset vault reference cap is 100 (was 50): infrastructure presets need about 60 references; user decision T-72 Q27.
