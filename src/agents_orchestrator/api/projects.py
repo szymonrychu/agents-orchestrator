@@ -45,7 +45,7 @@ async def list_projects(
     return [view(p) for p in rows]
 
 
-async def create(pool, body: schemas.ProjectIn) -> schemas.ProjectView:
+async def create(pool: Pool, body: schemas.ProjectIn) -> schemas.ProjectView:
     """Create a project; shared by the main-port route and the superleader admin route."""
     try:
         async with pool.connection() as conn:
