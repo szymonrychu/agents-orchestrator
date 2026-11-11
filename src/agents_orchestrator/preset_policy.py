@@ -15,7 +15,8 @@ and false equal:
 - env.<NAME>: on a privileged target an `env.<NAME>` path is still security, except when the
   stored and the new entry are each a vault reference or absent (attach, detach, re-point).
 
-`HUMAN_ONLY_COLUMNS` are preset columns outside the spec that an agent may not change at all.
+`AGENT_MAY_MOVE_PRIVILEGED_PRESETS` decides whether a superleader may move a privileged
+preset between projects.
 
 A live session adds two rules of its own: `fixed_changes` (fields that cannot change on a
 running session) and `tighten_changes` (limits a regular leader may only lower: usage quota,
@@ -83,9 +84,11 @@ NON_SECURITY: frozenset[str] = frozenset(
         "wrapper.agent_commands",
     }
 )
-# Preset columns an agent may not change: `project` decides which project secrets the preset's
-# sessions get (projects plan 3.16), so only a human moves a preset between projects.
-HUMAN_ONLY_COLUMNS: tuple[str, ...] = ("project",)
+# The one switch for moving a privileged preset (one with a grant flag on, see `PRIVILEGED`)
+# between projects by a superleader: `project` decides which project secrets the preset's
+# sessions get (projects plan 3.16). Off: such a move is 403 `privileged_preset_move`; a
+# non-privileged preset always moves. The user's decision on this is pending (T-113).
+AGENT_MAY_MOVE_PRIVILEGED_PRESETS: bool = False
 
 # Fields of a live session that a spec edit may not change.
 SESSION_FIXED: tuple[str, ...] = (

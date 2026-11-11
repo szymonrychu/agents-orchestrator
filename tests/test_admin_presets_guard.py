@@ -17,13 +17,14 @@ from test_api_agent import client_for, headers, make_settings
 from test_api_sessions import assert_error
 from test_api_sessions import client_for as main_client
 
+from agents_orchestrator import preset_policy
 from agents_orchestrator.api import admin
 from agents_orchestrator.api import presets as presets_api
 from agents_orchestrator.api.admin import ADMIN_PREFIX
 from agents_orchestrator.api.app import create_app
 from agents_orchestrator.api.errors import ApiError
 from agents_orchestrator.db import presets as presets_repo
-from agents_orchestrator.preset_policy import HUMAN_ONLY_COLUMNS, NON_SECURITY
+from agents_orchestrator.preset_policy import NON_SECURITY
 
 A = f"{ADMIN_PREFIX}/presets"
 M = "/api/v1/presets"
@@ -710,11 +711,8 @@ GRANT_FIELDS = ("kube_cluster_access", "session_messaging")
 QUOTA = {"usage_quota": {"five_hour_pct": 80}}
 
 
-# Preset columns (not spec paths) an agent may not change: each guarded route and column.
-GUARDED_COLUMN_WRITES: dict[tuple[str, str], tuple[str, ...]] = {
-    ("PUT", f"{A}/{{ref}}"): ("project",),
-    ("PATCH", f"{A}/{{ref}}"): ("project",),
-}
+# Routes that can move a preset to another project (a column, not a spec path).
+MOVING_WRITES: tuple[tuple[str, str], ...] = (("PUT", f"{A}/{{ref}}"), ("PATCH", f"{A}/{{ref}}"))
 
 
 def _admin_preset_writes() -> set[tuple[str, str]]:
@@ -978,26 +976,42 @@ async def test_delete_grant_flipped_between_check_and_delete_403(
     assert (await human("GET", f"{M}/{pid}")).json()["spec"]["kube_cluster_access"] is True
 
 
-def test_every_guarded_column_is_human_only():
+def test_every_moving_write_is_a_guarded_route():
     guard_routes = {r for r, kind in GUARDED_PRESET_WRITES.items() if kind == "guard"}
-    assert set(GUARDED_COLUMN_WRITES) == guard_routes - {("POST", A)}
-    for columns in GUARDED_COLUMN_WRITES.values():
-        assert columns == HUMAN_ONLY_COLUMNS
+    assert set(MOVING_WRITES) == guard_routes - {("POST", A)}
 
 
-@pytest.mark.parametrize("route", list(GUARDED_COLUMN_WRITES), ids="-".join)
-async def test_project_move_refused_on_every_admin_preset_write(call, human, seed, kube, route):
+@pytest.mark.parametrize("route", MOVING_WRITES, ids="-".join)
+async def test_privileged_preset_move_refused_on_every_admin_preset_write(
+    call, human, seed, kube, route
+):
     method, path = route
     r = await human("POST", "/api/v1/projects", json={"slug": "elsewhere", "name": "Elsewhere"})
     assert r.status_code == 201, r.text
-    pid = await seed({})
+    pid = await seed({"docker": True})
     before = (await human("GET", f"{M}/{pid}")).json()
     secrets_before = kube.names("Secret")
     body = {"project": "elsewhere"}
     if method == "PUT":
-        body |= {"name": "seeded", "spec": {}}
+        body |= {"name": "seeded", "spec": {"docker": True}}
     r = await call(method, path.format(ref=pid), json=body)
-    assert_error(r, 403, "human_only_field")
+    assert_error(r, 403, "privileged_preset_move")
     assert r.json()["error"]["fields"] == ["project"]
     assert (await human("GET", f"{M}/{pid}")).json() == before
     assert kube.names("Secret") == secrets_before
+
+
+@pytest.mark.parametrize("route", MOVING_WRITES, ids="-".join)
+async def test_privileged_preset_move_allowed_when_switch_on(call, human, seed, monkeypatch, route):
+    monkeypatch.setattr(preset_policy, "AGENT_MAY_MOVE_PRIVILEGED_PRESETS", True)
+    method, path = route
+    r = await human("POST", "/api/v1/projects", json={"slug": "elsewhere", "name": "Elsewhere"})
+    assert r.status_code == 201, r.text
+    pid = await seed({"docker": True})
+    body = {"project": "elsewhere"}
+    if method == "PUT":
+        body |= {"name": "seeded", "spec": {"docker": True}}
+    r = await call(method, path.format(ref=pid), json=body)
+    assert r.status_code == 200, r.text
+    assert r.json()["project"] == "elsewhere"
+    assert (await human("GET", f"{M}/{pid}")).json()["project"] == "elsewhere"

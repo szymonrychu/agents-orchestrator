@@ -11,14 +11,15 @@ from fastapi import APIRouter, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from pydantic import ValidationError
 
+from agents_orchestrator import preset_policy
 from agents_orchestrator.api import schemas, vault_client
 from agents_orchestrator.api.errors import ApiError, not_found, project_error
 from agents_orchestrator.api.sessions import Cfg, Pool, check_spec, hold_project
 from agents_orchestrator.api.spec_edit import (
     guard_agent_edit,
-    human_only_refused,
     merged_spec,
     note_fields,
+    privileged_move_refused,
 )
 from agents_orchestrator.api.vault_refs import (
     check_refs,
@@ -31,7 +32,6 @@ from agents_orchestrator.api.vault_refs import (
 from agents_orchestrator.db import presets as repo
 from agents_orchestrator.db import projects
 from agents_orchestrator.preset_policy import (
-    HUMAN_ONLY_COLUMNS,
     changed_paths,
     privileged,
     strip_grants,
@@ -113,14 +113,21 @@ async def validated_spec(
     return spec.model_dump(mode="json", exclude_unset=True)
 
 
-def _refuse_column_moves(request: Request, stored: repo.Preset, new: dict[str, Any]) -> None:
-    """403 `human_only_field` when an agent edit changes a human-only column (`project`). The
-    stored row is the one the save compares `updated_at` against, so a concurrent move by the
-    user makes the save a 409 rather than slipping past this check."""
-    moved = [c for c in HUMAN_ONLY_COLUMNS if new[c] != getattr(stored, c)]
-    if moved:
-        note_fields(request, moved)
-        raise human_only_refused(moved)
+async def _check_move(request: Request, conn, stored: repo.Preset, project: str) -> None:
+    """A superleader edit that moves the preset to `project`: 422 `unknown_project` for a missing
+    target, 403 `privileged_preset_move` for a privileged preset unless
+    `AGENT_MAY_MOVE_PRIVILEGED_PRESETS`. Sessions keep their project. The stored row is the one
+    the save compares `updated_at` with, so a concurrent move by the user makes the save a 409
+    rather than slipping past this check."""
+    if project == stored.project:
+        return
+    if not preset_policy.AGENT_MAY_MOVE_PRIVILEGED_PRESETS and preset_policy.privileged(
+        stored.spec
+    ):
+        note_fields(request, ["project"])
+        raise privileged_move_refused()
+    if await projects.get_project(conn, project) is None:
+        raise project_error(projects.UnknownProject(project))
 
 
 async def check_vault(
@@ -297,7 +304,7 @@ async def replace(
     # an omitted project keeps the one read here; the save holds it and writes it back
     project = stored.project if body.project is None else body.project
     if superleader:
-        _refuse_column_moves(request, stored, {**body.model_dump(), "project": project})
+        await _check_move(request, conn, stored, project)
     spec, model = await _validated(
         body,
         settings,
@@ -336,6 +343,8 @@ async def replace(
             paths.append("name")
         if body.labels is not None and body.labels != stored.labels:
             paths.append("labels")
+        if body.project is not None and body.project != stored.project:
+            paths.append("project")
         note_fields(request, paths)
     return _view(preset)
 
@@ -508,7 +517,7 @@ async def patch(
         if stored is None or not stored.superleader_manageable:
             raise not_found("preset")
         merged = _merged_body(stored, body)
-        _refuse_column_moves(request, stored, merged.model_dump())
+        await _check_move(request, conn, stored, merged.project)
         spec, model = await _validated(
             merged,
             settings,
@@ -545,6 +554,8 @@ async def patch(
             paths.append("name")
         if merged.labels is not None and merged.labels != stored.labels:
             paths.append("labels")
+        if merged.project != stored.project:
+            paths.append("project")
         note_fields(request, paths)
         return _view(preset)
     raise ApiError(409, "conflict", "the preset changed since it was read; retry")

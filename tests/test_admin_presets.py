@@ -224,22 +224,31 @@ async def test_admin_create_in_project(call, pool, boss):
     )
 
 
-async def test_admin_patch_project_change_403_human_only_field(call, pool, boss):
+async def test_admin_move_project_by_patch_and_put(call, pool, boss):
     await _project(call, "alpha")
+    await _project(call, "beta")
+    pid = (await call("POST", A, json={"name": "mover", "spec": {}})).json()["id"]
+    r = await call("PATCH", f"{A}/{pid}", json={"project": "alpha"})
+    assert r.status_code == 200, r.text
+    assert r.json()["project"] == "alpha"
+    assert (await _human_get(call, pid))["project"] == "alpha"
+    last = (await events(pool, boss.id))[-1]
+    assert last["type"] == "admin_call" and last["data"]["status"] == 200
+    assert last["data"]["fields"] == ["project"]
+    r = await call("PUT", f"{A}/{pid}", json={"name": "mover", "spec": {}, "project": "beta"})
+    assert r.status_code == 200, r.text
+    assert (await _human_get(call, pid))["project"] == "beta"
+    assert (await events(pool, boss.id))[-1]["data"]["fields"] == ["project"]
+
+
+async def test_admin_move_to_unknown_project_422(call):
     pid = (await call("POST", A, json={"name": "stay", "spec": {}})).json()["id"]
     before = await _human_get(call, pid)
     for method, body in (
-        ("PATCH", {"project": "alpha"}),
-        ("PUT", {"name": "stay", "spec": {}, "project": "alpha"}),
+        ("PATCH", {"project": "nope"}),
+        ("PUT", {"name": "stay", "spec": {}, "project": "nope"}),
     ):
-        r = await call(method, f"{A}/{pid}", json=body)
-        assert_error(r, 403, "human_only_field")
-        assert r.json()["error"]["fields"] == ["project"]
-        last = (await events(pool, boss.id))[-1]["data"]
-        assert last["status"] == 403 and last["fields"] == ["project"]
-    # an unknown target is refused the same way: the move itself is human-only
-    r = await call("PATCH", f"{A}/{pid}", json={"project": "nope"})
-    assert_error(r, 403, "human_only_field")
+        assert_error(await call(method, f"{A}/{pid}", json=body), 422, "unknown_project")
     assert await _human_get(call, pid) == before
 
 
