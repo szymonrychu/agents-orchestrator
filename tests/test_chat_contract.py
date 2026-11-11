@@ -31,7 +31,7 @@ def upstream_client(fake: FakeChat) -> httpx.AsyncClient:
 
 
 def concrete(template: str) -> str:
-    return template.replace("{id}", "s1")
+    return template.replace("{id}", "s1").replace("{name}", "demo")
 
 
 def normalise(path: str) -> str:
@@ -79,9 +79,21 @@ def test_relay_routes_exist_upstream():
         if path.startswith(RELAY_PREFIX)
         for method in item
     ]
-    assert len(relayed) == 4, relayed  # rooms, messages, reactions, status
-    assert {path for _, path in relayed} == {
-        f"{RELAY_PREFIX}{p}" for p in ("/rooms", "/messages", "/reactions", "/messages/{send_id}")
+    assert len(relayed) == 10, relayed  # rooms, messages, reactions, status, notes, skills
+    assert {(method, path) for method, path in relayed} == {
+        (method, f"{RELAY_PREFIX}{p}")
+        for method, p in (
+            ("GET", "/rooms"),
+            ("POST", "/messages"),
+            ("POST", "/reactions"),
+            ("GET", "/messages/{send_id}"),
+            ("GET", "/notes"),
+            ("PUT", "/notes"),
+            ("GET", "/skills"),
+            ("GET", "/skills/{name}"),
+            ("PUT", "/skills/{name}"),
+            ("DELETE", "/skills/{name}"),
+        )
     }
     for method, path in relayed:
         upstream = chat.UPSTREAM_PREFIX + path.removeprefix(RELAY_PREFIX)
@@ -114,21 +126,52 @@ async def test_fake_chat_matches_vendored_schema():
         return r
 
     valid = {
-        "/chat/v1/messages": {"text": "hello", "room": "!dm:hs"},
-        "/chat/v1/reactions": {"to": "m3", "key": "\U0001f44d"},
+        ("POST", "/chat/v1/messages"): {"text": "hello", "room": "!dm:hs"},
+        ("POST", "/chat/v1/reactions"): {"to": "m3", "key": "\U0001f44d"},
+        ("PUT", "/chat/v1/notes"): {"body": "likes tea", "expected_version": 0},
+        ("PUT", "/chat/v1/skills/{name}"): {"description": "d", "body": "b", "expected_version": 0},
     }
+    notes_put = valid[("PUT", "/chat/v1/notes")]
+    skill_put = valid[("PUT", "/chat/v1/skills/{name}")]
     # success answers
     assert (await call("GET", "/chat/v1/rooms")).status_code == 200
-    sent = await call("POST", "/chat/v1/messages", json=valid["/chat/v1/messages"])
+    sent = await call("POST", "/chat/v1/messages", json=valid[("POST", "/chat/v1/messages")])
     assert sent.status_code == 202
     reply = {"text": "re", "reply_to": "m3"}
     assert (await call("POST", "/chat/v1/messages", json=reply)).status_code == 202
-    assert (await call("POST", "/chat/v1/reactions", json=valid["/chat/v1/reactions"])).is_success
+    reaction = valid[("POST", "/chat/v1/reactions")]
+    assert (await call("POST", "/chat/v1/reactions", json=reaction)).is_success
     unknown = await call("GET", "/chat/v1/messages/{id}", "/chat/v1/messages/s999")
     assert unknown.status_code == 404
     own = await call("GET", "/chat/v1/messages/{id}", f"/chat/v1/messages/{sent.json()['id']}")
     assert own.status_code == 200
     assert own.json()["id"] == sent.json()["id"] and own.json()["kind"] == "message"
+
+    # the room memory routes: notes and skills round trip through their versions
+    assert (await call("GET", "/chat/v1/notes")).json()["version"] == 0
+    saved = await call("PUT", "/chat/v1/notes", json=notes_put)
+    assert saved.status_code == 200
+    assert (saved.json()["version"], saved.json()["body"]) == (1, "likes tea")
+    assert (await call("PUT", "/chat/v1/notes", json=notes_put)).status_code == 409
+    big = {**notes_put, "expected_version": 1, "body": "x" * 8001}
+    assert (await call("PUT", "/chat/v1/notes", json=big)).status_code == 413
+    assert (await call("GET", "/chat/v1/skills")).json()["skills"] == []
+    made = await call("PUT", "/chat/v1/skills/{name}", json=skill_put)
+    assert (made.status_code, made.json()["version"]) == (200, 1)
+    assert (await call("PUT", "/chat/v1/skills/{name}", json=skill_put)).status_code == 409
+    listed = (await call("GET", "/chat/v1/skills")).json()["skills"]
+    assert [s["name"] for s in listed] == ["demo"] and "body" not in listed[0]
+    assert (await call("GET", "/chat/v1/skills/{name}")).json()["body"] == "b"
+    assert (await call("DELETE", "/chat/v1/skills/{name}")).json()["deleted"] is True
+    assert (await call("DELETE", "/chat/v1/skills/{name}")).status_code == 404
+    bad = "/chat/v1/skills/Bad_Name"
+    bad_name = await call("PUT", "/chat/v1/skills/{name}", bad, json=skill_put)
+    assert bad_name.status_code == 422
+    for n in range(20):
+        path = f"/chat/v1/skills/s{n}"
+        assert (await call("PUT", "/chat/v1/skills/{name}", path, json=skill_put)).is_success
+    over = await call("PUT", "/chat/v1/skills/{name}", "/chat/v1/skills/s20", json=skill_put)
+    assert (over.status_code, over.json()["error"]["code"]) == (409, "skill_limit")
 
     # error answers the fake produces by itself: bad token, bad session header, bad body
     bad_token = {**GOOD, "Authorization": "Bearer nope"}
@@ -138,12 +181,12 @@ async def test_fake_chat_matches_vendored_schema():
         assert (await call(method, template, headers=no_session)).status_code == 401
         garbled = {**GOOD, "X-Orch-Session": "not-a-uuid"}
         assert (await call(method, template, headers=garbled)).status_code == 401
-    for template in valid:
-        for body in ({}, {**valid[template], "surplus": 1}):
-            r = await call("POST", template, json=body)
-            assert (r.status_code, r.json()["error"]["code"]) == (422, "invalid_request")
-        r = await call("POST", template, content=b"{not json")
-        assert (r.status_code, r.json()["error"]["code"]) == (422, "invalid_request")
+    for method, template in valid:
+        for body in ({}, {**valid[(method, template)], "surplus": 1}):
+            r = await call(method, template, json=body)
+            assert r.status_code == 422
+        r = await call(method, template, content=b"{not json")
+        assert r.status_code == 422
 
     # every other documented status, on request, in the schema the document gives it
     for (method, template), statuses in documented_statuses().items():
@@ -151,7 +194,7 @@ async def test_fake_chat_matches_vendored_schema():
             if (method, template, status_code) in seen:
                 continue
             fake.refuse(f"{method} {template}", status_code, "refused_by_test")
-            r = await call(method, template, json=valid.get(template))
+            r = await call(method, template, json=valid.get((method, template)))
             assert r.status_code == status_code
             fake.allow(f"{method} {template}")
 

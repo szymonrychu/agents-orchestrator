@@ -43,6 +43,15 @@ _REGISTRY = Registry().with_resource(
     BASE_URI, Resource.from_contents(DOC, default_specification=DRAFT202012)
 )
 _SESSION_HEADER = "x-orch-session"
+# the connector's default caps
+NOTES_MAX_CHARS = 8000
+SKILL_MAX_CHARS = 8000
+SKILLS_MAX = 20
+SKILL_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 def operations() -> dict[tuple[str, str], dict[str, Any]]:
@@ -147,6 +156,9 @@ class FakeChat:
         ]
     )
     sends: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # per-session room memory: the notes (body, version) and the skills (name -> record)
+    notes: dict[uuid.UUID, tuple[str, int]] = field(default_factory=dict)
+    skills: dict[uuid.UUID, dict[str, dict[str, Any]]] = field(default_factory=dict)
     _refusals: dict[tuple[str, str, str | None], _Refusal] = field(default_factory=dict)
 
     # ---------------------------------------------------------------------------- control
@@ -238,11 +250,111 @@ class FakeChat:
         if refusal is not None:
             return self._error(key, refusal.status, refusal.code, refusal.message, refusal.extra)
         method, template = key
+        if template == PREFIX + "/notes":
+            return self._notes(key, call, session)
+        if template.startswith(PREFIX + "/skills"):
+            return self._skills(key, call, session, match)
         if method == "POST":
             return self._post(key, call, session)
         if template.endswith("/rooms"):
             return self._answer(key, 200, {"rooms": self.rooms})
         return self._status(key, match.group(1), session)
+
+    def _json(self, key: tuple[str, str], call: Call) -> tuple[int, Any] | dict[str, Any]:
+        """The request body when it is valid JSON the document accepts, else the 422 answer."""
+        try:
+            body = call.json()
+        except ValueError:
+            return self._error(key, 422, "invalid_request", "the body is not JSON")
+        problems = request_errors(*key, body)
+        if problems:
+            return self._error(key, 422, "invalid_request", "; ".join(problems))
+        return body
+
+    def _notes(self, key: tuple[str, str], call: Call, session: uuid.UUID) -> tuple[int, Any]:
+        body, version = self.notes.get(session, ("", 0))
+        if key[0] == "PUT":
+            sent = self._json(key, call)
+            if isinstance(sent, tuple):
+                return sent
+            if len(sent["body"]) > NOTES_MAX_CHARS:
+                return self._error(key, 413, "notes_too_large", "the notes are too long")
+            if sent["expected_version"] != version:
+                return self._error(key, 409, "version_conflict", "the notes changed")
+            body, version = sent["body"], version + 1
+            self.notes[session] = (body, version)
+        return self._answer(
+            key,
+            200,
+            {
+                "room_id": DEFAULT_ROOM,
+                "body": body,
+                "version": version,
+                "updated_at": _now() if version else None,
+                "chars": len(body),
+                "max_chars": NOTES_MAX_CHARS,
+                "rule": "fake memory rule",
+            },
+        )
+
+    def _skills(
+        self, key: tuple[str, str], call: Call, session: uuid.UUID, match: re.Match[str]
+    ) -> tuple[int, Any]:
+        mine = self.skills.setdefault(session, {})
+        if key[1].endswith("/skills"):
+            metas = [{k: v for k, v in s.items() if k != "body"} for s in mine.values()]
+            return self._answer(
+                key,
+                200,
+                {
+                    "room_id": DEFAULT_ROOM,
+                    "skills": metas,
+                    "max_skills": SKILLS_MAX,
+                    "max_chars": SKILL_MAX_CHARS,
+                },
+            )
+        name = match.group(1)
+        found = mine.get(name)
+        if key[0] == "PUT":
+            return self._skill_put(key, call, mine, name)
+        if found is None:
+            return self._error(key, 404, "skill_not_found", f"no skill {name!r}")
+        if key[0] == "DELETE":
+            del mine[name]
+            return self._answer(key, 200, {"room_id": DEFAULT_ROOM, "name": name, "deleted": True})
+        return self._answer(key, 200, self._skill_record(found))
+
+    def _skill_record(self, skill: dict[str, Any]) -> dict[str, Any]:
+        return {**skill, "room_id": DEFAULT_ROOM, "max_chars": SKILL_MAX_CHARS}
+
+    def _skill_put(
+        self, key: tuple[str, str], call: Call, mine: dict[str, dict[str, Any]], name: str
+    ) -> tuple[int, Any]:
+        sent = self._json(key, call)
+        if isinstance(sent, tuple):
+            return sent
+        if not SKILL_NAME.match(name):
+            return self._error(key, 422, "invalid_skill_name", "not a valid skill name")
+        if len(sent["body"]) > SKILL_MAX_CHARS:
+            return self._error(key, 413, "skill_too_large", "the skill is too long")
+        found = mine.get(name)
+        if found is None and sent["expected_version"] != 0:
+            return self._error(key, 404, "skill_not_found", f"no skill {name!r}")
+        if found is None and len(mine) >= SKILLS_MAX:
+            return self._error(key, 409, "skill_limit", "too many skills")
+        if found is not None and sent["expected_version"] != found["version"]:
+            return self._error(key, 409, "version_conflict", "the skill changed")
+        version = found["version"] + 1 if found else 1
+        skill = {
+            "name": name,
+            "description": sent["description"],
+            "body": sent["body"],
+            "version": version,
+            "updated_at": _now(),
+            "chars": len(sent["body"]),
+        }
+        mine[name] = skill
+        return self._answer(key, 200, self._skill_record(skill))
 
     def _authorised(self, call: Call) -> bool:
         scheme, _, token = call.headers.get("authorization", "").partition(" ")
