@@ -71,6 +71,15 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("POST", f"{_A}/tasks/{{path:path}}"): "project",
     ("PUT", f"{_A}/tasks/{{path:path}}"): "project",
     ("PATCH", f"{_A}/tasks/{{path:path}}"): "project",
+    # spec relay: same shape as the task relay (T-116)
+    ("GET", f"{_A}/specs"): "project",
+    ("POST", f"{_A}/specs"): "project",
+    ("PUT", f"{_A}/specs"): "project",
+    ("PATCH", f"{_A}/specs"): "project",
+    ("GET", f"{_A}/specs/{{path:path}}"): "project",
+    ("POST", f"{_A}/specs/{{path:path}}"): "project",
+    ("PUT", f"{_A}/specs/{{path:path}}"): "project",
+    ("PATCH", f"{_A}/specs/{{path:path}}"): "project",
     # the caller's project, or every active project for a superleader
     ("GET", f"{_A}/projects"): "project",
     # chat relay: project in the plan, but no filter is sent until the complete stage (X1)
