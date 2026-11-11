@@ -436,11 +436,35 @@ def _apply_wrapper(cfg: dict[str, Any], wrapper: WrapperSettings, session: Sessi
         cfg["claude"]["permission_mode"] = user["permission_mode"]
 
 
+PROJECT_ROOM_PROMPT = (
+    "Coordinate with the other hives of your project in the project room "
+    "(orchestrator_project_chat_send / orchestrator_project_chat_read): split work, announce "
+    "what you take and what you finished, ask the hive that owns something. Post only what "
+    "other hives need, never an acknowledgement. Ask a superleader only for decisions outside "
+    "the project or ones the user must make. Only the hive leader posts to and reads the "
+    "project room; members ask their leader."
+)
+SUPERLEADER_ROOM_PROMPT = (
+    "Hives coordinate in project rooms without you; read them with "
+    "orchestrator_project_chat_read (project required) when you need the state of a project, "
+    "and post there with an explicit project only to step in."
+)
+
+
 def _ask_prompt(settings: Settings) -> str:
     """Questions go through taskboard decisions when the agent relay and taskboard are reachable."""
     if settings.agent_api_url and settings.taskboard_available:
         return ASK_VIA_DECISIONS_PROMPT
     return ASK_IN_WRITING_PROMPT
+
+
+def _system_append(spec: SessionSpec, settings: Settings) -> str:
+    """The ask prompt, plus the project room guidance when the agent relay is reachable."""
+    ask = _ask_prompt(settings)
+    if not settings.agent_api_url:
+        return ask
+    room = SUPERLEADER_ROOM_PROMPT if spec.session_messaging else PROJECT_ROOM_PROMPT
+    return f"{ask}\n\n{room}"
 
 
 def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
@@ -506,7 +530,7 @@ def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
                 "dialog_auto_dismiss_seconds": settings.wrapper_dialog_auto_dismiss_seconds,
             },
         },
-        "prompts": {"system_append": _ask_prompt(settings)},
+        "prompts": {"system_append": _system_append(spec, settings)},
         "limits": {
             "shutdown_timeout_seconds": _shutdown_timeout(settings.agent_termination_grace_seconds)
         },

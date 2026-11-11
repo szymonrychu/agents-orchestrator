@@ -228,3 +228,40 @@ async def test_me_leader_state_taskboard_unconfigured(pool, dsn):
         "- taskboard unavailable: call orchestrator_task_list(waiting=true)"
         in r.json()["leader_state"]
     )
+
+
+async def _me(app, caller, ip):
+    async with client_for(app, ip) as http:
+        r = await http.get("/agent/v1/me", headers=headers(caller.id))
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+async def test_me_project_room_for_leader(pool, dsn):
+    from test_agent_project_chat import _post, _room
+    from test_agent_session_messaging import _app
+
+    r = await _room(pool)
+    app = _app(pool, dsn)
+    sent = await _post(app, r["A"])
+    assert sent.status_code == 202, sent.text
+    me = await _me(app, r["B"], r["B"].leader_ip)
+    assert me["project_room"] == {
+        "project": "a",
+        "last_post_id": sent.json()["post_id"],
+        "unhandled": 1,
+    }
+    own = await _me(app, r["A"], r["A"].leader_ip)
+    assert own["project_room"]["unhandled"] == 0
+    assert own["project_room"]["last_post_id"] == sent.json()["post_id"]
+
+
+async def test_me_project_room_none_for_member_and_superleader(pool, dsn):
+    from test_agent_project_chat import _post, _room
+    from test_agent_session_messaging import _app
+
+    r = await _room(pool)
+    app = _app(pool, dsn)
+    await _post(app, r["A"])
+    assert (await _me(app, r["B"], r["B"].member_ip))["project_room"] is None
+    assert (await _me(app, r["S"], r["S"].leader_ip))["project_room"] is None

@@ -125,8 +125,16 @@ async def _audit(request: Request, status: int) -> None:
         data["vault"] = vault
     if fields is not None:
         data["fields"] = fields
+    await write_audit(request.app.state.pool, session, agent, data)
+
+
+async def write_audit(
+    pool: Any, session: sessions_repo.Session, agent: agents_repo.Agent, data: dict[str, Any]
+) -> None:
+    """Write one `admin_call` events row for an admitted superleader call. Best effort: the call
+    already happened, so a failed write is logged, never raised."""
     try:
-        async with request.app.state.pool.connection() as conn:
+        async with pool.connection() as conn:
             await events_repo.insert_events(
                 conn,
                 session.id,

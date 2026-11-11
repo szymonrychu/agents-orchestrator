@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
+import uuid
+
+import httpx
 import pytest
 import pytest_asyncio
 from test_api_sessions import assert_error, client_for, make_settings
 
 from agents_orchestrator.api.app import create_app
 from agents_orchestrator.api.errors import project_error
+from agents_orchestrator.db import project_posts
 from agents_orchestrator.db import projects as repo
 
 
@@ -137,3 +142,77 @@ async def test_unknown_project_error_body(http):
     assert r.json() == {
         "error": {"code": "unknown_project", "message": "project nope does not exist"}
     }
+
+
+# ------------------------------------------------------------------ project room read (T-117)
+
+
+async def _seed_posts(pool, project: str, n: int) -> list[int]:
+    ids = []
+    async with pool.connection() as conn:
+        for i in range(n):
+            ids.append(
+                await project_posts.insert_post(
+                    conn,
+                    project=project,
+                    sender_kind="leader",
+                    sender_session_id=uuid.uuid4(),
+                    sender_slug="a-alpha",
+                    text=f"post {i}",
+                    reply_to=None,
+                    addressed=[],
+                )
+            )
+    return ids
+
+
+async def test_project_messages_main_port_pages(http, pool):
+    ids = await _seed_posts(pool, "default", 5)
+    r = await http.get("/api/v1/projects/default/messages", params={"limit": 2})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert [p["id"] for p in body["posts"]] == [ids[4], ids[3]]
+    assert body["next_before_id"] == ids[3]
+    assert body["posts"][0]["sender_session_id"]
+    r = await http.get(
+        "/api/v1/projects/default/messages", params={"limit": 2, "before_id": ids[3]}
+    )
+    assert [p["id"] for p in r.json()["posts"]] == [ids[2], ids[1]]
+    r = await http.get(
+        "/api/v1/projects/default/messages", params={"limit": 10, "after_id": ids[2]}
+    )
+    assert [p["id"] for p in r.json()["posts"]] == [ids[3], ids[4]]
+    assert r.json()["next_before_id"] is None
+    r = await http.get("/api/v1/projects/default/messages", params={"before_id": 1, "after_id": 1})
+    assert_error(r, 422, "invalid_cursor")
+    r = await http.get("/api/v1/projects/default/messages", params={"limit": 101})
+    assert r.status_code == 422
+
+
+async def test_project_messages_unknown_project_404(http):
+    r = await http.get("/api/v1/projects/nope/messages")
+    assert_error(r, 404, "not_found")
+
+
+async def test_project_messages_archived_readable(http, pool):
+    await http.post("/api/v1/projects", json={"slug": "old", "name": "Old"})
+    ids = await _seed_posts(pool, "old", 1)
+    r = await http.patch("/api/v1/projects/old", json={"archived": True})
+    assert r.status_code == 200, r.text
+    r = await http.get("/api/v1/projects/old/messages")
+    assert r.status_code == 200, r.text
+    assert [p["id"] for p in r.json()["posts"]] == ids
+
+
+async def test_project_messages_not_on_service_port(pool, dsn):
+    token = "svc-example-token-value"
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    app = create_app(make_settings(dsn, service_tokens=f"agents-webhook:{digest}"), pool)
+    transport = httpx.ASGITransport(app=app, client=("203.0.113.9", 4444))
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://orch:8002",
+        headers={"Authorization": f"Bearer {token}"},
+    ) as c:
+        r = await c.get("/api/v1/projects/default/messages")
+    assert r.status_code == 403, r.text

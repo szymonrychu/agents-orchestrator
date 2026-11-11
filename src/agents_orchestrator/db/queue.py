@@ -185,9 +185,11 @@ async def enqueue_message(
     held: bool = False,
     notice: str | None = None,
     attachments: Sequence[StoredAttachment] = (),
+    project_post_id: int | None = None,
 ) -> int:
     """Queue a message; a session message carries its sender and hop (D8), an orchestrator
-    notice its kind (`notice`, e.g. `inactivity_reminder`).
+    notice its kind (`notice`, e.g. `inactivity_reminder`), a project room fan-out row its post
+    (`project_post_id`).
 
     A `held` message is not deliverable until `release_note` clears its `not_before` (the hold
     is a day, so a note whose commands never finish still expires).
@@ -209,9 +211,9 @@ async def enqueue_message(
         row = await _one(
             conn,
             "INSERT INTO messages (session_id, text, target_agent_id, sender_session_id,"
-            " sender_slug, hop, lane, carries_start_prompt, not_before, notice)"
+            " sender_slug, hop, lane, carries_start_prompt, not_before, notice, project_post_id)"
             " VALUES (%s, %s, %s, %s, %s, %s, %s, %s,"
-            " CASE WHEN %s THEN now() + interval '1 day' END, %s) RETURNING id",
+            " CASE WHEN %s THEN now() + interval '1 day' END, %s, %s) RETURNING id",
             (
                 session_id,
                 text,
@@ -223,6 +225,7 @@ async def enqueue_message(
                 carries_start_prompt,
                 held,
                 notice,
+                project_post_id,
             ),
         )
         assert row is not None
@@ -260,11 +263,12 @@ async def turn_hop(conn: psycopg.AsyncConnection, agent_id: uuid.UUID) -> int | 
 async def count_sent_by(
     conn: psycopg.AsyncConnection, sender_session_id: uuid.UUID, seconds: float
 ) -> int:
-    """Session messages of any status the sender session sent in the last `seconds`."""
+    """Session messages of any status the sender session sent in the last `seconds`, room
+    fan-out rows excluded (a post counts once, through `project_posts.count_posts_by`)."""
     return await _count(
         conn,
         "SELECT count(*) AS n FROM messages WHERE sender_session_id = %s"
-        " AND created_at > now() - make_interval(secs => %s::float8)",
+        " AND project_post_id IS NULL AND created_at > now() - make_interval(secs => %s::float8)",
         (sender_session_id, seconds),
     )
 
@@ -273,11 +277,11 @@ async def count_between(
     conn: psycopg.AsyncConnection, a: uuid.UUID, b: uuid.UUID, seconds: float
 ) -> int:
     """Session messages exchanged between sessions `a` and `b`, both directions, in the last
-    `seconds`."""
+    `seconds`, room fan-out rows excluded."""
     return await _count(
         conn,
-        "SELECT count(*) AS n FROM messages"
-        " WHERE ((sender_session_id = %(a)s AND session_id = %(b)s)"
+        "SELECT count(*) AS n FROM messages WHERE project_post_id IS NULL"
+        " AND ((sender_session_id = %(a)s AND session_id = %(b)s)"
         " OR (sender_session_id = %(b)s AND session_id = %(a)s))"
         " AND created_at > now() - make_interval(secs => %(secs)s::float8)",
         {"a": a, "b": b, "secs": seconds},

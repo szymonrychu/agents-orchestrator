@@ -24,6 +24,8 @@ from agents_orchestrator.api import (
     forward,
     messages,
     presets,
+    project_chat,
+    project_post_sweep,
     projects,
     proposal_routes,
     proposal_sweep,
@@ -101,10 +103,12 @@ def create_app(
         app.state.autoclose_task = sweeper
         proposal_sweeper = asyncio.create_task(proposal_sweep.sweep(app), name="proposal_sweep")
         app.state.proposal_sweep_task = proposal_sweeper
+        post_sweeper = asyncio.create_task(project_post_sweep.sweep(app), name="project_post_sweep")
+        app.state.project_post_sweep_task = post_sweeper
         try:
             yield
         finally:
-            for task in (sweeper, proposal_sweeper):
+            for task in (sweeper, proposal_sweeper, post_sweeper):
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
@@ -144,6 +148,7 @@ def create_app(
     errors.install(app)
     app.include_router(sessions.router)
     app.include_router(agent.router)
+    app.include_router(project_chat.router)
     app.include_router(admin.router)
     app.include_router(admin.session_router)
     app.include_router(proposal_routes.proposal_router)
@@ -154,6 +159,7 @@ def create_app(
     app.include_router(presets.router)
     app.include_router(proposal_routes.main_router)
     app.include_router(projects.router)
+    app.include_router(project_chat.main_router)
     app.include_router(templates.router)
     app.include_router(archives.router)
     app.include_router(messages.router)
