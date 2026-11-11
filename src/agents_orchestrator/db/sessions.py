@@ -86,6 +86,14 @@ class Session:
     discard_forced_at: datetime | None = None
     # the project it belongs to (projects.slug); moved by set_project, never by a spec change
     project: str = DEFAULT
+    # the other projects it fully belongs to (T-120), sorted; set by set_extra_projects, read
+    # live per request like `project`
+    extra_projects: tuple[str, ...] = ()
+
+    @property
+    def projects(self) -> tuple[str, ...]:
+        """Every project of the session, its home project first."""
+        return (self.project, *self.extra_projects)
 
 
 @dataclass(frozen=True)
@@ -120,6 +128,7 @@ def _from_row(row: dict[str, Any]) -> Session:
         close_deadline_at=row["close_deadline_at"],
         discard_forced_at=row["discard_forced_at"],
         project=row["project"],
+        extra_projects=tuple(row["extra_projects"]),
     )
 
 
@@ -283,11 +292,28 @@ async def set_project(
             await _lock_row(conn, session_id)
             rows = await _fetch(
                 conn,
-                "UPDATE sessions SET project = %s WHERE id = %s RETURNING *",
-                (project, session_id),
+                "UPDATE sessions SET project = %s,"
+                " extra_projects = array_remove(extra_projects, %s) WHERE id = %s RETURNING *",
+                (project, project, session_id),
             )
     except psycopg.errors.ForeignKeyViolation:
         raise UnknownProject(project) from None
+    return rows[0]
+
+
+async def set_extra_projects(
+    conn: psycopg.AsyncConnection, session_id: uuid.UUID, projects: list[str]
+) -> Session:
+    """Replace the session's extra projects (stored sorted and distinct). Like `set_project`:
+    no generation bump and no NOTIFY, scope is read live per request. The caller validates the
+    slugs (`api.project_grants`). Raises SessionNotFound or SessionBeingDeleted."""
+    async with conn.transaction():
+        await _lock_row(conn, session_id)
+        rows = await _fetch(
+            conn,
+            "UPDATE sessions SET extra_projects = %s WHERE id = %s RETURNING *",
+            (sorted(set(projects)), session_id),
+        )
     return rows[0]
 
 
