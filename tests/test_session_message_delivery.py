@@ -9,9 +9,9 @@ from factories import insert_agent, insert_session, set_agent_status
 from psycopg.rows import dict_row
 from test_dispatcher import make_env
 
+from agents_orchestrator.db import project_posts, session_messaging
 from agents_orchestrator.db import queue as q
-from agents_orchestrator.db import session_messaging
-from agents_orchestrator.dispatcher.session_frame import frame, relay_notice
+from agents_orchestrator.dispatcher.session_frame import frame, project_post, relay_notice
 
 
 async def _exec(pool, query: str, params: tuple = ()) -> None:
@@ -182,3 +182,37 @@ async def test_relay_notice_is_delivered_framed(env):
         notice_id: relay_notice("hello <room>", "caller", notice_id, "s9", "!r:x"),
         plain_id: frame("hi", "caller", plain_id),
     }
+
+
+async def test_fanout_row_delivered_with_room_trailer(env):
+    sender = await insert_session(env.pool, slug="caller")
+    await env.agent(free_ago=20)
+    await _exec(env.pool, "INSERT INTO projects (slug, name) VALUES ('alpha', 'alpha')")
+    async with env.pool.connection() as conn:
+        post_id = await project_posts.insert_post(
+            conn,
+            project="alpha",
+            sender_kind="leader",
+            sender_session_id=sender["id"],
+            sender_slug="caller",
+            text="room <hi>",
+            reply_to=None,
+            addressed=[],
+        )
+        msg_id = await q.enqueue_message(
+            conn,
+            env.cid,
+            "room <hi>",
+            sender_session_id=sender["id"],
+            sender_slug="caller",
+            hop=1,
+        )
+        await conn.execute(
+            "UPDATE messages SET project_post_id = %s WHERE id = %s", (post_id, msg_id)
+        )
+    d = env.dispatcher()
+    await d.drain()
+    await d.aclose()
+    expected = project_post("room <hi>", "caller", msg_id, "alpha", post_id, None)
+    assert env.fake.turn_texts == [expected]
+    assert env.fake.turn_metadata[0]["orch_sender_session"] == "caller"
