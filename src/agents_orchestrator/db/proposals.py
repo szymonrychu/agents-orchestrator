@@ -358,12 +358,14 @@ async def lock(
 
 # The one visibility rule: a proposal is hidden from its proposer when its target exists and the
 # proposer may no longer manage it: a preset that is not superleader-manageable, or another
-# session whose preset is not (or that has none), as `admin._target` decides. A deleted target
+# session whose preset is not (or that has none), as `admin._target` decides. A project grant
+# (T-120) follows the rule of its target. A deleted target
 # stays visible as target_gone; the proposer's own session is never hidden.
 VISIBLE_SQL = (
-    "NOT (kind = 'preset' AND EXISTS (SELECT 1 FROM presets pr"
+    "NOT (kind IN ('preset', 'preset_projects') AND EXISTS (SELECT 1 FROM presets pr"
     " WHERE pr.id::text = change_proposals.target_id AND NOT pr.superleader_manageable))"
-    " AND NOT (kind = 'session' AND change_proposals.target_id <> proposer_session::text"
+    " AND NOT (kind IN ('session', 'session_projects')"
+    " AND change_proposals.target_id <> proposer_session::text"
     " AND EXISTS (SELECT 1 FROM sessions s LEFT JOIN presets pr ON pr.id = s.preset_id"
     " WHERE s.id::text = change_proposals.target_id"
     " AND (pr.id IS NULL OR NOT pr.superleader_manageable)))"

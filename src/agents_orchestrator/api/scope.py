@@ -123,6 +123,11 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("GET", f"{_ADMIN}/commands/{{command_id}}"): "superleader",
     ("GET", f"{_ADMIN}/usage"): "superleader",
     ("POST", f"{_ADMIN}/projects"): "superleader",
+    # project grants (T-120): a grant files a proposal, a revoke is direct
+    ("POST", f"{_ADMIN}/sessions/{{slug}}/projects"): "superleader",
+    ("DELETE", f"{_ADMIN}/sessions/{{slug}}/projects/{{project}}"): "superleader",
+    ("POST", f"{_ADMIN}/presets/{{ref}}/projects"): "superleader",
+    ("DELETE", f"{_ADMIN}/presets/{{ref}}/projects/{{project}}"): "superleader",
     # admin relay (`admin_relay`): superleader-only forwards, sent with X-Orch-Projects: *
     ("GET", f"{_ADMIN}/webhooks/endpoints"): "superleader",
     ("POST", f"{_ADMIN}/webhooks/endpoints"): "superleader",

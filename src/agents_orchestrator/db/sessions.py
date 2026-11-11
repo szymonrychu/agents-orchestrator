@@ -158,6 +158,7 @@ async def create(
     labels: list[str] | None = None,
     project: str = DEFAULT,
     session_id: uuid.UUID | None = None,
+    extra_projects: list[str] | None = None,
 ) -> Session:
     validate_slug(slug)
     try:
@@ -165,8 +166,8 @@ async def create(
             rows = await _fetch(
                 conn,
                 "INSERT INTO sessions (id, slug, spec, preset_id, preset_name, created_by_service,"
-                " secret_versions, created_by_session, labels, project)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
+                " secret_versions, created_by_session, labels, project, extra_projects)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
                 (
                     session_id or uuid.uuid4(),
                     slug,
@@ -178,6 +179,7 @@ async def create(
                     created_by_session,
                     labels or [],
                     project,
+                    sorted(set(extra_projects or [])),
                 ),
             )
             await _notify(conn, rows[0].id)
@@ -437,6 +439,12 @@ async def _lock_row(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> dic
 
 async def _lock_active(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Session:
     return _from_row(await _lock_row(conn, session_id))
+
+
+async def lock_active(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Session:
+    """The session row FOR UPDATE in the caller's transaction (a grant apply or revoke); raises
+    SessionNotFound or SessionBeingDeleted."""
+    return await _lock_active(conn, session_id)
 
 
 CLOSE_KINDS = ("self", "inactivity")

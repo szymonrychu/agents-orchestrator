@@ -54,8 +54,17 @@ TAIL_TOOLS = [
     *on_start.PROJECT_CHAT_TOOLS,
 ]
 # Allowed before the pinned plugin ships them; remove when the plugin pin offers the tool
-# (projects P15; project room T-117 O9).
-PLUGIN_PENDING = {"project_list", *SPEC_TOOLS, "project_chat_send", "project_chat_read"}
+# (projects P15; project room T-117 O9; project grants T-120).
+PLUGIN_PENDING = {
+    "project_list",
+    *SPEC_TOOLS,
+    "project_chat_send",
+    "project_chat_read",
+    "session_projects_grant",
+    "session_projects_revoke",
+    "preset_projects_grant",
+    "preset_projects_revoke",
+}
 ALONE_TOOLS = ["me", *TAIL_TOOLS]
 PROPOSAL = [
     "proposal_create",
@@ -81,6 +90,8 @@ ADMIN_TOOLS = [
     "chat_open_confirm", "vault_list", "vault_attach", "vault_detach",
     "history_search", "history_get",
     "history_records", "usage_get", "project_create",
+    "session_projects_grant", "session_projects_revoke", "preset_projects_grant",
+    "preset_projects_revoke",
     *PROPOSAL,
 ]  # fmt: skip
 SECRET = "s3cr3t-token-value"
@@ -629,7 +640,7 @@ async def test_admin_tools_exist_in_plugin():
             offered |= {t["name"].removeprefix("orchestratorplugin_") for t in await h.list_tools()}
         missing = set(entry["allow"]) - offered - PLUGIN_PENDING
         assert not missing, (spec, sorted(missing))
-    assert set(on_start.ADMIN_TOOLS) <= offered
+    assert set(on_start.ADMIN_TOOLS) <= offered | PLUGIN_PENDING
 
 
 def test_withdraw_offered_to_hives_and_superleaders():

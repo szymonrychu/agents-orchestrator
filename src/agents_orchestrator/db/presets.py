@@ -192,10 +192,11 @@ async def set_extra_projects(
     conn: psycopg.AsyncConnection, preset_id: uuid.UUID, projects: list[str]
 ) -> Preset:
     """Replace the preset's extra projects (stored sorted and distinct); the caller validates the
-    slugs (`api.project_grants`). Sessions created before keep theirs."""
+    slugs (`api.project_grants`). Sessions created before keep theirs. `updated_at` is not
+    bumped: it fingerprints the spec for spec proposals, which a grant does not touch."""
     rows = await _fetch(
         conn,
-        "UPDATE presets SET extra_projects = %s, updated_at = now() WHERE id = %s RETURNING *",
+        "UPDATE presets SET extra_projects = %s WHERE id = %s RETURNING *",
         (sorted(set(projects)), preset_id),
     )
     if not rows:

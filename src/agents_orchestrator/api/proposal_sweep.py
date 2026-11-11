@@ -7,10 +7,12 @@ in its own committed transaction on its own pooled connection, so its row lock i
 own commit:
 
 1. expire: active proposals past `expires_at` on the database clock become `expired`;
-2. stale: open preset and session proposals whose live fingerprint differs from the current
-   revision's become `stale` (also the ones a review's SKIP LOCKED pass left unmarked);
-3. target_gone: active preset proposals whose preset is deleted or no longer manageable, and
-   active session proposals whose session is purged or being deleted.
+2. stale: open preset, session and project grant proposals whose live fingerprint differs from
+   the current revision's become `stale` (also the ones a review's SKIP LOCKED pass left
+   unmarked);
+3. target_gone: active preset (and preset grant) proposals whose preset is deleted or no longer
+   manageable, and active session (and session grant) proposals whose session is purged or
+   being deleted.
 
 Each proposal is handled under `FOR UPDATE SKIP LOCKED`: a proposal a review (or revise,
 withdraw) holds is left to it and seen again next pass. Every transition is status-guarded and
@@ -81,6 +83,8 @@ async def _expire(pool: AsyncConnectionPool) -> None:
 async def _live(conn: AsyncConnection, p: repo.Proposal) -> str | None:
     """The live fingerprint of the preset or session a proposal targets; None when the preset is
     deleted or no longer superleader-manageable, or the session purged or being deleted."""
+    if p.kind in proposals.PROJECT_KINDS:
+        return await proposals.live_projects_fingerprint(conn, p.kind, p.target_id)
     if p.kind == "session":
         found = await proposals.live_session(conn, uuid.UUID(p.target_id))
         return (
@@ -95,8 +99,10 @@ async def _live(conn: AsyncConnection, p: repo.Proposal) -> str | None:
 
 
 async def _ids(conn: AsyncConnection, statuses: tuple[str, ...]) -> list[int]:
-    """The preset and session proposals in `statuses` (schedules are compared at review only)."""
-    return [i for kind in ("preset", "session") for i in await repo.ids_in(conn, kind, statuses)]
+    """The preset, session and project grant proposals in `statuses` (schedules are compared at
+    review only)."""
+    kinds = ("preset", "session", *proposals.PROJECT_KINDS)
+    return [i for kind in kinds for i in await repo.ids_in(conn, kind, statuses)]
 
 
 async def _stale(pool: AsyncConnectionPool) -> None:

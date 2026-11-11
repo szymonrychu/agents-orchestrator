@@ -183,6 +183,7 @@ def _view(session: repo.Session, agg: dict | None, settings: Settings) -> schema
         created_by_session=session.created_by_session,
         labels=session.labels,
         project=session.project,
+        extra_projects=list(session.extra_projects),
     )
 
 
@@ -595,24 +596,27 @@ async def _placed_preset(
     preset_id: uuid.UUID,
     project: str | None,
     created_by_session: uuid.UUID | None,
-) -> tuple[presets.Preset, str]:
-    """The preset (held FOR SHARE) and the project the session goes into (held FOR SHARE and
-    active), locked in the epic's order: project row first, then the preset row. Without a
-    body `project` the preset's own project is read unlocked first and confirmed under the
-    preset lock; a preset moved meanwhile is read again."""
+) -> tuple[presets.Preset, str, list[str]]:
+    """The preset (held FOR SHARE), the project the session goes into and its extra projects
+    (the preset's, T-120), every project row held FOR SHARE and active, locked in the epic's
+    order: project rows first, then the preset row. The preset's own project and extra projects
+    are read unlocked first and confirmed under the preset lock; a preset moved or regranted
+    meanwhile is read again."""
     for _ in range(PLACE_ATTEMPTS):
-        target = project
-        if target is None:
-            peek = await presets.get(conn, preset_id)
-            if peek is None or not _visible(peek, created_by_session):
-                raise not_found("preset")
-            target = peek.project
-        await hold_project(conn, target)
+        peek = await presets.get(conn, preset_id)
+        if peek is None or not _visible(peek, created_by_session):
+            raise not_found("preset")
+        target = peek.project if project is None else project
+        extras = [p for p in peek.extra_projects if p != target]
+        for slug in (target, *extras):
+            await hold_project(conn, slug)
         preset = await presets.get_for_share(conn, preset_id)
         if preset is None or not _visible(preset, created_by_session):
             raise not_found("preset")
-        if project is not None or preset.project == target:
-            return preset, target
+        if (project is not None or preset.project == target) and (
+            preset.extra_projects == peek.extra_projects
+        ):
+            return preset, target, extras
     raise ApiError(409, "conflict", "the preset moved to another project meanwhile; retry")
 
 
@@ -630,7 +634,7 @@ async def _create_from_preset(
     """Snapshot the preset's spec, filled and validated against the current settings. The
     session goes into `project`, else the preset's project (`_placed_preset`). `pinned` is what
     the vault pinned for it; a preset whose refs or effective labels moved since is 409."""
-    preset, project = await _placed_preset(conn, preset_id, project, created_by_session)
+    preset, project, extras = await _placed_preset(conn, preset_id, project, created_by_session)
     refs = vault_refs.refs_in(preset.spec)
     if refs != (pinned.refs if pinned else {}) or (
         pinned is not None and vault_client.effective_labels(preset) != pinned.labels
@@ -662,6 +666,7 @@ async def _create_from_preset(
         "created_by_session": created_by_session,
         "labels": preset.labels,
         "project": project,
+        "extra_projects": extras,
     }
     if slug is not None:
         return await _insert(conn, slug, spec, **provenance)

@@ -25,6 +25,7 @@ from agents_orchestrator.api import (
     messages,
     presets,
     project_chat,
+    project_grant_routes,
     project_post_sweep,
     projects,
     proposal_routes,
@@ -158,6 +159,7 @@ def create_app(
     app.include_router(session_labels.router)
     app.include_router(presets.router)
     app.include_router(proposal_routes.main_router)
+    app.include_router(project_grant_routes.main_router)
     app.include_router(projects.router)
     app.include_router(project_chat.main_router)
     app.include_router(templates.router)

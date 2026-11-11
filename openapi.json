@@ -1618,6 +1618,25 @@
         "title": "EventsPage",
         "type": "object"
       },
+      "ExtraProjectsIn": {
+        "additionalProperties": false,
+        "description": "The human's direct set of a session's or preset's extra projects (main port, T-120).",
+        "properties": {
+          "extra_projects": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 9,
+            "title": "Extra Projects",
+            "type": "array"
+          }
+        },
+        "required": [
+          "extra_projects"
+        ],
+        "title": "ExtraProjectsIn",
+        "type": "object"
+      },
       "FileContent": {
         "properties": {
           "agent_id": {
@@ -2470,6 +2489,14 @@
             ],
             "title": "Epoch"
           },
+          "extra_projects": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Extra Projects",
+            "type": "array"
+          },
           "leader": {
             "anyOf": [
               {
@@ -2755,7 +2782,8 @@
                   "inactivity_reminder",
                   "inactivity_close",
                   "handover",
-                  "proposal"
+                  "proposal",
+                  "project_grant"
                 ],
                 "type": "string"
               },
@@ -3633,6 +3661,14 @@
             "title": "Created At",
             "type": "string"
           },
+          "extra_projects": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Extra Projects",
+            "type": "array"
+          },
           "id": {
             "format": "uuid",
             "title": "Id",
@@ -3801,6 +3837,40 @@
           "variables"
         ],
         "title": "PreviewOut",
+        "type": "object"
+      },
+      "ProjectGrantIn": {
+        "additionalProperties": false,
+        "description": "A superleader's request to add an extra project to a session or preset (T-120): filed\nas a change proposal the human reviews.",
+        "properties": {
+          "client_key": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Key"
+          },
+          "project": {
+            "title": "Project",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project",
+          "reason"
+        ],
+        "title": "ProjectGrantIn",
         "type": "object"
       },
       "ProjectIn": {
@@ -4361,7 +4431,9 @@
             "enum": [
               "preset",
               "schedule",
-              "session"
+              "session",
+              "session_projects",
+              "preset_projects"
             ],
             "title": "Kind",
             "type": "string"
@@ -5678,6 +5750,14 @@
             "title": "Desired",
             "type": "string"
           },
+          "extra_projects": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Extra Projects",
+            "type": "array"
+          },
           "generation": {
             "title": "Generation",
             "type": "integer"
@@ -6372,6 +6452,14 @@
             "format": "date-time",
             "title": "Created At",
             "type": "string"
+          },
+          "extra_projects": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Extra Projects",
+            "type": "array"
           },
           "id": {
             "format": "uuid",
@@ -8480,6 +8568,175 @@
         ]
       }
     },
+    "/agent/v1/admin/presets/{ref}/projects": {
+      "post": {
+        "description": "File a grant of an extra project to a preset as a `preset_projects` proposal; sessions\ncreated from the preset after the approval get it.",
+        "operationId": "grant_preset_project_agent_v1_admin_presets__ref__projects_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ref",
+            "required": true,
+            "schema": {
+              "title": "Ref",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectGrantIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProposalView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Grant Preset Project",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/agent/v1/admin/presets/{ref}/projects/{project}": {
+      "delete": {
+        "description": "Remove an extra project from a preset at once; running sessions keep theirs (revoke those\non each session). 404 when the project is not one of its extra projects.",
+        "operationId": "revoke_preset_project_agent_v1_admin_presets__ref__projects__project__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ref",
+            "required": true,
+            "schema": {
+              "title": "Ref",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "title": "Project",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PresetView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Revoke Preset Project",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/agent/v1/admin/presets/{ref}/vault/{entry_id}": {
       "delete": {
         "description": "Remove every ref to the entry from a manageable preset, or only the one under preset env\n`?env=`; 404 `not_attached` when nothing matches.",
@@ -10222,6 +10479,175 @@
         ]
       }
     },
+    "/agent/v1/admin/sessions/{slug}/projects": {
+      "post": {
+        "description": "File a grant of an extra project to a session as a `session_projects` proposal; the\nsession gets full membership in that project once the user approves it (no restart). 200\nwith the first proposal on a `client_key` replay.",
+        "operationId": "grant_session_project_agent_v1_admin_sessions__slug__projects_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectGrantIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProposalView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Grant Session Project",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/agent/v1/admin/sessions/{slug}/projects/{project}": {
+      "delete": {
+        "description": "Remove an extra project from a session at once (toward safe, the superleader's alone);\nthe session gets a notice. 404 when the project is not one of its extra projects.",
+        "operationId": "revoke_session_project_agent_v1_admin_sessions__slug__projects__project__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "title": "Project",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Revoke Session Project",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/agent/v1/admin/sessions/{slug}/restart": {
       "post": {
         "description": "Restart every live agent of a session. The caller's own session claims the self-restart\ncooldown and gets one note, all in the same transaction as the commands.",
@@ -10365,7 +10791,7 @@
     },
     "/agent/v1/admin/vault": {
       "get": {
-        "description": "The vault entries in the caller's project scope and the env names to re-attach.",
+        "description": "The vault entries of the caller's projects (home and extra) and the env names to\nre-attach.",
         "operationId": "admin_vault_list",
         "parameters": [
           {
@@ -12408,7 +12834,7 @@
     },
     "/agent/v1/projects": {
       "get": {
-        "description": "Scope `project` (projects plan 3.3): the caller's own project, archived or not; a\nsuperleader session gets every active project. No counts, as on the service port.",
+        "description": "Scope `project` (projects plan 3.3): the caller's own projects, home first then its extra\nprojects (T-120), archived or not; a superleader session gets every active project. No\ncounts, as on the service port.",
         "operationId": "projects_agent_v1_projects_get",
         "parameters": [
           {
@@ -12470,7 +12896,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "The caller's project, or every active project for a superleader",
+        "summary": "The caller's projects, or every active project for a superleader",
         "tags": [
           "agent"
         ]
@@ -12687,7 +13113,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Sessions the caller may message (superleaders, own project; all for a superleader)",
+        "summary": "Sessions the caller may message (superleaders, own projects; all for a superleader)",
         "tags": [
           "agent"
         ]
@@ -15099,6 +15525,60 @@
         "summary": "Copy Preset"
       }
     },
+    "/api/v1/presets/{preset_id}/extra-projects": {
+      "put": {
+        "description": "The human sets a preset's extra projects directly; sessions created from it afterwards\nget them, running sessions keep theirs.",
+        "operationId": "put_preset_extra_projects_api_v1_presets__preset_id__extra_projects_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "preset_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Preset Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtraProjectsIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PresetView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Preset Extra Projects",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
     "/api/v1/projects": {
       "get": {
         "description": "Active projects, or only the archived ones with `archived=true`. Counts are left out on\nthe service port.",
@@ -16135,6 +16615,60 @@
           }
         },
         "summary": "Stream Events"
+      }
+    },
+    "/api/v1/sessions/{session_id}/extra-projects": {
+      "put": {
+        "description": "The human sets a live session's extra projects directly; the change applies on the next\nrequest (no restart) and the session gets a notice per added or removed project.",
+        "operationId": "put_session_extra_projects_api_v1_sessions__session_id__extra_projects_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtraProjectsIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Session Extra Projects",
+        "tags": [
+          "projects"
+        ]
       }
     },
     "/api/v1/sessions/{session_id}/files": {
