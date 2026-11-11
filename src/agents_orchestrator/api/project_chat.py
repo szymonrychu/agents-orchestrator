@@ -143,14 +143,19 @@ async def _leader_session(conn: Any, agent: agents_repo.Agent) -> sessions_repo.
 
 def _room_of(own: sessions_repo.Session, project: str | None) -> str:
     """The project a caller posts to or reads: a superleader must name one; any other session
-    uses its own (read live from its row, so a moved session follows its new project)."""
+    names one of its projects (home or extra, T-120) or gets its home project (read live from
+    its row, so a moved session follows its new project and a revoked grant ends at once)."""
     if own.spec.session_messaging:
         if project is None:
             raise ApiError(422, "project_required", "a superleader session must give project")
         return project
-    if project is not None and project != own.project:
-        raise ApiError(403, "project_forbidden", "a session can only use its own project's room")
-    return own.project
+    if project is None:
+        return own.project
+    if project not in own.projects:
+        raise ApiError(
+            403, "project_forbidden", "a session can only use the rooms of its own projects"
+        )
+    return project
 
 
 async def _check_limits(

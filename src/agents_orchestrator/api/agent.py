@@ -78,7 +78,10 @@ class Me(BaseModel):
     static: bool
     members: list[Member]
     project: str
-    # "*" for a superleader session (every project), else `project` (projects plan 3.2)
+    # the other projects the session fully belongs to (T-120), sorted
+    extra_projects: list[str] = []
+    # "*" for a superleader session (every project), else `project` then `extra_projects`,
+    # comma-separated (projects plan 3.2, T-120)
     projects_scope: str
     # the live generated state (same sections as the handover file); only for the current leader
     leader_state: str | None = None
@@ -183,6 +186,7 @@ async def me(agent: Caller, pool: Pool, settings: Cfg) -> Me:
         max_replicas=session.spec.max_replicas or session.spec.replicas,
         static=session.spec.static,
         project=session.project,
+        extra_projects=list(session.extra_projects),
         projects_scope=scope_of(session),
         leader_state=leader_state.render_state(state) if state is not None else None,
         project_room=room,
@@ -202,20 +206,23 @@ async def me(agent: Caller, pool: Pool, settings: Cfg) -> Me:
 @router.get(
     "/projects",
     response_model=list[schemas.ProjectView],
-    summary="The caller's project, or every active project for a superleader",
+    summary="The caller's projects, or every active project for a superleader",
 )
 async def projects(agent: Caller, pool: Pool) -> list[schemas.ProjectView]:
-    """Scope `project` (projects plan 3.3): the caller's own project, archived or not; a
-    superleader session gets every active project. No counts, as on the service port."""
+    """Scope `project` (projects plan 3.3): the caller's own projects, home first then its extra
+    projects (T-120), archived or not; a superleader session gets every active project. No
+    counts, as on the service port."""
     async with pool.connection() as conn:
         session = await _session(conn, agent)
         if scope_of(session) == ALL_PROJECTS:
             rows = await projects_repo.list_projects(conn)
         else:
-            own = await projects_repo.get_project(conn, session.project)
-            if own is None:  # sessions.project references projects: a broken invariant
-                raise ApiError(500, "internal", "the session's project is missing")
-            rows = [own]
+            rows = []
+            for slug in session.projects:
+                own = await projects_repo.get_project(conn, slug)
+                if own is None:  # projects are never deleted: a broken invariant
+                    raise ApiError(500, "internal", "a project of the session is missing")
+                rows.append(own)
     return [projects_api.view(p) for p in rows]
 
 
@@ -498,7 +505,7 @@ class SessionMessageQueued(BaseModel):
 @router.get(
     "/sessions",
     response_model=SessionPeers,
-    summary="Sessions the caller may message (superleaders, own project; all for a superleader)",
+    summary="Sessions the caller may message (superleaders, own projects; all for a superleader)",
 )
 async def sessions_list(agent: Caller, pool: Pool) -> SessionPeers:
     async with pool.connection() as conn:
@@ -506,7 +513,7 @@ async def sessions_list(agent: Caller, pool: Pool) -> SessionPeers:
         peers = await sessions_repo.list_messaging_peers(
             conn,
             agent.session_id,
-            project=None if session.spec.session_messaging else session.project,
+            projects=None if session.spec.session_messaging else session.projects,
         )
     return SessionPeers(
         sessions=[
