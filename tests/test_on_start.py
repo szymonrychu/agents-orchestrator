@@ -45,11 +45,17 @@ SPEC_TOOLS = [
     "spec_comments", "spec_comment_resolve", "spec_pull", "spec_push",
 ]  # fmt: skip
 TAIL_TOOLS = [
-    *SESSION_TOOLS, *INIT_SCRIPTS_TOOLS, *CHAT_TOOLS, *TASK_TOOLS, *PROJECT_TOOLS, *SPEC_TOOLS,
-]  # fmt: skip
+    *SESSION_TOOLS,
+    *INIT_SCRIPTS_TOOLS,
+    *CHAT_TOOLS,
+    *TASK_TOOLS,
+    *PROJECT_TOOLS,
+    *SPEC_TOOLS,
+    *on_start.PROJECT_CHAT_TOOLS,
+]
 # Allowed before the pinned plugin ships them; remove when the plugin pin offers the tool
-# (projects P15).
-PLUGIN_PENDING = {"project_list", *SPEC_TOOLS}
+# (projects P15; project room T-117 O9).
+PLUGIN_PENDING = {"project_list", *SPEC_TOOLS, "project_chat_send", "project_chat_read"}
 ALONE_TOOLS = ["me", *TAIL_TOOLS]
 PROPOSAL = [
     "proposal_create",
@@ -566,6 +572,7 @@ def test_alone_session_allow_is_the_literal_e2e_list():
         "project_list",
         "spec_list", "spec_get", "spec_create", "spec_update", "spec_versions", "spec_comment",
         "spec_comments", "spec_comment_resolve", "spec_pull", "spec_push",
+        "project_chat_send", "project_chat_read",
         "session_get", "session_patch", "proposal_create", "proposal_revise", "proposals_list",
         "proposal_get", "proposal_withdraw", "self_close",
     ]  # fmt: skip
@@ -635,3 +642,14 @@ def test_withdraw_offered_to_hives_and_superleaders():
 def test_project_create_is_superleader_only():
     assert "project_create" in on_start.ADMIN_TOOLS
     assert "project_create" not in on_start.PROJECT_TOOLS
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [{}, {"replicas": 2}, {"replicas": 2, "session_messaging": True}],
+    ids=["alone", "hive", "superleader"],
+)
+def test_project_chat_tools_in_every_session(fields):
+    allow = on_start.orchestrator_allow(SessionSpec(**fields))
+    for name in ("project_chat_send", "project_chat_read"):
+        assert allow.count(name) == 1

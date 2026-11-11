@@ -58,6 +58,9 @@ SPEC_TOOLS = [
     "spec_list", "spec_get", "spec_create", "spec_update", "spec_versions", "spec_comment",
     "spec_comments", "spec_comment_resolve", "spec_pull", "spec_push",
 ]  # fmt: skip
+# Project room tools (T-117): every session can post to and read its project room; the routes
+# themselves answer 403 not_leader to a worker.
+PROJECT_CHAT_TOOLS = ["project_chat_send", "project_chat_read"]
 # Superleader admin tools: the plugin's declarative admin rows (any-mcp-tatara-plugins
 # orchestration/orchestrator admin.py), the vault tools included. History is read and search
 # only: there is no history delete tool, deleting a stored session is for the user (web UI).
@@ -99,6 +102,7 @@ def orchestrator_allow(spec: SessionSpec) -> list[str]:
         *TASK_TOOLS,
         *PROJECT_TOOLS,
         *SPEC_TOOLS,
+        *PROJECT_CHAT_TOOLS,
         *(ADMIN_TOOLS if spec.session_messaging else [*SESSION_EDIT_TOOLS, CLOSE_TOOL]),
     ]
     if not spec.hive:

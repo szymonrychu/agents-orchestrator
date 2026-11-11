@@ -456,7 +456,9 @@ def test_system_append_asks_in_writing_without_taskboard():
 )
 def test_system_append_asks_in_writing_with_only_half_the_gate(over):
     cfg = config_of(render.render_session(make_session(), make_settings(**over), TOKENS))
-    assert cfg["prompts"]["system_append"] == render.ASK_IN_WRITING_PROMPT
+    room = "agent_api_url" in over
+    expected = render.ASK_IN_WRITING_PROMPT + (f"\n\n{render.PROJECT_ROOM_PROMPT}" if room else "")
+    assert cfg["prompts"]["system_append"] == expected
 
 
 def test_system_append_asks_via_decisions_with_taskboard():
@@ -465,7 +467,7 @@ def test_system_append_asks_via_decisions_with_taskboard():
     )
     cfg = config_of(render.render_session(make_session(), settings, TOKENS))
     text = cfg["prompts"]["system_append"]
-    assert text == render.ASK_VIA_DECISIONS_PROMPT
+    assert text == f"{render.ASK_VIA_DECISIONS_PROMPT}\n\n{render.PROJECT_ROOM_PROMPT}"
     assert "orchestrator_decision_ask" in text
     assert "recommended" in text
     assert "askuserquestion" in text.lower()
@@ -735,7 +737,9 @@ def test_wrapper_system_append_follows_decisions_prompt():
         agent_api_url=AGENT_URL, taskboard_url="http://tb", taskboard_token="t"
     )
     cfg = config_of(render.render_session(session, settings, TOKENS))
-    assert cfg["prompts"]["system_append"] == render.ASK_VIA_DECISIONS_PROMPT + "\n\nBe terse."
+    assert cfg["prompts"]["system_append"] == (
+        f"{render.ASK_VIA_DECISIONS_PROMPT}\n\n{render.PROJECT_ROOM_PROMPT}\n\nBe terse."
+    )
 
 
 def test_wrapper_settings_keep_reserved_entries():
@@ -753,7 +757,9 @@ def test_wrapper_settings_keep_reserved_entries():
         "WebFetch",
     ]
     assert list(cfg["claude"]["mcp_servers"]) == ["any-mcp", "docs", "loc"]
-    assert cfg["prompts"]["system_append"] == render.ASK_IN_WRITING_PROMPT + "\n\nBe terse."
+    assert cfg["prompts"]["system_append"] == (
+        f"{render.ASK_IN_WRITING_PROMPT}\n\n{render.PROJECT_ROOM_PROMPT}\n\nBe terse."
+    )
 
 
 def test_user_strings_escaped_against_interpolation():
@@ -989,3 +995,21 @@ def test_dialog_settings_rendered():
     cfg = config_of(render.render_session(make_session(), settings, TOKENS))
     assert cfg["sessions"]["commands"]["permission_hold_seconds"] == 60
     assert cfg["sessions"]["commands"]["dialog_auto_dismiss_seconds"] == 5
+
+
+def test_system_append_has_room_prompt():
+    settings = make_settings(agent_api_url=AGENT_URL)
+    regular = config_of(render.render_session(make_session(), settings, TOKENS))
+    assert render.PROJECT_ROOM_PROMPT in regular["prompts"]["system_append"]
+    assert render.SUPERLEADER_ROOM_PROMPT not in regular["prompts"]["system_append"]
+    leader = make_session(session_messaging=True)
+    sl = config_of(render.render_session(leader, settings, TOKENS))
+    assert render.SUPERLEADER_ROOM_PROMPT in sl["prompts"]["system_append"]
+    assert render.PROJECT_ROOM_PROMPT not in sl["prompts"]["system_append"]
+
+
+def test_room_prompt_absent_without_agent_api():
+    cfg = config_of(render.render_session(make_session(), make_settings(agent_api_url=""), TOKENS))
+    text = cfg["prompts"]["system_append"]
+    assert render.PROJECT_ROOM_PROMPT not in text
+    assert render.SUPERLEADER_ROOM_PROMPT not in text

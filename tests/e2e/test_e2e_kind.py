@@ -326,6 +326,8 @@ ALONE_SESSION_TOOLS = [
     "spec_comment_resolve",
     "spec_pull",
     "spec_push",
+    "project_chat_send",
+    "project_chat_read",
     "session_get",
     "session_patch",
     "proposal_create",
