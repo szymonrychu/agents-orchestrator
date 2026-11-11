@@ -6,7 +6,8 @@ request carries the taskboard bearer, `X-Orch-Session`, `X-Orch-Slug` and `X-Orc
 body is capped at 256 KiB (413 `payload_too_large`) and the upstream status and JSON body come back
 unchanged. The allowlist is the spec, its documents and versions, and its comments with resolve.
 Accept and dismiss are user-only and are not relayed, DELETE does not exist here, and a path with
-`..` is refused: all are 404 `not_found` without an upstream call. `labels=mine` is not expanded.
+`..`, `.` or empty segments is refused: all are 404
+`not_found` without an upstream call. `labels=mine` is not expanded.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ _ALLOWED = re.compile(
 
 
 async def _relay(request: Request, agent: Caller, pool: Pool, settings: Cfg, path: str) -> Response:
-    if ".." in path:
+    if ".." in path or any(seg in ("", ".") for seg in path.split("/")[1:]):
         raise ApiError(404, "not_found", "no such taskboard path")
     return await relay(request, agent, pool, settings, "/specs" + path, _ALLOWED, mine=False)
 
