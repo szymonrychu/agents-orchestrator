@@ -1,7 +1,9 @@
 """Change proposals service (preset-change-proposals 3.4, 3.5): create, revise, withdraw, read
 and the human review that applies the approved items.
 
-It handles `kind: "preset"`, `kind: "schedule"` (stage B) and `kind: "session"` (stage C); the
+It handles `kind: "preset"`, `kind: "schedule"` (stage B), `kind: "session"` (stage C) and the
+project grants `kind: "session_projects"` and `kind: "preset_projects"` (T-120: one item
+`projects.<slug>` per granted project, filed by `project_grant_routes`, never revised); the
 routes and gates live in `proposal_routes`. A proposal never runs the agent guards (human-only,
 privileged): it may carry any path, security, grant or not, for a human to decide; only `review`
 (a human) writes the target.
@@ -12,11 +14,13 @@ and `If-Match: "<that value>"` (412 there is stale here). Views never call the u
 schedule proposal reads `stale: false` until a review compares.
 
 A session's fingerprint is its stored spec plus `secret_versions` (its vault pins); the review
-writes through `db.sessions.replace_spec` (generation + 1). A proposal never carries a value: a
-preset proposal may carry vault references (`{"vault": <entry id>, "env": <entry env>}`), which
-the vault checks at create and revise (early 422) and again when the review saves the preset; a
-session proposal refuses reference changes (422 `vault_ref_not_allowed`), refs enter and leave a
-live session only through its preset.
+writes through `db.sessions.replace_spec` (generation + 1). A grant's fingerprint is the
+target's home project plus its extra projects; the review writes the extra projects under the
+row lock (no spec change, no generation bump: scope is read live). A proposal never carries a
+value: a preset proposal may carry vault references (`{"vault": <entry id>, "env": <entry
+env>}`), which the vault checks at create and revise (early 422) and again when the review saves
+the preset; a session proposal refuses reference changes (422 `vault_ref_not_allowed`), refs
+enter and leave a live session only through its preset.
 
 Every write runs in a real transaction (the connection is idle when it starts, `_idle`).
 """
@@ -28,7 +32,7 @@ import hashlib
 import json
 import logging
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -37,7 +41,7 @@ from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 
-from agents_orchestrator.api import admin, admin_relay, schemas, session_spec
+from agents_orchestrator.api import admin, admin_relay, project_grants, schemas, session_spec
 from agents_orchestrator.api import forward as forward_core
 from agents_orchestrator.api import presets as presets_api
 from agents_orchestrator.api.errors import ApiError, not_found
@@ -69,6 +73,20 @@ STATUSES: dict[str, tuple[str, ...]] = {
 
 SCHEDULE_FIELDS = tuple(schemas.ScheduleIn.model_fields)
 
+# project grants (T-120): the target is a session or a preset, the items `projects.<slug>`
+PROJECT_KINDS = ("session_projects", "preset_projects")
+# the target a kind names, for texts
+_NOUN = {"session_projects": "session", "preset_projects": "preset"}
+
+
+@dataclass(frozen=True)
+class _Filed:
+    """What `_insert` reads of a proposal body, for a grant filed by `create_projects`."""
+
+    kind: str
+    reason: str
+    client_key: str | None
+
 
 @dataclass(frozen=True)
 class _Plan:
@@ -93,6 +111,27 @@ def fingerprint_session(stored: Mapping[str, Any], versions: Mapping[str, str]) 
     doc = {"spec": stored, "secret_versions": versions}
     canonical = json.dumps(doc, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def fingerprint_projects(home: str, extras: Sequence[str]) -> str:
+    """A grant target as a proposal revision was based on it: its home and extra projects."""
+    doc = {"project": home, "extra_projects": sorted(extras)}
+    canonical = json.dumps(doc, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+async def live_projects_fingerprint(conn, kind: str, target_id: str) -> str | None:
+    """The live fingerprint of a grant's target; None when the session is purged or being
+    deleted, or the preset deleted or no longer superleader-manageable."""
+    if kind == "session_projects":
+        found = await live_session(conn, uuid.UUID(target_id))
+        if found is None:
+            return None
+        return fingerprint_projects(found[0].project, found[0].extra_projects)
+    preset = await presets_repo.get(conn, uuid.UUID(target_id))
+    if preset is None or not preset.superleader_manageable:
+        return None
+    return fingerprint_projects(preset.project, preset.extra_projects)
 
 
 def _not_open() -> ApiError:
@@ -244,7 +283,7 @@ def _idle(conn) -> None:
 async def _insert(
     conn,
     settings: Settings,
-    body: schemas.ProposalIn,
+    body: schemas.ProposalIn | _Filed,
     caller: Session,
     superleader: bool,
     target_id: str,
@@ -327,6 +366,67 @@ async def create(
     return await get_view(conn, settings, proposal_id, proposer=caller.id), True
 
 
+async def _grant_target(
+    conn, kind: str, ref: str, caller: Session
+) -> tuple[str, str, str, tuple[str, ...]]:
+    """The grant's target as the superleader may see it (else 404 like an unknown): id, display
+    name, home project and extra projects. A session being deleted is 409."""
+    if kind == "session_projects":
+        session = await admin._target(conn, ref, caller)
+        if session.desired != "active":
+            raise _deleting()
+        return str(session.id), session.slug, session.project, session.extra_projects
+    preset = await admin.manageable_preset(conn, ref)
+    return str(preset.id), preset.name, preset.project, preset.extra_projects
+
+
+async def create_projects(
+    request: Request,
+    conn,
+    settings: Settings,
+    *,
+    kind: str,
+    ref: str,
+    body: schemas.ProjectGrantIn,
+    caller: Session,
+) -> tuple[schemas.ProposalView, bool]:
+    """File a grant of `body.project` to the session (slug) or preset (id or name) `ref` as a
+    proposal of `kind` (T-120, user answer Q4 A); the bool is False on a `client_key` replay.
+    The checks run again when the review applies it."""
+    _idle(conn)
+    filed = _Filed(kind=kind, reason=body.reason, client_key=body.client_key)
+    if body.client_key is not None:
+        async with conn.transaction():
+            first = await repo.by_client_key(conn, caller.id, body.client_key)
+        if first is not None:
+            view = await get_view(conn, settings, first, proposer=caller.id, visible_only=True)
+            return view, False
+    note_fields(request, ["projects"])
+    try:
+        async with conn.transaction():
+            target_id, name, home, extras = await _grant_target(conn, kind, ref, caller)
+            await project_grants.check_grant(conn, home, extras, body.project)
+            item = repo.Item(
+                path=project_grants.item_path(body.project),
+                before=None,
+                after=True,
+                security=True,
+                grant=True,
+            )
+            plan = _Plan(
+                {"project": home, "extra_projects": list(extras)},
+                fingerprint_projects(home, extras),
+                [item],
+            )
+            proposal_id = await _insert(conn, settings, filed, caller, True, target_id, name, plan)
+    except repo.ProposalExists as exc:  # a concurrent replay won the insert
+        view = await get_view(
+            conn, settings, exc.proposal_id, proposer=caller.id, visible_only=True
+        )
+        return view, False
+    return await get_view(conn, settings, proposal_id, proposer=caller.id), True
+
+
 async def revise(
     request: Request,
     conn,
@@ -347,6 +447,12 @@ async def revise(
             current.kind,
             current.target_id == str(caller.id),
         )
+        if current.kind in PROJECT_KINDS:
+            raise ApiError(
+                422,
+                "not_revisable",
+                "a project grant is not revised; withdraw it and file the grant again",
+            )
         if current.status not in repo.ACTIVE:
             raise _not_open()
         if current.kind == "schedule":
@@ -406,6 +512,9 @@ async def _stale(conn, proposal: repo.Proposal) -> bool:
     if proposal.status not in repo.ACTIVE or proposal.kind == "schedule":
         return False
     current = next(r for r in proposal.revisions if r.revision == proposal.revision)
+    if proposal.kind in PROJECT_KINDS:
+        live = await live_projects_fingerprint(conn, proposal.kind, proposal.target_id)
+        return live != current.fingerprint
     if proposal.kind == "session":
         found = await live_session(conn, uuid.UUID(proposal.target_id))
         if found is None:
@@ -715,7 +824,8 @@ async def mark_closed(
     """Move the proposal to `to` (stale, expired, target_gone) and queue the proposer's one-line
     notice, in the caller's transaction. Status-guarded: NotInState when another writer won."""
     await repo.transition(conn, p.id, from_states=from_states, to=to, outcome=to)
-    await _notify(conn, p, f"{_head(p)} {_CLOSED_TEXT[to].format(id=p.id, kind=p.kind)}")
+    kind = _NOUN.get(p.kind, p.kind)
+    await _notify(conn, p, f"{_head(p)} {_CLOSED_TEXT[to].format(id=p.id, kind=kind)}")
 
 
 async def _close(conn, p: repo.Proposal, to: str, error: ApiError) -> _Done:
@@ -873,6 +983,8 @@ async def _review_locked(
         return await _review_schedule(request, conn, settings, p, decisions)
     if p.kind == "session":
         return await _review_session(conn, settings, p, decisions)
+    if p.kind in PROJECT_KINDS:
+        return await _review_projects(conn, p, decisions)
     to = _outcome(decisions)
     preset = await _locked_target(conn, uuid.UUID(p.target_id), hold=to == "applied")
     if preset is None:
@@ -1011,6 +1123,48 @@ async def _apply_session(
             raise _SessionChanged
 
     await sessions_repo.replace_spec(conn, session.id, stored, filled, recheck)
+
+
+async def _review_projects(conn, p: repo.Proposal, decisions: Decisions) -> _Done:
+    """Plan 3.5 for a project grant (T-120): the approved projects are held active first (lock
+    order: project rows, then the target row; 422 `project_archived` rolls the review back and
+    the proposal stays open), then the target row is locked, its fingerprint compared, and the
+    approved projects added to its extra projects. A granted session gets a `project_grant`
+    notice. No spec changes and no pod rolls: scope is read live per request."""
+    current = p.revisions[0]
+    to = _outcome(decisions)
+    noun = _NOUN[p.kind]
+    added = [project_grants.project_of(i.path) for i in _approved(current, decisions)]
+    if to == "applied":
+        for slug in added:
+            await project_grants.require_active(conn, slug)
+    target_id = uuid.UUID(p.target_id)
+    if p.kind == "session_projects":
+        try:
+            session = await sessions_repo.lock_active(conn, target_id)
+        except sessions_repo.SessionNotFound:
+            return await _close(conn, p, "target_gone", _gone_error(noun))
+        except SessionBeingDeleted:
+            return await _close(conn, p, "target_gone", _deleting())
+        home, extras = session.project, session.extra_projects
+    else:
+        preset = await presets_repo.get_for_update(conn, target_id)
+        if preset is None or not preset.superleader_manageable:
+            return await _close(conn, p, "target_gone", _gone_error(noun))
+        home, extras = preset.project, preset.extra_projects
+    if p.status == "open" and fingerprint_projects(home, extras) != current.fingerprint:
+        return await _close(conn, p, "stale", _stale_error(noun))
+    if to == "applied":
+        wanted = sorted({*extras, *added} - {home})
+        project_grants.check_count(wanted)
+        if p.kind == "session_projects":
+            await sessions_repo.set_extra_projects(conn, target_id, wanted)
+            for slug in added:
+                text = project_grants.granted_text(slug, f"proposal P-{p.id}")
+                await project_grants.notify(conn, target_id, text)
+        else:
+            await presets_repo.set_extra_projects(conn, target_id, wanted)
+    return await _record(conn, p, decisions, to, _Done())
 
 
 async def review(

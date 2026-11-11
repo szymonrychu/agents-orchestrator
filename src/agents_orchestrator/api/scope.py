@@ -2,7 +2,8 @@
 plan 3.2, 3.3).
 
 A superleader session (`spec.session_messaging`) is `*`, every project; any other session is
-its own project, read live from the session row on every request. The orchestrator computes
+its home project followed by its extra projects (T-120), comma-separated, read live from the
+session row on every request. The orchestrator computes
 the scope and the service that owns the data enforces it on `X-Orch-Projects`, which the relay
 sets itself (`forward` never passes an inbound header, so an agent cannot forge it).
 
@@ -33,8 +34,9 @@ _ADMIN = f"{_A}/admin"
 
 
 def scope_of(session: sessions_repo.Session) -> str:
-    """`*` for a superleader session, else the session's own project slug."""
-    return ALL_PROJECTS if session.spec.session_messaging else session.project
+    """`*` for a superleader session, else its projects comma-separated, home first (the
+    taskboard reads the first as the home project)."""
+    return ALL_PROJECTS if session.spec.session_messaging else ",".join(session.projects)
 
 
 def projects_header(session: sessions_repo.Session) -> dict[str, str]:
@@ -44,7 +46,7 @@ def projects_header(session: sessions_repo.Session) -> dict[str, str]:
 
 AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     # identity, lifecycle, locks, labels, init scripts: the caller's own session
-    ("GET", f"{_A}/me"): "own",  # answers `project` and `projects_scope`
+    ("GET", f"{_A}/me"): "own",  # answers `project`, `extra_projects` and `projects_scope`
     ("POST", f"{_A}/scale"): "own",
     ("POST", f"{_A}/close"): "own",
     ("GET", f"{_A}/init-scripts"): "own",
@@ -83,7 +85,7 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("POST", f"{_A}/specs/{{path:path}}"): "project",
     ("PUT", f"{_A}/specs/{{path:path}}"): "project",
     ("PATCH", f"{_A}/specs/{{path:path}}"): "project",
-    # the caller's project, or every active project for a superleader
+    # the caller's projects, or every active project for a superleader
     ("GET", f"{_A}/projects"): "project",
     # chat relay: project in the plan, but no filter is sent until the complete stage (X1)
     ("GET", f"{_A}/chat/rooms"): "project",
@@ -121,6 +123,11 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("GET", f"{_ADMIN}/commands/{{command_id}}"): "superleader",
     ("GET", f"{_ADMIN}/usage"): "superleader",
     ("POST", f"{_ADMIN}/projects"): "superleader",
+    # project grants (T-120): a grant files a proposal, a revoke is direct
+    ("POST", f"{_ADMIN}/sessions/{{slug}}/projects"): "superleader",
+    ("DELETE", f"{_ADMIN}/sessions/{{slug}}/projects/{{project}}"): "superleader",
+    ("POST", f"{_ADMIN}/presets/{{ref}}/projects"): "superleader",
+    ("DELETE", f"{_ADMIN}/presets/{{ref}}/projects/{{project}}"): "superleader",
     # admin relay (`admin_relay`): superleader-only forwards, sent with X-Orch-Projects: *
     ("GET", f"{_ADMIN}/webhooks/endpoints"): "superleader",
     ("POST", f"{_ADMIN}/webhooks/endpoints"): "superleader",

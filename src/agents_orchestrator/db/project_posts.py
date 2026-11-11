@@ -88,13 +88,14 @@ async def set_recipients(conn: psycopg.AsyncConnection, post_id: int, slugs: lis
 async def recipients(
     conn: psycopg.AsyncConnection, project: str, sender_id: uuid.UUID
 ) -> list[Recipient]:
-    """Active sessions of the project except the sender and any superleader
-    (`spec.session_messaging`), ordered by slug."""
+    """Active sessions that belong to the project (home or extra, T-120) except the sender and
+    any superleader (`spec.session_messaging`), ordered by slug."""
     rows = await queue._all(
         conn,
-        "SELECT id, slug FROM sessions WHERE project = %s AND desired = 'active' AND id <> %s"
+        "SELECT id, slug FROM sessions WHERE (project = %s OR %s = ANY(extra_projects))"
+        " AND desired = 'active' AND id <> %s"
         " AND COALESCE((spec->>'session_messaging')::boolean, false) = false ORDER BY slug",
-        (project, sender_id),
+        (project, project, sender_id),
     )
     return [Recipient(id=r["id"], slug=r["slug"]) for r in rows]
 

@@ -23,6 +23,8 @@ BODIES = {
     ("PATCH", "/agent/v1/admin/sessions/{slug}"): {"spec": {}},
     ("POST", "/agent/v1/admin/sessions/{slug}/leadership/withdraw"): {},
     ("PUT", "/agent/v1/admin/presets/{ref}/vault/{entry_id}"): {},
+    ("POST", "/agent/v1/admin/sessions/{slug}/projects"): {"project": "default", "reason": "r"},
+    ("POST", "/agent/v1/admin/presets/{ref}/projects"): {"project": "default", "reason": "r"},
 }
 
 

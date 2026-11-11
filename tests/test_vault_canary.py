@@ -179,6 +179,25 @@ async def test_vault_canary_never_leaks(pool, dsn, caplog):
         r = await admin("PUT", f"{A}/canary/vault/{PROTECTED}", json={"envs": {"TOKEN": "Z"}})
         assert r.status_code == 200, r.text
 
+        # project grants (T-120): views, proposals and notices carry names only
+        r = seen(await http.post("/api/v1/projects", json={"slug": "canary-x", "name": "X"}))
+        assert r.status_code == 201, r.text
+        grant = {"project": "canary-x", "reason": "canary"}
+        r = await admin("POST", f"{A}/canary/projects", json=grant)
+        assert r.status_code == 202, r.text
+        r = await admin("POST", f"{ADMIN_PREFIX}/sessions/canary/projects", json=grant)
+        assert r.status_code == 202, r.text
+        extra = {"extra_projects": ["canary-x"]}
+        r = seen(await http.put(f"{C}/{session_id}/extra-projects", json=extra))
+        assert r.status_code == 200, r.text
+        r = seen(await http.put(f"{P}/{preset_id}/extra-projects", json=extra))
+        assert r.status_code == 200, r.text
+        r = await admin("DELETE", f"{ADMIN_PREFIX}/sessions/canary/projects/canary-x")
+        assert r.status_code == 200, r.text
+        r = await admin("DELETE", f"{A}/canary/projects/canary-x")
+        assert r.status_code == 200, r.text
+        seen(await http.get("/api/v1/proposals", params={"status": "all"}))
+
         # every failure mode of the vault, on every route that calls it
         for mode in ("refuse", "invalid", "server", "nonjson"):
             vault.mode = mode

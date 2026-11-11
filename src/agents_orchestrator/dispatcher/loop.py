@@ -15,7 +15,9 @@ from typing import Any
 import httpx
 from psycopg_pool import AsyncConnectionPool
 
+from agents_orchestrator.api.session_limits import may_message
 from agents_orchestrator.db import leadership, project_posts, queue, session_messaging
+from agents_orchestrator.db import sessions as sessions_repo
 from agents_orchestrator.db.pool import listen
 from agents_orchestrator.dispatcher import hive
 from agents_orchestrator.dispatcher.session_frame import frame, project_post, relay_notice
@@ -226,6 +228,23 @@ class Dispatcher:
             async with self.pool.connection() as conn:
                 await queue.heartbeat_dispatching(conn, message_id)
 
+    async def _still_in_scope(
+        self, conn: Any, claim: queue.Claim, room: project_posts.ProjectMark | None
+    ) -> bool:
+        """Delivery-time scope re-check of a session message (T-120): a room post only reaches a
+        session that still belongs to the post's project, a peer message only while
+        `may_message` still holds. A revoke or move thus drops what was queued before it."""
+        receiver = await sessions_repo.get(conn, claim.session_id)
+        sender_row = await queue._one(
+            conn, "SELECT sender_session_id FROM messages WHERE id = %s", (claim.message_id,)
+        )
+        if receiver is None or sender_row is None or sender_row["sender_session_id"] is None:
+            return True
+        if room is not None:
+            return room.project in receiver.projects
+        sender = await sessions_repo.get(conn, sender_row["sender_session_id"])
+        return sender is None or await may_message(conn, sender, receiver, self.settings)
+
     async def _send(self, claim: queue.Claim) -> None:
         s = self.settings
         if not claim.agent_url:
@@ -245,6 +264,15 @@ class Dispatcher:
                         if mark is None
                         else None
                     )
+                    if mark is None and not await self._still_in_scope(conn, claim, room):
+                        await queue.release_agent(
+                            conn,
+                            claim.agent_id,
+                            claim.previous_dispatched_at,
+                            claimed_at=claim.dispatched_at,
+                        )
+                        await queue.fail_message(conn, claim.message_id, "project_revoked")
+                        return
                 if room is not None:
                     text = project_post(
                         claim.text,

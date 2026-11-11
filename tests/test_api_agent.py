@@ -246,14 +246,12 @@ async def test_me_project_room_for_leader(pool, dsn):
     sent = await _post(app, r["A"])
     assert sent.status_code == 202, sent.text
     me = await _me(app, r["B"], r["B"].leader_ip)
-    assert me["project_room"] == {
-        "project": "a",
-        "last_post_id": sent.json()["post_id"],
-        "unhandled": 1,
-    }
+    assert me["project_rooms"] == [
+        {"project": "a", "last_post_id": sent.json()["post_id"], "unhandled": 1}
+    ]
     own = await _me(app, r["A"], r["A"].leader_ip)
-    assert own["project_room"]["unhandled"] == 0
-    assert own["project_room"]["last_post_id"] == sent.json()["post_id"]
+    assert own["project_rooms"][0]["unhandled"] == 0
+    assert own["project_rooms"][0]["last_post_id"] == sent.json()["post_id"]
 
 
 async def test_me_project_room_none_for_member_and_superleader(pool, dsn):
@@ -263,5 +261,5 @@ async def test_me_project_room_none_for_member_and_superleader(pool, dsn):
     r = await _room(pool)
     app = _app(pool, dsn)
     await _post(app, r["A"])
-    assert (await _me(app, r["B"], r["B"].member_ip))["project_room"] is None
-    assert (await _me(app, r["S"], r["S"].leader_ip))["project_room"] is None
+    assert (await _me(app, r["B"], r["B"].member_ip))["project_rooms"] == []
+    assert (await _me(app, r["S"], r["S"].leader_ip))["project_rooms"] == []

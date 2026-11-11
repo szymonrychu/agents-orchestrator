@@ -52,6 +52,7 @@ def _view(preset: repo.Preset) -> schemas.PresetView:
         superleader_manageable=preset.superleader_manageable,
         labels=preset.labels,
         project=preset.project,
+        extra_projects=list(preset.extra_projects),
         privileged=privileged(preset.spec),
         vault_reattach=preset.vault_reattach,
         spec=preset.spec,

@@ -93,6 +93,25 @@ class SessionProjectIn(BaseModel):
     project: str
 
 
+class ProjectGrantIn(BaseModel):
+    """A superleader's request to add an extra project to a session or preset (T-120): filed
+    as a change proposal the human reviews."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    project: str
+    reason: str = Field(min_length=1, max_length=4000)
+    client_key: str | None = Field(default=None, max_length=200)
+
+
+class ExtraProjectsIn(BaseModel):
+    """The human's direct set of a session's or preset's extra projects (main port, T-120)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    extra_projects: list[str] = Field(max_length=9)
+
+
 class SessionLabelsIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -159,6 +178,8 @@ class PresetView(BaseModel):
     superleader_manageable: bool
     labels: list[str]
     project: str
+    # the other projects its sessions fully belong to (T-120), copied at session create
+    extra_projects: list[str] = []
     # the privileged grants on (preset_policy.privileged), so a client never names the fields
     privileged: list[str]
     # env names to re-attach as vault references (set by migration 0041)
@@ -248,9 +269,13 @@ class ProposalRevisionView(BaseModel):
     items: list[ProposalItemView]
 
 
+ProposalKind = Literal["preset", "schedule", "session", "session_projects", "preset_projects"]
+
+
 class ProposalView(BaseModel):
     id: int
-    kind: Literal["preset", "schedule", "session"]
+    # session_projects / preset_projects: a project grant (T-120), items `projects.<slug>`
+    kind: ProposalKind
     target_id: str
     target_name: str
     proposer_slug: str
@@ -372,6 +397,9 @@ class SessionView(BaseModel):
     labels: list[str] = []
     # the project the session belongs to; moved by PATCH /sessions/{id}/project
     project: str
+    # the other projects it fully belongs to (T-120); set by PUT /sessions/{id}/extra-projects
+    # or a reviewed grant proposal
+    extra_projects: list[str] = []
 
 
 class InitScriptsIn(BaseModel):
@@ -617,7 +645,7 @@ class Meta(BaseModel):
 Lane = Literal["idle", "regular", "priority"]
 MessageStatus = Literal["queued", "dispatching", "verifying", "sent", "failed", "cancelled"]
 # an orchestrator-written message; null for every other message
-Notice = Literal["inactivity_reminder", "inactivity_close", "handover", "proposal"]
+Notice = Literal["inactivity_reminder", "inactivity_close", "handover", "proposal", "project_grant"]
 
 
 class MessageAttachment(BaseModel):

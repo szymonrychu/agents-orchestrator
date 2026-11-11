@@ -222,6 +222,25 @@ async def test_create_from_preset_in_archived_project_422(pool, dsn):
         assert r.json()["project"] == "default"
 
 
+async def test_create_copies_the_preset_extra_projects(pool, dsn):
+    """A preset's extra projects go to every session created from it (T-120 Q5); a body project
+    that is one of them becomes the home and is not repeated; an archived one is 422."""
+    async with app_client(pool, dsn) as http:
+        for slug in ("alpha", "beta", "gamma"):
+            await _project(http, slug)
+        pid = (await http.post(P, json={"name": "multi", "project": "alpha"})).json()["id"]
+        r = await http.put(f"{P}/{pid}/extra-projects", json={"extra_projects": ["beta", "gamma"]})
+        assert r.status_code == 200, r.text
+        r = await http.post(C, json={"preset_id": pid})
+        assert r.status_code == 201, r.text
+        assert (r.json()["project"], r.json()["extra_projects"]) == ("alpha", ["beta", "gamma"])
+        r = await http.post(C, json={"preset_id": pid, "project": "beta"})
+        assert r.status_code == 201, r.text
+        assert (r.json()["project"], r.json()["extra_projects"]) == ("beta", ["gamma"])
+        await http.patch("/api/v1/projects/gamma", json={"archived": True})
+        assert_error(await http.post(C, json={"preset_id": pid}), 422, "project_archived")
+
+
 async def test_create_from_preset_waits_on_project_lock_and_sees_archive(pool, dsn):
     """Without a body project the preset's project row is held FOR SHARE: an archive committed
     while the create waits turns the create into 422 `project_archived`."""

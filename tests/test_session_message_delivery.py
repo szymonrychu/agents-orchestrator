@@ -188,6 +188,9 @@ async def test_fanout_row_delivered_with_room_trailer(env):
     sender = await insert_session(env.pool, slug="caller")
     await env.agent(free_ago=20)
     await _exec(env.pool, "INSERT INTO projects (slug, name) VALUES ('alpha', 'alpha')")
+    await _exec(
+        env.pool, "UPDATE sessions SET extra_projects = '{alpha}' WHERE id = %s", (env.cid,)
+    )
     async with env.pool.connection() as conn:
         post_id = await project_posts.insert_post(
             conn,
@@ -214,3 +217,72 @@ async def test_fanout_row_delivered_with_room_trailer(env):
     expected = project_post("room <hi>", "caller", msg_id, "alpha", post_id, None)
     assert env.fake.turn_texts == [expected]
     assert env.fake.turn_metadata[0]["orch_sender_session"] == "caller"
+
+
+async def _fanout(env, *, project: str):
+    await _exec(env.pool, "INSERT INTO projects (slug, name) VALUES (%s, %s)", (project, project))
+    sender = await insert_session(env.pool, slug="caller", project=project)
+    await env.agent(free_ago=20)
+    async with env.pool.connection() as conn:
+        post_id = await project_posts.insert_post(
+            conn,
+            project=project,
+            sender_kind="leader",
+            sender_session_id=sender["id"],
+            sender_slug="caller",
+            text="room",
+            reply_to=None,
+            addressed=[],
+        )
+        return await q.enqueue_message(
+            conn,
+            env.cid,
+            "room",
+            sender_session_id=sender["id"],
+            sender_slug="caller",
+            hop=1,
+            project_post_id=post_id,
+        )
+
+
+async def test_fanout_row_of_a_project_the_receiver_left_is_not_delivered(env):
+    msg_id = await _fanout(env, project="alpha")  # the receiver is only in "default"
+    d = env.dispatcher()
+    await d.drain()
+    await d.aclose()
+    assert env.fake.turn_texts == []
+    row = await env.message(msg_id)
+    assert (row["status"], row["error"]) == ("failed", "project_revoked")
+
+
+async def test_peer_message_without_shared_project_is_not_delivered(env):
+    await _exec(env.pool, "INSERT INTO projects (slug, name) VALUES ('other', 'other')")
+    sender = await insert_session(env.pool, slug="caller", project="other")
+    await env.agent(free_ago=20)
+    async with env.pool.connection() as conn:
+        msg_id = await q.enqueue_message(
+            conn, env.cid, "hi", sender_session_id=sender["id"], sender_slug="caller", hop=1
+        )
+    d = env.dispatcher()
+    await d.drain()
+    await d.aclose()
+    assert env.fake.turn_texts == []
+    row = await env.message(msg_id)
+    assert (row["status"], row["error"]) == ("failed", "project_revoked")
+
+
+async def test_reply_inside_the_window_is_still_delivered(env):
+    await _exec(env.pool, "INSERT INTO projects (slug, name) VALUES ('other', 'other')")
+    other = await insert_session(env.pool, slug="caller", project="other")
+    await env.agent(free_ago=20)
+    async with env.pool.connection() as conn:
+        await q.enqueue_message(
+            conn, other["id"], "q?", sender_session_id=env.cid, sender_slug="me", hop=1
+        )
+        msg_id = await q.enqueue_message(
+            conn, env.cid, "a!", sender_session_id=other["id"], sender_slug="caller", hop=1
+        )
+    d = env.dispatcher()
+    await d.drain()
+    await d.aclose()
+    assert (await env.message(msg_id))["status"] == "sent"

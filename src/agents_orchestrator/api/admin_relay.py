@@ -592,7 +592,8 @@ def _scoped_entry(
     tags=["admin"],
 )
 async def vault_list(request: Request, q: str | None = None) -> Response:
-    """The vault entries in the caller's project scope and the env names to re-attach."""
+    """The vault entries of the caller's projects (home and extra) and the env names to
+    re-attach."""
     _, session = caller_of(request)
     client = request.app.state.vault
     if client is None:
@@ -606,7 +607,7 @@ async def vault_list(request: Request, q: str | None = None) -> Response:
     except vault_client.VaultRefused:
         raise vault_refs.unavailable() from None
     visible = await _visible(request)
-    project_labels = [f"{PROJECT_PREFIX}{session.project}"]
+    project_labels = [f"{PROJECT_PREFIX}{p}" for p in session.projects]
     async with request.app.state.pool.connection() as conn:
         presets = await presets_repo.list_presets(conn)
     marked = {str(p.id) for p in presets if privileged(p.spec)}

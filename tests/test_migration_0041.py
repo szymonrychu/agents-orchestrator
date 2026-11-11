@@ -45,7 +45,7 @@ def test_reattach_lists_protected_names_and_strips_them_from_the_spec(empty_dsn,
     _seed(empty_dsn, "p1", spec)
     _seed(empty_dsn, "p2", {"env": {"A": {"value": "x", "protected": False, "expand": False}}})
     _seed(empty_dsn, "p3", {"model": "opus"})
-    assert run_migrations(empty_dsn) == ["0041", "0042", "0043", "0044"]
+    assert run_migrations(empty_dsn) == ["0041", "0042", "0043", "0044", "0045"]
     assert _preset(empty_dsn, "p1") == (
         {"env": {"A": {"value": "x", "expand": False}, "PLAIN": "text"}},
         ["B", "Z"],
@@ -61,7 +61,7 @@ def test_non_object_env_does_not_fail_the_migration(empty_dsn, tmp_path):
     _seed(empty_dsn, "strenv", {"env": "oops"})
     _seed(empty_dsn, "arrenv", {"env": [1, 2]})
     _seed(empty_dsn, "nullenv", {"env": None})
-    assert run_migrations(empty_dsn) == ["0041", "0042", "0043", "0044"]
+    assert run_migrations(empty_dsn) == ["0041", "0042", "0043", "0044", "0045"]
     assert _preset(empty_dsn, "ok")[1] == ["B"]
     for name in ("noenv", "strenv", "arrenv", "nullenv"):
         assert _preset(empty_dsn, name)[1] == []
@@ -215,7 +215,7 @@ def _dump(dsn):
 def test_protected_entries_leave_presets_and_sessions_legacy_pins_stay(empty_dsn, tmp_path):
     _upto_0040(empty_dsn, tmp_path)
     _seed_pre_apply(empty_dsn)
-    assert run_migrations(empty_dsn) == ["0041", "0042", "0043", "0044"]
+    assert run_migrations(empty_dsn) == ["0041", "0042", "0043", "0044", "0045"]
     specs = dict(_rows(empty_dsn, "SELECT name, spec FROM presets"))
     assert specs["mixed"] == {"env": {"A": {"value": "x", "expand": False}, "S": "str", "L": [1]}}
     assert specs["noenv"] == {"model": "opus"}
@@ -393,7 +393,7 @@ async def test_a_protected_variable_removed_before_the_apply_does_not_come_back(
             " (gen_random_uuid(), 'strenv', %s, %s)",
             (json.dumps({"env": {}}), json.dumps({"env": "oops"}), json.dumps({"B": dropped})),
         )
-    assert run_migrations(empty_dsn) == ["0041", "0042", "0043", "0044"]
+    assert run_migrations(empty_dsn) == ["0041", "0042", "0043", "0044", "0045"]
     pins = dict(_rows(empty_dsn, "SELECT slug, secret_versions FROM sessions"))
     assert pins == {
         "gone": {"C": kept, "V": vault_pin},

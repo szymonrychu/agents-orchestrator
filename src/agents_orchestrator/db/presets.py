@@ -55,6 +55,8 @@ class Preset:
     updated_at: datetime
     project: str = DEFAULT
     vault_reattach: list[str] = field(default_factory=list)
+    # the other projects its sessions fully belong to (T-120), sorted; copied at session create
+    extra_projects: tuple[str, ...] = ()
 
 
 def validate_preset_name(name: str) -> str:
@@ -81,6 +83,7 @@ def _from_row(row: dict[str, Any]) -> Preset:
         updated_at=row["updated_at"],
         project=row["project"],
         vault_reattach=row["vault_reattach"],
+        extra_projects=tuple(row["extra_projects"]),
     )
 
 
@@ -176,11 +179,28 @@ async def update(
                 "UPDATE presets SET name = %s, spec = %s,"
                 " superleader_manageable = COALESCE(%s, superleader_manageable),"
                 " labels = COALESCE(%s, labels), project = COALESCE(%s, project),"
+                " extra_projects = array_remove(extra_projects, COALESCE(%s, project)),"
                 " updated_at = now() WHERE id = %s RETURNING *",
-                (name, Jsonb(spec), superleader_manageable, labels, project, preset_id),
+                (name, Jsonb(spec), superleader_manageable, labels, project, project, preset_id),
             )
     except psycopg.errors.UniqueViolation:
         raise PresetExists(name) from None
+    return rows[0]
+
+
+async def set_extra_projects(
+    conn: psycopg.AsyncConnection, preset_id: uuid.UUID, projects: list[str]
+) -> Preset:
+    """Replace the preset's extra projects (stored sorted and distinct); the caller validates the
+    slugs (`api.project_grants`). Sessions created before keep theirs. `updated_at` is not
+    bumped: it fingerprints the spec for spec proposals, which a grant does not touch."""
+    rows = await _fetch(
+        conn,
+        "UPDATE presets SET extra_projects = %s WHERE id = %s RETURNING *",
+        (sorted(set(projects)), preset_id),
+    )
+    if not rows:
+        raise PresetNotFound(str(preset_id))
     return rows[0]
 
 

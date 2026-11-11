@@ -86,6 +86,14 @@ class Session:
     discard_forced_at: datetime | None = None
     # the project it belongs to (projects.slug); moved by set_project, never by a spec change
     project: str = DEFAULT
+    # the other projects it fully belongs to (T-120), sorted; set by set_extra_projects, read
+    # live per request like `project`
+    extra_projects: tuple[str, ...] = ()
+
+    @property
+    def projects(self) -> tuple[str, ...]:
+        """Every project of the session, its home project first."""
+        return (self.project, *self.extra_projects)
 
 
 @dataclass(frozen=True)
@@ -120,6 +128,7 @@ def _from_row(row: dict[str, Any]) -> Session:
         close_deadline_at=row["close_deadline_at"],
         discard_forced_at=row["discard_forced_at"],
         project=row["project"],
+        extra_projects=tuple(row["extra_projects"]),
     )
 
 
@@ -149,6 +158,7 @@ async def create(
     labels: list[str] | None = None,
     project: str = DEFAULT,
     session_id: uuid.UUID | None = None,
+    extra_projects: list[str] | None = None,
 ) -> Session:
     validate_slug(slug)
     try:
@@ -156,8 +166,8 @@ async def create(
             rows = await _fetch(
                 conn,
                 "INSERT INTO sessions (id, slug, spec, preset_id, preset_name, created_by_service,"
-                " secret_versions, created_by_session, labels, project)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
+                " secret_versions, created_by_session, labels, project, extra_projects)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
                 (
                     session_id or uuid.uuid4(),
                     slug,
@@ -169,6 +179,7 @@ async def create(
                     created_by_session,
                     labels or [],
                     project,
+                    sorted(set(extra_projects or [])),
                 ),
             )
             await _notify(conn, rows[0].id)
@@ -283,11 +294,28 @@ async def set_project(
             await _lock_row(conn, session_id)
             rows = await _fetch(
                 conn,
-                "UPDATE sessions SET project = %s WHERE id = %s RETURNING *",
-                (project, session_id),
+                "UPDATE sessions SET project = %s,"
+                " extra_projects = array_remove(extra_projects, %s) WHERE id = %s RETURNING *",
+                (project, project, session_id),
             )
     except psycopg.errors.ForeignKeyViolation:
         raise UnknownProject(project) from None
+    return rows[0]
+
+
+async def set_extra_projects(
+    conn: psycopg.AsyncConnection, session_id: uuid.UUID, projects: list[str]
+) -> Session:
+    """Replace the session's extra projects (stored sorted and distinct). Like `set_project`:
+    no generation bump and no NOTIFY, scope is read live per request. The caller validates the
+    slugs (`api.project_grants`). Raises SessionNotFound or SessionBeingDeleted."""
+    async with conn.transaction():
+        await _lock_row(conn, session_id)
+        rows = await _fetch(
+            conn,
+            "UPDATE sessions SET extra_projects = %s WHERE id = %s RETURNING *",
+            (sorted(set(projects)), session_id),
+        )
     return rows[0]
 
 
@@ -317,20 +345,26 @@ SELECT c.*,
                    AND a.start_failure IS NOT NULL), '[]'::jsonb) AS start_failures
 FROM sessions c
 WHERE c.desired = 'active' AND c.id <> %(caller)s
-  AND (%(project)s::text IS NULL OR c.project = %(project)s
+  AND (%(projects)s::text[] IS NULL OR c.project = ANY(%(projects)s)
+       OR c.extra_projects && %(projects)s::text[]
        OR COALESCE((c.spec->>'session_messaging')::boolean, false))
 ORDER BY c.slug
 """
 
 
 async def list_messaging_peers(
-    conn: psycopg.AsyncConnection, caller_session_id: uuid.UUID, *, project: str | None
+    conn: psycopg.AsyncConnection,
+    caller_session_id: uuid.UUID,
+    *,
+    projects: tuple[str, ...] | None,
 ) -> list[MessagingPeer]:
-    """The sessions the caller may message (D6, D7, projects Q5 C), ordered by slug: every other
-    active session with `project` None (a superleader caller), else the other active sessions
-    of `project` plus every active superleader session."""
+    """The sessions the caller may message (D6, D7, projects Q5 C, T-120 Q5), ordered by slug:
+    every other active session with `projects` None (a superleader caller), else the other
+    active sessions that belong (home or extra) to any of `projects`, plus every active
+    superleader session."""
+    params = {"caller": caller_session_id, "projects": None if projects is None else list(projects)}
     async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(_PEERS, {"caller": caller_session_id, "project": project})
+        await cur.execute(_PEERS, params)
         rows = await cur.fetchall()
     out = []
     for row in rows:
@@ -405,6 +439,12 @@ async def _lock_row(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> dic
 
 async def _lock_active(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Session:
     return _from_row(await _lock_row(conn, session_id))
+
+
+async def lock_active(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Session:
+    """The session row FOR UPDATE in the caller's transaction (a grant apply or revoke); raises
+    SessionNotFound or SessionBeingDeleted."""
+    return await _lock_active(conn, session_id)
 
 
 CLOSE_KINDS = ("self", "inactivity")
@@ -750,20 +790,22 @@ async def set_init_scripts(
 
     No generation bump: the list is never rendered into pods. Lock order is sessions, then
     presets. With `same_project_preset` (an agent's edit, projects plan 3.3) the preset is
-    written only when it is in the session's project, checked under the preset row lock, so the
-    edit never reaches a preset that is or just moved to another project; then only the session
-    is written. Returns the updated session and whether a preset row was written.
+    written only when it is in one of the session's projects (home or extra, T-120), checked
+    under the preset row lock, so the edit never reaches a preset that is or just moved to
+    another project; then only the session is written. Returns the updated session and whether
+    a preset row was written.
     """
     async with conn.transaction():
         async with conn.cursor() as cur:
             await cur.execute(
-                "SELECT desired, preset_id, project FROM sessions WHERE id = %s FOR UPDATE",
+                "SELECT desired, preset_id, project, extra_projects FROM sessions"
+                " WHERE id = %s FOR UPDATE",
                 (session_id,),
             )
             locked = await cur.fetchone()
         if locked is None:
             raise SessionNotFound(str(session_id))
-        desired, preset_id, project = locked
+        desired, preset_id, project, extra_projects = locked
         if desired == "deleting":
             raise SessionBeingDeleted(str(session_id))
         listed = Jsonb(scripts)
@@ -779,7 +821,8 @@ async def set_init_scripts(
                 "SELECT project FROM presets WHERE id = %s FOR UPDATE", (preset_id,)
             )
             preset = await cur.fetchone()
-            if preset is not None and (not same_project_preset or preset[0] == project):
+            mine = (project, *extra_projects)
+            if preset is not None and (not same_project_preset or preset[0] in mine):
                 await conn.execute(
                     "UPDATE presets SET spec = jsonb_set(spec, '{init_scripts}', %s),"
                     " updated_at = now() WHERE id = %s",

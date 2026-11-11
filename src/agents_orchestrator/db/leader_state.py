@@ -90,7 +90,12 @@ _UNHANDLED = (
     "FROM messages WHERE session_id = %s AND sender_session_id IS NOT NULL AND notice IS NULL"
     " AND handled_at IS NULL AND status <> 'cancelled'"
 )
-_UNHANDLED_ROOM_COUNT = f"SELECT count(*) AS n {_UNHANDLED} AND project_post_id IS NOT NULL"
+_UNHANDLED_ROOM_COUNTS = (
+    "SELECT p.project, count(*) AS n FROM messages m"
+    " JOIN project_posts p ON p.id = m.project_post_id"
+    " WHERE m.session_id = %s AND m.sender_session_id IS NOT NULL AND m.notice IS NULL"
+    " AND m.handled_at IS NULL AND m.status <> 'cancelled' GROUP BY p.project"
+)
 _MEMBERS = f"""
     SELECT a.id AS agent_id, a.pod_name, coalesce(l.agent_id = a.id, false) AS leader,
            coalesce(st.state, 'unknown') AS state,
@@ -165,12 +170,13 @@ async def _subagent_infos(
     }
 
 
-async def unhandled_room_count(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> int:
-    """Unhandled project room fan-out rows of the session."""
+async def unhandled_room_counts(
+    conn: psycopg.AsyncConnection, session_id: uuid.UUID
+) -> dict[str, int]:
+    """Unhandled project room fan-out rows of the session, per project."""
     async with conn.cursor() as cur:
-        await cur.execute(_UNHANDLED_ROOM_COUNT, (session_id,))
-        row = await cur.fetchone()
-    return row[0] if row else 0
+        await cur.execute(_UNHANDLED_ROOM_COUNTS, (session_id,))
+        return {project: n for project, n in await cur.fetchall()}
 
 
 async def collect(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> LeaderState:

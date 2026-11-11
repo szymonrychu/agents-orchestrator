@@ -10,7 +10,7 @@ import uuid
 import httpx
 import pytest
 from psycopg.rows import dict_row
-from test_agent_session_messaging import alone
+from test_agent_session_messaging import _exec, alone
 from test_api_agent import client_for as agent_client
 from test_api_agent import headers
 from test_api_agent import make_settings as agent_settings
@@ -20,6 +20,7 @@ from test_api_sessions import assert_error, client_for
 from agents_orchestrator.api.admin import ADMIN_PREFIX
 from agents_orchestrator.api.app import create_app
 from agents_orchestrator.db import presets as repo
+from agents_orchestrator.db import sessions as sessions_repo
 
 P = "/api/v1/presets"
 A = f"{ADMIN_PREFIX}/presets"
@@ -424,6 +425,20 @@ async def test_vault_list_scopes_entries_to_the_callers_project(app, call, vault
     assert r.status_code == 200, r.text
     assert [e["name"] for e in r.json()["entries"]] == ["open", "tagged", "own-project"]
     assert "other-project" not in r.text
+
+
+async def test_vault_list_includes_the_callers_extra_projects(app, call, vault, pool, boss):
+    """A superleader that also belongs to project `other` (T-120 Q5) sees its entries too."""
+    await _exec(pool, "INSERT INTO projects (slug, name) VALUES ('other', 'Other')")
+    async with pool.connection() as conn:
+        await sessions_repo.set_extra_projects(conn, boss.id, ["other"])
+    vault.listing = [
+        listed(E_OTHER, "other-project", ["project:other"], []),
+        listed(E_HIDDEN, "third-project", ["project:third"], []),
+    ]
+    r = await call("GET", V)
+    assert r.status_code == 200, r.text
+    assert [e["name"] for e in r.json()["entries"]] == ["other-project"]
 
 
 async def test_vault_list_hides_readable_values_unless_attached_to_a_manageable_preset(

@@ -64,6 +64,7 @@ PROJECT_CHAT_TOOLS = ["project_chat_send", "project_chat_read"]
 # Superleader admin tools: the plugin's declarative admin rows (any-mcp-tatara-plugins
 # orchestration/orchestrator admin.py), the vault tools included. History is read and search
 # only: there is no history delete tool, deleting a stored session is for the user (web UI).
+# A project grant tool files a proposal the user reviews (T-120); revoke tools act at once.
 ADMIN_TOOLS = [
     "presets_list", "preset_get", "preset_create", "preset_replace", "preset_patch",
     "preset_delete", "preset_copy", "session_get", "session_patch", "session_create",
@@ -79,6 +80,8 @@ ADMIN_TOOLS = [
     "chat_open_confirm", "vault_list", "vault_attach", "vault_detach",
     "history_search", "history_get",
     "history_records", "usage_get", "project_create",
+    "session_projects_grant", "session_projects_revoke", "preset_projects_grant",
+    "preset_projects_revoke",
     *PROPOSAL_TOOLS,
 ]  # fmt: skip
 
