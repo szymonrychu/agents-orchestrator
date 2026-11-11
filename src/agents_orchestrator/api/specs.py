@@ -4,7 +4,8 @@ Same contract as the task relay (`api/tasks.py`, which holds the shared `relay` 
 is verified, the upstream is `{ORCH_TASKBOARD_URL}/taskboard/api/v1/specs...`, the forwarded
 request carries the taskboard bearer, `X-Orch-Session`, `X-Orch-Slug` and `X-Orch-Projects`, the
 body is capped at 256 KiB (413 `payload_too_large`) and the upstream status and JSON body come back
-unchanged. The allowlist is the spec, its documents and versions, and its comments with resolve.
+unchanged. The allowlist is the spec, its documents, versions and sections, its comments with
+resolve, and its plan, steps (order, next) and gate.
 Accept and dismiss are user-only and are not relayed, DELETE does not exist here, and a path with
 `..`, `.` or empty segments is refused: all are 404
 `not_found` without an upstream call. `labels=mine` is not expanded.
@@ -27,7 +28,8 @@ _KEY = r"S-[0-9]+"
 _P = r"[a-z0-9][a-z0-9._/-]{0,119}\.md"
 _ALLOWED = re.compile(
     rf"/specs(?:|/{_KEY}(?:|/docs|/docs/{_P}|/docs/{_P}/versions"
-    rf"|/comments|/comments/[0-9]+|/comments/[0-9]+/resolve))"
+    rf"|/docs/{_P}/section|/comments|/comments/[0-9]+|/comments/[0-9]+/resolve"
+    rf"|/plan|/steps|/steps/order|/steps/next|/gate))"
 )
 
 

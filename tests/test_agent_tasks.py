@@ -112,6 +112,7 @@ ROUTES = (
     ("GET", "/agent/v1/tasks/T-1/todo", "/taskboard/api/v1/tasks/T-1/todo"),
     ("POST", "/agent/v1/tasks/T-1/todo", "/taskboard/api/v1/tasks/T-1/todo"),
     ("PATCH", "/agent/v1/tasks/T-1/todo/3", "/taskboard/api/v1/tasks/T-1/todo/3"),
+    ("PUT", "/agent/v1/tasks/T-1/deps", "/taskboard/api/v1/tasks/T-1/deps"),
     ("GET", "/agent/v1/tasks/T-1/decisions", "/taskboard/api/v1/tasks/T-1/decisions"),
     ("POST", "/agent/v1/tasks/T-1/decisions", "/taskboard/api/v1/tasks/T-1/decisions"),
     (
@@ -234,6 +235,7 @@ async def test_unconfigured_503(monkeypatch):
         "/agent/v1/tasks/T-1/other",
         "/agent/v1/tasks/..%2Fadmin",
         "/agent/v1/tasks/T-1/todo/3/x",
+        "/agent/v1/tasks/T-1/deps/x",
         "/agent/v1/tasks/T-1/",
     ],
 )

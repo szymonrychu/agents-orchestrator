@@ -58,6 +58,12 @@ SPEC_TOOLS = [
     "spec_list", "spec_get", "spec_create", "spec_update", "spec_versions", "spec_comment",
     "spec_comments", "spec_comment_resolve", "spec_pull", "spec_push",
 ]  # fmt: skip
+# Plan tools (T-116 stage 4): the plan, steps, gate and section relay paths; every session.
+PLAN_TOOLS = [
+    "plan_get", "plan_set", "plan_steps", "plan_step_get", "plan_step_add", "plan_step_edit",
+    "plan_step_deps", "plan_steps_order", "plan_step_next", "plan_step_update", "plan_gate",
+    "spec_section", "plan_steps_push", "plan_export", "plan_questions_ask",
+]  # fmt: skip
 # Project room tools (T-117): every session can post to and read its project room; the routes
 # themselves answer 403 not_leader to a worker.
 PROJECT_CHAT_TOOLS = ["project_chat_send", "project_chat_read"]
@@ -105,6 +111,7 @@ def orchestrator_allow(spec: SessionSpec) -> list[str]:
         *TASK_TOOLS,
         *PROJECT_TOOLS,
         *SPEC_TOOLS,
+        *PLAN_TOOLS,
         *PROJECT_CHAT_TOOLS,
         *(ADMIN_TOOLS if spec.session_messaging else [*SESSION_EDIT_TOOLS, CLOSE_TOOL]),
     ]

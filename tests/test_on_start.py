@@ -44,6 +44,11 @@ SPEC_TOOLS = [
     "spec_list", "spec_get", "spec_create", "spec_update", "spec_versions", "spec_comment",
     "spec_comments", "spec_comment_resolve", "spec_pull", "spec_push",
 ]  # fmt: skip
+PLAN_TOOLS = [
+    "plan_get", "plan_set", "plan_steps", "plan_step_get", "plan_step_add", "plan_step_edit",
+    "plan_step_deps", "plan_steps_order", "plan_step_next", "plan_step_update", "plan_gate",
+    "spec_section", "plan_steps_push", "plan_export", "plan_questions_ask",
+]  # fmt: skip
 TAIL_TOOLS = [
     *SESSION_TOOLS,
     *INIT_SCRIPTS_TOOLS,
@@ -51,6 +56,7 @@ TAIL_TOOLS = [
     *TASK_TOOLS,
     *PROJECT_TOOLS,
     *SPEC_TOOLS,
+    *PLAN_TOOLS,
     *on_start.PROJECT_CHAT_TOOLS,
 ]
 # Allowed before the pinned plugin ships them; add a name here when the allow-list leads the
@@ -61,6 +67,7 @@ PLUGIN_PENDING: set[str] = {
     "session_projects_revoke",
     "preset_projects_grant",
     "preset_projects_revoke",
+    *PLAN_TOOLS,
 }
 ALONE_TOOLS = ["me", *TAIL_TOOLS]
 PROPOSAL = [
@@ -580,6 +587,9 @@ def test_alone_session_allow_is_the_literal_e2e_list():
         "project_list",
         "spec_list", "spec_get", "spec_create", "spec_update", "spec_versions", "spec_comment",
         "spec_comments", "spec_comment_resolve", "spec_pull", "spec_push",
+        "plan_get", "plan_set", "plan_steps", "plan_step_get", "plan_step_add", "plan_step_edit",
+        "plan_step_deps", "plan_steps_order", "plan_step_next", "plan_step_update", "plan_gate",
+        "spec_section", "plan_steps_push", "plan_export", "plan_questions_ask",
         "project_chat_send", "project_chat_read",
         "session_get", "session_patch", "proposal_create", "proposal_revise", "proposals_list",
         "proposal_get", "proposal_withdraw", "self_close",
