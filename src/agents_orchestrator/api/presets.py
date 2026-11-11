@@ -113,10 +113,9 @@ async def validated_spec(
 
 async def _check_move(request: Request, conn, stored: repo.Preset, project: str) -> None:
     """A superleader edit that moves the preset to `project`: 422 `unknown_project` for a missing
-    target; a privileged preset moves like any other (audited as admin_call). Sessions keep
-    their project. The stored row is the one
-    the save compares `updated_at` with, so a concurrent move by the user makes the save a 409
-    rather than slipping past this check."""
+    target; a privileged preset moves like any other (audited as admin_call). Sessions keep their
+    project. The stored row is the one the save compares `updated_at` with, so a concurrent move
+    by the user makes the save a 409 rather than slipping past this check."""
     if project == stored.project:
         return
     if await projects.get_project(conn, project) is None:

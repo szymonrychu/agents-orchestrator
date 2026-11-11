@@ -134,8 +134,8 @@ dependencies = [
 
 [[package]]
 name = "any-mcp-tatara-orchestrator"
-version = "0.33.0"
-source = { git = "https://github.com/szymonrychu/any-mcp-tatara-plugins?subdirectory=orchestration%2Forchestrator&rev=v0.34.0#c8c3cd673c3b9d5fed9cf2ac71cbf57d20a9f88d" }
+version = "0.34.0"
+source = { git = "https://github.com/szymonrychu/any-mcp-tatara-plugins?subdirectory=orchestration%2Forchestrator&rev=v0.34.0#8e7aa710997dc1c73be8a4797b389077a546e942" }
 dependencies = [
     { name = "any-mcp" },
 ]
