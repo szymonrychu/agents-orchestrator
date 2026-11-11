@@ -69,7 +69,7 @@ ADMIN_TOOLS = [
     "chat_admin_room", "chat_users", "chat_room_allow", "chat_open", "chat_open_status",
     "chat_open_confirm", "vault_list", "vault_attach", "vault_detach",
     "history_search", "history_get",
-    "history_records", "usage_get",
+    "history_records", "usage_get", "project_create",
     *PROPOSAL_TOOLS,
 ]  # fmt: skip
 

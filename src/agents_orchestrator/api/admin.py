@@ -24,11 +24,13 @@ from starlette.responses import Response as StarletteResponse
 
 from agents_orchestrator.api import messages as messages_api
 from agents_orchestrator.api import presets as presets_api
+from agents_orchestrator.api import projects as projects_api
 from agents_orchestrator.api import schemas, session_spec
 from agents_orchestrator.api import sessions as sessions_api
 from agents_orchestrator.api.agent import Caller, _leads
 from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.sessions import Cfg, Pool, Usage
+from agents_orchestrator.api.spec_edit import note_fields
 from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import events as events_repo
 from agents_orchestrator.db import leadership
@@ -198,12 +200,26 @@ ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/agents/{{pod}}/restart"): "session",
     ("GET", f"{ADMIN_PREFIX}/commands/{{command_id}}"): "none",
     ("GET", f"{ADMIN_PREFIX}/usage"): "none",
+    ("POST", f"{ADMIN_PREFIX}/projects"): "none",
     ("POST", f"{ADMIN_PREFIX}/proposals"): "proposal",
     ("GET", f"{ADMIN_PREFIX}/proposals"): "proposal",
     ("GET", f"{ADMIN_PREFIX}/proposals/{{proposal_id}}"): "proposal",
     ("POST", f"{ADMIN_PREFIX}/proposals/{{proposal_id}}/revise"): "proposal",
     ("POST", f"{ADMIN_PREFIX}/proposals/{{proposal_id}}/withdraw"): "proposal",
 }
+
+
+# ---------------------------------------------------------------- projects (T-113)
+
+
+@router.post("/projects", status_code=201, response_model=schemas.ProjectView)
+async def create_project(
+    body: schemas.ProjectIn, request: Request, pool: Pool
+) -> schemas.ProjectView:
+    """Create a project, same body, answer and errors as the main-port route. The audit row
+    carries the field names only."""
+    note_fields(request, ["slug", "name"])
+    return await projects_api.create(pool, body)
 
 
 # ---------------------------------------------------------------- presets (O6)

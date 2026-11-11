@@ -68,7 +68,7 @@ ADMIN_TOOLS = [
     "chat_admin_room", "chat_users", "chat_room_allow", "chat_open", "chat_open_status",
     "chat_open_confirm", "vault_list", "vault_attach", "vault_detach",
     "history_search", "history_get",
-    "history_records", "usage_get",
+    "history_records", "usage_get", "project_create",
     *PROPOSAL,
 ]  # fmt: skip
 SECRET = "s3cr3t-token-value"
@@ -607,3 +607,8 @@ def test_withdraw_offered_to_hives_and_superleaders():
     assert "leadership_withdraw" in on_start.orchestrator_allow(SessionSpec(replicas=2))
     assert "leadership_withdraw" in on_start.orchestrator_allow(SessionSpec(session_messaging=True))
     assert "leadership_withdraw" not in on_start.orchestrator_allow(SessionSpec())
+
+
+def test_project_create_is_superleader_only():
+    assert "project_create" in on_start.ADMIN_TOOLS
+    assert "project_create" not in on_start.PROJECT_TOOLS
