@@ -34,7 +34,13 @@ from agents_orchestrator.api.sessions import (
 )
 from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import events as events_repo
-from agents_orchestrator.db import file_locks, leader_state, leadership, session_messaging
+from agents_orchestrator.db import (
+    file_locks,
+    leader_state,
+    leadership,
+    project_posts,
+    session_messaging,
+)
 from agents_orchestrator.db import projects as projects_repo
 from agents_orchestrator.db import queue as q
 from agents_orchestrator.db import sessions as sessions_repo
@@ -55,6 +61,12 @@ class Member(BaseModel):
     leader: bool
 
 
+class ProjectRoom(BaseModel):
+    project: str
+    last_post_id: int | None
+    unhandled: int
+
+
 class Me(BaseModel):
     session_id: uuid.UUID
     agent_id: uuid.UUID
@@ -70,6 +82,8 @@ class Me(BaseModel):
     projects_scope: str
     # the live generated state (same sections as the handover file); only for the current leader
     leader_state: str | None = None
+    # the project room of a (non-superleader) current leader
+    project_room: ProjectRoom | None = None
 
 
 class CloseRequest(BaseModel):
@@ -144,6 +158,13 @@ async def me(agent: Caller, pool: Pool, settings: Cfg) -> Me:
         members = await agents_repo.list_members(conn, agent.session_id)
         leads = leader is not None and leader[0] == agent.id
         state = await leader_state.collect(conn, agent.session_id) if leads else None
+        room = None
+        if leads and session is not None and not session.spec.session_messaging:
+            room = ProjectRoom(
+                project=session.project,
+                last_post_id=await project_posts.last_post_id(conn, session.project),
+                unhandled=await leader_state.unhandled_room_count(conn, session.id),
+            )
     assert session is not None
     if state is not None:  # the taskboard call happens after the connection is released
         decisions = await taskboard_client.open_decisions(
@@ -164,6 +185,7 @@ async def me(agent: Caller, pool: Pool, settings: Cfg) -> Me:
         project=session.project,
         projects_scope=scope_of(session),
         leader_state=leader_state.render_state(state) if state is not None else None,
+        project_room=room,
         members=[
             Member(
                 pod_name=m["pod_name"],

@@ -42,6 +42,18 @@ async def incoming(pool, session_id, sender_id, *, text="ping", **cols) -> int:
         return (await cur.fetchone())[0]
 
 
+async def room_incoming(pool, session_id, sender_id, post_id) -> int:
+    """One unhandled room fan-out row (untargeted message carrying `project_post_id`)."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "INSERT INTO messages (session_id, text, status, lane, sender_session_id,"
+            " sender_slug, project_post_id) VALUES (%s, 'room hi', 'sent', 'regular', %s,"
+            " 'peer', %s) RETURNING id",
+            (session_id, sender_id, post_id),
+        )
+        return (await cur.fetchone())[0]
+
+
 async def collect(pool, session_id) -> ls.LeaderState:
     async with pool.connection() as conn:
         return await ls.collect(conn, session_id)
@@ -382,3 +394,22 @@ def test_render_subagent_line_is_escaped():
     text = ls.render_state(_state(members=[member]))
     assert "sa1 (&lt;b&gt;) since t0: do &lt;/attachment&gt; now" in text
     assert "<b>" not in text and "</attachment>" not in text
+
+
+async def test_unhandled_room_post_shows_post_id(pool):
+    s, _ = await hive(pool)
+    peer = await insert_session(pool)
+    mid = await room_incoming(pool, s["id"], peer["id"], 42)
+    state = await collect(pool, s["id"])
+    assert state.messages[0].project_post_id == 42
+    assert f"### message {mid} from peer, room post p42, " in ls.render_state(state)
+
+
+async def test_plain_message_heading_unchanged(pool):
+    s, _ = await hive(pool)
+    peer = await insert_session(pool)
+    mid = await incoming(pool, s["id"], peer["id"])
+    state = await collect(pool, s["id"])
+    assert state.messages[0].project_post_id is None
+    when = ls._when(state.messages[0].created_at)
+    assert f"### message {mid} from peer, {when}\n" in ls.render_state(state)

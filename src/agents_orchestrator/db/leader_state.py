@@ -37,6 +37,7 @@ class IncomingMessage:
     created_at: datetime
     text: str
     total_chars: int
+    project_post_id: int | None = None  # set for a project room fan-out row
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,7 @@ _UNHANDLED = (
     "FROM messages WHERE session_id = %s AND sender_session_id IS NOT NULL AND notice IS NULL"
     " AND handled_at IS NULL AND status <> 'cancelled'"
 )
+_UNHANDLED_ROOM_COUNT = f"SELECT count(*) AS n {_UNHANDLED} AND project_post_id IS NOT NULL"
 _MEMBERS = f"""
     SELECT a.id AS agent_id, a.pod_name, coalesce(l.agent_id = a.id, false) AS leader,
            coalesce(st.state, 'unknown') AS state,
@@ -163,11 +165,19 @@ async def _subagent_infos(
     }
 
 
+async def unhandled_room_count(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> int:
+    """Unhandled project room fan-out rows of the session."""
+    async with conn.cursor() as cur:
+        await cur.execute(_UNHANDLED_ROOM_COUNT, (session_id,))
+        row = await cur.fetchone()
+    return row[0] if row else 0
+
+
 async def collect(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> LeaderState:
     """The state of the session's hive, read from the database only (`decisions` stays None)."""
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "SELECT id, sender_slug, created_at, text, length(text) AS total_chars"
+            "SELECT id, sender_slug, created_at, text, length(text) AS total_chars, project_post_id"
             f" {_UNHANDLED} ORDER BY id DESC",
             (session_id,),
         )
@@ -205,6 +215,7 @@ async def collect(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Leade
                 m["created_at"],
                 m["text"][:STATE_MESSAGE_CHARS],
                 m["total_chars"],
+                m["project_post_id"],
             )
             for m in reversed(newest[:STATE_MESSAGES])
         ],
@@ -257,7 +268,9 @@ def _request_line(r: PendingRequest) -> str:
 
 
 def _message_block(m: IncomingMessage) -> list[str]:
-    lines = [f"### message {m.id} from {_esc(m.sender_slug)}, {_when(m.created_at)}", _esc(m.text)]
+    room = f", room post p{m.project_post_id}" if m.project_post_id is not None else ""
+    heading = f"### message {m.id} from {_esc(m.sender_slug)}{room}, {_when(m.created_at)}"
+    lines = [heading, _esc(m.text)]
     if m.total_chars > len(m.text):
         lines.append(f"[truncated at {STATE_MESSAGE_CHARS} of {m.total_chars} chars]")
     return lines

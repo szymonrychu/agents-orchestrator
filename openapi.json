@@ -2515,6 +2515,16 @@
             "title": "Project",
             "type": "string"
           },
+          "project_room": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProjectRoom"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "projects_scope": {
             "title": "Projects Scope",
             "type": "string"
@@ -4035,6 +4045,36 @@
           "posts"
         ],
         "title": "ProjectPostsPage",
+        "type": "object"
+      },
+      "ProjectRoom": {
+        "properties": {
+          "last_post_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Post Id"
+          },
+          "project": {
+            "title": "Project",
+            "type": "string"
+          },
+          "unhandled": {
+            "title": "Unhandled",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "project",
+          "last_post_id",
+          "unhandled"
+        ],
+        "title": "ProjectRoom",
         "type": "object"
       },
       "ProjectView": {
