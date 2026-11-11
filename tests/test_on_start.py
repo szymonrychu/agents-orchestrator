@@ -47,9 +47,9 @@ SPEC_TOOLS = [
 TAIL_TOOLS = [
     *SESSION_TOOLS, *INIT_SCRIPTS_TOOLS, *CHAT_TOOLS, *TASK_TOOLS, *PROJECT_TOOLS, *SPEC_TOOLS,
 ]  # fmt: skip
-# Allowed before the pinned plugin ships them; remove when the plugin pin offers the tool
-# (projects P15).
-PLUGIN_PENDING = {"project_list", *SPEC_TOOLS}
+# Allowed before the pinned plugin ships them; add a name here when the allow-list leads the
+# plugin pin and remove it when the pin offers the tool.
+PLUGIN_PENDING: set[str] = set()
 ALONE_TOOLS = ["me", *TAIL_TOOLS]
 PROPOSAL = [
     "proposal_create",
