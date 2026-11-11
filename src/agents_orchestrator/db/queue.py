@@ -260,11 +260,12 @@ async def turn_hop(conn: psycopg.AsyncConnection, agent_id: uuid.UUID) -> int | 
 async def count_sent_by(
     conn: psycopg.AsyncConnection, sender_session_id: uuid.UUID, seconds: float
 ) -> int:
-    """Session messages of any status the sender session sent in the last `seconds`."""
+    """Session messages of any status the sender session sent in the last `seconds`, room
+    fan-out rows excluded (a post counts once, through `project_posts.count_posts_by`)."""
     return await _count(
         conn,
         "SELECT count(*) AS n FROM messages WHERE sender_session_id = %s"
-        " AND created_at > now() - make_interval(secs => %s::float8)",
+        " AND project_post_id IS NULL AND created_at > now() - make_interval(secs => %s::float8)",
         (sender_session_id, seconds),
     )
 
@@ -273,11 +274,11 @@ async def count_between(
     conn: psycopg.AsyncConnection, a: uuid.UUID, b: uuid.UUID, seconds: float
 ) -> int:
     """Session messages exchanged between sessions `a` and `b`, both directions, in the last
-    `seconds`."""
+    `seconds`, room fan-out rows excluded."""
     return await _count(
         conn,
-        "SELECT count(*) AS n FROM messages"
-        " WHERE ((sender_session_id = %(a)s AND session_id = %(b)s)"
+        "SELECT count(*) AS n FROM messages WHERE project_post_id IS NULL"
+        " AND ((sender_session_id = %(a)s AND session_id = %(b)s)"
         " OR (sender_session_id = %(b)s AND session_id = %(a)s))"
         " AND created_at > now() - make_interval(secs => %(secs)s::float8)",
         {"a": a, "b": b, "secs": seconds},

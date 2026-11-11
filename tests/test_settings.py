@@ -810,3 +810,22 @@ def test_wrapper_dialog_settings_defaults_and_bounds():
     for bad in (0, -1, 86401):
         with pytest.raises(SettingsError):
             Settings(**base, wrapper_permission_hold_seconds=bad)
+
+
+def test_project_chat_settings_defaults_and_bounds(monkeypatch):
+    s = Settings()
+    assert (
+        s.project_chat_posts_per_hour,
+        s.project_chat_max_recipients,
+        s.project_chat_retention_days,
+    ) == (30, 12, 30)
+    for name in (
+        "ORCH_PROJECT_CHAT_POSTS_PER_HOUR",
+        "ORCH_PROJECT_CHAT_MAX_RECIPIENTS",
+        "ORCH_PROJECT_CHAT_RETENTION_DAYS",
+    ):
+        monkeypatch.setenv(name, "0")
+        with pytest.raises(SettingsError, match=name):
+            Settings()
+        monkeypatch.setenv(name, "1")
+        Settings()

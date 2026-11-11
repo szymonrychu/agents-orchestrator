@@ -123,6 +123,9 @@ Every process reads `ORCH_*` variables (the contract `agents-orchestrator-settin
 | `ORCH_SESSION_MESSAGE_QUEUED_MAX` | `20` | api | queued cross-session messages one target session may hold (at least 1); above it a send is refused 409 `target_queue_full` |
 | `ORCH_SESSION_MESSAGE_MAX_HOPS` | `8` | api | longest chain of cross-session messages each sent in the turn that delivered the previous one (at least 1); above it a send is refused 409 `hop_limit` |
 | `ORCH_SESSION_REPLY_WINDOW_SECONDS` | `86400` | api | how long after session B messaged session A, A may message B back although neither is a superleader (reply right; 0 turns it off); the usual limits still apply |
+| `ORCH_PROJECT_CHAT_POSTS_PER_HOUR` | `30` | api | project room posts one project may receive per hour (the project budget) |
+| `ORCH_PROJECT_CHAT_MAX_RECIPIENTS` | `12` | api | most leaders one project room post may fan out to |
+| `ORCH_PROJECT_CHAT_RETENTION_DAYS` | `30` | api | days a project room post is kept before the api sweeper deletes it |
 | `ORCH_PROPOSAL_TTL_SECONDS` | `604800` | api | seconds (at least 3600) a change proposal stays open after its latest revision before it expires |
 | `ORCH_PROPOSALS_OPEN_MAX` | `20` | api | change proposals one session may have open, in rework or stale at once (409 `too_many_proposals` above) |
 | `ORCH_PROPOSAL_SWEEP_SECONDS` | `60` | api | seconds (at least 10), how often the api proposals sweeper runs (expiry, staleness, target gone) |

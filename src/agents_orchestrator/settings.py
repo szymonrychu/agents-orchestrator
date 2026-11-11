@@ -308,6 +308,11 @@ class Settings(BaseSettings):
     session_message_pair_max_per_hour: int = Field(default=30, ge=1)
     session_reply_window_seconds: int = Field(default=86400, ge=0)
 
+    # project chat rooms between hive leaders (T-117)
+    project_chat_posts_per_hour: int = Field(default=30, ge=1)
+    project_chat_max_recipients: int = Field(default=12, ge=1)
+    project_chat_retention_days: int = Field(default=30, ge=1)
+
     # change proposals (preset-change-proposals 3.4)
     proposal_ttl_seconds: int = Field(default=604800, ge=3600)
     proposals_open_max: int = Field(default=20, ge=1)

@@ -94,3 +94,40 @@ async def test_relay_counts_as_session_message(pool):
         )
         assert await queue.count_between(conn, a["id"], b["id"], 3600) == 1
         assert await queue.count_sent_by(conn, a["id"], 60) == 1
+
+
+async def test_fanout_rows_not_in_count_sent_by_or_between(pool):
+    from agents_orchestrator.db import project_posts
+
+    async with pool.connection() as conn:
+        await conn.execute("INSERT INTO projects (slug, name) VALUES ('a', 'A')")
+    sender = await insert_session(pool, project="a")
+    r1, r2, r3 = [await insert_session(pool, project="a") for _ in range(3)]
+    async with pool.connection() as conn:
+        post_id = await project_posts.insert_post(
+            conn,
+            project="a",
+            sender_kind="leader",
+            sender_session_id=sender["id"],
+            sender_slug=sender["slug"],
+            text="hi",
+            reply_to=None,
+            addressed=[],
+        )
+        for r in (r1, r2, r3):
+            await project_posts.enqueue_fanout(
+                conn,
+                r["id"],
+                "hi",
+                sender_session_id=sender["id"],
+                sender_slug=sender["slug"],
+                hop=0,
+                post_id=post_id,
+            )
+        assert await queue.count_sent_by(conn, sender["id"], 60) == 0
+        assert await queue.count_between(conn, sender["id"], r1["id"], 3600) == 0
+        await queue.enqueue_message(
+            conn, r1["id"], "direct", sender_session_id=sender["id"], sender_slug=sender["slug"]
+        )
+        assert await queue.count_sent_by(conn, sender["id"], 60) == 1
+        assert await queue.count_between(conn, sender["id"], r1["id"], 3600) == 1
