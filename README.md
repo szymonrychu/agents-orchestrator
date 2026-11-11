@@ -1542,14 +1542,14 @@ Limits. The room reuses `ORCH_SESSION_MESSAGE_MAX_HOPS`, `ORCH_SESSION_MESSAGE_R
 
 ### Chat
 
-A session leader reaches the user's chat (the matrix connector's rooms) through four relay routes; the orchestrator proves who is calling and forwards to one generic chat upstream at `ORCH_CHAT_URL`, so it names no Matrix concept and the agent token never leaves it. Nothing is stored. Backs the plugin chat tools `orchestrator_chat_rooms`, `orchestrator_chat_send`, `orchestrator_chat_react` and `orchestrator_chat_status`, which are in every session's any-mcp allow list (see Tool gating): the tools are visible to every agent of every session, and only the leader's calls succeed (a member gets 403 `not_leader`). Every route checks, in this order, and a refusal makes no upstream call:
+A session leader reaches the user's chat (the matrix connector's rooms) through relay routes (rooms, messages, reactions, status, and the room notes and skills below); the orchestrator proves who is calling and forwards to one generic chat upstream at `ORCH_CHAT_URL`, so it names no Matrix concept and the agent token never leaves it. Nothing is stored. Backs the plugin chat tools `orchestrator_chat_rooms`, `orchestrator_chat_send`, `orchestrator_chat_react` and `orchestrator_chat_status`, which are in every session's any-mcp allow list (see Tool gating): the tools are visible to every agent of every session, and only the leader's calls succeed (a member gets 403 `not_leader`). Every route checks, in this order, and a refusal makes no upstream call:
 
 1. the agent identity above: 401 `unauthorized`, 403 `forbidden`;
 2. 403 `not_leader`: the caller is not its session's current leader (the only agent of an alone session counts as leader), exactly as `POST /agent/v1/sessions/{slug}/messages`;
 3. 503 `chat_unconfigured`: `ORCH_CHAT_URL` and `ORCH_CHAT_TOKEN` are empty;
-4. 413 `payload_too_large`: a POST body over 256 KiB (262144 bytes). It covers a maximal message: 16000 characters of 4 bytes each are 64000 bytes as raw UTF-8 JSON and 192000 bytes with every character escaped as a JSON surrogate pair, plus a room id of up to 255 characters, `reply_to` and the keys.
+4. 413 `payload_too_large`: a POST or PUT body over 256 KiB (262144 bytes). It covers a maximal message: 16000 characters of 4 bytes each are 64000 bytes as raw UTF-8 JSON and 192000 bytes with every character escaped as a JSON surrogate pair, plus a room id of up to 255 characters, `reply_to` and the keys.
 
-The relay then forwards the method, the path under `{ORCH_CHAT_URL}/chat/v1`, the query string and the POST body byte for byte, with only these headers: `Authorization: Bearer <ORCH_CHAT_TOKEN>`, `X-Orch-Session: <caller session id>`, `X-Orch-Slug: <caller session slug>` (read from the sessions table, never from the request) and, for a POST, `Content-Type: application/json`. No inbound header is forwarded, the agent token included. The upstream call is capped at 10 s.
+The relay then forwards the method, the path under `{ORCH_CHAT_URL}/chat/v1`, the query string and the POST or PUT body byte for byte (a GET or DELETE is forwarded without a body), with only these headers: `Authorization: Bearer <ORCH_CHAT_TOKEN>`, `X-Orch-Session: <caller session id>`, `X-Orch-Slug: <caller session slug>` (read from the sessions table, never from the request) and, for a POST or PUT, `Content-Type: application/json`. No inbound header is forwarded, the agent token included. The upstream call is capped at 10 s.
 
 Pass-through rule: the upstream status and JSON body reach the agent unchanged, refusals included (for example 403 `room_not_allowed`, 422 `bad_reference`, 429 `rate_limited`), with two exceptions on `POST /messages`: a 409 `room_bound` that names an `occupier` is relayed through that session and answered 202 `relayed` (see below), and the `occupier` field is stripped from every other chat answer, any route and status (a 409 `room_bound` that is not relayable passes back without it). A connection error, a timeout or an answer that is not JSON is 503 `chat_unavailable`, without the upstream text. The orchestrator does not validate the bodies; the upstream does. Log lines carry the method, path and status only, never a token or a body.
 
@@ -1570,6 +1570,36 @@ Forwards to `POST {ORCH_CHAT_URL}/chat/v1/reactions`. Body `{to, key}`: `to` a m
 #### `GET /agent/v1/chat/messages/{send_id}`
 
 Forwards to `GET {ORCH_CHAT_URL}/chat/v1/messages/{send_id}` (the id percent-encoded as one path segment, dots included): the delivery status of a send of the caller's session, 200 `{id, kind, status, reason, room_id, created_at, sent_at}`; the upstream answers 404 `not_found` for an id that is not one of the caller session's sends.
+
+**Room notes and skills** (the six routes below).
+
+Per-room memory kept by the connector (notes and skills survive the session). The room is never a parameter: the connector resolves it from the caller session's active binding, so a session reaches only the room it is bound to (scope `own`). No route stamps `last_update_at`. A caller with no bound room gets the upstream's 409 `room_unbound`. All six routes pass the upstream status and JSON body through unchanged: 401, 403 `not_leader` and 503 `chat_unconfigured` or `chat_unavailable` come from the relay, a body over 256 KiB is 413 `payload_too_large` from the relay (the upstream's own 413 `notes_too_large` or `skill_too_large` passes back as is).
+
+#### `GET /agent/v1/chat/notes`
+
+Forwards to `GET {ORCH_CHAT_URL}/chat/v1/notes`: 200 `{room_id, body, version, updated_at, chars, max_chars, rule}` (empty body and version 0 when none).
+
+#### `PUT /agent/v1/chat/notes`
+
+Forwards to `PUT .../notes`. Body `{body, expected_version}` (the version read before; 0 creates; an empty body forgets the notes), forwarded byte for byte. A stale version is the upstream's 409 `version_conflict`.
+
+#### `GET /agent/v1/chat/skills`
+
+Forwards to `GET .../skills`: 200 `{room_id, skills: [{name, description, version, updated_at, chars}], max_skills, max_chars}`, no bodies.
+
+#### `GET /agent/v1/chat/skills/{name}`
+
+Forwards to `GET .../skills/{name}`: 200 with the body; 404 `skill_not_found`.
+
+#### `PUT /agent/v1/chat/skills/{name}`
+
+Forwards to `PUT .../skills/{name}`. Body `{description, body, expected_version}`; 409 `skill_limit` when the room is at its skill count.
+
+#### `DELETE /agent/v1/chat/skills/{name}`
+
+Forwards to `DELETE .../skills/{name}` without a body: 200 `{room_id, name, deleted}`; 404 `skill_not_found`.
+
+The skill name is percent-encoded as one path segment, dots included, exactly like `send_id`; a name holding `/` is decoded by the server before routing and is 404 here without an upstream call. The orchestrator validates nothing (names, caps and versions are the upstream's). Bodies and descriptions are never logged.
 
 ### Taskboard
 

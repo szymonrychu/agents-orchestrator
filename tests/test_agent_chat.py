@@ -466,6 +466,162 @@ async def test_occupier_never_reaches_agent(monkeypatch):
     assert checked >= 20
 
 
+# ------------------------------------------------------------------- room notes and skills
+
+MEMORY_ROUTES = (
+    ("GET", "/agent/v1/chat/notes", "/chat/v1/notes", None),
+    ("PUT", "/agent/v1/chat/notes", "/chat/v1/notes", {"body": "tea", "expected_version": 0}),
+    ("GET", "/agent/v1/chat/skills", "/chat/v1/skills", None),
+    ("GET", "/agent/v1/chat/skills/deploy", "/chat/v1/skills/deploy", None),
+    (
+        "PUT",
+        "/agent/v1/chat/skills/deploy",
+        "/chat/v1/skills/deploy",
+        {"description": "d", "body": "b", "expected_version": 0},
+    ),
+    ("DELETE", "/agent/v1/chat/skills/deploy", "/chat/v1/skills/deploy", None),
+)
+
+
+async def test_notes_get_relayed_with_identity(monkeypatch):
+    rig = make_rig(monkeypatch)
+    secret = agent_token(rig.session.id)
+    r = await rig.call("GET", "/agent/v1/chat/notes?a=1")
+    assert r.status_code == 200, r.text
+    (sent,) = rig.upstream.seen
+    assert (sent.method, sent.url.raw_path) == ("GET", b"/chat/v1/notes?a=1")
+    assert sent.headers["authorization"] == f"Bearer {CHAT_TOKEN}"
+    assert sent.headers["x-orch-session"] == str(rig.session.id)
+    assert sent.headers["x-orch-slug"] == "chat-caller"
+    assert sent.content == b"" and "content-type" not in sent.headers
+    assert all(secret not in v for v in sent.headers.values())
+
+
+async def test_notes_put_forwards_body(monkeypatch):
+    rig = make_rig(monkeypatch)
+    # whitespace and key order are the caller's: the bytes go through untouched
+    body = '{ "expected_version":3,\n "body" : "caf\u00e9 \\u00e9 \U0001f600" }'.encode()
+    inbound = {**rig.headers(), "Content-Type": "x/y"}
+    r = await rig.call("PUT", "/agent/v1/chat/notes", content=body, headers=inbound)
+    assert r.status_code == 200, r.text
+    (sent,) = rig.upstream.seen
+    assert (sent.method, sent.url.path) == ("PUT", "/chat/v1/notes")
+    assert sent.content == body
+    assert sent.headers["content-type"] == "application/json"
+    assert sent.headers["authorization"] == f"Bearer {CHAT_TOKEN}"
+    assert sent.headers["x-orch-session"] == str(rig.session.id)
+
+
+async def test_notes_put_body_cap(monkeypatch):
+    rig = make_rig(monkeypatch)
+    cap = chat.MAX_BODY_BYTES
+    for path in ("/agent/v1/chat/notes", "/agent/v1/chat/skills/deploy"):
+        big = b"a" * (cap + 1)
+        assert_error(await rig.call("PUT", path, content=big), 413, "payload_too_large")
+
+        async def chunks():
+            for _ in range(cap // 4096 + 1):
+                yield b"a" * 4096
+
+        assert_error(await rig.call("PUT", path, content=chunks()), 413, "payload_too_large")
+    assert rig.upstream.seen == []
+    assert (await rig.call("PUT", "/agent/v1/chat/notes", content=b"a" * cap)).status_code == 200
+    assert len(rig.upstream.seen[0].content) == cap
+
+
+async def test_skills_routes_relayed(monkeypatch):
+    rig = make_rig(monkeypatch)
+    for method, path, upstream_path, body in MEMORY_ROUTES:
+        rig.upstream.seen.clear()
+        kw: dict[str, Any] = {} if body is None else {"content": json.dumps(body).encode()}
+        r = await rig.call(method, path, **kw)
+        assert r.status_code == 200, (method, path, r.text)
+        (sent,) = rig.upstream.seen
+        assert (sent.method, sent.url.path) == (method, upstream_path)
+        if body is None:
+            assert sent.content == b"" and "content-type" not in sent.headers
+        else:
+            assert sent.content == json.dumps(body).encode()
+            assert sent.headers["content-type"] == "application/json"
+        assert sent.headers["authorization"] == f"Bearer {CHAT_TOKEN}"
+        assert sent.headers["x-orch-session"] == str(rig.session.id)
+        assert sent.headers["x-orch-slug"] == "chat-caller"
+
+
+async def test_delete_forwards_no_body(monkeypatch):
+    rig = make_rig(monkeypatch)
+    r = await rig.call("DELETE", "/agent/v1/chat/skills/deploy", content=b'{"x":1}')
+    assert r.status_code == 200, r.text
+    (sent,) = rig.upstream.seen
+    assert sent.method == "DELETE" and sent.content == b""
+    assert "content-type" not in sent.headers
+
+
+async def test_skill_name_is_one_segment(monkeypatch):
+    rig = make_rig(monkeypatch)
+    cases = (("%2E%2E", "%2E%2E"), ("%2E", "%2E"), ("a%20b", "a%20b"))
+    assert chat._segment("a/b") == "a%2Fb"  # one segment, whatever the name holds
+    assert chat._segment("..") == "%2E%2E" and chat._segment(".") == "%2E"
+    for method in ("GET", "PUT", "DELETE"):
+        for raw, encoded in cases:
+            rig.upstream.seen.clear()
+            kw: dict[str, Any] = {"content": b"{}"} if method == "PUT" else {}
+            r = await rig.call(method, f"/agent/v1/chat/skills/{raw}", **kw)
+            assert r.status_code == 200, (method, raw, r.text)
+            (sent,) = rig.upstream.seen
+            assert sent.url.raw_path == f"/chat/v1/skills/{encoded}".encode()
+        # the server decodes %2F before routing, so a slash never reaches the relay as a name
+        rig.upstream.seen.clear()
+        kw = {"content": b"{}"} if method == "PUT" else {}
+        r = await rig.call(method, "/agent/v1/chat/skills/a%2Fb", **kw)
+        assert r.status_code == 404 and rig.upstream.seen == []
+
+
+async def test_memory_member_refused(monkeypatch):
+    rig = make_rig(monkeypatch)
+    for method, path, _, body in MEMORY_ROUTES:
+        kw: dict[str, Any] = {} if body is None else {"json": body}
+        assert_error(await rig.call(method, path, ip=MEMBER_IP, **kw), 403, "not_leader")
+        assert_error(await rig.call(method, path, headers={}, **kw), 401, "unauthorized")
+        assert_error(await rig.call(method, path, ip="10.9.9.9", **kw), 403, "forbidden")
+    assert rig.upstream.seen == []
+
+
+async def test_memory_unconfigured_and_unavailable(monkeypatch):
+    rig = make_rig(monkeypatch, chat_url="", chat_token="")
+    for method, path, _, _ in MEMORY_ROUTES:
+        assert_error(await rig.call(method, path), 503, "chat_unconfigured")
+    rig = make_rig(monkeypatch)
+    rig.upstream.reply = httpx.Response(502, content=b"<html>bad gateway</html>")
+    for method, path, _, _ in MEMORY_ROUTES:
+        assert_error(await rig.call(method, path), 503, "chat_unavailable")
+
+
+async def test_memory_upstream_refusals_pass_through(monkeypatch):
+    rig = make_rig(monkeypatch)
+    cases = [
+        ("GET", "/agent/v1/chat/notes", 409, "room_unbound"),
+        ("PUT", "/agent/v1/chat/notes", 413, "notes_too_large"),
+        ("PUT", "/agent/v1/chat/notes", 409, "version_conflict"),
+        ("PUT", "/agent/v1/chat/skills/new", 409, "skill_limit"),
+        ("GET", "/agent/v1/chat/skills/gone", 404, "skill_not_found"),
+        ("DELETE", "/agent/v1/chat/skills/gone", 404, "skill_not_found"),
+    ]
+    for method, path, status, code in cases:
+        raw = json.dumps({"error": {"code": code, "message": "m"}}).encode()
+        rig.upstream.reply = httpx.Response(status, content=raw)
+        r = await rig.call(method, path, content=b"{}" if method == "PUT" else None)
+        assert (r.status_code, r.content) == (status, raw), (method, path)
+
+
+async def test_memory_routes_do_not_touch_the_session(monkeypatch):
+    rig = make_rig(monkeypatch)
+    for method, path, _, body in MEMORY_ROUTES:
+        kw: dict[str, Any] = {} if body is None else {"json": body}
+        assert (await rig.call(method, path, **kw)).status_code == 200
+    assert rig.db.touched == []
+
+
 # ------------------------------------------------------------------------- identity and ports
 
 
@@ -526,7 +682,7 @@ def test_readme_documents_chat_routes():
     assert "\n### Chat\n" in agent_api
     section = agent_api.split("\n### Chat\n", 1)[1].split("\n### ", 1)[0]
     documented = set(
-        re.findall(r"^#### `(GET|POST) (/agent/v1/chat/\S+)`\s*$", section, re.MULTILINE)
+        re.findall(r"^#### `(GET|POST|PUT|DELETE) (/agent/v1/chat/\S+)`\s*$", section, re.MULTILINE)
     )
     app = create_app(settings(), pool=None)
     served = {
@@ -540,6 +696,12 @@ def test_readme_documents_chat_routes():
         ("POST", "/agent/v1/chat/messages"),
         ("POST", "/agent/v1/chat/reactions"),
         ("GET", "/agent/v1/chat/messages/{send_id}"),
+        ("GET", "/agent/v1/chat/notes"),
+        ("PUT", "/agent/v1/chat/notes"),
+        ("GET", "/agent/v1/chat/skills"),
+        ("GET", "/agent/v1/chat/skills/{name}"),
+        ("PUT", "/agent/v1/chat/skills/{name}"),
+        ("DELETE", "/agent/v1/chat/skills/{name}"),
     }
     assert documented == served
     assert {f"{m} {p}" for m, p in served} <= {

@@ -5,12 +5,14 @@ A session leader reaches the user's chat through the orchestrator: every route r
 chat upstream configured (503 `chat_unconfigured`), then caps the body at 256 KiB (413
 `payload_too_large`) and forwards the call to `{ORCH_CHAT_URL}/chat/v1/...`. The forwarded request
 carries only the chat bearer (`ORCH_CHAT_TOKEN`), `X-Orch-Session` and `X-Orch-Slug` of the caller
-(the slug read from the sessions repo), and for a POST the body and `Content-Type:
-application/json`; no inbound header and never the agent token. The upstream status and JSON body
-come back unchanged, except that the `occupier` field of a 409 `room_bound` never reaches the
-agent, and `POST /messages` answered 409 `room_bound` with an occupier is relayed through the
-occupier's session (`chat_relay`, 202 `relayed`); a connection error, a timeout or a non-JSON
-answer is 503 `chat_unavailable`.
+(the slug read from the sessions repo), and for a POST or PUT the body and `Content-Type:
+application/json` (a GET or DELETE carries no body); no inbound header and never the agent token.
+The upstream status and JSON body come back unchanged, except that the `occupier` field of a
+409 `room_bound` never reaches the agent, and `POST /messages` answered 409 `room_bound` with an
+occupier is relayed through the occupier's session (`chat_relay`, 202 `relayed`); a connection
+error, a timeout or a non-JSON answer is 503 `chat_unavailable`.
+The room notes and skills routes (`/notes`, `/skills`, `/skills/{name}`) are relayed the same way;
+the upstream resolves the room from the caller's session binding, so no route takes a room.
 The orchestrator does not validate the bodies (the upstream does) and stores nothing. Log lines
 carry the method, path and status only, never a token or a body.
 """
@@ -58,6 +60,25 @@ class ChatMessageIn(BaseModel):
     reply_to: str | None = None
 
 
+class ChatNotesIn(BaseModel):
+    """A notes replacement as the upstream reads it (OpenAPI only; the upstream validates it)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    body: str
+    expected_version: int
+
+
+class ChatSkillIn(BaseModel):
+    """A skill replacement as the upstream reads it (OpenAPI only; the upstream validates it)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    description: str
+    body: str
+    expected_version: int
+
+
 class ChatReactionIn(BaseModel):
     """A reaction as the upstream reads it (OpenAPI only; the upstream validates it)."""
 
@@ -75,7 +96,7 @@ _RESPONSES: dict[int | str, dict[str, Any]] = {
 }
 _POST_RESPONSES: dict[int | str, dict[str, Any]] = {
     **_RESPONSES,
-    413: {"description": "payload_too_large: the body exceeds 256 KiB"},
+    413: {"description": "payload_too_large: a POST or PUT body exceeds 256 KiB"},
 }
 
 
@@ -112,7 +133,7 @@ async def _relay(
             raise ApiError(403, "not_leader", "only the leader of a session can use the chat")
     if not settings.chat_available:
         raise ApiError(503, "chat_unconfigured", "no chat upstream is configured")
-    body = await forward_core.capped_body(request) if method == "POST" else None
+    body = await forward_core.capped_body(request) if method in ("POST", "PUT") else None
     target = _target(settings)
     status, content = await forward_core.forward(
         request, target, method, path, body, str(own.id), own.slug
@@ -180,6 +201,71 @@ async def send_reaction(request: Request, agent: Caller, pool: Pool, settings: C
 async def message_status(
     send_id: str, request: Request, agent: Caller, pool: Pool, settings: Cfg
 ) -> Response:
-    # Dots are encoded too, so `.` and `..` stay one segment instead of walking up the path.
-    segment = quote(send_id, safe="").replace(".", "%2E")
-    return await _relay(request, agent, pool, settings, "GET", f"/messages/{segment}")
+    return await _relay(request, agent, pool, settings, "GET", f"/messages/{_segment(send_id)}")
+
+
+def _segment(name: str) -> str:
+    """One path segment: dots are encoded too, so `.` and `..` cannot walk up the path."""
+    return quote(name, safe="").replace(".", "%2E")
+
+
+@router.get(
+    "/notes",
+    summary="The notes of the room bound to the caller's session (leader only)",
+    responses={200: _PASS_THROUGH, **_RESPONSES},
+)
+async def notes_get(request: Request, agent: Caller, pool: Pool, settings: Cfg) -> Response:
+    return await _relay(request, agent, pool, settings, "GET", "/notes")
+
+
+@router.put(
+    "/notes",
+    summary="Replace the notes of the room bound to the caller's session (leader only)",
+    responses={200: _PASS_THROUGH, **_POST_RESPONSES},
+    openapi_extra=_json_body(ChatNotesIn),
+)
+async def notes_put(request: Request, agent: Caller, pool: Pool, settings: Cfg) -> Response:
+    return await _relay(request, agent, pool, settings, "PUT", "/notes")
+
+
+@router.get(
+    "/skills",
+    summary="The skills of the room bound to the caller's session, no bodies (leader only)",
+    responses={200: _PASS_THROUGH, **_RESPONSES},
+)
+async def skills_list(request: Request, agent: Caller, pool: Pool, settings: Cfg) -> Response:
+    return await _relay(request, agent, pool, settings, "GET", "/skills")
+
+
+@router.get(
+    "/skills/{name}",
+    summary="One skill of the room bound to the caller's session (leader only)",
+    responses={200: _PASS_THROUGH, **_RESPONSES},
+)
+async def skill_get(
+    name: str, request: Request, agent: Caller, pool: Pool, settings: Cfg
+) -> Response:
+    return await _relay(request, agent, pool, settings, "GET", f"/skills/{_segment(name)}")
+
+
+@router.put(
+    "/skills/{name}",
+    summary="Create or replace a skill of the room bound to the caller's session (leader only)",
+    responses={200: _PASS_THROUGH, **_POST_RESPONSES},
+    openapi_extra=_json_body(ChatSkillIn),
+)
+async def skill_put(
+    name: str, request: Request, agent: Caller, pool: Pool, settings: Cfg
+) -> Response:
+    return await _relay(request, agent, pool, settings, "PUT", f"/skills/{_segment(name)}")
+
+
+@router.delete(
+    "/skills/{name}",
+    summary="Delete a skill of the room bound to the caller's session (leader only)",
+    responses={200: _PASS_THROUGH, **_RESPONSES},
+)
+async def skill_delete(
+    name: str, request: Request, agent: Caller, pool: Pool, settings: Cfg
+) -> Response:
+    return await _relay(request, agent, pool, settings, "DELETE", f"/skills/{_segment(name)}")
