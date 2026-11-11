@@ -112,6 +112,12 @@ async def test_project_room_of_an_extra_project(pool, dsn):
         assert len(r.json()["posts"]) == 2
         r = await http.get(ROOM, headers=headers(delta.id))
         assert r.status_code == 200 and r.json()["posts"] == []  # home room stays the default
+        me = await http.get("/agent/v1/me", headers=headers(delta.id))
+    rooms = {room["project"]: room for room in me.json()["project_rooms"]}
+    assert list(rooms) == ["b", "a"]  # home first, then the extra project
+    assert rooms["b"]["last_post_id"] is None
+    assert rooms["a"]["last_post_id"] is not None
+    assert rooms["a"]["unhandled"] == 1 and rooms["b"]["unhandled"] == 0
 
 
 async def test_init_scripts_write_a_preset_of_an_extra_project(pool):

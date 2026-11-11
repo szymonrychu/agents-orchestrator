@@ -85,8 +85,9 @@ class Me(BaseModel):
     projects_scope: str
     # the live generated state (same sections as the handover file); only for the current leader
     leader_state: str | None = None
-    # the project room of a (non-superleader) current leader
-    project_room: ProjectRoom | None = None
+    # one room cursor per project of a (non-superleader) current leader, home first then the
+    # extra projects (T-120); empty for a member or a superleader
+    project_rooms: list[ProjectRoom] = []
 
 
 class CloseRequest(BaseModel):
@@ -161,13 +162,17 @@ async def me(agent: Caller, pool: Pool, settings: Cfg) -> Me:
         members = await agents_repo.list_members(conn, agent.session_id)
         leads = leader is not None and leader[0] == agent.id
         state = await leader_state.collect(conn, agent.session_id) if leads else None
-        room = None
+        rooms: list[ProjectRoom] = []
         if leads and session is not None and not session.spec.session_messaging:
-            room = ProjectRoom(
-                project=session.project,
-                last_post_id=await project_posts.last_post_id(conn, session.project),
-                unhandled=await leader_state.unhandled_room_count(conn, session.id),
-            )
+            unhandled = await leader_state.unhandled_room_counts(conn, session.id)
+            rooms = [
+                ProjectRoom(
+                    project=project,
+                    last_post_id=await project_posts.last_post_id(conn, project),
+                    unhandled=unhandled.get(project, 0),
+                )
+                for project in session.projects
+            ]
     assert session is not None
     if state is not None:  # the taskboard call happens after the connection is released
         decisions = await taskboard_client.open_decisions(
@@ -189,7 +194,7 @@ async def me(agent: Caller, pool: Pool, settings: Cfg) -> Me:
         extra_projects=list(session.extra_projects),
         projects_scope=scope_of(session),
         leader_state=leader_state.render_state(state) if state is not None else None,
-        project_room=room,
+        project_rooms=rooms,
         members=[
             Member(
                 pod_name=m["pod_name"],

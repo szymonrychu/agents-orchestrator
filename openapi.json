@@ -2542,15 +2542,13 @@
             "title": "Project",
             "type": "string"
           },
-          "project_room": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ProjectRoom"
-              },
-              {
-                "type": "null"
-              }
-            ]
+          "project_rooms": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProjectRoom"
+            },
+            "title": "Project Rooms",
+            "type": "array"
           },
           "projects_scope": {
             "title": "Projects Scope",
