@@ -3857,6 +3857,186 @@
         "title": "ProjectPatch",
         "type": "object"
       },
+      "ProjectPostIn": {
+        "additionalProperties": false,
+        "properties": {
+          "handled": {
+            "items": {
+              "type": "integer"
+            },
+            "maxItems": 50,
+            "title": "Handled",
+            "type": "array"
+          },
+          "project": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project"
+          },
+          "reply_to": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply To"
+          },
+          "text": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          },
+          "to": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "To",
+            "type": "array"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "ProjectPostIn",
+        "type": "object"
+      },
+      "ProjectPostQueued": {
+        "properties": {
+          "delivered": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Delivered",
+            "type": "array"
+          },
+          "handled": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Handled",
+            "type": "array"
+          },
+          "post_id": {
+            "title": "Post Id",
+            "type": "integer"
+          },
+          "skipped": {
+            "items": {
+              "$ref": "#/components/schemas/SkippedRecipient"
+            },
+            "title": "Skipped",
+            "type": "array"
+          }
+        },
+        "required": [
+          "post_id",
+          "delivered",
+          "skipped",
+          "handled"
+        ],
+        "title": "ProjectPostQueued",
+        "type": "object"
+      },
+      "ProjectPostView": {
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "title": "At",
+            "type": "string"
+          },
+          "from": {
+            "title": "From",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "reply_to": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply To"
+          },
+          "sender_kind": {
+            "title": "Sender Kind",
+            "type": "string"
+          },
+          "sender_session_id": {
+            "format": "uuid",
+            "title": "Sender Session Id",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "to": {
+            "items": {
+              "type": "string"
+            },
+            "title": "To",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "from",
+          "sender_kind",
+          "sender_session_id",
+          "at",
+          "text",
+          "reply_to",
+          "to"
+        ],
+        "title": "ProjectPostView",
+        "type": "object"
+      },
+      "ProjectPostsPage": {
+        "properties": {
+          "next_before_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Before Id"
+          },
+          "posts": {
+            "items": {
+              "$ref": "#/components/schemas/ProjectPostView"
+            },
+            "title": "Posts",
+            "type": "array"
+          }
+        },
+        "required": [
+          "next_before_id",
+          "posts"
+        ],
+        "title": "ProjectPostsPage",
+        "type": "object"
+      },
       "ProjectView": {
         "properties": {
           "archived": {
@@ -5665,6 +5845,28 @@
           "project"
         ],
         "title": "SessionView",
+        "type": "object"
+      },
+      "SkippedRecipient": {
+        "properties": {
+          "reason": {
+            "enum": [
+              "queue_full",
+              "session_deleting"
+            ],
+            "title": "Reason",
+            "type": "string"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slug",
+          "reason"
+        ],
+        "title": "SkippedRecipient",
         "type": "object"
       },
       "SweepPolicyIn": {
@@ -11958,6 +12160,207 @@
           }
         },
         "summary": "Identity, leader and members of the caller",
+        "tags": [
+          "agent"
+        ]
+      }
+    },
+    "/agent/v1/project/messages": {
+      "get": {
+        "operationId": "project_read_agent_v1_project_messages_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "project",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Project"
+            }
+          },
+          {
+            "in": "query",
+            "name": "before_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "after_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "After Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectPostsPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read the project room, newest first (leader only)",
+        "tags": [
+          "agent"
+        ]
+      },
+      "post": {
+        "description": "Checks in order (leader, project, hop, rate, budget, recipients) in one transaction; a\nrefusal writes nothing. A recipient with a full queue or being deleted is skipped.",
+        "operationId": "project_post_agent_v1_project_messages_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectPostIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectPostQueued"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Post to the project room, pushed to the other leaders of the project (leader only)",
         "tags": [
           "agent"
         ]

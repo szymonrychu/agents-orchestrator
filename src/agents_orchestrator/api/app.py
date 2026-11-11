@@ -24,6 +24,7 @@ from agents_orchestrator.api import (
     forward,
     messages,
     presets,
+    project_chat,
     projects,
     proposal_routes,
     proposal_sweep,
@@ -144,6 +145,7 @@ def create_app(
     errors.install(app)
     app.include_router(sessions.router)
     app.include_router(agent.router)
+    app.include_router(project_chat.router)
     app.include_router(admin.router)
     app.include_router(admin.session_router)
     app.include_router(proposal_routes.proposal_router)

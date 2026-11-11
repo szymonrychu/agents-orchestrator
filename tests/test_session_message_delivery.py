@@ -206,9 +206,7 @@ async def test_fanout_row_delivered_with_room_trailer(env):
             sender_session_id=sender["id"],
             sender_slug="caller",
             hop=1,
-        )
-        await conn.execute(
-            "UPDATE messages SET project_post_id = %s WHERE id = %s", (post_id, msg_id)
+            project_post_id=post_id,
         )
     d = env.dispatcher()
     await d.drain()

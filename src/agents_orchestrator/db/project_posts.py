@@ -109,22 +109,18 @@ async def enqueue_fanout(
     hop: int,
     post_id: int,
 ) -> int:
-    """Queue the post as an untargeted session message to the recipient and mark it with the
-    post id in one transaction. Raises `queue.SessionBeingDeleted` like `queue.enqueue_message`."""
-    async with conn.transaction():
-        message_id = await queue.enqueue_message(
-            conn,
-            recipient_id,
-            text,
-            sender_session_id=sender_session_id,
-            sender_slug=sender_slug,
-            hop=hop,
-            lane="regular",
-        )
-        await conn.execute(
-            "UPDATE messages SET project_post_id = %s WHERE id = %s", (post_id, message_id)
-        )
-        return message_id
+    """Queue the post as an untargeted session message to the recipient, marked with the post
+    id. Raises `queue.SessionBeingDeleted` like `queue.enqueue_message`."""
+    return await queue.enqueue_message(
+        conn,
+        recipient_id,
+        text,
+        sender_session_id=sender_session_id,
+        sender_slug=sender_slug,
+        hop=hop,
+        lane="regular",
+        project_post_id=post_id,
+    )
 
 
 async def page(

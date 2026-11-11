@@ -185,9 +185,11 @@ async def enqueue_message(
     held: bool = False,
     notice: str | None = None,
     attachments: Sequence[StoredAttachment] = (),
+    project_post_id: int | None = None,
 ) -> int:
     """Queue a message; a session message carries its sender and hop (D8), an orchestrator
-    notice its kind (`notice`, e.g. `inactivity_reminder`).
+    notice its kind (`notice`, e.g. `inactivity_reminder`), a project room fan-out row its post
+    (`project_post_id`).
 
     A `held` message is not deliverable until `release_note` clears its `not_before` (the hold
     is a day, so a note whose commands never finish still expires).
@@ -209,9 +211,9 @@ async def enqueue_message(
         row = await _one(
             conn,
             "INSERT INTO messages (session_id, text, target_agent_id, sender_session_id,"
-            " sender_slug, hop, lane, carries_start_prompt, not_before, notice)"
+            " sender_slug, hop, lane, carries_start_prompt, not_before, notice, project_post_id)"
             " VALUES (%s, %s, %s, %s, %s, %s, %s, %s,"
-            " CASE WHEN %s THEN now() + interval '1 day' END, %s) RETURNING id",
+            " CASE WHEN %s THEN now() + interval '1 day' END, %s, %s) RETURNING id",
             (
                 session_id,
                 text,
@@ -223,6 +225,7 @@ async def enqueue_message(
                 carries_start_prompt,
                 held,
                 notice,
+                project_post_id,
             ),
         )
         assert row is not None

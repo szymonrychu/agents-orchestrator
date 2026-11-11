@@ -62,6 +62,9 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     # cross-session messaging
     ("GET", f"{_A}/sessions"): "peers",
     ("POST", f"{_A}/sessions/{{slug}}/messages"): "peers",
+    # the project room: the caller's project, any project for a superleader
+    ("GET", f"{_A}/project/messages"): "project",
+    ("POST", f"{_A}/project/messages"): "project",
     # taskboard relay: forwards X-Orch-Projects, the taskboard filters (plan 3.6)
     ("GET", f"{_A}/tasks"): "project",
     ("POST", f"{_A}/tasks"): "project",
