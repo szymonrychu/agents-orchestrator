@@ -52,6 +52,12 @@ TASK_TOOLS = [
 # Project tool (projects T-19): every session lists the projects its scope reaches
 # (GET /agent/v1/projects: its own project, or every active one for a superleader).
 PROJECT_TOOLS = ["project_list"]
+# Spec tools (T-116): the spec relay on the agent port; every session gets them, trigger-created
+# ones included (accept and dismiss are user-only and have no tool).
+SPEC_TOOLS = [
+    "spec_list", "spec_get", "spec_create", "spec_update", "spec_versions", "spec_comment",
+    "spec_comments", "spec_comment_resolve", "spec_pull", "spec_push",
+]  # fmt: skip
 # Superleader admin tools: the plugin's declarative admin rows (any-mcp-tatara-plugins
 # orchestration/orchestrator admin.py), the vault tools included. History is read and search
 # only: there is no history delete tool, deleting a stored session is for the user (web UI).
@@ -92,6 +98,7 @@ def orchestrator_allow(spec: SessionSpec) -> list[str]:
         *CHAT_TOOLS,
         *TASK_TOOLS,
         *PROJECT_TOOLS,
+        *SPEC_TOOLS,
         *(ADMIN_TOOLS if spec.session_messaging else [*SESSION_EDIT_TOOLS, CLOSE_TOOL]),
     ]
     if not spec.hive:

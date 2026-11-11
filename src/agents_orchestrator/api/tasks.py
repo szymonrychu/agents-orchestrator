@@ -44,7 +44,7 @@ STATE_ATTR = "taskboard_http"
 _ID = r"[A-Za-z0-9_-]+"
 _KEY = r"T-[0-9]+"
 _ALLOWED = re.compile(
-    rf"(?:|/{_KEY}(?:|/comments|/todo|/todo/{_ID}|/decisions|/decisions/{_ID}/withdraw))"
+    rf"/tasks(?:|/{_KEY}(?:|/comments|/todo|/todo/{_ID}|/decisions|/decisions/{_ID}/withdraw))"
 )
 
 
@@ -68,11 +68,11 @@ def _expand_mine(query: str, labels: list[str]) -> str:
     return urlencode(pairs)
 
 
-def _wants_mine(request: Request, path: str) -> bool:
+def _wants_mine(request: Request, upstream_path: str) -> bool:
     query = request.scope.get("query_string", b"").decode("latin-1")
     return (
         request.method == "GET"
-        and path == ""
+        and upstream_path == "/tasks"
         and ("labels", "mine") in parse_qsl(query, keep_blank_values=True)
     )
 
@@ -102,15 +102,30 @@ def taskboard_target(settings: Settings) -> forward_core.Target:
     )
 
 
-async def _relay(request: Request, agent: Caller, pool: Pool, settings: Cfg, path: str) -> Response:
-    if not _ALLOWED.fullmatch(path):
+async def relay(
+    request: Request,
+    agent: Caller,
+    pool: Pool,
+    settings: Settings,
+    upstream_path: str,
+    allowed: re.Pattern[str],
+    *,
+    mine: bool,
+) -> Response:
+    """Forward one agent call to the taskboard as the caller's session.
+
+    `upstream_path` is the whole path under `/taskboard/api/v1` (`/tasks/T-1`, `/specs`) and
+    `allowed` must match it in full, else 404 `not_found` without an upstream call. `mine` turns
+    on the `labels=mine` expansion of `GET /tasks`; the specs relay passes False.
+    """
+    if not allowed.fullmatch(upstream_path):
         raise ApiError(404, "not_found", "no such taskboard path")
     async with pool.connection() as conn:
         own = await _session(conn, agent)
     if not settings.taskboard_available:
         raise ApiError(503, "taskboard_unconfigured", "no taskboard upstream is configured")
     query = None
-    if _wants_mine(request, path):
+    if mine and _wants_mine(request, upstream_path):
         if not own.labels:
             empty = json.dumps({"items": [], "next_cursor": None}).encode()
             return Response(empty, 200, media_type="application/json")
@@ -120,7 +135,7 @@ async def _relay(request: Request, agent: Caller, pool: Pool, settings: Cfg, pat
         request,
         taskboard_target(settings),
         request.method,
-        "/tasks" + path,
+        upstream_path,
         body,
         str(own.id),
         own.slug,
@@ -130,6 +145,10 @@ async def _relay(request: Request, agent: Caller, pool: Pool, settings: Cfg, pat
     if request.method in _WRITES:
         await forward_core.touch_on_success(pool, own.id, status)
     return Response(content, status, media_type="application/json")
+
+
+async def _relay(request: Request, agent: Caller, pool: Pool, settings: Cfg, path: str) -> Response:
+    return await relay(request, agent, pool, settings, "/tasks" + path, _ALLOWED, mine=True)
 
 
 @router.get(

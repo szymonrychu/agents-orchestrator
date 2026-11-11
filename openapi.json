@@ -12335,6 +12335,654 @@
         ]
       }
     },
+    "/agent/v1/specs": {
+      "get": {
+        "operationId": "collection_agent_v1_specs_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "The taskboard upstream's status and JSON body, unchanged"
+          },
+          "401": {
+            "description": "unauthorized: missing or invalid agent credentials"
+          },
+          "403": {
+            "description": "forbidden (not a live agent pod)"
+          },
+          "404": {
+            "description": "not_found: the path is not one the relay forwards"
+          },
+          "413": {
+            "description": "payload_too_large: the body exceeds 256 KiB"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "taskboard_unconfigured or taskboard_unavailable"
+          }
+        },
+        "summary": "Taskboard specs collection (list, create) as the caller's session",
+        "tags": [
+          "agent"
+        ]
+      },
+      "patch": {
+        "operationId": "collection_agent_v1_specs_patch",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "The taskboard upstream's status and JSON body, unchanged"
+          },
+          "401": {
+            "description": "unauthorized: missing or invalid agent credentials"
+          },
+          "403": {
+            "description": "forbidden (not a live agent pod)"
+          },
+          "404": {
+            "description": "not_found: the path is not one the relay forwards"
+          },
+          "413": {
+            "description": "payload_too_large: the body exceeds 256 KiB"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "taskboard_unconfigured or taskboard_unavailable"
+          }
+        },
+        "summary": "Taskboard specs collection (list, create) as the caller's session",
+        "tags": [
+          "agent"
+        ]
+      },
+      "post": {
+        "operationId": "collection_agent_v1_specs_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "The taskboard upstream's status and JSON body, unchanged"
+          },
+          "401": {
+            "description": "unauthorized: missing or invalid agent credentials"
+          },
+          "403": {
+            "description": "forbidden (not a live agent pod)"
+          },
+          "404": {
+            "description": "not_found: the path is not one the relay forwards"
+          },
+          "413": {
+            "description": "payload_too_large: the body exceeds 256 KiB"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "taskboard_unconfigured or taskboard_unavailable"
+          }
+        },
+        "summary": "Taskboard specs collection (list, create) as the caller's session",
+        "tags": [
+          "agent"
+        ]
+      },
+      "put": {
+        "operationId": "collection_agent_v1_specs_put",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "The taskboard upstream's status and JSON body, unchanged"
+          },
+          "401": {
+            "description": "unauthorized: missing or invalid agent credentials"
+          },
+          "403": {
+            "description": "forbidden (not a live agent pod)"
+          },
+          "404": {
+            "description": "not_found: the path is not one the relay forwards"
+          },
+          "413": {
+            "description": "payload_too_large: the body exceeds 256 KiB"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "taskboard_unconfigured or taskboard_unavailable"
+          }
+        },
+        "summary": "Taskboard specs collection (list, create) as the caller's session",
+        "tags": [
+          "agent"
+        ]
+      }
+    },
+    "/agent/v1/specs/{path}": {
+      "get": {
+        "operationId": "item_agent_v1_specs__path__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "The taskboard upstream's status and JSON body, unchanged"
+          },
+          "401": {
+            "description": "unauthorized: missing or invalid agent credentials"
+          },
+          "403": {
+            "description": "forbidden (not a live agent pod)"
+          },
+          "404": {
+            "description": "not_found: the path is not one the relay forwards"
+          },
+          "413": {
+            "description": "payload_too_large: the body exceeds 256 KiB"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "taskboard_unconfigured or taskboard_unavailable"
+          }
+        },
+        "summary": "Taskboard spec, documents, versions and comments as the caller's session",
+        "tags": [
+          "agent"
+        ]
+      },
+      "patch": {
+        "operationId": "item_agent_v1_specs__path__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "The taskboard upstream's status and JSON body, unchanged"
+          },
+          "401": {
+            "description": "unauthorized: missing or invalid agent credentials"
+          },
+          "403": {
+            "description": "forbidden (not a live agent pod)"
+          },
+          "404": {
+            "description": "not_found: the path is not one the relay forwards"
+          },
+          "413": {
+            "description": "payload_too_large: the body exceeds 256 KiB"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "taskboard_unconfigured or taskboard_unavailable"
+          }
+        },
+        "summary": "Taskboard spec, documents, versions and comments as the caller's session",
+        "tags": [
+          "agent"
+        ]
+      },
+      "post": {
+        "operationId": "item_agent_v1_specs__path__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "The taskboard upstream's status and JSON body, unchanged"
+          },
+          "401": {
+            "description": "unauthorized: missing or invalid agent credentials"
+          },
+          "403": {
+            "description": "forbidden (not a live agent pod)"
+          },
+          "404": {
+            "description": "not_found: the path is not one the relay forwards"
+          },
+          "413": {
+            "description": "payload_too_large: the body exceeds 256 KiB"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "taskboard_unconfigured or taskboard_unavailable"
+          }
+        },
+        "summary": "Taskboard spec, documents, versions and comments as the caller's session",
+        "tags": [
+          "agent"
+        ]
+      },
+      "put": {
+        "operationId": "item_agent_v1_specs__path__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "The taskboard upstream's status and JSON body, unchanged"
+          },
+          "401": {
+            "description": "unauthorized: missing or invalid agent credentials"
+          },
+          "403": {
+            "description": "forbidden (not a live agent pod)"
+          },
+          "404": {
+            "description": "not_found: the path is not one the relay forwards"
+          },
+          "413": {
+            "description": "payload_too_large: the body exceeds 256 KiB"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "taskboard_unconfigured or taskboard_unavailable"
+          }
+        },
+        "summary": "Taskboard spec, documents, versions and comments as the caller's session",
+        "tags": [
+          "agent"
+        ]
+      }
+    },
     "/agent/v1/tasks": {
       "get": {
         "operationId": "collection_agent_v1_tasks_get",

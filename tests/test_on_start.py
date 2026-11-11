@@ -40,10 +40,16 @@ TASK_TOOLS = [
     "decision_ask", "decision_withdraw", "todo_set", "todo_update", "session_labels_set",
 ]  # fmt: skip
 PROJECT_TOOLS = ["project_list"]
-TAIL_TOOLS = [*SESSION_TOOLS, *INIT_SCRIPTS_TOOLS, *CHAT_TOOLS, *TASK_TOOLS, *PROJECT_TOOLS]
+SPEC_TOOLS = [
+    "spec_list", "spec_get", "spec_create", "spec_update", "spec_versions", "spec_comment",
+    "spec_comments", "spec_comment_resolve", "spec_pull", "spec_push",
+]  # fmt: skip
+TAIL_TOOLS = [
+    *SESSION_TOOLS, *INIT_SCRIPTS_TOOLS, *CHAT_TOOLS, *TASK_TOOLS, *PROJECT_TOOLS, *SPEC_TOOLS,
+]  # fmt: skip
 # Allowed before the pinned plugin ships them; remove when the plugin pin offers the tool
 # (projects P15).
-PLUGIN_PENDING = {"project_list"}
+PLUGIN_PENDING = {"project_list", *SPEC_TOOLS}
 ALONE_TOOLS = ["me", *TAIL_TOOLS]
 PROPOSAL = [
     "proposal_create",
