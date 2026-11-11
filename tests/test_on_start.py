@@ -53,13 +53,10 @@ TAIL_TOOLS = [
     *SPEC_TOOLS,
     *on_start.PROJECT_CHAT_TOOLS,
 ]
-# Allowed before the pinned plugin ships them; remove when the plugin pin offers the tool
-# (projects P15; project room T-117 O9; project grants T-120).
-PLUGIN_PENDING = {
-    "project_list",
-    *SPEC_TOOLS,
-    "project_chat_send",
-    "project_chat_read",
+# Allowed before the pinned plugin ships them; add a name here when the allow-list leads the
+# plugin pin and remove it when the pin offers the tool (project room T-117 O9; project grants
+# T-120).
+PLUGIN_PENDING: set[str] = {
     "session_projects_grant",
     "session_projects_revoke",
     "preset_projects_grant",
