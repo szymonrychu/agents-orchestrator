@@ -441,7 +441,8 @@ PROJECT_ROOM_PROMPT = (
     "(orchestrator_project_chat_send / orchestrator_project_chat_read): split work, announce "
     "what you take and what you finished, ask the hive that owns something. Post only what "
     "other hives need, never an acknowledgement. Ask a superleader only for decisions outside "
-    "the project or ones the user must make."
+    "the project or ones the user must make. Only the hive leader posts to and reads the "
+    "project room; members ask their leader."
 )
 SUPERLEADER_ROOM_PROMPT = (
     "Hives coordinate in project rooms without you; read them with "
