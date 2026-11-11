@@ -21,6 +21,9 @@ _CASES = (
     ("GET", f"/S-1/docs/{P}"), ("PUT", f"/S-1/docs/{P}"), ("GET", f"/S-1/docs/{P}/versions"),
     ("GET", "/S-1/docs/plan.md"), ("GET", "/S-1/comments"), ("POST", "/S-1/comments"),
     ("PATCH", "/S-1/comments/7"), ("POST", "/S-1/comments/7/resolve"),
+    ("GET", "/S-1/plan"), ("PUT", "/S-1/plan"), ("GET", "/S-1/steps"), ("PUT", "/S-1/steps"),
+    ("POST", "/S-1/steps"), ("PUT", "/S-1/steps/order"), ("POST", "/S-1/steps/next"),
+    ("GET", "/S-1/gate"), ("GET", f"/S-1/docs/{P}/section"),
 )  # fmt: skip
 ROUTES = tuple(
     (method, "/agent/v1/specs" + tail, "/taskboard/api/v1/specs" + tail) for method, tail in _CASES
@@ -60,7 +63,11 @@ async def test_labels_mine_is_not_expanded(monkeypatch):
         "/agent/v1/specs/S-1/docs/a%2f%2fb.md",
         "/agent/v1/specs/S-1/comments/1/accept",
         "/agent/v1/specs/S-1/comments/1/dismiss",
-        "/agent/v1/specs/S-1/plan",
+        "/agent/v1/specs/S-1/steps/x",
+        "/agent/v1/specs/S-1/steps/order/x",
+        "/agent/v1/specs/S-1/gate/x",
+        "/agent/v1/specs/S-1/plan/x",
+        "/agent/v1/specs/S-1/docs/a.md/section/x",
         "/agent/v1/specs/S-1/",
         "/agent/v1/specs/S-1/docs/x.txt",
         "/agent/v1/specs/S-1/docs/Upper.md",

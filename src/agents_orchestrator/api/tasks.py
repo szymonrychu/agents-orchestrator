@@ -44,7 +44,7 @@ STATE_ATTR = "taskboard_http"
 _ID = r"[A-Za-z0-9_-]+"
 _KEY = r"T-[0-9]+"
 _ALLOWED = re.compile(
-    rf"/tasks(?:|/{_KEY}(?:|/comments|/todo|/todo/{_ID}|/decisions|/decisions/{_ID}/withdraw))"
+    rf"/tasks(?:|/{_KEY}(?:|/comments|/todo|/todo/{_ID}|/deps|/decisions|/decisions/{_ID}/withdraw))"
 )
 
 
