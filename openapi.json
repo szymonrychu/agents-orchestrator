@@ -3562,7 +3562,7 @@
       },
       "PresetPatch": {
         "additionalProperties": false,
-        "description": "Admin partial edit: `spec` is an RFC 7396 merge patch of the stored spec. A `project`\nother than the stored one is refused (human-only).",
+        "description": "Admin partial edit: `spec` is an RFC 7396 merge patch of the stored spec. A `project`\nother than the stored one moves the preset.",
         "properties": {
           "labels": {
             "anyOf": [

@@ -1,7 +1,6 @@
 import pytest
 
 from agents_orchestrator.preset_policy import (
-    HUMAN_ONLY_COLUMNS,
     HUMAN_ONLY_PATHS,
     NON_SECURITY,
     changed_paths,
@@ -625,10 +624,3 @@ def test_tighten_docker_ignores_sizes_unless_both_sides_have_docker():
     assert tighten(_dk(docker_cpu="2"), {"docker_cpu": "64"}) == []
     # Without docker on the stored side nothing is compared.
     assert tighten({"docker_cpu": "2"}, _dk(docker_cpu="64")) == []
-
-
-def test_human_only_columns_listed():
-    """Preset columns (outside the spec) only a human may change; `project` decides which
-    project secrets a preset's sessions get (plan 3.16), so an agent may not move a preset."""
-    assert HUMAN_ONLY_COLUMNS == ("project",)
-    assert not set(HUMAN_ONLY_COLUMNS) & HUMAN_ONLY_PATHS

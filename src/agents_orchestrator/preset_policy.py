@@ -15,8 +15,6 @@ and false equal:
 - env.<NAME>: on a privileged target an `env.<NAME>` path is still security, except when the
   stored and the new entry are each a vault reference or absent (attach, detach, re-point).
 
-`HUMAN_ONLY_COLUMNS` are preset columns outside the spec that an agent may not change at all.
-
 A live session adds two rules of its own: `fixed_changes` (fields that cannot change on a
 running session) and `tighten_changes` (limits a regular leader may only lower: usage quota,
 inactivity, autoclose, pod resources and docker sizes).
@@ -83,10 +81,6 @@ NON_SECURITY: frozenset[str] = frozenset(
         "wrapper.agent_commands",
     }
 )
-# Preset columns an agent may not change: `project` decides which project secrets the preset's
-# sessions get (projects plan 3.16), so only a human moves a preset between projects.
-HUMAN_ONLY_COLUMNS: tuple[str, ...] = ("project",)
-
 # Fields of a live session that a spec edit may not change.
 SESSION_FIXED: tuple[str, ...] = (
     "replicas",

@@ -224,23 +224,78 @@ async def test_admin_create_in_project(call, pool, boss):
     )
 
 
-async def test_admin_patch_project_change_403_human_only_field(call, pool, boss):
+async def test_admin_move_project_by_patch_and_put(call, pool, boss):
     await _project(call, "alpha")
+    await _project(call, "beta")
+    pid = (await call("POST", A, json={"name": "mover", "spec": {}})).json()["id"]
+    r = await call("PATCH", f"{A}/{pid}", json={"project": "alpha"})
+    assert r.status_code == 200, r.text
+    assert r.json()["project"] == "alpha"
+    assert (await _human_get(call, pid))["project"] == "alpha"
+    last = (await events(pool, boss.id))[-1]
+    assert last["type"] == "admin_call" and last["data"]["status"] == 200
+    assert last["data"]["fields"] == ["project"]
+    r = await call("PUT", f"{A}/{pid}", json={"name": "mover", "spec": {}, "project": "beta"})
+    assert r.status_code == 200, r.text
+    assert (await _human_get(call, pid))["project"] == "beta"
+    assert (await events(pool, boss.id))[-1]["data"]["fields"] == ["project"]
+
+
+async def test_admin_move_to_unknown_project_422(call):
     pid = (await call("POST", A, json={"name": "stay", "spec": {}})).json()["id"]
     before = await _human_get(call, pid)
     for method, body in (
-        ("PATCH", {"project": "alpha"}),
-        ("PUT", {"name": "stay", "spec": {}, "project": "alpha"}),
+        ("PATCH", {"project": "nope"}),
+        ("PUT", {"name": "stay", "spec": {}, "project": "nope"}),
     ):
-        r = await call(method, f"{A}/{pid}", json=body)
-        assert_error(r, 403, "human_only_field")
-        assert r.json()["error"]["fields"] == ["project"]
-        last = (await events(pool, boss.id))[-1]["data"]
-        assert last["status"] == 403 and last["fields"] == ["project"]
-    # an unknown target is refused the same way: the move itself is human-only
-    r = await call("PATCH", f"{A}/{pid}", json={"project": "nope"})
-    assert_error(r, 403, "human_only_field")
+        assert_error(await call(method, f"{A}/{pid}", json=body), 422, "unknown_project")
     assert await _human_get(call, pid) == before
+
+
+async def test_admin_move_to_archived_project_422(call):
+    await _project(call, "attic")
+    async with main_client(call.app) as main:
+        r = await main.patch("/api/v1/projects/attic", json={"archived": True})
+    assert r.status_code == 200, r.text
+    pid = (await call("POST", A, json={"name": "stay2", "spec": {}})).json()["id"]
+    before = await _human_get(call, pid)
+    for method, body in (
+        ("PATCH", {"project": "attic"}),
+        ("PUT", {"name": "stay2", "spec": {}, "project": "attic"}),
+    ):
+        assert_error(await call(method, f"{A}/{pid}", json=body), 422, "project_archived")
+    assert await _human_get(call, pid) == before
+
+
+async def test_non_superleader_cannot_move_preset(call, pool, dsn):
+    await _project(call, "alpha")
+    pid = (await call("POST", A, json={"name": "guarded", "spec": {}})).json()["id"]
+    plain = await alone(pool, "adm-plain-mover")
+    app = create_app(make_settings(dsn), pool)
+    async with client_for(app, plain.leader_ip) as http:
+        for method, body in (
+            ("PATCH", {"project": "alpha"}),
+            ("PUT", {"name": "guarded", "spec": {}, "project": "alpha"}),
+        ):
+            r = await http.request(method, f"{A}/{pid}", headers=headers(plain.id), json=body)
+            assert_error(r, 403, "not_superleader")
+    assert (await _human_get(call, pid))["project"] == "default"
+
+
+async def test_move_keeps_running_session_in_old_project(call, pool):
+    await _project(call, "alpha")
+    pid = (await call("POST", A, json={"name": "live", "spec": {}})).json()["id"]
+    running = await alone(pool, "live-session")
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE sessions SET preset_name = 'live' WHERE id = %s", (running.id,))
+    r = await call("PATCH", f"{A}/{pid}", json={"project": "alpha"})
+    assert r.status_code == 200, r.text
+    assert (await _human_get(call, pid))["project"] == "alpha"
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT project, desired FROM sessions WHERE id = %s", (running.id,)
+        )
+        assert await cur.fetchone() == ("default", "active")
 
 
 async def test_admin_put_same_project_ok(call):
