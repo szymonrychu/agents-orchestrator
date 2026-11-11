@@ -17,7 +17,6 @@ from test_api_agent import client_for, headers, make_settings
 from test_api_sessions import assert_error
 from test_api_sessions import client_for as main_client
 
-from agents_orchestrator import preset_policy
 from agents_orchestrator.api import admin
 from agents_orchestrator.api import presets as presets_api
 from agents_orchestrator.api.admin import ADMIN_PREFIX
@@ -982,28 +981,7 @@ def test_every_moving_write_is_a_guarded_route():
 
 
 @pytest.mark.parametrize("route", MOVING_WRITES, ids="-".join)
-async def test_privileged_preset_move_refused_on_every_admin_preset_write(
-    call, human, seed, kube, route
-):
-    method, path = route
-    r = await human("POST", "/api/v1/projects", json={"slug": "elsewhere", "name": "Elsewhere"})
-    assert r.status_code == 201, r.text
-    pid = await seed({"docker": True})
-    before = (await human("GET", f"{M}/{pid}")).json()
-    secrets_before = kube.names("Secret")
-    body = {"project": "elsewhere"}
-    if method == "PUT":
-        body |= {"name": "seeded", "spec": {"docker": True}}
-    r = await call(method, path.format(ref=pid), json=body)
-    assert_error(r, 403, "privileged_preset_move")
-    assert r.json()["error"]["fields"] == ["project"]
-    assert (await human("GET", f"{M}/{pid}")).json() == before
-    assert kube.names("Secret") == secrets_before
-
-
-@pytest.mark.parametrize("route", MOVING_WRITES, ids="-".join)
-async def test_privileged_preset_move_allowed_when_switch_on(call, human, seed, monkeypatch, route):
-    monkeypatch.setattr(preset_policy, "AGENT_MAY_MOVE_PRIVILEGED_PRESETS", True)
+async def test_privileged_preset_move_allowed(call, human, seed, route):
     method, path = route
     r = await human("POST", "/api/v1/projects", json={"slug": "elsewhere", "name": "Elsewhere"})
     assert r.status_code == 201, r.text

@@ -41,16 +41,6 @@ def privileged_edit_refused(paths: list[str]) -> ApiError:
     )
 
 
-def privileged_move_refused() -> ApiError:
-    return ApiError(
-        403,
-        "privileged_preset_move",
-        "only a human can move a preset with kube_cluster_access, kube_namespace_access, "
-        "session_messaging or docker on to another project",
-        extra={"fields": ["project"], "proposable": False},
-    )
-
-
 def note_fields(request: Request, paths: list[str]) -> None:
     """Hand the changed (or refused) paths to the admin audit; paths only, never values."""
     request.state.preset_fields = sorted(paths)

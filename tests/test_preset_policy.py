@@ -1,7 +1,6 @@
 import pytest
 
 from agents_orchestrator.preset_policy import (
-    AGENT_MAY_MOVE_PRIVILEGED_PRESETS,
     HUMAN_ONLY_PATHS,
     NON_SECURITY,
     changed_paths,
@@ -625,9 +624,3 @@ def test_tighten_docker_ignores_sizes_unless_both_sides_have_docker():
     assert tighten(_dk(docker_cpu="2"), {"docker_cpu": "64"}) == []
     # Without docker on the stored side nothing is compared.
     assert tighten({"docker_cpu": "2"}, _dk(docker_cpu="64")) == []
-
-
-def test_privileged_preset_move_switch_defaults_to_refuse():
-    """One switch for a superleader moving a privileged preset between projects; the user's
-    decision is pending (T-113), so the default refuses."""
-    assert AGENT_MAY_MOVE_PRIVILEGED_PRESETS is False

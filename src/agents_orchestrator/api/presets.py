@@ -11,7 +11,6 @@ from fastapi import APIRouter, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from pydantic import ValidationError
 
-from agents_orchestrator import preset_policy
 from agents_orchestrator.api import schemas, vault_client
 from agents_orchestrator.api.errors import ApiError, not_found, project_error
 from agents_orchestrator.api.sessions import Cfg, Pool, check_spec, hold_project
@@ -19,7 +18,6 @@ from agents_orchestrator.api.spec_edit import (
     guard_agent_edit,
     merged_spec,
     note_fields,
-    privileged_move_refused,
 )
 from agents_orchestrator.api.vault_refs import (
     check_refs,
@@ -115,17 +113,12 @@ async def validated_spec(
 
 async def _check_move(request: Request, conn, stored: repo.Preset, project: str) -> None:
     """A superleader edit that moves the preset to `project`: 422 `unknown_project` for a missing
-    target, 403 `privileged_preset_move` for a privileged preset unless
-    `AGENT_MAY_MOVE_PRIVILEGED_PRESETS`. Sessions keep their project. The stored row is the one
+    target; a privileged preset moves like any other (audited as admin_call). Sessions keep
+    their project. The stored row is the one
     the save compares `updated_at` with, so a concurrent move by the user makes the save a 409
     rather than slipping past this check."""
     if project == stored.project:
         return
-    if not preset_policy.AGENT_MAY_MOVE_PRIVILEGED_PRESETS and preset_policy.privileged(
-        stored.spec
-    ):
-        note_fields(request, ["project"])
-        raise privileged_move_refused()
     if await projects.get_project(conn, project) is None:
         raise project_error(projects.UnknownProject(project))
 

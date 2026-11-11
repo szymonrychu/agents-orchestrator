@@ -64,7 +64,7 @@ class VaultAttachIn(BaseModel):
 
 class PresetPatch(BaseModel):
     """Admin partial edit: `spec` is an RFC 7396 merge patch of the stored spec. A `project`
-    other than the stored one moves the preset (a privileged one: 403 `privileged_preset_move`)."""
+    other than the stored one moves the preset."""
 
     model_config = ConfigDict(extra="forbid")
 
