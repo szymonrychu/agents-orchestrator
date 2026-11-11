@@ -554,6 +554,23 @@ def test_alone_session_gets_me_and_task_tools():
     assert "activity" not in allow and "lock_claim" not in allow
 
 
+def test_alone_session_allow_is_the_literal_e2e_list():
+    """The kind e2e `ALONE_SESSION_TOOLS` literal, mirrored: spec tools follow `project_list`,
+    pending ones included (the plugin pin only filters them at load, never from the allow list)."""
+    allow = on_start.orchestrator_allow(SessionSpec(replicas=1))
+    assert allow == [
+        "me", "sessions_list", "session_send", "init_scripts_get", "init_scripts_edit",
+        "chat_rooms", "chat_send", "chat_react", "chat_status",
+        "task_create", "task_update", "task_list", "task_get", "task_comment",
+        "decision_ask", "decision_withdraw", "todo_set", "todo_update", "session_labels_set",
+        "project_list",
+        "spec_list", "spec_get", "spec_create", "spec_update", "spec_versions", "spec_comment",
+        "spec_comments", "spec_comment_resolve", "spec_pull", "spec_push",
+        "session_get", "session_patch", "proposal_create", "proposal_revise", "proposals_list",
+        "proposal_get", "proposal_withdraw", "self_close",
+    ]  # fmt: skip
+
+
 def test_hive_session_gets_task_tools_once():
     allow = on_start.orchestrator_allow(SessionSpec(replicas=2))
     assert len(allow) == len(set(allow))
