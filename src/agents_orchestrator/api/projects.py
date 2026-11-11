@@ -45,8 +45,8 @@ async def list_projects(
     return [view(p) for p in rows]
 
 
-@router.post("/projects", response_model=schemas.ProjectView, status_code=201)
-async def create_project(body: schemas.ProjectIn, pool: Pool) -> schemas.ProjectView:
+async def create(pool, body: schemas.ProjectIn) -> schemas.ProjectView:
+    """Create a project; shared by the main-port route and the superleader admin route."""
     try:
         async with pool.connection() as conn:
             project = await repo.create_project(conn, body.slug, body.name, body.description)
@@ -55,6 +55,11 @@ async def create_project(body: schemas.ProjectIn, pool: Pool) -> schemas.Project
     except repo.ProjectExists as exc:
         raise project_error(exc) from None
     return view(project)
+
+
+@router.post("/projects", response_model=schemas.ProjectView, status_code=201)
+async def create_project(body: schemas.ProjectIn, pool: Pool) -> schemas.ProjectView:
+    return await create(pool, body)
 
 
 @router.get("/projects/{slug}", response_model=schemas.ProjectView)

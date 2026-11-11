@@ -108,6 +108,7 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("POST", f"{_ADMIN}/sessions/{{slug}}/agents/{{pod}}/restart"): "superleader",
     ("GET", f"{_ADMIN}/commands/{{command_id}}"): "superleader",
     ("GET", f"{_ADMIN}/usage"): "superleader",
+    ("POST", f"{_ADMIN}/projects"): "superleader",
     # admin relay (`admin_relay`): superleader-only forwards, sent with X-Orch-Projects: *
     ("GET", f"{_ADMIN}/webhooks/endpoints"): "superleader",
     ("POST", f"{_ADMIN}/webhooks/endpoints"): "superleader",
