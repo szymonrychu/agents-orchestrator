@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from agents_orchestrator.api import admin
 from agents_orchestrator.api import forward as forward_core
 from agents_orchestrator.api.agent import Caller, _leads, _session
-from agents_orchestrator.api.errors import ApiError
+from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.session_limits import RATE_WINDOW_SECONDS
 from agents_orchestrator.api.sessions import Cfg, Pool
 from agents_orchestrator.db import agents as agents_repo
@@ -33,6 +33,7 @@ from agents_orchestrator.db import sessions as sessions_repo
 from agents_orchestrator.settings import Settings
 
 router = APIRouter(prefix="/agent/v1", tags=["agent"])
+main_router = APIRouter(prefix="/api/v1", tags=["projects"])
 
 PATH = "/agent/v1/project/messages"
 PROJECT_POST_MAX_CHARS = 4000
@@ -290,3 +291,15 @@ async def project_read(
         if await projects_repo.get_project(conn, room) is None:
             raise ApiError(404, "unknown_project", f"project {room} not found")
         return await read_page(conn, room, page)
+
+
+@main_router.get(
+    "/projects/{slug}/messages",
+    response_model=ProjectPostsPage,
+    summary="Read a project room, newest first (main port)",
+)
+async def project_messages(slug: str, pool: Pool, page: Page) -> ProjectPostsPage:
+    async with pool.connection() as conn:
+        if await projects_repo.get_project(conn, slug) is None:
+            raise not_found(f"project {slug}")
+        return await read_page(conn, slug, page)

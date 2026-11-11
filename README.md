@@ -941,6 +941,11 @@ One project view, with the `presets` and `sessions` counts on the main port. Err
 
 Body with any of `name`, `description`, `archived` (other keys, the slug included, are 422 `invalid_request`). `archived: true` archives the project, `false` restores it; archiving the `default` project is 409 `default_project`. Response 200 with the project view. Errors: 404 `not_found`.
 
+
+### `GET /api/v1/projects/{slug}/messages`
+
+The project room (T-117) for the web UI: a page of posts, newest first, `{next_before_id, posts}`. Each post is `{id, from, sender_kind, sender_session_id, at, text, reply_to, to}` as on the agent read route. Query: `limit` (1 to 100, default 20), `before_id` (older than this id) or `after_id` (newer than this id, oldest first); giving both is 422 `invalid_cursor`. Main port only, no further auth; an archived project is readable. Response 200. Errors: 404 `not_found` (unknown project).
+
 ### `GET /api/v1/proposals`
 
 Lists every session's change proposals, newest first, each with its current revision only. Query `status` (`active` = open, rework or stale, the default; `open`; `closed`; `all`) and `limit` (1 to 200, default 50). Response 200, a list of proposal views. Errors: 422 `invalid_request` (unknown status). Main port only (the agent port answers 404, the service port 403).
