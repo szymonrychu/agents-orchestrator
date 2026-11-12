@@ -460,3 +460,19 @@ async def test_events_stream_ignores_other_sessions_notify(pool, dsn, monkeypatc
             await notify(conn, "events", {"session_id": str(cl["id"]), "max_id": 1})
         await asyncio.sleep(0.5)
         assert calls > base
+
+
+async def test_status_stream_carries_last_user_message_at(srv, pool):
+    cl = await insert_session(pool)
+    async with open_sse(srv, "/api/v1/stream") as sse:
+        snap = await sse.next()
+        assert snap["event"] == "snapshot"
+        async with srv.client() as c:
+            r = await c.post(f"/api/v1/sessions/{cl['id']}/messages", json={"text": "hi"})
+            assert r.status_code == 202, r.text
+        stamped = None
+        while stamped is None:
+            f = await sse.next()
+            if f["event"] == "session_status" and f["data"]["session"]["id"] == str(cl["id"]):
+                stamped = f["data"]["session"]["last_user_message_at"]
+        assert stamped is not None

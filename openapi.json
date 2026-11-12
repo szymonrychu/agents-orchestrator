@@ -3499,6 +3499,18 @@
             "title": "Attachments",
             "type": "array"
           },
+          "from_user": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "True when a human wrote this message. Omitted: true on the main (web) port, false on the service port.",
+            "title": "From User"
+          },
           "lane": {
             "default": "regular",
             "enum": [
@@ -5816,6 +5828,18 @@
               }
             ],
             "title": "Last Update At"
+          },
+          "last_user_message_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last User Message At"
           },
           "leader_agent_id": {
             "anyOf": [

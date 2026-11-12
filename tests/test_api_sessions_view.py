@@ -166,3 +166,22 @@ async def test_view_last_update_is_quiet_clock(limited_app, pool):
         for view in await views(http, session):
             assert _at(view["last_update_at"]) == inbound["created_at"]
             assert _at(view["reminder_at"]) == inbound["created_at"] + timedelta(hours=1)
+
+
+async def test_view_last_user_message_at_null_then_set(app, pool):
+    from agents_orchestrator.db import sessions as repo
+
+    cl = await insert_session(pool)
+    async with main_client(app) as http:
+        listed, detail = await views(http, str(cl["id"]))
+        assert listed["last_user_message_at"] is None
+        assert detail["last_user_message_at"] is None
+        async with pool.connection() as conn:
+            await repo.mark_user_message(conn, cl["id"])
+            cur = await conn.execute(
+                "SELECT last_user_message_at FROM sessions WHERE id = %s", (cl["id"],)
+            )
+            row = (await cur.fetchone())[0]
+        listed, detail = await views(http, str(cl["id"]))
+    assert datetime.fromisoformat(detail["last_user_message_at"]) == row
+    assert datetime.fromisoformat(listed["last_user_message_at"]) == row
