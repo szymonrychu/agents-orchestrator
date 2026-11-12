@@ -66,16 +66,7 @@ TAIL_TOOLS = [
 # Allowed before the pinned plugin ships them; add a name here when the allow-list leads the
 # plugin pin and remove it when the pin offers the tool (project room T-117 O9; project grants
 # T-120).
-PLUGIN_PENDING: set[str] = {
-    "session_labels_update",
-    "session_scale",
-    "session_lock_reassign",
-    "session_message_cancel",
-    "project_update",
-    "archives_settings_set",
-    "spec_delete",
-    "spec_suggestion_dismiss",
-}
+PLUGIN_PENDING: set[str] = set()
 ALONE_TOOLS = ["me", *TAIL_TOOLS]
 PROPOSAL = [
     "proposal_create",
