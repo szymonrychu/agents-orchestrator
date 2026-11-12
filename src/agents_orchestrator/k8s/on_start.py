@@ -31,7 +31,11 @@ HIVE_TOOLS = [
 ]
 SESSION_TOOLS = ["sessions_list", "session_send"]
 INIT_SCRIPTS_TOOLS = ["init_scripts_get", "init_scripts_edit"]
-CHAT_TOOLS = ["chat_rooms", "chat_send", "chat_react", "chat_status"]
+CHAT_TOOLS = [
+    "chat_rooms", "chat_send", "chat_react", "chat_status",
+    "chat_notes_get", "chat_notes_update",
+    "chat_skills_list", "chat_skills_get", "chat_skills_save", "chat_skills_delete",
+]  # fmt: skip
 # Change proposals (preset-change-proposals plan 3.3): a superleader files them for any target it
 # may see, the leader of any other session for its own session only (the API gate decides).
 PROPOSAL_TOOLS = [

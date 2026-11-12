@@ -769,7 +769,7 @@ def memory_target(monkeypatch: pytest.MonkeyPatch) -> Target:
 
 
 async def check_chat_tools_parity(target: Target) -> None:
-    """The four chat tools return what the routes return, and a member's calls are refused."""
+    """The ten chat tools return what the routes return, and a member's calls are refused."""
     fake = target.fake
     async with target.plugin(target.leader_ip) as h:
         rooms = await h.call("chat_rooms")
@@ -777,7 +777,14 @@ async def check_chat_tools_parity(target: Target) -> None:
         reacted = await h.call("chat_react", {"to": "m3", "key": "\U0001f44d"})
         status = await h.call("chat_status", {"id": "s1"})
         missing = await h.call("chat_status", {"id": "s99"})
-    for result in (rooms, sent, reacted, status):
+        notes0 = await h.call("chat_notes_get")
+        notes1 = await h.call("chat_notes_update", {"body": "likes tea", "expected_version": 0})
+        stale = await h.call("chat_notes_update", {"body": "x", "expected_version": 0})
+        skill_args = {"name": "deploy", "description": "when deploying", "body": "step 1"}
+        saved = await h.call("chat_skills_save", {**skill_args, "expected_version": 0})
+        listed = await h.call("chat_skills_list")
+        got = await h.call("chat_skills_get", {"name": "deploy"})
+    for result in (rooms, sent, reacted, status, notes0, notes1, saved, listed, got):
         assert not result.is_error, result.text
     direct_rooms = await target.direct("GET", "/agent/v1/chat/rooms")
     assert rooms.structured == direct_rooms.json() == {"rooms": fake.rooms}
@@ -800,6 +807,26 @@ async def check_chat_tools_parity(target: Target) -> None:
     assert missing.is_error
     assert missing.structured["error"]["status"] == 404
     assert missing.structured["error"]["code"] == direct_missing.json()["error"]["code"]
+    # notes and skills through the plugin equal the direct route answers
+    assert notes0.structured["body"] == "" and notes0.structured["version"] == 0
+    assert notes1.structured["body"] == "likes tea" and notes1.structured["version"] == 1
+    assert stale.is_error and stale.structured["error"]["status"] == 409
+    assert stale.structured["error"]["code"] == "version_conflict"
+    direct_notes = await target.direct("GET", "/agent/v1/chat/notes")
+    # the fake stamps updated_at on every read, so it is the one field compared out
+    assert {**direct_notes.json(), "updated_at": 0} == {**notes1.structured, "updated_at": 0}
+    assert saved.structured["name"] == "deploy" and saved.structured["version"] == 1
+    direct_list = await target.direct("GET", "/agent/v1/chat/skills")
+    assert listed.structured == direct_list.json()
+    assert [s["name"] for s in listed.structured["skills"]] == ["deploy"]
+    direct_got = await target.direct("GET", "/agent/v1/chat/skills/deploy")
+    assert {**got.structured, "updated_at": 0} == {**direct_got.json(), "updated_at": 0}
+    assert got.structured["body"] == "step 1"
+    async with target.plugin(target.leader_ip) as h:
+        deleted = await h.call("chat_skills_delete", {"name": "deploy"})
+        gone = await h.call("chat_skills_get", {"name": "deploy"})
+    assert deleted.structured["deleted"] is True
+    assert gone.is_error and gone.structured["error"]["code"] == "skill_not_found"
     # the plugin sent the same bodies as the direct calls and the same identity headers
     plugin_calls = [c for c in fake.calls if c.method == "POST"][:2]
     assert plugin_calls[0].json() == {"text": "hello from the plugin", "room": DEFAULT_ROOM}
@@ -815,6 +842,15 @@ async def check_chat_tools_parity(target: Target) -> None:
             ("chat_send", {"text": "x"}),
             ("chat_react", {"to": "m1", "key": "x"}),
             ("chat_status", {"id": "s1"}),
+            ("chat_notes_get", {}),
+            ("chat_notes_update", {"body": "x", "expected_version": 0}),
+            ("chat_skills_list", {}),
+            ("chat_skills_get", {"name": "deploy"}),
+            (
+                "chat_skills_save",
+                {"name": "d", "description": "d", "body": "b", "expected_version": 0},
+            ),
+            ("chat_skills_delete", {"name": "deploy"}),
         ):
             refused = await h.call(name, args)
             assert refused.is_error, name
@@ -823,7 +859,7 @@ async def check_chat_tools_parity(target: Target) -> None:
 
 
 async def test_chat_tools_parity(monkeypatch):
-    """The released plugin drives chat_rooms, chat_send, chat_react and chat_status against the
+    """The released plugin drives the ten chat tools against the
     real agent routes and the contract fake of the chat upstream (design D16)."""
     await check_chat_tools_parity(memory_target(monkeypatch))
 
