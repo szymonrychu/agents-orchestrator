@@ -133,6 +133,24 @@ async def test_room_bound_without_occupier_passes_through(pool, dsn):
     assert await _rows(pool) == []
 
 
+async def test_room_bound_with_files_not_relayed(pool, dsn):
+    rig = Rig(pool, dsn)
+    cron, _ = await _pair(rig)
+    r = await rig.post(cron, files=["a.png"])
+    assert_error(r, 409, "files_not_relayable")
+    assert "occupier" not in r.text
+    assert len(rig.fake.calls) == 1  # only the caller's own refused post
+    assert await _rows(pool) == []
+
+
+async def test_room_bound_without_files_still_relayed(pool, dsn):
+    rig = Rig(pool, dsn)
+    cron, _ = await _pair(rig)
+    assert (await rig.post(cron, files=[])).status_code == 202
+    assert len(rig.fake.calls) == 2
+    assert len(await _rows(pool)) == 1
+
+
 async def test_unknown_occupier_passes_plain_room_bound(pool, dsn):
     rig = Rig(pool, dsn)
     cron = await alone(pool, "cron-x")

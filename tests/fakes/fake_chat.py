@@ -152,6 +152,7 @@ class FakeChat:
                 "kind": "dm",
                 "bound": False,
                 "agents_may_initiate": True,
+                "agents_may_send_files": False,
             }
         ]
     )
@@ -371,6 +372,9 @@ class FakeChat:
         if problems:
             return self._error(key, 422, "invalid_request", "; ".join(problems))
         kind = "message" if key[1].endswith("/messages") else "reaction"
+        if kind == "message" and not (body.get("text") or "").strip() and not body.get("files"):
+            # the document makes text optional; the connector's model validator wants text or files
+            return self._error(key, 422, "invalid_text", "text or files is required")
         send_id = f"s{len(self.sends) + 1}"
         self.sends[send_id] = {
             "session": session,
@@ -395,6 +399,7 @@ class FakeChat:
                 "room_id": found["room_id"],
                 "created_at": found["created_at"],
                 "sent_at": None,
+                "files": [],
             },
         )
 

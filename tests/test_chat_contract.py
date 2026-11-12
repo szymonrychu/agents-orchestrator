@@ -53,7 +53,12 @@ def test_helpers_reject_what_the_document_rejects():
     assert request_errors(*post, {"text": ""})  # minLength 1
     assert request_errors(*post, {"text": "x" * 16001})  # maxLength 16000
     assert request_errors(*post, {"text": "hi", "extra": 1})  # additionalProperties false
-    assert request_errors(*post, {})  # text required
+    # text is optional in the document: the connector enforces "text or files" itself
+    assert request_errors(*post, {"files": ["a.png"]}) == []
+    assert request_errors(*post, {"text": "hi", "files": ["a.png"]}) == []
+    assert request_errors(*post, {"files": ["a"] * 5})  # maxItems 4, unconditionally
+    assert request_errors(*post, {"files": ["a"] * 4}) == []
+    assert request_errors(*post, {"text": 1})
     assert request_errors("POST", "/chat/v1/reactions", {"to": "m1"})  # key required
     accepted = ("POST", "/chat/v1/messages", 202)
     assert response_errors(*accepted, {"id": "s1", "status": "queued"}) == []
