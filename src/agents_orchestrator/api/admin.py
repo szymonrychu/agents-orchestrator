@@ -830,13 +830,17 @@ async def scale_session(
 ) -> schemas.ScaleResult:
     """Set spec.replicas of a manageable session in place; the caller's own session is refused
     (422 `own_session`). A scale-up over the usage quota is 409 `usage_quota`: that check reads
-    on its own connection and fails open, like the main port's. No kube call."""
+    on its own connection and fails open, like the main port's, so it runs between a short
+    read of the target and the transaction (never while a connection is held). No kube call."""
     _, caller = caller_of(request)
+    async with pool.connection() as conn:
+        target = await _writable_target(conn, slug, caller)
+    if target.id == caller.id:
+        raise own_session("scale")
+    await sessions_api.gate_scale_up(pool, usage, settings, target.id, body.replicas)
     async with pool.connection() as conn, conn.transaction():
         target = await _writable_target(conn, slug, caller)
-        if target.id == caller.id:
-            raise own_session("scale")
-        out = await sessions_api.scale(conn, pool, usage, settings, target.id, body.replicas)
+        out = await sessions_api.scale(conn, target.id, body.replicas)
     note_fields(request, ["replicas"])
     note_detail(request, replicas_before=out.previous_replicas, replicas_after=out.replicas)
     return out

@@ -1023,17 +1023,10 @@ async def gate_scale_up(
     await usage_gate.enforce(usage, spec.usage_quota, settings.usage_quota_default)
 
 
-async def scale(
-    conn,
-    pool: AsyncConnectionPool,
-    usage: UsageSource | None,
-    settings: Settings,
-    session_id: uuid.UUID,
-    replicas: int,
-) -> schemas.ScaleResult:
+async def scale(conn, session_id: uuid.UUID, replicas: int) -> schemas.ScaleResult:
     """Set spec.replicas in place (no caller agent: neither public route has a leader check).
-    A scale-up over the usage quota is refused 409 `usage_quota`."""
-    await gate_scale_up(pool, usage, settings, session_id, replicas)
+    The usage gate is the caller's job and runs BEFORE it takes `conn`: `gate_scale_up` takes its
+    own pool connection, so gating while holding one would nest two."""
     try:
         out = await repo.set_replicas(conn, session_id, replicas)
     except repo.SessionNotFound:
@@ -1055,8 +1048,9 @@ async def scale_session(
 ) -> schemas.ScaleResult:
     """Set spec.replicas in place (no caller agent: the public route has no leader check).
     A scale-up over the usage quota is refused 409 `usage_quota`."""
+    await gate_scale_up(pool, usage, settings, session_id, body.replicas)
     async with pool.connection() as conn:
-        return await scale(conn, pool, usage, settings, session_id, body.replicas)
+        return await scale(conn, session_id, body.replicas)
 
 
 @router.post(
