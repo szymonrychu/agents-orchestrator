@@ -2924,6 +2924,10 @@
           "kube_namespace_access": {
             "$ref": "#/components/schemas/MetaKubeNamespaceAccess"
           },
+          "mindmap": {
+            "title": "Mindmap",
+            "type": "boolean"
+          },
           "models": {
             "items": {
               "type": "string"
@@ -2957,7 +2961,8 @@
           "hook_events",
           "permission_modes",
           "usage",
-          "inactivity"
+          "inactivity",
+          "mindmap"
         ],
         "title": "Meta",
         "type": "object"
@@ -14335,6 +14340,360 @@
           }
         },
         "summary": "Identity, leader and members of the caller",
+        "tags": [
+          "agent"
+        ]
+      }
+    },
+    "/agent/v1/mindmap/{path}": {
+      "delete": {
+        "operationId": "item_agent_v1_mindmap__path__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "The mindmap upstream's status and JSON body, unchanged"
+          },
+          "204": {
+            "description": "No content (edge and link delete), passed through"
+          },
+          "401": {
+            "description": "unauthorized: missing or invalid agent credentials"
+          },
+          "403": {
+            "description": "forbidden (not a live agent pod)"
+          },
+          "404": {
+            "description": "not_found: the method and path are not one the relay forwards"
+          },
+          "413": {
+            "description": "payload_too_large: the body exceeds 256 KiB"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "mindmap_unconfigured or mindmap_unavailable"
+          }
+        },
+        "summary": "Mindmap maps, nodes, edges, notes, links and directions as the caller's session",
+        "tags": [
+          "agent"
+        ]
+      },
+      "get": {
+        "operationId": "item_agent_v1_mindmap__path__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "The mindmap upstream's status and JSON body, unchanged"
+          },
+          "204": {
+            "description": "No content (edge and link delete), passed through"
+          },
+          "401": {
+            "description": "unauthorized: missing or invalid agent credentials"
+          },
+          "403": {
+            "description": "forbidden (not a live agent pod)"
+          },
+          "404": {
+            "description": "not_found: the method and path are not one the relay forwards"
+          },
+          "413": {
+            "description": "payload_too_large: the body exceeds 256 KiB"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "mindmap_unconfigured or mindmap_unavailable"
+          }
+        },
+        "summary": "Mindmap maps, nodes, edges, notes, links and directions as the caller's session",
+        "tags": [
+          "agent"
+        ]
+      },
+      "patch": {
+        "operationId": "item_agent_v1_mindmap__path__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "The mindmap upstream's status and JSON body, unchanged"
+          },
+          "204": {
+            "description": "No content (edge and link delete), passed through"
+          },
+          "401": {
+            "description": "unauthorized: missing or invalid agent credentials"
+          },
+          "403": {
+            "description": "forbidden (not a live agent pod)"
+          },
+          "404": {
+            "description": "not_found: the method and path are not one the relay forwards"
+          },
+          "413": {
+            "description": "payload_too_large: the body exceeds 256 KiB"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "mindmap_unconfigured or mindmap_unavailable"
+          }
+        },
+        "summary": "Mindmap maps, nodes, edges, notes, links and directions as the caller's session",
+        "tags": [
+          "agent"
+        ]
+      },
+      "post": {
+        "operationId": "item_agent_v1_mindmap__path__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "The mindmap upstream's status and JSON body, unchanged"
+          },
+          "204": {
+            "description": "No content (edge and link delete), passed through"
+          },
+          "401": {
+            "description": "unauthorized: missing or invalid agent credentials"
+          },
+          "403": {
+            "description": "forbidden (not a live agent pod)"
+          },
+          "404": {
+            "description": "not_found: the method and path are not one the relay forwards"
+          },
+          "413": {
+            "description": "payload_too_large: the body exceeds 256 KiB"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "mindmap_unconfigured or mindmap_unavailable"
+          }
+        },
+        "summary": "Mindmap maps, nodes, edges, notes, links and directions as the caller's session",
         "tags": [
           "agent"
         ]

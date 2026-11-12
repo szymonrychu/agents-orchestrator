@@ -325,6 +325,10 @@ class Settings(BaseSettings):
     taskboard_url: str = ""
     taskboard_token: str = Field(default="", repr=False)
 
+    # mindmap relay (agents-mindmap): url and token come as a pair, or neither
+    mindmap_url: str = ""
+    mindmap_token: str = Field(default="", repr=False)
+
     # usage gate (agents-usage): url and service token come as a pair, or neither
     usage_url: str = ""
     usage_token: str = Field(default="", repr=False)
@@ -711,7 +715,7 @@ class Settings(BaseSettings):
             raise _Bad("must be printable ASCII without whitespace")
         return v
 
-    @field_validator("chat_url", "taskboard_url")
+    @field_validator("chat_url", "taskboard_url", "mindmap_url")
     @classmethod
     def _check_relay_url(cls, v: str) -> str:
         if v:
@@ -809,6 +813,14 @@ class Settings(BaseSettings):
             raise _Bad("set ORCH_TASKBOARD_URL and ORCH_TASKBOARD_TOKEN together, or neither")
         return v
 
+    @field_validator("mindmap_token")
+    @classmethod
+    def _check_mindmap_pair(cls, v: str, info: ValidationInfo) -> str:
+        url = info.data.get("mindmap_url")
+        if url is not None and bool(url) != bool(v):
+            raise _Bad("set ORCH_MINDMAP_URL and ORCH_MINDMAP_TOKEN together, or neither")
+        return v
+
     @model_validator(mode="after")
     def _resolve(self) -> Settings:
         if self.master_key_file:
@@ -881,6 +893,10 @@ class Settings(BaseSettings):
     @property
     def taskboard_available(self) -> bool:
         return bool(self.taskboard_url)
+
+    @property
+    def mindmap_available(self) -> bool:
+        return bool(self.mindmap_url)
 
     @property
     def vault_available(self) -> bool:

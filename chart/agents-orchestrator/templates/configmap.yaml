@@ -12,6 +12,7 @@
 {{- $claude := include "agents-orchestrator.claudeSecretName" . }}
 {{- $_ := include "agents-orchestrator.chatEnabled" . }}
 {{- $_ := include "agents-orchestrator.taskboardEnabled" . }}
+{{- $_ := include "agents-orchestrator.mindmapEnabled" . }}
 {{- $_ := include "agents-orchestrator.usageEnabled" . }}
 {{- $_ := include "agents-orchestrator.adminUpstreams" . }}
 {{- $discardHook := include "agents-orchestrator.discardHookEnabled" . }}

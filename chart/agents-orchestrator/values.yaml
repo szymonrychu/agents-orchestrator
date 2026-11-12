@@ -308,6 +308,19 @@ taskboard:
   existingSecret: ""
   existingSecretKey: taskboard-token
 
+# Mindmap upstream of the agent mindmap relay (/agent/v1/mindmap on the agent port) and of the
+# mindmap tool group. url becomes ORCH_MINDMAP_URL (the relay appends /mindmap/api/v1/...);
+# ORCH_MINDMAP_TOKEN, the bearer sent upstream (the agents-mindmap service listener relay token),
+# comes from existingSecret/existingSecretKey, or from the chart Secret <fullname>-mindmap built
+# from token (existingSecret wins). Both are env of the api main container only, always together,
+# never in the settings ConfigMap. Set url and a token source together, or neither (the relay then
+# answers 503 mindmap_unconfigured and sessions get no mindmap tools).
+mindmap:
+  url: ""
+  token: ""
+  existingSecret: ""
+  existingSecretKey: mindmap-token
+
 # Usage gate upstream (agents-usage service port). url becomes ORCH_USAGE_URL; ORCH_USAGE_TOKEN,
 # the service bearer sent upstream, comes from existingSecret/existingSecretKey, or from the chart
 # Secret <fullname>-usage built from token (existingSecret wins). Both are env of the api main

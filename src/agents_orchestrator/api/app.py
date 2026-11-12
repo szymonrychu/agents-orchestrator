@@ -24,6 +24,7 @@ from agents_orchestrator.api import (
     errors,
     forward,
     messages,
+    mindmap,
     presets,
     project_chat,
     project_grant_routes,
@@ -118,6 +119,7 @@ def create_app(
             await workspace.close_client(app)
             await chat.close_client(app)
             await tasks.close_client(app)
+            await forward.close_client(app, mindmap.STATE_ATTR)
             await forward.close_client(app, admin_relay.STATE_ATTR)
             await secret_store.close_kube(app)
             if usage is not None:
@@ -158,6 +160,7 @@ def create_app(
     app.include_router(tasks.router)
     app.include_router(tasks.summary_router)
     app.include_router(specs.router)
+    app.include_router(mindmap.router)
     app.include_router(session_labels.router)
     app.include_router(presets.router)
     app.include_router(proposal_routes.main_router)

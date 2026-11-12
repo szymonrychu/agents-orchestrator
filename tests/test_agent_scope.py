@@ -45,6 +45,13 @@ def test_every_agent_route_is_classified():
     assert AGENT_SCOPE[("GET", "/agent/v1/projects")] == "project"
 
 
+def test_agent_scope_table_covers_mindmap_routes():
+    rows = {k: v for k, v in AGENT_SCOPE.items() if k[1].startswith("/agent/v1/mindmap")}
+    assert {m for m, _ in rows} == {"GET", "POST", "PATCH", "DELETE"}
+    assert {p for _, p in rows} == {"/agent/v1/mindmap/{path:path}"}
+    assert set(rows.values()) == {"project"}
+
+
 async def test_scope_of_superleader_is_star(pool):
     seats = await two_project_fixture(pool)
     scopes = {}

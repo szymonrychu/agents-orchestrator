@@ -71,6 +71,16 @@ PLAN_TOOLS = [
 # Project room tools (T-117): every session can post to and read its project room; the routes
 # themselves answer 403 not_leader to a worker.
 PROJECT_CHAT_TOOLS = ["project_chat_send", "project_chat_read"]
+# Mindmap tools (research-mindmaps): the plugin's mindmap module registers them statically; they
+# reach a session only when the orchestrator has a mindmap upstream (`settings.mindmap_available`).
+MINDMAP_TOOLS = [
+    "mindmap_map_list", "mindmap_map_get", "mindmap_map_create", "mindmap_map_update",
+    "mindmap_node_get", "mindmap_node_history", "mindmap_search", "mindmap_traverse",
+    "mindmap_node_create", "mindmap_node_update", "mindmap_note_put",
+    "mindmap_growth_area_update", "mindmap_edge_create", "mindmap_edge_delete", "mindmap_link",
+    "mindmap_task_nodes", "mindmap_direction_list", "mindmap_direction_create",
+    "mindmap_direction_update",
+]  # fmt: skip
 # Superleader admin tools: the plugin's declarative admin rows (any-mcp-tatara-plugins
 # orchestration/orchestrator admin.py), the vault tools included. History is read and search
 # only: there is no history delete tool, deleting a stored session is for the user (web UI).
@@ -101,7 +111,7 @@ ADMIN_TOOLS = [
 ]  # fmt: skip
 
 
-def orchestrator_allow(spec: SessionSpec) -> list[str]:
+def orchestrator_allow(spec: SessionSpec, *, mindmap: bool = False) -> list[str]:
     """The orchestrator tools this session's agents may call.
 
     Every session gets the session tools (D11), the init-scripts tools, the chat tools (D13), the
@@ -122,6 +132,7 @@ def orchestrator_allow(spec: SessionSpec) -> list[str]:
         *SPEC_TOOLS,
         *PLAN_TOOLS,
         *PROJECT_CHAT_TOOLS,
+        *(MINDMAP_TOOLS if mindmap else []),
         *(ADMIN_TOOLS if spec.session_messaging else [*SESSION_EDIT_TOOLS, CLOSE_TOOL]),
     ]
     if not spec.hive:
@@ -142,7 +153,7 @@ def _orchestrator_entry(
             f"?ref={settings.any_mcp_plugins_ref}"
         ),
         "namespace": PLUGIN_NAME,
-        "allow": orchestrator_allow(spec),
+        "allow": orchestrator_allow(spec, mindmap=settings.mindmap_available),
         "config": {
             "base_url": "${ORCH_AGENT_URL}",
             "token": "${ORCH_AGENT_TOKEN}",

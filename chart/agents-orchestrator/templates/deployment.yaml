@@ -32,6 +32,9 @@ spec:
         {{- if and (eq $component "api") $.Values.taskboard.token (not $.Values.taskboard.existingSecret) }}
         checksum/taskboard-secret: {{ $.Values.taskboard.token | sha256sum }}
         {{- end }}
+        {{- if and (eq $component "api") $.Values.mindmap.token (not $.Values.mindmap.existingSecret) }}
+        checksum/mindmap-secret: {{ $.Values.mindmap.token | sha256sum }}
+        {{- end }}
         {{- if and (eq $component "api") $.Values.usage.token (not $.Values.usage.existingSecret) }}
         checksum/usage-secret: {{ $.Values.usage.token | sha256sum }}
         {{- end }}
@@ -139,6 +142,9 @@ spec:
             {{- . | nindent 12 }}
             {{- end }}
             {{- with include "agents-orchestrator.taskboardEnv" $ }}
+            {{- . | nindent 12 }}
+            {{- end }}
+            {{- with include "agents-orchestrator.mindmapEnv" $ }}
             {{- . | nindent 12 }}
             {{- end }}
             {{- with include "agents-orchestrator.usageEnv" $ }}

@@ -552,3 +552,64 @@ def test_taskboard_absent_by_default():
         for c in items:
             assert "ORCH_TASKBOARD_URL" not in _env_names(c)
             assert "ORCH_TASKBOARD_TOKEN" not in _env_names(c)
+
+
+MM_URL = "http://agents-mindmap-service:8082"
+MM_VALUES = {
+    "inline": {"url": MM_URL, "token": "t"},
+    "existing": {"url": MM_URL, "existingSecret": "mm-s", "existingSecretKey": "k"},
+}
+
+
+@pytest.mark.parametrize("mm", MM_VALUES.values(), ids=MM_VALUES.keys())
+def test_mindmap_pair_on_api_main_only(mm):
+    docs = render(values(postgres={"url": URL}, mindmap=mm))
+    cm = by_kind(docs, "ConfigMap")[f"{FULL}-settings"]
+    assert "ORCH_MINDMAP_URL" not in cm["data"] and "ORCH_MINDMAP_TOKEN" not in cm["data"]
+    for dep, items in _containers(docs).items():
+        for c in items:
+            names = _env_names(c)
+            assert ("ORCH_MINDMAP_URL" in names) == ("ORCH_MINDMAP_TOKEN" in names)
+            assert ("ORCH_MINDMAP_URL" in names) == _is_api_main(dep, c), (dep, c["name"])
+    api = next(c for c in _containers(docs)[f"{FULL}-api"] if c["name"] == "api")
+    env = {e["name"]: e for e in api["env"]}
+    assert env["ORCH_MINDMAP_URL"] == {"name": "ORCH_MINDMAP_URL", "value": MM_URL}
+    assert env["ORCH_MINDMAP_TOKEN"]["valueFrom"]["secretKeyRef"] == {
+        "name": mm.get("existingSecret", f"{FULL}-mindmap"),
+        "key": mm.get("existingSecretKey", "mindmap-token"),
+    }
+    assert "value" not in env["ORCH_MINDMAP_TOKEN"]
+
+
+def test_mindmap_token_secret_and_checksum():
+    tok = "".join(["marker", "mindmap", "value"])
+    docs = render(values(postgres={"url": URL}, mindmap={"url": MM_URL, "token": tok}))
+    assert by_kind(docs, "Secret")[f"{FULL}-mindmap"]["stringData"] == {"mindmap-token": tok}
+    for cm in by_kind(docs, "ConfigMap").values():
+        assert tok not in yaml.safe_dump(cm)
+    api = by_kind(docs, "Deployment")[f"{FULL}-api"]
+    assert "checksum/mindmap-secret" in api["spec"]["template"]["metadata"]["annotations"]
+
+
+def test_mindmap_existing_secret_wins():
+    docs = render(
+        values(
+            postgres={"url": URL}, mindmap={"url": MM_URL, "token": "t", "existingSecret": "mm-s"}
+        )
+    )
+    assert f"{FULL}-mindmap" not in by_kind(docs, "Secret")
+
+
+@pytest.mark.parametrize("mm", [{"url": MM_URL}, {"token": "t"}, {"existingSecret": "mm-s"}])
+def test_mindmap_url_and_token_together(mm):
+    err = render_error(values(postgres={"url": URL}, mindmap=mm))
+    assert "mindmap.url" in err and "mindmap.token" in err
+
+
+def test_mindmap_absent_by_default():
+    docs = render(values(postgres={"url": URL}))
+    assert f"{FULL}-mindmap" not in by_kind(docs, "Secret")
+    for items in _containers(docs).values():
+        for c in items:
+            assert "ORCH_MINDMAP_URL" not in _env_names(c)
+            assert "ORCH_MINDMAP_TOKEN" not in _env_names(c)
