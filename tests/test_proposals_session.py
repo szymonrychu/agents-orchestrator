@@ -185,7 +185,9 @@ async def test_own_session_without_a_manageable_preset_may_be_proposed(pool, kub
     assert [i.path for i in view.revisions[0].items] == ["wrapper.mcp_servers"]
 
 
-async def test_hidden_or_unknown_session_is_404(pool, kube, settings, boss, preset, canary):
+async def test_unmanageable_session_is_403_and_unknown_404(
+    pool, kube, settings, boss, preset, canary
+):
     sess = await alone(pool, "hidden-1")
     async with pool.connection() as conn:
         hidden = await presets_repo.create(conn, "hidden", {}, superleader_manageable=False)
@@ -201,7 +203,10 @@ async def test_hidden_or_unknown_session_is_404(pool, kube, settings, boss, pres
                 target=slug,
                 patch=MCP_PATCH,
             )
-        _error(exc, 404, "not_found")
+        if slug == "nope":
+            _error(exc, 404, "not_found")
+        else:
+            _error(exc, 403, "not_manageable")
     assert kube.applied("Secret") == []
 
 

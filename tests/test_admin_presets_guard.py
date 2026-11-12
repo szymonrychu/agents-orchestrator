@@ -386,10 +386,10 @@ async def test_patch_empty_name_matches_put_422(call, human, seed):
     assert (await human("GET", f"{M}/{pid}")).json()["name"] == "keepme"
 
 
-async def test_patch_hidden_preset_404(call, human):
+async def test_patch_unmanageable_preset_403(call, human):
     r = await human("POST", M, json={"name": "hid", "spec": {}, "superleader_manageable": False})
     r = await call("PATCH", f"{A}/{r.json()['id']}", json={"spec": {}})
-    assert_error(r, 404, "not_found")
+    assert_error(r, 403, "not_manageable")
 
 
 async def test_patch_default_preset_rename_409(call, human):
@@ -758,7 +758,7 @@ async def test_patch_without_agent_token_refused(app, human, seed, boss):
     assert (await human("GET", f"{M}/{pid}")).json() == before
 
 
-async def test_patch_hidden_preset_by_id_and_name_404(call, human):
+async def test_patch_unmanageable_preset_by_id_and_name_403(call, human):
     r = await human("POST", M, json={"name": "hid-o2", "spec": {}, "superleader_manageable": False})
     assert r.status_code == 201, r.text
     hidden = r.json()
@@ -766,8 +766,7 @@ async def test_patch_hidden_preset_by_id_and_name_404(call, human):
     assert_error(unknown, 404, "not_found")
     for ref in (hidden["id"], hidden["name"]):
         got = await call("PATCH", f"{A}/{ref}", json={"spec": QUOTA})
-        assert_error(got, 404, "not_found")
-        assert got.json() == unknown.json()
+        assert_error(got, 403, "not_manageable")
     assert (await human("GET", f"{M}/{hidden['id']}")).json() == hidden
 
 
@@ -959,7 +958,7 @@ async def test_delete_grant_flipped_between_check_and_delete_403(
     """TOCTOU: a human turns kube_cluster_access on after the route read the preset but before the
     delete. The delete re-reads the row under lock and refuses: 403, nothing deleted."""
     pid = await seed({"env": {"K": {"value": "v"}}})
-    real = admin.manageable_preset
+    real = admin.writable_preset
 
     async def flip_after_read(conn, ref):
         found = await real(conn, ref)
@@ -971,7 +970,7 @@ async def test_delete_grant_flipped_between_check_and_delete_403(
             )
         return found
 
-    monkeypatch.setattr(admin, "manageable_preset", flip_after_read)
+    monkeypatch.setattr(admin, "writable_preset", flip_after_read)
     r = await call("DELETE", f"{A}/{pid}")
     assert_error(r, 403, "privileged_target")
     assert r.json()["error"]["fields"] == ["kube_cluster_access"]

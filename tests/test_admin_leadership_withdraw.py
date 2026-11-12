@@ -157,13 +157,13 @@ async def test_a_superleader_withdraws_in_a_manageable_session(app, pool):
     assert await state(pool, rid) == ("rejected", "withdrawn", True)
 
 
-async def test_a_superleader_outside_its_remit_gets_404(app, pool):
+async def test_a_superleader_outside_its_remit_gets_403(app, pool):
     boss = await alone(pool, "lw-boss-hidden", superleader=True)
     target = await hive(pool, "lw-hidden")
     await attach_preset(pool, target.id, manageable=False)
     rid = await queue(pool, target)
     r = await withdraw(app, boss, target.slug, request_id=rid)
-    assert_error(r, 404, "not_found")
+    assert_error(r, 403, "not_manageable")
     assert (await state(pool, rid))[0] == "queued"
 
 

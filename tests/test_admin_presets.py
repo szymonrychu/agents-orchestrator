@@ -122,15 +122,14 @@ async def hidden_preset(call, name="hidden"):
     return r.json()
 
 
-async def test_list_only_manageable(call):
+async def test_list_includes_unmanageable(call):
     await hidden_preset(call)
     await call("POST", A, json={"name": "shown", "spec": {}})
-    names = [p["name"] for p in (await call("GET", A)).json()]
-    assert "shown" in names and "hidden" not in names
+    flags = {p["name"]: p["superleader_manageable"] for p in (await call("GET", A)).json()}
+    assert flags["shown"] is True and flags["hidden"] is False
 
 
 HIDDEN_CALLS = [
-    ("GET", "{ref}", None),
     ("PUT", "{ref}", {"name": "hidden", "spec": {}}),
     ("DELETE", "{ref}", None),
     ("POST", "{ref}/copy", None),
@@ -138,24 +137,22 @@ HIDDEN_CALLS = [
 
 
 @pytest.mark.parametrize(("method", "tail", "body"), HIDDEN_CALLS)
-async def test_hidden_preset_404(call, method, tail, body):
+async def test_unmanageable_preset_write_403(call, method, tail, body):
     hidden = await hidden_preset(call)
     kw = {} if body is None else {"json": body}
     got = await call(method, f"{A}/" + tail.format(ref=hidden["id"]), **kw)
     missing = await call(method, f"{A}/" + tail.format(ref=uuid.uuid4()), **kw)
-    assert_error(got, 404, "not_found")
-    assert got.json() == missing.json()
+    assert_error(got, 403, "not_manageable")
+    assert_error(missing, 404, "not_found")
     async with main_client(call.app) as http:
         assert (await http.get(f"{M}/{hidden['id']}")).status_code == 200
 
 
-async def test_hidden_preset_is_indistinguishable_from_missing(call):
+async def test_unmanageable_preset_reads_200_and_unknown_is_404(call):
     hidden = await hidden_preset(call)
     for ref, other in ((hidden["name"], "no-such-name"), (hidden["id"], str(uuid.uuid4()))):
-        a = await call("GET", f"{A}/{ref}")
-        b = await call("GET", f"{A}/{other}")
-        assert a.status_code == b.status_code == 404
-        assert a.json() == b.json()
+        assert (await call("GET", f"{A}/{ref}")).status_code == 200
+        assert_error(await call("GET", f"{A}/{other}"), 404, "not_found")
 
 
 async def test_admin_create_forced_manageable(call):

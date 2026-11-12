@@ -70,7 +70,7 @@ async def require_session_editor(
     request: Request, agent: Caller, pool: Pool, slug: str
 ) -> sessions_repo.Session:
     """The caller's session. A superleader session passes for any slug (the route resolves the
-    target with _target). Any other session passes only for its own slug (else 403
+    target with _writable_target). Any other session passes only for its own slug (else 403
     not_superleader, before any lookup, so another slug and an unknown one answer alike) and
     only for its leader (else 403 not_leader). Sets admin_caller and admin_secrets like
     require_superleader."""
@@ -185,8 +185,9 @@ def touched(request: Request, *names: str) -> None:
     request.state.admin_secrets.extend(names)
 
 
-# What each non-relay admin route hides from the superleader: "preset" and "session" routes
-# answer 404 for a target outside its remit, "list" and "create" are filtered or forced,
+# What each non-relay admin route withholds from the superleader: "preset" and "session" routes
+# are read open (200 for any target) and write-guarded (403 `not_manageable` outside its remit),
+# "list" and "create" are filtered or forced,
 # "proposal" routes see only the caller's own proposals on targets it may manage (404 otherwise).
 ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("GET", f"{ADMIN_PREFIX}/presets"): "list",
@@ -237,18 +238,32 @@ async def create_project(
 # ---------------------------------------------------------------- presets (O6)
 
 
-async def manageable_preset(conn, ref: str) -> presets_repo.Preset:
-    """A preset by id or name; one the superleader may not manage is as missing as an unknown."""
-    found = await presets_api.by_ref(conn, ref)
+def not_manageable(kind: str) -> ApiError:
+    """The refusal of a write on a target the superleader may read but not manage (decision 388)."""
+    return ApiError(
+        403,
+        "not_manageable",
+        f"this {kind} is not superleader_manageable: writes need the user's approval",
+    )
+
+
+async def readable_preset(conn, ref: str) -> presets_repo.Preset:
+    """A preset by id or name; 404 only when unknown."""
+    return await presets_api.by_ref(conn, ref)
+
+
+async def writable_preset(conn, ref: str) -> presets_repo.Preset:
+    """A preset by id or name the superleader may write: 403 `not_manageable` for any other."""
+    found = await readable_preset(conn, ref)
     if not found.superleader_manageable:
-        raise not_found("preset")
+        raise not_manageable("preset")
     return found
 
 
 @router.get("/presets", response_model=list[schemas.PresetView])
 async def list_presets(pool: Pool) -> list[schemas.PresetView]:
     async with pool.connection() as conn:
-        return await presets_api.list_all(conn, only_manageable=True)
+        return await presets_api.list_all(conn)
 
 
 @router.post("/presets", status_code=201, response_model=schemas.PresetView)
@@ -262,7 +277,7 @@ async def create_preset(
 @router.get("/presets/{ref}", response_model=schemas.PresetView)
 async def get_preset(ref: str, pool: Pool) -> schemas.PresetView:
     async with pool.connection() as conn:
-        found = await manageable_preset(conn, ref)
+        found = await readable_preset(conn, ref)
         return await presets_api.get_one(conn, found.id)
 
 
@@ -271,7 +286,7 @@ async def replace_preset(
     ref: str, body: schemas.PresetIn, request: Request, pool: Pool, settings: Cfg
 ) -> schemas.PresetView:
     async with pool.connection() as conn:
-        found = await manageable_preset(conn, ref)
+        found = await writable_preset(conn, ref)
         return await presets_api.replace(request, conn, settings, found.id, body, superleader=True)
 
 
@@ -280,14 +295,14 @@ async def patch_preset(
     ref: str, body: schemas.PresetPatch, request: Request, pool: Pool, settings: Cfg
 ) -> schemas.PresetView:
     async with pool.connection() as conn:
-        found = await manageable_preset(conn, ref)
+        found = await writable_preset(conn, ref)
         return await presets_api.patch(request, conn, settings, found.id, body)
 
 
 @router.delete("/presets/{ref}", status_code=204, response_model=None)
 async def delete_preset(ref: str, request: Request, pool: Pool) -> Response:
     async with pool.connection() as conn:
-        found = await manageable_preset(conn, ref)
+        found = await writable_preset(conn, ref)
         await presets_api.remove(request, conn, found.id, superleader=True)
     return Response(status_code=204)
 
@@ -297,7 +312,7 @@ async def copy_preset(
     ref: str, request: Request, pool: Pool, body: schemas.CopyPreset | None = None
 ) -> schemas.PresetView:
     async with pool.connection() as conn:
-        found = await manageable_preset(conn, ref)
+        found = await writable_preset(conn, ref)
         body = body or schemas.CopyPreset()
         return await presets_api.copy(
             conn, found.id, body.name, superleader=True, request=request, project=body.project
@@ -319,7 +334,7 @@ async def attach_vault(
     attached under its own name. A preset env that is taken is 409 `env_exists` unless
     `replace`. The answer marks `attachment_privileged` (marked, never blocked)."""
     async with pool.connection() as conn:
-        found = await manageable_preset(conn, ref)
+        found = await writable_preset(conn, ref)
         view = await presets_api.attach_vault(request, conn, settings, found.id, entry_id, body)
     return schemas.VaultAttachView(**view.model_dump(), attachment_privileged=bool(view.privileged))
 
@@ -336,24 +351,31 @@ async def detach_vault(
     """Remove every ref to the entry from a manageable preset, or only the one under preset env
     `?env=`; 404 `not_attached` when nothing matches."""
     async with pool.connection() as conn:
-        found = await manageable_preset(conn, ref)
+        found = await writable_preset(conn, ref)
         return await presets_api.detach_vault(request, conn, settings, found.id, entry_id, env)
 
 
 # ---------------------------------------------------------------- sessions (O7)
 
 
-async def _target(conn, slug: str, caller: sessions_repo.Session) -> sessions_repo.Session:
-    """The caller's own session, or one whose preset the superleader may manage; any other
-    (hidden preset, no preset) is as missing as an unknown slug."""
+async def _readable_target(conn, slug: str, caller: sessions_repo.Session) -> sessions_repo.Session:
+    """Any session by slug (raw-spec ones too); 404 only when unknown. The route gate already
+    limits a non-superleader caller to its own slug."""
     session = await sessions_repo.get_by_slug(conn, slug)
     if session is None:
         raise not_found("session")
+    return session
+
+
+async def _writable_target(conn, slug: str, caller: sessions_repo.Session) -> sessions_repo.Session:
+    """The caller's own session, or one whose preset the superleader may manage; any other
+    (unmanageable preset, no preset) is 403 `not_manageable`."""
+    session = await _readable_target(conn, slug, caller)
     if session.id != caller.id and (
         session.preset_id is None
         or session.preset_id not in await presets_repo.manageable_ids(conn)
     ):
-        raise not_found("session")
+        raise not_manageable("session")
     return session
 
 
@@ -363,10 +385,12 @@ async def _target(conn, slug: str, caller: sessions_repo.Session) -> sessions_re
 async def get_session(
     slug: str, request: Request, pool: Pool, settings: Cfg
 ) -> schemas.SessionView:
-    """A superleader reads its own or a manageable session; any other leader its own."""
+    """A superleader reads any session; any other leader its own."""
     _, caller = caller_of(request)
     async with pool.connection() as conn:
-        return await sessions_api.one_view(conn, await _target(conn, slug, caller), settings)
+        return await sessions_api.one_view(
+            conn, await _readable_target(conn, slug, caller), settings
+        )
 
 
 @session_router.patch(
@@ -380,7 +404,7 @@ async def patch_session(
     agent, caller = caller_of(request)
     superleader = bool(caller.spec.session_messaging)
     async with pool.connection() as conn:
-        target = await _target(conn, slug, caller) if superleader else caller
+        target = await _writable_target(conn, slug, caller) if superleader else caller
         return await session_spec.patch(
             request,
             conn,
@@ -407,7 +431,9 @@ async def withdraw_handover(
     `rollout` request is never withdrawn (409 `rollout_request` by id, left queued without)."""
     _, caller = caller_of(request)
     async with pool.connection() as conn:
-        target = await _target(conn, slug, caller) if caller.spec.session_messaging else caller
+        target = (
+            await _writable_target(conn, slug, caller) if caller.spec.session_messaging else caller
+        )
         withdrawn = await leadership.withdraw_handovers(conn, target.id, body.request_id)
         if body.request_id is not None and not withdrawn:
             reason = await leadership.handover_reason(conn, target.id, body.request_id)
@@ -447,7 +473,7 @@ async def discard_session(
     _, caller = caller_of(request)
     force = sessions_api.force_flag(request)
     async with pool.connection() as conn:
-        target = await _target(conn, slug, caller)
+        target = await _writable_target(conn, slug, caller)
         if target.id == caller.id:
             raise ApiError(422, "own_session", "a session cannot discard itself")
         return await sessions_api.discard(conn, target.id, settings, force=force)
@@ -496,7 +522,7 @@ async def restart_session(
     cooldown and gets one note, all in the same transaction as the commands."""
     _, caller = caller_of(request)
     async with pool.connection() as conn, conn.transaction():
-        target = await _target(conn, slug, caller)
+        target = await _writable_target(conn, slug, caller)
         own = target.id == caller.id
         note_id = None
         if own:
@@ -515,7 +541,7 @@ async def restart_agent(
     """Restart one agent by pod name; an agent of the caller's own session is a self-restart."""
     _, caller = caller_of(request)
     async with pool.connection() as conn, conn.transaction():
-        target = await _target(conn, slug, caller)
+        target = await _writable_target(conn, slug, caller)
         if target.desired == "deleting":
             raise ApiError(409, "session_deleting", "session is being discarded")
         agent_id = await _member_id(conn, target.id, pod)

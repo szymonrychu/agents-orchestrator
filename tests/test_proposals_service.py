@@ -233,10 +233,15 @@ async def test_an_empty_diff_is_nothing_changed(pool, kube, settings, boss, pres
         _error(exc, 422, "nothing_changed")
 
 
-async def test_a_hidden_or_unknown_preset_is_404(pool, kube, settings, boss, preset):
+async def test_an_unmanageable_preset_is_403_and_an_unknown_one_404(
+    pool, kube, settings, boss, preset
+):
     async with pool.connection() as conn:
         await presets_repo.create(conn, "hidden", {"env": {"TOKEN": {"value": "token"}}})
-    for target in ("hidden", "nope", "00000000-0000-0000-0000-000000000000"):
+    with pytest.raises(ApiError) as exc:
+        await _create(pool, kube, settings, boss, target="hidden", patch={"replicas": 2})
+    _error(exc, 403, "not_manageable")
+    for target in ("nope", "00000000-0000-0000-0000-000000000000"):
         with pytest.raises(ApiError) as exc:
             await _create(pool, kube, settings, boss, target=target, patch={"replicas": 2})
         _error(exc, 404, "not_found")

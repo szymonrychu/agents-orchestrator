@@ -220,15 +220,15 @@ async def test_replay_answers_200_with_the_first_proposal(app, pool, kube, boss,
     assert len(await _rows(pool, "SELECT id FROM change_proposals")) == 1
 
 
-async def test_hidden_and_unknown_preset_answer_alike(app, pool, boss, preset):
+async def test_unmanageable_preset_is_403_and_unknown_404(app, pool, boss, preset):
     async with pool.connection() as conn:
         await presets_repo.create(conn, "secret-ops", {}, superleader_manageable=False)
     hidden = await agent(app, boss, "POST", P, json=body(target="secret-ops"))
     unknown = await agent(app, boss, "POST", P, json=body(target="no-such-preset"))
-    assert_error(hidden, 404, "not_found")
-    assert hidden.json() == unknown.json()
+    assert_error(hidden, 403, "not_manageable")
+    assert_error(unknown, 404, "not_found")
     assert await _rows(pool, "SELECT id FROM change_proposals") == []
-    assert [a["status"] for a in await audits(pool, boss.id)] == [404, 404]
+    assert [a["status"] for a in await audits(pool, boss.id)] == [403, 404]
 
 
 async def test_refused_patch_is_proposable_and_files_as_a_proposal(app, pool, boss, preset):
