@@ -459,9 +459,7 @@ async def test_projects_summary_passes_upstream_answer_unchanged(monkeypatch):
 
 async def test_projects_summary_unconfigured_503(monkeypatch):
     rig = make_rig(monkeypatch, taskboard_url="", taskboard_token="")
-    assert_error(
-        await rig.call("GET", "/agent/v1/projects/summary"), 503, "taskboard_unconfigured"
-    )
+    assert_error(await rig.call("GET", "/agent/v1/projects/summary"), 503, "taskboard_unconfigured")
     assert rig.upstream.seen == []
 
 
