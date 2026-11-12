@@ -156,6 +156,7 @@ def create_app(
     app.include_router(proposal_routes.proposal_router)
     app.include_router(chat.router)
     app.include_router(tasks.router)
+    app.include_router(tasks.summary_router)
     app.include_router(specs.router)
     app.include_router(session_labels.router)
     app.include_router(presets.router)
