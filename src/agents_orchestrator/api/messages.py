@@ -94,6 +94,17 @@ async def post_message(
     return schemas.MessageAccepted(message_id=mid)
 
 
+def parse_statuses(status: str | None) -> list[str] | None:
+    """The comma-separated `status` filter as a list; 422 for an unknown or empty one."""
+    if not status:
+        return None
+    statuses = [s.strip() for s in status.split(",") if s.strip()]
+    bad = [s for s in statuses if s not in views.MESSAGE_STATUSES]
+    if bad or not statuses:
+        raise ApiError(422, "invalid_request", f"unknown status {', '.join(bad) or status!r}")
+    return statuses
+
+
 @router.get("/sessions/{session_id}/messages", response_model=list[schemas.MessageView])
 async def list_messages(
     session_id: uuid.UUID,
@@ -101,12 +112,7 @@ async def list_messages(
     status: str | None = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> list[schemas.MessageView]:
-    statuses = None
-    if status:
-        statuses = [s.strip() for s in status.split(",") if s.strip()]
-        bad = [s for s in statuses if s not in views.MESSAGE_STATUSES]
-        if bad or not statuses:
-            raise ApiError(422, "invalid_request", f"unknown status {', '.join(bad) or status!r}")
+    statuses = parse_statuses(status)
     async with pool.connection() as conn:
         if await repo.get(conn, session_id) is None:
             raise not_found("session")

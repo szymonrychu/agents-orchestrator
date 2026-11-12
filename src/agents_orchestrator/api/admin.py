@@ -25,15 +25,24 @@ from starlette.responses import Response as StarletteResponse
 from agents_orchestrator.api import messages as messages_api
 from agents_orchestrator.api import presets as presets_api
 from agents_orchestrator.api import projects as projects_api
-from agents_orchestrator.api import schemas, session_spec
+from agents_orchestrator.api import schemas, session_spec, streams
 from agents_orchestrator.api import sessions as sessions_api
-from agents_orchestrator.api.agent import Caller, _leads
+from agents_orchestrator.api.agent import (
+    ACTIVITY_DEFAULT_LIMIT,
+    ACTIVITY_MAX_LIMIT,
+    Activity,
+    Caller,
+    LocksOut,
+    _leads,
+    activity_lines,
+    locks_of,
+)
 from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.sessions import Cfg, Pool, Usage
 from agents_orchestrator.api.spec_edit import note_fields
 from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import events as events_repo
-from agents_orchestrator.db import leadership
+from agents_orchestrator.db import leadership, views
 from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.db import queue as q
 from agents_orchestrator.db import sessions as sessions_repo
@@ -203,6 +212,11 @@ ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("PUT", f"{ADMIN_PREFIX}/presets/{{ref}}/vault/{{entry_id}}"): "preset",
     ("DELETE", f"{ADMIN_PREFIX}/presets/{{ref}}/vault/{{entry_id}}"): "preset",
     ("GET", f"{ADMIN_PREFIX}/sessions/{{slug}}"): "session",
+    ("GET", f"{ADMIN_PREFIX}/sessions/{{slug}}/activity"): "session",
+    ("GET", f"{ADMIN_PREFIX}/sessions/{{slug}}/events"): "session",
+    ("GET", f"{ADMIN_PREFIX}/sessions/{{slug}}/messages"): "session",
+    ("GET", f"{ADMIN_PREFIX}/sessions/{{slug}}/locks"): "session",
+    ("GET", f"{ADMIN_PREFIX}/sessions/{{slug}}/commands"): "session",
     ("PATCH", f"{ADMIN_PREFIX}/sessions/{{slug}}"): "session",
     ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/leadership/withdraw"): "session",
     ("POST", f"{ADMIN_PREFIX}/sessions"): "create",
@@ -589,11 +603,96 @@ async def _member_id(conn, session_id: uuid.UUID, pod_name: str) -> uuid.UUID:
 
 
 @router.get("/commands/{command_id}", response_model=schemas.CommandView)
-async def get_command(command_id: int, request: Request, pool: Pool) -> schemas.CommandView:
-    """Only a command this superleader issued; any other id is 404."""
+async def get_command(command_id: int, pool: Pool) -> schemas.CommandView:
+    """Any command, whoever issued it; 404 only when unknown."""
+    async with pool.connection() as conn:
+        return await messages_api.command_view(conn, command_id)
+
+
+# ------------------------------------------------- live work of any session (T-120)
+
+
+@router.get("/sessions/{slug}/activity", response_model=Activity)
+async def session_activity(
+    slug: str,
+    request: Request,
+    pool: Pool,
+    peer: Annotated[str | None, Query(alias="agent")] = None,
+    limit: Annotated[int, Query(ge=1, le=ACTIVITY_MAX_LIMIT)] = ACTIVITY_DEFAULT_LIMIT,
+) -> Activity:
+    """The agent-port activity digest of any session."""
     _, caller = caller_of(request)
     async with pool.connection() as conn:
-        return await messages_api.command_view(conn, command_id, caller.id)
+        target = await _readable_target(conn, slug, caller)
+        return await activity_lines(conn, target, peer, limit)
+
+
+@router.get("/sessions/{slug}/events", response_model=streams.EventsPage)
+async def session_events(
+    slug: str,
+    request: Request,
+    pool: Pool,
+    before_id: Annotated[int | None, Query(ge=0)] = None,
+    after_id: Annotated[int | None, Query(ge=0)] = None,
+    limit: Annotated[int, Query(ge=1, le=events_repo.MAX_LIMIT)] = 200,
+    agent_id: uuid.UUID | None = None,
+    types: Annotated[list[str] | None, Query()] = None,
+) -> streams.EventsPage:
+    """One page of any session's stored events, as the main port's events route (no SSE)."""
+    _, caller = caller_of(request)
+    async with pool.connection() as conn:
+        target = await _readable_target(conn, slug, caller)
+        return await streams.events_page(
+            conn,
+            target.id,
+            before_id=before_id,
+            after_id=after_id,
+            limit=limit,
+            agent_id=agent_id,
+            types=types,
+        )
+
+
+@router.get("/sessions/{slug}/messages", response_model=list[schemas.MessageView])
+async def session_messages(
+    slug: str,
+    request: Request,
+    pool: Pool,
+    status: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+) -> list[schemas.MessageView]:
+    """The message queue of any session, with the main port's `status` filter."""
+    _, caller = caller_of(request)
+    statuses = messages_api.parse_statuses(status)
+    async with pool.connection() as conn:
+        target = await _readable_target(conn, slug, caller)
+        rows = await views.list_messages(
+            conn, target.id, statuses, limit, messages_api._DEFAULT_ATTEMPTS
+        )
+    return [messages_api._message_view(r) for r in rows]
+
+
+@router.get("/sessions/{slug}/locks", response_model=LocksOut)
+async def session_locks(slug: str, request: Request, pool: Pool) -> LocksOut:
+    """The file locks held by the live agents of any session."""
+    _, caller = caller_of(request)
+    async with pool.connection() as conn:
+        return await locks_of(conn, (await _readable_target(conn, slug, caller)).id)
+
+
+@router.get("/sessions/{slug}/commands", response_model=list[schemas.CommandView])
+async def session_commands(
+    slug: str,
+    request: Request,
+    pool: Pool,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> list[schemas.CommandView]:
+    """The newest commands issued to the agents of any session."""
+    _, caller = caller_of(request)
+    async with pool.connection() as conn:
+        target = await _readable_target(conn, slug, caller)
+        rows = await views.list_commands(conn, target.id, limit)
+    return [schemas.CommandView(**r) for r in rows]
 
 
 # ---------------------------------------------------------------- usage
