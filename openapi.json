@@ -12005,6 +12005,9 @@
           "200": {
             "description": "Successful Response"
           },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -12014,6 +12017,12 @@
               }
             },
             "description": "Validation Error"
+          },
+          "502": {
+            "description": "upstream_shape: the vault answered an unexpected shape"
+          },
+          "503": {
+            "description": "upstream_unconfigured, upstream_unavailable or vault_unavailable: the vault"
           }
         },
         "summary": "GET vault entries",

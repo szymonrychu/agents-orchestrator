@@ -181,15 +181,13 @@ async def live_agent_ids(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -
     return [r["id"] for r in rows]
 
 
-async def get_command(
-    conn: psycopg.AsyncConnection, id: int, issued_by_session: uuid.UUID | None = None
-) -> dict | None:
-    """A command; with `issued_by_session` only when that session issued it."""
+async def get_command(conn: psycopg.AsyncConnection, id: int) -> dict | None:
+    """A command by id."""
     rows = await _rows(
         conn,
         "SELECT id, agent_id, kind, status, result, created_at, started_at, finished_at"
-        " FROM commands WHERE id = %s AND (%s::uuid IS NULL OR issued_by_session = %s)",
-        (id, issued_by_session, issued_by_session),
+        " FROM commands WHERE id = %s",
+        (id,),
     )
     return rows[0] if rows else None
 

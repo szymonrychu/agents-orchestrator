@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.listener import Listener, Subscription, SubscriptionDropped
-from agents_orchestrator.api.messages import _DEFAULT_ATTEMPTS, _message_view
+from agents_orchestrator.api.messages import DEFAULT_ATTEMPTS, message_view
 from agents_orchestrator.api.sessions import Cfg, Pool, agent_view
 from agents_orchestrator.api.sessions import _view as session_view
 from agents_orchestrator.db import events as ev
@@ -199,12 +199,12 @@ async def _session_state(conn, session: repo.Session, settings) -> dict[str, Any
     aggs = await views.session_aggregates(conn, session.id)
     agg = aggs.get(session.id) or {}
     rows = await views.agent_rows(conn, session.id)
-    msgs = await views.list_messages(conn, session.id, None, _RECENT_MESSAGES, _DEFAULT_ATTEMPTS)
+    msgs = await views.list_messages(conn, session.id, None, _RECENT_MESSAGES, DEFAULT_ATTEMPTS)
     view = session_view(session, agg, settings).model_dump(mode="json")
     return {
         "session": view,
         "agents": {str(r["id"]): agent_view(r).model_dump(mode="json") for r in rows},
-        "messages": {m["id"]: _message_view(m).model_dump(mode="json") for m in msgs},
+        "messages": {m["id"]: message_view(m).model_dump(mode="json") for m in msgs},
         "queued": agg.get("queued", 0),
         "failed": agg.get("failed", 0),
         "oldest_queued_at": view["summary"]["oldest_queued_at"],

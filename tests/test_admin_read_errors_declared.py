@@ -1,5 +1,5 @@
 """Every superleader read added in T-120 slice 2 declares in OpenAPI the error statuses it really
-returns (403 `not_superleader`, 404 `not_found`, 400 `bad_request`, 503 upstream), like the
+returns (403 `not_superleader`, 404 `not_found`, 400 `bad_request`, 502/503 upstream), like the
 archives reads."""
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ DECLARED = {
     f"{S}/messages": {403, 404},
     f"{S}/locks": {403, 404},
     f"{S}/commands": {403, 404},
+    f"{ADMIN_PREFIX}/vault": {403, 502, 503},
     f"{ADMIN_PREFIX}/usage/history": {403, 503},
     f"{ADMIN_PREFIX}/usage/sessions": {403, 503},
 }

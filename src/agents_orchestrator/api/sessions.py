@@ -16,7 +16,7 @@ from pydantic import ValidationError
 
 from agents_orchestrator import inactivity, rendering
 from agents_orchestrator.api import schemas, usage_gate, vault_client, vault_refs
-from agents_orchestrator.api.errors import ApiError, not_found, project_error
+from agents_orchestrator.api.errors import ApiError, not_found, not_manageable, project_error
 from agents_orchestrator.api.service_auth import calling_service
 from agents_orchestrator.api.usage_gate import UsageSource
 from agents_orchestrator.api.vault_client import Pin, VaultClient
@@ -544,8 +544,9 @@ async def _pin_preset(
         return None
     async with pool.connection() as conn:
         preset = await presets.get(conn, preset_id)
-    if not _visible(preset, created_by_session):
+    if preset is None:
         return None  # the transaction answers 404
+    _writable(preset, created_by_session)
     refs = vault_refs.refs_in(preset.spec)
     if not refs:
         return None
@@ -604,9 +605,11 @@ async def _insert(conn, slug: str, spec: SessionSpec, **provenance) -> repo.Sess
 PLACE_ATTEMPTS = 3
 
 
-def _visible(preset: presets.Preset | None, created_by_session: uuid.UUID | None) -> bool:
-    """A superleader (admin create) sees only manageable presets; any other is as missing."""
-    return preset is not None and (created_by_session is None or preset.superleader_manageable)
+def _writable(preset: presets.Preset, created_by_session: uuid.UUID | None) -> None:
+    """A superleader (admin create) starts sessions only from manageable presets: it may read
+    any other, but the write is 403 `not_manageable` (decision 388)."""
+    if created_by_session is not None and not preset.superleader_manageable:
+        raise not_manageable("preset")
 
 
 async def _placed_preset(
@@ -622,15 +625,17 @@ async def _placed_preset(
     meanwhile is read again."""
     for _ in range(PLACE_ATTEMPTS):
         peek = await presets.get(conn, preset_id)
-        if peek is None or not _visible(peek, created_by_session):
+        if peek is None:
             raise not_found("preset")
+        _writable(peek, created_by_session)
         target = peek.project if project is None else project
         extras = [p for p in peek.extra_projects if p != target]
         for slug in (target, *extras):
             await hold_project(conn, slug)
         preset = await presets.get_for_share(conn, preset_id)
-        if preset is None or not _visible(preset, created_by_session):
+        if preset is None:
             raise not_found("preset")
+        _writable(preset, created_by_session)
         if (project is not None or preset.project == target) and (
             preset.extra_projects == peek.extra_projects
         ):

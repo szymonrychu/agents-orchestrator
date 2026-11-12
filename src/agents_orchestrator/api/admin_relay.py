@@ -70,8 +70,8 @@ from pydantic import SecretStr
 
 from agents_orchestrator.api import chat_requests, secret_store, vault_client, vault_refs
 from agents_orchestrator.api import forward as forward_core
-from agents_orchestrator.api.admin import FORBIDDEN, caller_of, not_manageable, router, touched
-from agents_orchestrator.api.errors import ApiError, not_found
+from agents_orchestrator.api.admin import FORBIDDEN, caller_of, router, touched
+from agents_orchestrator.api.errors import ApiError, not_found, not_manageable
 from agents_orchestrator.api.scope import projects_header
 from agents_orchestrator.api.sessions import Cfg
 from agents_orchestrator.db import presets as presets_repo
@@ -568,6 +568,15 @@ def _scoped_entry(entry: Any, own_labels: list[str], writable: set[str], marked:
     "/vault",
     response_class=Response,
     operation_id="admin_vault_list",
+    responses={
+        403: FORBIDDEN,
+        502: {"description": "upstream_shape: the vault answered an unexpected shape"},
+        503: {
+            "description": (
+                "upstream_unconfigured, upstream_unavailable or vault_unavailable: the vault"
+            )
+        },
+    },
     summary="GET vault entries",
     tags=["admin"],
 )
