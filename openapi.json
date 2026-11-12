@@ -46,6 +46,43 @@
         "title": "ActivityLine",
         "type": "object"
       },
+      "AdminLockReassigned": {
+        "properties": {
+          "agent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "previous": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previous"
+          }
+        },
+        "required": [
+          "path",
+          "agent",
+          "previous"
+        ],
+        "title": "AdminLockReassigned",
+        "type": "object"
+      },
       "AgentAttention": {
         "description": "The agent's claude is waiting on a person; `state` is unchanged by it.",
         "properties": {
@@ -11603,6 +11640,93 @@
           }
         },
         "summary": "Session Locks",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/agent/v1/admin/sessions/{slug}/locks/reassign": {
+      "post": {
+        "description": "Give a file lock of a manageable session to one of its agents, or discard it with\n`to: null`. The path is read against the target's workdir; the caller's own session is\nrefused (422 `own_session`).",
+        "operationId": "reassign_session_lock_agent_v1_admin_sessions__slug__locks_reassign_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LockReassignIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminLockReassigned"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "description": "invalid_path: empty or outside the target session workdir"
+          },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader; not_manageable: the target is not superleader_manageable (needs the user's approval)"
+          },
+          "404": {
+            "description": "not_found: no session has that slug, or `to` is not a live agent of it"
+          },
+          "422": {
+            "description": "own_session: the target is the caller's own session (use the leader-only agent route)"
+          }
+        },
+        "summary": "Reassign Session Lock",
         "tags": [
           "admin"
         ]

@@ -91,6 +91,21 @@ async def assign(
     )
 
 
+async def holder_for_update(
+    conn: psycopg.AsyncConnection, session_id: uuid.UUID, path: str
+) -> str | None:
+    """Pod name holding `path`, with the lock row locked until the transaction ends; None when
+    the path is free."""
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT a.pod_name FROM file_locks f JOIN agents a ON a.id = f.agent_id"
+            " WHERE f.session_id = %s AND f.path = %s FOR UPDATE OF f",
+            (session_id, path),
+        )
+        row = await cur.fetchone()
+    return row[0] if row else None
+
+
 async def other_holder(
     conn: psycopg.AsyncConnection, session_id: uuid.UUID, agent_id: uuid.UUID, path: str
 ) -> Lock | None:

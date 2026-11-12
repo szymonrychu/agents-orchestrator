@@ -21,6 +21,7 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.exceptions import HTTPException, RequestValidationError
 from fastapi.routing import APIRoute
+from pydantic import BaseModel
 from starlette.responses import Response as StarletteResponse
 
 from agents_orchestrator.api import messages as messages_api
@@ -33,10 +34,13 @@ from agents_orchestrator.api.agent import (
     ACTIVITY_MAX_LIMIT,
     Activity,
     Caller,
+    LockReassignIn,
     LocksOut,
     _leads,
     activity_lines,
     locks_of,
+    member_id,
+    normalise_all,
 )
 from agents_orchestrator.api.errors import ApiError, not_found, not_manageable
 from agents_orchestrator.api.session_labels import OwnLabelsView
@@ -44,7 +48,7 @@ from agents_orchestrator.api.sessions import Cfg, Pool, Usage
 from agents_orchestrator.api.spec_edit import note_fields
 from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import events as events_repo
-from agents_orchestrator.db import leadership, views
+from agents_orchestrator.db import file_locks, leadership, views
 from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.db import queue as q
 from agents_orchestrator.db import sessions as sessions_repo
@@ -263,6 +267,7 @@ ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("PATCH", f"{ADMIN_PREFIX}/projects/{{slug}}"): "none",
     ("PUT", f"{ADMIN_PREFIX}/sessions/{{slug}}/labels"): "session",
     ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/scale"): "session",
+    ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/locks/reassign"): "session",
     ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/projects"): "session",
     ("DELETE", f"{ADMIN_PREFIX}/sessions/{{slug}}/projects/{{project}}"): "session",
     ("POST", f"{ADMIN_PREFIX}/presets/{{ref}}/projects"): "preset",
@@ -636,7 +641,7 @@ async def restart_agent(
         target = await _writable_target(conn, slug, caller)
         if target.desired == "deleting":
             raise ApiError(409, "session_deleting", "session is being discarded")
-        agent_id = await _member_id(conn, target.id, pod)
+        agent_id = await member_id(conn, target.id, pod)
         own = target.id == caller.id
         note_id = None
         if own:
@@ -646,13 +651,6 @@ async def restart_agent(
             conn, agent_id, "restart", caller.id, note_id
         )
     return schemas.CommandAccepted(command_id=command_id)
-
-
-async def _member_id(conn, session_id: uuid.UUID, pod_name: str) -> uuid.UUID:
-    for member in await agents_repo.list_members(conn, session_id):
-        if member["pod_name"] == pod_name:
-            return member["id"]
-    raise not_found(f"agent {pod_name}")
 
 
 @router.get("/commands/{command_id}", response_model=schemas.CommandView)
@@ -827,6 +825,44 @@ async def scale_session(
     note_fields(request, ["replicas"])
     note_detail(request, replicas_before=out.previous_replicas, replicas_after=out.replicas)
     return out
+
+
+class AdminLockReassigned(BaseModel):
+    path: str
+    agent: str | None
+    previous: str | None
+
+
+@router.post(
+    "/sessions/{slug}/locks/reassign",
+    response_model=AdminLockReassigned,
+    responses={
+        400: {"description": "invalid_path: empty or outside the target session workdir"},
+        403: WRITE_FORBIDDEN,
+        404: {
+            "description": "not_found: no session has that slug, or `to` is not a live agent of it"
+        },
+        422: OWN_SESSION,
+    },
+)
+async def reassign_session_lock(
+    slug: str, body: LockReassignIn, request: Request, pool: Pool
+) -> AdminLockReassigned:
+    """Give a file lock of a manageable session to one of its agents, or discard it with
+    `to: null`. The path is read against the target's workdir; the caller's own session is
+    refused (422 `own_session`)."""
+    _, caller = caller_of(request)
+    async with pool.connection() as conn, conn.transaction():
+        target = await _writable_target(conn, slug, caller)
+        if target.id == caller.id:
+            raise own_session("lock reassign")
+        (path,) = normalise_all([body.path], target.spec.workdir)
+        to_id = await member_id(conn, target.id, body.to) if body.to is not None else None
+        previous = await file_locks.holder_for_update(conn, target.id, path)
+        await file_locks.assign(conn, target.id, path, to_id)
+    note_fields(request, ["path", "to"])
+    note_detail(request, path=path, previous=previous, to=body.to)
+    return AdminLockReassigned(path=path, agent=body.to, previous=previous)
 
 
 # ---------------------------------------------------------------- usage

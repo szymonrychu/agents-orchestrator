@@ -152,6 +152,7 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     # superleader writes on any manageable session (T-120 slice 3)
     ("PUT", f"{_ADMIN}/sessions/{{slug}}/labels"): "superleader",
     ("POST", f"{_ADMIN}/sessions/{{slug}}/scale"): "superleader",
+    ("POST", f"{_ADMIN}/sessions/{{slug}}/locks/reassign"): "superleader",
     # project grants (T-120): a grant files a proposal, a revoke is direct
     ("POST", f"{_ADMIN}/sessions/{{slug}}/projects"): "superleader",
     ("DELETE", f"{_ADMIN}/sessions/{{slug}}/projects/{{project}}"): "superleader",

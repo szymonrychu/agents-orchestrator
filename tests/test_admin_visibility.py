@@ -34,6 +34,7 @@ BODIES = {
     ("POST", "/agent/v1/admin/presets/{ref}/projects"): {"project": "default", "reason": "r"},
     ("PUT", "/agent/v1/admin/sessions/{slug}/labels"): {"labels": ["x"]},
     ("POST", "/agent/v1/admin/sessions/{slug}/scale"): {"replicas": 1},
+    ("POST", "/agent/v1/admin/sessions/{slug}/locks/reassign"): {"path": "a.txt", "to": None},
 }
 
 
