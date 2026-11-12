@@ -206,6 +206,44 @@ async def test_agents_view_joins_status(http, pool):
     assert_error(await http.get(f"/api/v1/sessions/{uuid.uuid4()}/agents"), 404, "not_found")
 
 
+async def test_summary_ready_with_session_counts_live_session_holders(http, pool):
+    from datetime import UTC
+
+    c = await insert_session(pool, spec={"replicas": 5})
+    held = await insert_agent(pool, c["id"], ready=True, wrapper_session_id="w-a")
+    await insert_agent(pool, c["id"], ready=True)
+    await insert_agent(pool, c["id"], ready=False, wrapper_session_id="w-c")
+    dead = await insert_agent(pool, c["id"], ready=True, wrapper_session_id="w-d")
+    await insert_agent(
+        pool, c["id"], ready=True, wrapper_session_id="w-e", gone_at=datetime.now(UTC)
+    )
+    await set_agent_status(pool, held["id"], state="idle")
+    await set_agent_status(pool, dead["id"], state="dead")
+    summary = (await http.get(f"/api/v1/sessions/{c['id']}")).json()["summary"]
+    assert summary["ready"] == 3
+    assert summary["ready_with_session"] == 1
+    rows = (await http.get("/api/v1/sessions")).json()
+    assert [r["summary"]["ready_with_session"] for r in rows if r["id"] == str(c["id"])] == [1]
+
+
+async def test_ready_pod_without_session_is_not_held(http, pool):
+    from agents_orchestrator.db import agents as agents_repo
+
+    c = await insert_session(pool, spec={"replicas": 1})
+    a = await insert_agent(pool, c["id"], ready=True)
+    url = f"/api/v1/sessions/{c['id']}"
+    summary = (await http.get(url)).json()["summary"]
+    assert (summary["start_state"], summary["ready"], summary["ready_with_session"]) == (
+        "ready",
+        1,
+        0,
+    )
+    async with pool.connection() as conn:
+        await agents_repo.set_wrapper_session(conn, a["id"], "w-1", None)
+    summary = (await http.get(url)).json()["summary"]
+    assert summary["ready_with_session"] == 1
+
+
 async def test_session_summary_state_and_gauge_max(http, pool):
     c = await insert_session(pool, spec={"replicas": 3, "auto_compact_pct": 80})
     a0 = await insert_agent(pool, c["id"], ready=True)
@@ -223,6 +261,7 @@ async def test_session_summary_state_and_gauge_max(http, pool):
         "start_state": "ready",
         "bootstrap_failures": [],
         "ready": 2,
+        "ready_with_session": 0,
         "replicas": 3,
         "context_pct_max": 62.5,
         "auto_compact_pct": 80,
