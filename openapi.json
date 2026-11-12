@@ -12753,8 +12753,16 @@
             "application/json": {
               "schema": {
                 "additionalProperties": false,
-                "description": "A chat message as the upstream reads it (OpenAPI only; the upstream validates it).",
+                "description": "A chat message as the upstream reads it (OpenAPI only; the upstream validates it).\n\n`text` may be omitted when `files` is given. `files`: workdir-relative paths of files to send\nafter the text; the room must allow agent files.",
                 "properties": {
+                  "files": {
+                    "default": [],
+                    "items": {
+                      "type": "string"
+                    },
+                    "title": "Files",
+                    "type": "array"
+                  },
                   "reply_to": {
                     "anyOf": [
                       {
@@ -12778,13 +12786,17 @@
                     "title": "Room"
                   },
                   "text": {
-                    "title": "Text",
-                    "type": "string"
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Text"
                   }
                 },
-                "required": [
-                  "text"
-                ],
                 "title": "ChatMessageIn",
                 "type": "object"
               }
@@ -12842,6 +12854,9 @@
           },
           "403": {
             "description": "forbidden (not a live agent pod) or not_leader"
+          },
+          "409": {
+            "description": "room_bound or another upstream conflict, or files_not_relayable: the room is held by another session and the body has files"
           },
           "413": {
             "description": "payload_too_large: a POST or PUT body exceeds 256 KiB"

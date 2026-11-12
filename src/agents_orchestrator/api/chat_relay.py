@@ -5,6 +5,8 @@ may start a chat in) to a session that is not the occupier. `chat._relay` hands 
 `relay`: the text is posted as the occupier with the sender's slug as prefix, a relay notice is
 queued to the occupier under the session-message limits, and the sender gets 202 `relayed`.
 Every other answer goes back without any `occupier` field: agents never see the occupier id.
+A body with `files` is never relayed (the files live in the sender's workdir, not the occupier's):
+it is answered 409 `files_not_relayable`.
 """
 
 from __future__ import annotations
@@ -81,6 +83,14 @@ def _plain(status: int, content: bytes) -> Response:
     return Response(without_occupier(content), status, media_type="application/json")
 
 
+def _has_files(body: bytes) -> bool:
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return False
+    return isinstance(data, dict) and isinstance(data.get("files"), list) and bool(data["files"])
+
+
 def _parse(body: bytes) -> tuple[str, str] | None:
     """(text, room) of a relayable body, None when it cannot be relayed (`reply_to` present,
     `room` missing or any field of the wrong type)."""
@@ -112,6 +122,13 @@ async def relay(
     All checks run before any write, so on a refusal nothing is posted or queued. `refusal` is
     the connector's 409 answer, passed back (without the occupier) when the post is not relayable.
     """
+    if _has_files(body):
+        raise ApiError(
+            409,
+            "files_not_relayable",
+            "the room is held by another session; send the files from that session or send"
+            " text without files",
+        )
     parsed = _parse(body)
     if parsed is None:
         return _plain(409, refusal)

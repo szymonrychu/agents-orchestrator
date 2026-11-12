@@ -13,7 +13,15 @@ from agents_orchestrator.db import queue
 from agents_orchestrator.settings import Settings
 
 ALLOWED_MIMES: frozenset[str] = frozenset(
-    {"image/png", "image/jpeg", "application/json", "text/plain"}
+    {
+        "image/png",
+        "image/jpeg",
+        "image/gif",
+        "image/webp",
+        "application/pdf",
+        "application/json",
+        "text/plain",
+    }
 )
 
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -31,6 +39,12 @@ def _check_content(name: str, mime: str, data: bytes) -> None:
         ok = data.startswith(_PNG)
     elif mime == "image/jpeg":
         ok = data.startswith(_JPEG)
+    elif mime == "image/gif":
+        ok = data[:6] in (b"GIF87a", b"GIF89a")
+    elif mime == "image/webp":
+        ok = data[:4] == b"RIFF" and data[8:12] == b"WEBP"
+    elif mime == "application/pdf":
+        ok = data.startswith(b"%PDF-")
     elif mime == "application/json":
         try:
             json.loads(data)

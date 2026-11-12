@@ -276,6 +276,17 @@ async def test_forwards_with_chat_token_never_agent_token(monkeypatch):
             assert "content-type" not in names
 
 
+async def test_relay_sends_caller_agent_header(monkeypatch):
+    rig = make_rig(monkeypatch)
+    leader = rig.db.agents[(rig.session.id, LEADER_IP)]
+    for method, path, _upstream in ROUTES[:2]:
+        rig.upstream.seen.clear()
+        r = await rig.call(method, path)
+        assert r.status_code == 200, r.text
+        (sent,) = rig.upstream.seen
+        assert sent.headers["x-orch-agent"] == str(leader.id)
+
+
 async def test_forwards_dot_segment_id_inside_messages_path(monkeypatch):
     rig = make_rig(monkeypatch)
     for raw, encoded in (("%2E%2E", "%2E%2E"), ("%2E", "%2E"), ("a%20b", "a%20b")):

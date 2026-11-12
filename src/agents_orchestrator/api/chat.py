@@ -39,6 +39,7 @@ MAX_BODY_BYTES = forward_core.MAX_BODY_BYTES
 TIMEOUT_SECONDS = forward_core.TIMEOUT_SECONDS
 UPSTREAM_PREFIX = "/chat/v1"
 STATE_ATTR = "chat_http"
+AGENT_HEADER = "X-Orch-Agent"  # the calling agent, whose workdir holds `files`
 
 
 def client(app: FastAPI) -> httpx.AsyncClient:
@@ -51,11 +52,16 @@ async def close_client(app: FastAPI) -> None:
 
 
 class ChatMessageIn(BaseModel):
-    """A chat message as the upstream reads it (OpenAPI only; the upstream validates it)."""
+    """A chat message as the upstream reads it (OpenAPI only; the upstream validates it).
+
+    `text` may be omitted when `files` is given. `files`: workdir-relative paths of files to send
+    after the text; the room must allow agent files.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    text: str
+    text: str | None = None
+    files: list[str] = []
     room: str | None = None
     reply_to: str | None = None
 
@@ -136,7 +142,14 @@ async def _relay(
     body = await forward_core.capped_body(request) if method in ("POST", "PUT") else None
     target = _target(settings)
     status, content = await forward_core.forward(
-        request, target, method, path, body, str(own.id), own.slug
+        request,
+        target,
+        method,
+        path,
+        body,
+        str(own.id),
+        own.slug,
+        extra_headers={AGENT_HEADER: str(agent.id)},
     )
     occupier = chat_relay.occupier_of(status, content) if relay_bound else None
     if occupier is not None:
@@ -173,6 +186,10 @@ async def rooms(request: Request, agent: Caller, pool: Pool, settings: Cfg) -> R
             "content": {"application/json": {"schema": chat_relay.ChatRelayed.model_json_schema()}},
         },
         **_POST_RESPONSES,
+        409: {
+            "description": "room_bound or another upstream conflict, or files_not_relayable: the"
+            " room is held by another session and the body has files"
+        },
     },
     openapi_extra=_json_body(ChatMessageIn),
 )
