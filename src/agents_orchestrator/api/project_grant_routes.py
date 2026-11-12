@@ -3,7 +3,8 @@
 The admin routes sit on `admin.router` (agent port, superleader gate, audited): a grant of an
 extra project to a session or preset is filed as a change proposal the human reviews (202 with
 the proposal, user answer Q4 A); a revoke is direct (200 with the target's view). Targets follow
-the admin visibility rule (`admin._target`, `admin.manageable_preset`: else 404).
+the admin write rule (`admin._writable_target`, `admin.writable_preset`: else 403
+`not_manageable`).
 
 `main_router` (main port, the human): `PUT .../extra-projects` sets the whole list directly.
 `PortGate` keeps it off the agent port.
@@ -18,8 +19,8 @@ from fastapi import APIRouter, Request, Response
 from agents_orchestrator.api import presets as presets_api
 from agents_orchestrator.api import project_grants, proposals, schemas
 from agents_orchestrator.api import sessions as sessions_api
-from agents_orchestrator.api.admin import _target as admin_target
-from agents_orchestrator.api.admin import caller_of, manageable_preset
+from agents_orchestrator.api.admin import _writable_target as admin_target
+from agents_orchestrator.api.admin import caller_of, writable_preset
 from agents_orchestrator.api.admin import router as admin_router
 from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.sessions import Cfg, Pool
@@ -117,7 +118,7 @@ async def revoke_preset_project(
     note_fields(request, ["projects"])
     async with pool.connection() as conn:
         async with conn.transaction():
-            found = await manageable_preset(conn, ref)
+            found = await writable_preset(conn, ref)
             locked = await presets_repo.get_for_update(conn, found.id)
             if locked is None:
                 raise not_found("preset")

@@ -10152,7 +10152,7 @@
         ]
       },
       "get": {
-        "description": "A superleader reads its own or a manageable session; any other leader its own.",
+        "description": "A superleader reads any session; any other leader its own.",
         "operationId": "get_session_agent_v1_admin_sessions__slug__get",
         "parameters": [
           {

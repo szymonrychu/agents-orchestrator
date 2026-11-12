@@ -145,7 +145,7 @@ async def test_trigger_created_superleader_is_admitted(app, pool, settings):
 
 
 @pytest.mark.parametrize("kind", ["hidden", "presetless", "unknown"])
-async def test_superleader_on_a_session_outside_its_remit_404(app, pool, settings, kind):
+async def test_superleader_on_a_session_outside_its_remit_refused(app, pool, settings, kind):
     boss = await alone(pool, f"sp-boss-{kind}", superleader=True)
     slug = "sp-nobody"
     if kind != "unknown":
@@ -156,11 +156,12 @@ async def test_superleader_on_a_session_outside_its_remit_404(app, pool, setting
         slug = target.slug
         before = await _row(pool, target.id)
     r = await call(app, boss, "PATCH", slug, json=PEERS_OFF)
-    assert_error(r, 404, "not_found")
+    # decision 388: unknown stays 404, a session outside the remit is read open and write 403
+    assert_error(r, *((404, "not_found") if kind == "unknown" else (403, "not_manageable")))
     if kind != "unknown":
         assert await _row(pool, target.id) == before
     rows = await audits(pool, boss.id)
-    assert [(a["status"], "fields" in a) for a in rows] == [(404, False)]
+    assert [(a["status"], "fields" in a) for a in rows] == [(r.status_code, False)]
 
 
 # ---------------------------------------------------------------- refusals are audited

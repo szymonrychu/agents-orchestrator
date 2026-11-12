@@ -128,11 +128,11 @@ async def test_not_superleader_403(pool, app, vault):
     assert vault.calls == []
 
 
-async def test_not_manageable_404(app, call, vault):
+async def test_not_manageable_403(app, call, vault):
     await make(app, "hidden", manageable=False)
     for method in ("PUT", "DELETE"):
         kw = {"json": {}} if method == "PUT" else {}
-        assert_error(await call(method, f"{A}/hidden/vault/{ENTRY}", **kw), 404, "not_found")
+        assert_error(await call(method, f"{A}/hidden/vault/{ENTRY}", **kw), 403, "not_manageable")
     assert vault.calls == [] and vault.listed == 0
 
 

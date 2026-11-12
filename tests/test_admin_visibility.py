@@ -1,6 +1,7 @@
-"""Every admin route is classified by what it hides from a superleader, and every scoped route
-answers 404 for a target the superleader may not manage; every proposal route answers 404 for
-another session's proposal and for one whose preset the superleader may not manage."""
+"""Every admin route is classified by what it withholds from a superleader. Decision 388: a scoped
+route reads any target (200) and its writes answer 403 `not_manageable` for one the superleader
+may not manage; every proposal route answers 404 for another session's proposal and for one
+whose preset the superleader may not manage, and a create on such a target is 403."""
 
 from __future__ import annotations
 
@@ -61,7 +62,9 @@ def test_every_admin_route_is_classified():
 @pytest.mark.parametrize(
     ("method", "path"), [k for k, v in ADMIN_VISIBILITY.items() if v in ("preset", "session")]
 )
-async def test_every_scoped_admin_route_404s_for_hidden_target(pool, dsn, method, path):
+async def test_every_scoped_admin_route_reads_open_and_refuses_writes_on_unmanageable_target(
+    pool, dsn, method, path
+):
     app = create_app(make_settings(dsn), pool, kube=FakeKube(namespace="agents"))
     boss = await alone(pool, "vis-boss", superleader=True)
     other = await hive(pool, "vis-other")
@@ -85,7 +88,10 @@ async def test_every_scoped_admin_route_404s_for_hidden_target(pool, dsn, method
     kw = {"json": BODIES[(method, path)]} if (method, path) in BODIES else {}
     async with client_for(app, boss.leader_ip) as http:
         r = await http.request(method, url, headers=headers(boss.id), **kw)
-    assert_error(r, 404, "not_found")
+    if method == "GET":
+        assert r.status_code == 200, r.text
+    else:
+        assert_error(r, 403, "not_manageable")
 
 
 PROPOSAL_BODIES = {
@@ -154,5 +160,7 @@ async def test_every_proposal_route_hides_what_the_caller_may_not_see(
         assert r.json() == []
     elif (method, path) == ("POST", "/agent/v1/admin/proposals") and hidden_by == "another_session":
         assert r.status_code == 201, r.text  # a manageable target: the caller files its own
+    elif (method, path) == ("POST", "/agent/v1/admin/proposals"):
+        assert_error(r, 403, "not_manageable")  # decision 388: a write on an unmanageable preset
     else:
         assert_error(r, 404, "not_found")

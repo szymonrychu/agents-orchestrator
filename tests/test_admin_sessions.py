@@ -113,29 +113,29 @@ async def test_admin_create_from_manageable_preset_201(call, main):
     assert r.status_code == 201, r.text
 
 
-async def test_get_session_of_hidden_preset_404(call, pool):
+async def test_get_session_of_unmanageable_preset_200(call, pool):
     other = await alone(pool, "hid-get")
     await attach_preset(pool, other.id, manageable=False)
-    assert_error(await call("GET", f"{S}/{other.slug}"), 404, "not_found")
-    assert (await call("GET", f"{S}/nope")).json() == (
-        await call("GET", f"{S}/{other.slug}")
-    ).json()
+    r = await call("GET", f"{S}/{other.slug}")
+    assert r.status_code == 200 and r.json()["slug"] == other.slug
+    assert_error(await call("GET", f"{S}/nope"), 404, "not_found")
 
 
-async def test_discard_session_of_hidden_preset_404(call, pool):
+async def test_discard_session_of_unmanageable_preset_403(call, pool):
     other = await alone(pool, "hid-del")
     await attach_preset(pool, other.id, manageable=False)
-    assert_error(await call("DELETE", f"{S}/{other.slug}"), 404, "not_found")
+    assert_error(await call("DELETE", f"{S}/{other.slug}"), 403, "not_manageable")
     assert (await row(pool, other.slug))["desired"] == "active"
 
 
-async def test_session_without_preset_404(call, pool, main):
+async def test_session_without_preset_read_200_write_403(call, pool, main):
     r = await main("POST", "/api/v1/sessions", json={"slug": "raw-one", "spec": {}})
     assert r.status_code == 201, r.text
-    assert_error(await call("GET", f"{S}/raw-one"), 404, "not_found")
+    assert (await call("GET", f"{S}/raw-one")).status_code == 200
+    assert_error(await call("DELETE", f"{S}/raw-one"), 403, "not_manageable")
 
 
-async def test_session_after_preset_deleted_404(call, pool, main):
+async def test_session_after_preset_deleted_write_403(call, pool, main):
     p = (
         await main("POST", M, json={"name": "gone", "spec": {}, "superleader_manageable": True})
     ).json()
@@ -144,7 +144,8 @@ async def test_session_after_preset_deleted_404(call, pool, main):
     assert (await call("GET", f"{S}/orphan")).status_code == 200
     assert (await main("DELETE", f"{M}/{p['id']}")).status_code == 204
     assert (await row(pool, "orphan"))["preset_id"] is None
-    assert_error(await call("GET", f"{S}/orphan"), 404, "not_found")
+    assert (await call("GET", f"{S}/orphan")).status_code == 200
+    assert_error(await call("DELETE", f"{S}/orphan"), 403, "not_manageable")
 
 
 async def test_own_session_visible_with_hidden_preset(call, pool, boss):

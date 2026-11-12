@@ -286,18 +286,20 @@ async def test_commands_are_scoped_to_the_issuing_superleader(call, pool, app, b
     assert_error(r, 404, "not_found")
 
 
-async def test_restart_hidden_session_404(call, pool):
+async def test_restart_unmanageable_session_403(call, pool):
     other = await hive(pool, "rs-hidden")
     await attach_preset(pool, other.id, manageable=False)
-    assert_error(await call("POST", f"{S}/{other.slug}/restart"), 404, "not_found")
+    assert_error(await call("POST", f"{S}/{other.slug}/restart"), 403, "not_manageable")
     assert await q(pool, "SELECT 1 FROM commands") == []
 
 
-async def test_restart_agent_hidden_session_404(call, pool):
+async def test_restart_agent_unmanageable_session_403(call, pool):
     other = await hive(pool, "rs-hidden-agent")
     await attach_preset(pool, other.id, manageable=False)
     pod = (await agents_of(pool, other.id))[0]["pod_name"]
-    assert_error(await call("POST", f"{S}/{other.slug}/agents/{pod}/restart"), 404, "not_found")
+    assert_error(
+        await call("POST", f"{S}/{other.slug}/agents/{pod}/restart"), 403, "not_manageable"
+    )
     assert await q(pool, "SELECT 1 FROM commands") == []
 
 
