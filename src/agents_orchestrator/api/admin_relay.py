@@ -70,7 +70,7 @@ from pydantic import SecretStr
 
 from agents_orchestrator.api import chat_requests, secret_store, vault_client, vault_refs
 from agents_orchestrator.api import forward as forward_core
-from agents_orchestrator.api.admin import caller_of, not_manageable, router, touched
+from agents_orchestrator.api.admin import FORBIDDEN, caller_of, not_manageable, router, touched
 from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.scope import projects_header
 from agents_orchestrator.api.sessions import Cfg
@@ -491,6 +491,18 @@ def _cursor_responses(service: str, method: str, template: str) -> dict[int | st
     return {200: {"description": "Successful Response", "headers": {NEXT_CURSOR_HEADER: header}}}
 
 
+def _relay_responses(service: str, method: str, template: str) -> dict[int | str, Any]:
+    """The OpenAPI entries of one relay route: the cursor header, and for the usage reads the
+    gate's 403 and the 503 of an unconfigured or unreachable upstream."""
+    responses = _cursor_responses(service, method, template)
+    if service == "usage":
+        responses[403] = FORBIDDEN
+        responses[503] = {
+            "description": "upstream_unconfigured or upstream_unavailable: the usage service"
+        }
+    return responses
+
+
 def _register() -> None:
     for service, (relay_prefix, _, _, routes) in SERVICES.items():
         for method, template, success in routes:
@@ -500,7 +512,7 @@ def _register() -> None:
                 methods=[method],
                 status_code=success,
                 response_class=Response,
-                responses=_cursor_responses(service, method, template),
+                responses=_relay_responses(service, method, template),
                 operation_id="admin_" + service + "_" + method.lower() + _slug(template),
                 summary=f"{method} {service} {template}",
                 tags=["admin"],

@@ -10,10 +10,9 @@ from typing import Annotated
 from fastapi import Query, Response
 
 from agents_orchestrator.api import archives, schemas
-from agents_orchestrator.api.admin import router
+from agents_orchestrator.api.admin import FORBIDDEN, router
 from agents_orchestrator.api.sessions import Cfg, Pool
 
-_FORBIDDEN = {"description": "not_superleader: the caller is not a superleader"}
 _UNAVAILABLE = {"description": "unavailable: the cache archives are not configured for the api"}
 _BAD_REQUEST = {"description": "bad_request: invalid prefix or cursor"}
 
@@ -21,7 +20,7 @@ _BAD_REQUEST = {"description": "bad_request: invalid prefix or cursor"}
 @router.get(
     "/archives",
     response_model=schemas.ArchivePage,
-    responses={400: _BAD_REQUEST, 403: _FORBIDDEN, 503: _UNAVAILABLE},
+    responses={400: _BAD_REQUEST, 403: FORBIDDEN, 503: _UNAVAILABLE},
 )
 async def list_archives(
     pool: Pool,
@@ -36,7 +35,7 @@ async def list_archives(
 @router.get(
     "/archives/settings",
     response_model=schemas.CleanupSettingsView,
-    responses={403: _FORBIDDEN, 503: _UNAVAILABLE},
+    responses={403: FORBIDDEN, 503: _UNAVAILABLE},
 )
 async def archives_settings(
     pool: Pool, settings: Cfg, response: Response
@@ -47,7 +46,7 @@ async def archives_settings(
 @router.get(
     "/archives/cleanup/preview",
     response_model=schemas.CleanupPreview,
-    responses={403: _FORBIDDEN, 503: _UNAVAILABLE},
+    responses={403: FORBIDDEN, 503: _UNAVAILABLE},
 )
 async def archives_cleanup_preview(
     pool: Pool, settings: Cfg, response: Response

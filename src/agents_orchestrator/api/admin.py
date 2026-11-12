@@ -182,6 +182,10 @@ class AdminRoute(APIRoute):
         return handler
 
 
+FORBIDDEN: dict[int | str, Any] = {
+    "description": "not_superleader: the caller is not a superleader"
+}
+SESSION_NOT_FOUND: dict[int | str, Any] = {"description": "not_found: no session has that slug"}
 router = APIRouter(
     prefix=ADMIN_PREFIX, tags=["admin"], route_class=AdminRoute, dependencies=[Superleader]
 )
@@ -280,7 +284,7 @@ async def writable_preset(conn, ref: str) -> presets_repo.Preset:
     return found
 
 
-@router.get("/meta", response_model=schemas.Meta)
+@router.get("/meta", response_model=schemas.Meta, responses={403: FORBIDDEN})
 async def get_meta(settings: Cfg) -> schemas.Meta:
     """The deploy settings the main port answers (defaults, images, models, caps)."""
     return await sessions_api.meta(settings)
@@ -292,7 +296,7 @@ async def list_presets(pool: Pool) -> list[schemas.PresetView]:
         return await presets_api.list_all(conn)
 
 
-@router.get("/sessions", response_model=list[schemas.SessionView])
+@router.get("/sessions", response_model=list[schemas.SessionView], responses={403: FORBIDDEN})
 async def list_sessions(
     pool: Pool,
     settings: Cfg,
@@ -622,7 +626,11 @@ async def get_command(command_id: int, pool: Pool) -> schemas.CommandView:
 # ------------------------------------------------- live work of any session (T-120)
 
 
-@router.get("/sessions/{slug}/activity", response_model=Activity)
+@router.get(
+    "/sessions/{slug}/activity",
+    response_model=Activity,
+    responses={403: FORBIDDEN, 404: SESSION_NOT_FOUND},
+)
 async def session_activity(
     slug: str,
     request: Request,
@@ -637,7 +645,15 @@ async def session_activity(
         return await activity_lines(conn, target, peer, limit)
 
 
-@router.get("/sessions/{slug}/events", response_model=streams.EventsPage)
+@router.get(
+    "/sessions/{slug}/events",
+    response_model=streams.EventsPage,
+    responses={
+        400: {"description": "bad_request: before_id and after_id are mutually exclusive"},
+        403: FORBIDDEN,
+        404: SESSION_NOT_FOUND,
+    },
+)
 async def session_events(
     slug: str,
     request: Request,
@@ -663,7 +679,11 @@ async def session_events(
         )
 
 
-@router.get("/sessions/{slug}/messages", response_model=list[schemas.MessageView])
+@router.get(
+    "/sessions/{slug}/messages",
+    response_model=list[schemas.MessageView],
+    responses={403: FORBIDDEN, 404: SESSION_NOT_FOUND},
+)
 async def session_messages(
     slug: str,
     request: Request,
@@ -682,7 +702,11 @@ async def session_messages(
     return [messages_api._message_view(r) for r in rows]
 
 
-@router.get("/sessions/{slug}/locks", response_model=LocksOut)
+@router.get(
+    "/sessions/{slug}/locks",
+    response_model=LocksOut,
+    responses={403: FORBIDDEN, 404: SESSION_NOT_FOUND},
+)
 async def session_locks(slug: str, request: Request, pool: Pool) -> LocksOut:
     """The file locks held by the live agents of any session."""
     _, caller = caller_of(request)
@@ -690,7 +714,11 @@ async def session_locks(slug: str, request: Request, pool: Pool) -> LocksOut:
         return await locks_of(conn, (await _readable_target(conn, slug, caller)).id)
 
 
-@router.get("/sessions/{slug}/commands", response_model=list[schemas.CommandView])
+@router.get(
+    "/sessions/{slug}/commands",
+    response_model=list[schemas.CommandView],
+    responses={403: FORBIDDEN, 404: SESSION_NOT_FOUND},
+)
 async def session_commands(
     slug: str,
     request: Request,
