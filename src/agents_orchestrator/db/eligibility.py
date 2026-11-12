@@ -28,6 +28,10 @@ STAYS = (
 DEAD = "EXISTS (SELECT 1 FROM agent_status ds WHERE ds.agent_id = a.id AND ds.state = 'dead')"
 READY_STAYS = f"a.ready AND a.gone_at IS NULL AND NOT {DEAD} AND {STAYS}"
 ELIGIBLE = f"{READY_STAYS} AND a.wrapper_session_id IS NOT NULL"
+# The agents the dispatcher can hand a message to now (T-167): ready, not gone, not dead and
+# holding a wrapper session. Not `STAYS`: a leaving agent still holds the message it is given.
+# Behind the summary's `ready_with_session`. Alias `a`.
+HOLDS_SESSION = f"a.ready AND a.gone_at IS NULL AND NOT {DEAD} AND a.wrapper_session_id IS NOT NULL"
 
 # The handover trigger: the leader's pod is leaving. Aliases: `l` the `session_leaders` row, `a`
 # the leader's agent, `c` the session. `LEAVING` is the ordinal test alone (the pass reads it as
