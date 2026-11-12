@@ -67,10 +67,14 @@ TAIL_TOOLS = [
 # plugin pin and remove it when the pin offers the tool (project room T-117 O9; project grants
 # T-120).
 PLUGIN_PENDING: set[str] = {
-    "session_projects_grant",
-    "session_projects_revoke",
-    "preset_projects_grant",
-    "preset_projects_revoke",
+    "session_labels_update",
+    "session_scale",
+    "session_lock_reassign",
+    "session_message_cancel",
+    "project_update",
+    "archives_settings_set",
+    "spec_delete",
+    "spec_suggestion_dismiss",
 }
 ALONE_TOOLS = ["me", *TAIL_TOOLS]
 PROPOSAL = [
@@ -102,6 +106,8 @@ ADMIN_TOOLS = [
     "sessions_admin_list", "session_activity", "session_events", "session_messages",
     "session_locks", "session_commands", "meta_get", "archives_list", "archives_settings_get",
     "archives_cleanup_preview", "usage_history", "usage_sessions",
+    "session_labels_update", "session_scale", "session_lock_reassign", "session_message_cancel",
+    "project_update", "archives_settings_set", "spec_delete", "spec_suggestion_dismiss",
     *PROPOSAL,
 ]  # fmt: skip
 SECRET = "s3cr3t-token-value"

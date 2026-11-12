@@ -87,7 +87,9 @@ MINDMAP_TOOLS = [
 # only: there is no history delete tool, deleting a stored session is for the user (web UI).
 # The slice 2 reads (T-120): any session's live work, the deploy meta, the cache archives
 # (no download) and the usage history. A project grant tool files a proposal the user reviews
-# (T-120); revoke tools act at once.
+# (T-120); revoke tools act at once. The slice 3 writes (labels, scale, lock reassign, message
+# cancel, project update, cleanup settings, spec delete, suggestion dismiss) are
+# superleader-alone and audited.
 ADMIN_TOOLS = [
     "presets_list", "preset_get", "preset_create", "preset_replace", "preset_patch",
     "preset_delete", "preset_copy", "session_get", "session_patch", "session_create",
@@ -108,6 +110,8 @@ ADMIN_TOOLS = [
     "sessions_admin_list", "session_activity", "session_events", "session_messages",
     "session_locks", "session_commands", "meta_get", "archives_list", "archives_settings_get",
     "archives_cleanup_preview", "usage_history", "usage_sessions",
+    "session_labels_update", "session_scale", "session_lock_reassign", "session_message_cancel",
+    "project_update", "archives_settings_set", "spec_delete", "spec_suggestion_dismiss",
     *PROPOSAL_TOOLS,
 ]  # fmt: skip
 
