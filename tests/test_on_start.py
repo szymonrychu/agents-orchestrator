@@ -71,19 +71,6 @@ PLUGIN_PENDING: set[str] = {
     "session_projects_revoke",
     "preset_projects_grant",
     "preset_projects_revoke",
-    "project_summary",
-    "sessions_admin_list",
-    "session_activity",
-    "session_events",
-    "session_messages",
-    "session_locks",
-    "session_commands",
-    "meta_get",
-    "archives_list",
-    "archives_settings_get",
-    "archives_cleanup_preview",
-    "usage_history",
-    "usage_sessions",
 }
 ALONE_TOOLS = ["me", *TAIL_TOOLS]
 PROPOSAL = [
