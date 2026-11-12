@@ -9358,6 +9358,100 @@
         ]
       }
     },
+    "/agent/v1/admin/projects/{slug}": {
+      "patch": {
+        "description": "Rename, describe, archive or unarchive a project, same body, answer and errors as the\nmain-port route. An explicit null keeps the stored value and is still listed in the audit\nrow, which carries the set field names only.",
+        "operationId": "update_project_agent_v1_admin_projects__slug__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader"
+          },
+          "404": {
+            "description": "not_found: no project has that slug"
+          },
+          "409": {
+            "description": "default_project: the default project cannot be archived"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Project",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/agent/v1/admin/proposals": {
       "get": {
         "description": "A superleader: every proposal. A regular leader: its own, newest first, current revision\nonly.",

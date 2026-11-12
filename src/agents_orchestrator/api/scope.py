@@ -148,6 +148,7 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("GET", f"{_ADMIN}/commands/{{command_id}}"): "superleader",
     ("GET", f"{_ADMIN}/usage"): "superleader",
     ("POST", f"{_ADMIN}/projects"): "superleader",
+    ("PATCH", f"{_ADMIN}/projects/{{slug}}"): "superleader",
     # superleader writes on any manageable session (T-120 slice 3)
     ("PUT", f"{_ADMIN}/sessions/{{slug}}/labels"): "superleader",
     ("POST", f"{_ADMIN}/sessions/{{slug}}/scale"): "superleader",

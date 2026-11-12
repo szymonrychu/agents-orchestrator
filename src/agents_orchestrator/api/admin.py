@@ -260,6 +260,7 @@ ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("GET", f"{ADMIN_PREFIX}/commands/{{command_id}}"): "none",
     ("GET", f"{ADMIN_PREFIX}/usage"): "none",
     ("POST", f"{ADMIN_PREFIX}/projects"): "none",
+    ("PATCH", f"{ADMIN_PREFIX}/projects/{{slug}}"): "none",
     ("PUT", f"{ADMIN_PREFIX}/sessions/{{slug}}/labels"): "session",
     ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/scale"): "session",
     ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/projects"): "session",
@@ -285,6 +286,25 @@ async def create_project(
     carries the field names only."""
     note_fields(request, ["slug", "name"])
     return await projects_api.create(pool, body)
+
+
+@router.patch(
+    "/projects/{slug}",
+    response_model=schemas.ProjectView,
+    responses={
+        403: FORBIDDEN,
+        404: {"description": "not_found: no project has that slug"},
+        409: {"description": "default_project: the default project cannot be archived"},
+    },
+)
+async def update_project(
+    slug: str, body: schemas.ProjectPatch, request: Request, pool: Pool
+) -> schemas.ProjectView:
+    """Rename, describe, archive or unarchive a project, same body, answer and errors as the
+    main-port route. An explicit null keeps the stored value and is still listed in the audit
+    row, which carries the set field names only."""
+    note_fields(request, sorted(body.model_fields_set))
+    return await projects_api.patch(pool, slug, body)
 
 
 # ---------------------------------------------------------------- presets (O6)

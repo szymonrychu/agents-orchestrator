@@ -5,6 +5,7 @@ from __future__ import annotations
 from factories import two_project_fixture
 from fakes.fake_kube import FakeKube
 from psycopg.rows import dict_row
+from test_admin_audit_detail import admin_rows
 from test_agent_session_messaging import alone
 from test_api_agent import client_for, headers, make_settings
 from test_api_sessions import assert_error
@@ -92,3 +93,81 @@ async def test_regular_session_project_list_unchanged(pool, dsn):
         await conn.execute("UPDATE projects SET archived_at = now() WHERE slug = 'a'")
     assert await _agent_projects(pool, dsn, seats["A1"]) == {"a": True}
     assert await _agent_projects(pool, dsn, seats["B1"]) == {"b": False}
+
+
+async def patch(pool, dsn, who, slug, body):
+    app = create_app(make_settings(dsn), pool)
+    async with client_for(app, who.leader_ip) as http:
+        return await http.patch(f"{URL}/{slug}", headers=headers(who.id), json=body)
+
+
+async def seed_project(pool, slug="pa"):
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO projects (slug, name, description) VALUES (%s, 'Pa', 'old')", (slug,)
+        )
+
+
+async def test_superleader_renames_project(pool, dsn):
+    boss = await alone(pool, "pa-boss", superleader=True)
+    await seed_project(pool)
+    r = await patch(pool, dsn, boss, "pa", {"name": "Renamed"})
+    assert r.status_code == 200, r.text
+    assert r.json()["name"] == "Renamed"
+    (row,) = await admin_rows(pool)
+    assert row["fields"] == ["name"]
+
+
+async def test_superleader_sets_description(pool, dsn):
+    boss = await alone(pool, "pa-desc", superleader=True)
+    await seed_project(pool)
+    r = await patch(pool, dsn, boss, "pa", {"description": "d"})
+    assert r.status_code == 200, r.text
+    assert r.json()["description"] == "d"
+
+
+async def test_superleader_archives_and_unarchives_project(pool, dsn):
+    boss = await alone(pool, "pa-arch", superleader=True)
+    await seed_project(pool)
+    r = await patch(pool, dsn, boss, "pa", {"archived": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["archived"] is True
+    r = await patch(pool, dsn, boss, "pa", {"archived": False})
+    assert r.status_code == 200, r.text
+    assert r.json()["archived"] is False
+
+
+async def test_admin_archive_default_refused(pool, dsn):
+    boss = await alone(pool, "pa-def", superleader=True)
+    r = await patch(pool, dsn, boss, "default", {"archived": True})
+    assert_error(r, 409, "default_project")
+
+
+async def test_admin_project_update_unknown_404(pool, dsn):
+    boss = await alone(pool, "pa-404", superleader=True)
+    r = await patch(pool, dsn, boss, "nope", {"name": "x"})
+    assert_error(r, 404, "not_found")
+
+
+async def test_admin_project_update_regular_leader_403(pool, dsn):
+    leader = await alone(pool, "pa-reg")
+    await seed_project(pool)
+    r = await patch(pool, dsn, leader, "pa", {"name": "x"})
+    assert_error(r, 403, "not_superleader")
+
+
+async def test_admin_project_update_extra_field_422(pool, dsn):
+    boss = await alone(pool, "pa-422", superleader=True)
+    await seed_project(pool)
+    r = await patch(pool, dsn, boss, "pa", {"slug": "x"})
+    assert r.status_code == 422
+
+
+async def test_admin_project_update_null_keeps_value(pool, dsn):
+    boss = await alone(pool, "pa-null", superleader=True)
+    await seed_project(pool)
+    r = await patch(pool, dsn, boss, "pa", {"name": None})
+    assert r.status_code == 200, r.text
+    assert r.json()["name"] == "Pa"
+    (row,) = await admin_rows(pool)
+    assert row["fields"] == ["name"]
