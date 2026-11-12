@@ -17,10 +17,10 @@ from agents_orchestrator.spec import SessionSpec
 
 router = APIRouter(prefix="/api/v1")
 
-_DEFAULT_ATTEMPTS: int = SessionSpec.model_fields["max_attempts"].default
+DEFAULT_ATTEMPTS: int = SessionSpec.model_fields["max_attempts"].default
 
 
-def _message_view(r: dict) -> schemas.MessageView:
+def message_view(r: dict) -> schemas.MessageView:
     turn = (
         schemas.TurnView(
             status=r["turn_status"],
@@ -116,23 +116,23 @@ async def list_messages(
     async with pool.connection() as conn:
         if await repo.get(conn, session_id) is None:
             raise not_found("session")
-        rows = await views.list_messages(conn, session_id, statuses, limit, _DEFAULT_ATTEMPTS)
-    return [_message_view(r) for r in rows]
+        rows = await views.list_messages(conn, session_id, statuses, limit, DEFAULT_ATTEMPTS)
+    return [message_view(r) for r in rows]
 
 
 @router.get("/messages/{message_id}", response_model=schemas.MessageView)
 async def get_message(message_id: int, pool: Pool) -> schemas.MessageView:
     async with pool.connection() as conn:
-        row = await views.get_message(conn, message_id, _DEFAULT_ATTEMPTS)
+        row = await views.get_message(conn, message_id, DEFAULT_ATTEMPTS)
     if row is None:
         raise not_found("message")
-    return _message_view(row)
+    return message_view(row)
 
 
 @router.delete("/messages/{message_id}", status_code=204)
 async def cancel_message(message_id: int, pool: Pool) -> Response:
     async with pool.connection() as conn:
-        if await views.get_message(conn, message_id, _DEFAULT_ATTEMPTS) is None:
+        if await views.get_message(conn, message_id, DEFAULT_ATTEMPTS) is None:
             raise not_found("message")
         if not await queue.cancel_message(conn, message_id):
             raise ApiError(409, "not_queued", "only a queued message can be cancelled")
@@ -144,7 +144,7 @@ async def cancel_message(message_id: int, pool: Pool) -> Response:
 )
 async def retry_message(message_id: int, pool: Pool) -> schemas.MessageAccepted:
     async with pool.connection() as conn:
-        if await views.get_message(conn, message_id, _DEFAULT_ATTEMPTS) is None:
+        if await views.get_message(conn, message_id, DEFAULT_ATTEMPTS) is None:
             raise not_found("message")
         if not await queue.retry_message(conn, message_id):
             raise ApiError(409, "not_failed", "only a failed message can be retried")
@@ -220,11 +220,9 @@ async def restart_session(session_id: uuid.UUID, pool: Pool) -> schemas.SessionR
         return schemas.SessionRestartAccepted(command_ids=await restart_all(conn, session_id))
 
 
-async def command_view(
-    conn, command_id: int, issued_by_session: uuid.UUID | None = None
-) -> schemas.CommandView:
-    """A command; with `issued_by_session` only one that session issued, else 404."""
-    row = await views.get_command(conn, command_id, issued_by_session)
+async def command_view(conn, command_id: int) -> schemas.CommandView:
+    """A command, else 404."""
+    row = await views.get_command(conn, command_id)
     if row is None:
         raise not_found("command")
     return schemas.CommandView(**row)

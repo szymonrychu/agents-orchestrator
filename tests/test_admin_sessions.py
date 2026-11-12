@@ -99,10 +99,14 @@ async def test_create_from_preset_with_slug_conflict(call):
     assert_error(await call("POST", S, json=body), 409, "conflict")
 
 
-async def test_admin_create_from_hidden_preset_404(call, main):
+async def test_admin_create_from_unmanageable_preset_403_unknown_404(call, main):
+    """A write on an unmanageable target is refused 403 (decision 388, R2), not hidden as 404;
+    an unknown preset id stays 404."""
     hidden = (await main("POST", M, json={"name": "hid", "spec": {}})).json()
     r = await call("POST", S, json={"preset_id": hidden["id"], "slug": "child-h"})
-    assert_error(r, 404, "not_found")
+    assert_error(r, 403, "not_manageable")
+    unknown = {"preset_id": "00000000-0000-0000-0000-000000000000", "slug": "child-u"}
+    assert_error(await call("POST", S, json=unknown), 404, "not_found")
 
 
 async def test_admin_create_from_manageable_preset_201(call, main):
@@ -269,11 +273,11 @@ async def test_admin_create_from_preset_with_flags_off_201(call, main):
     assert r.status_code == 201, r.text
 
 
-async def test_admin_create_hidden_privileged_is_404(call, main):
+async def test_admin_create_unmanageable_privileged_is_403(call, main):
     made = await main("POST", M, json={"name": "hidp", "spec": {"kube_cluster_access": True}})
     assert made.status_code == 201, made.text
     r = await call("POST", S, json={"preset_id": made.json()["id"], "slug": "child-hp"})
-    assert_error(r, 404, "not_found")
+    assert_error(r, 403, "not_manageable")
 
 
 async def test_main_create_from_privileged_preset_201(main):

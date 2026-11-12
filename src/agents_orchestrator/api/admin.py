@@ -37,7 +37,7 @@ from agents_orchestrator.api.agent import (
     activity_lines,
     locks_of,
 )
-from agents_orchestrator.api.errors import ApiError, not_found
+from agents_orchestrator.api.errors import ApiError, not_found, not_manageable
 from agents_orchestrator.api.sessions import Cfg, Pool, Usage
 from agents_orchestrator.api.spec_edit import note_fields
 from agents_orchestrator.db import agents as agents_repo
@@ -260,15 +260,6 @@ async def create_project(
 
 
 # ---------------------------------------------------------------- presets (O6)
-
-
-def not_manageable(kind: str) -> ApiError:
-    """The refusal of a write on a target the superleader may read but not manage (decision 388)."""
-    return ApiError(
-        403,
-        "not_manageable",
-        f"this {kind} is not superleader_manageable: writes need the user's approval",
-    )
 
 
 async def readable_preset(conn, ref: str) -> presets_repo.Preset:
@@ -697,9 +688,9 @@ async def session_messages(
     async with pool.connection() as conn:
         target = await _readable_target(conn, slug, caller)
         rows = await views.list_messages(
-            conn, target.id, statuses, limit, messages_api._DEFAULT_ATTEMPTS
+            conn, target.id, statuses, limit, messages_api.DEFAULT_ATTEMPTS
         )
-    return [messages_api._message_view(r) for r in rows]
+    return [messages_api.message_view(r) for r in rows]
 
 
 @router.get(

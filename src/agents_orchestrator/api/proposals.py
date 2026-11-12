@@ -369,8 +369,9 @@ async def create(
 async def _grant_target(
     conn, kind: str, ref: str, caller: Session
 ) -> tuple[str, str, str, tuple[str, ...]]:
-    """The grant's target as the superleader may see it (else 404 like an unknown): id, display
-    name, home project and extra projects. A session being deleted is 409."""
+    """The grant's target as the superleader may write it (unknown is 404, unmanageable is 403
+    `not_manageable`): id, display name, home project and extra projects. A session being
+    deleted is 409."""
     if kind == "session_projects":
         session = await admin._writable_target(conn, ref, caller)
         if session.desired != "active":
