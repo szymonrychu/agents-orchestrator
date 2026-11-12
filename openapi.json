@@ -9992,7 +9992,7 @@
     },
     "/agent/v1/admin/sessions": {
       "get": {
-        "description": "Every session, raw-spec and unmanageable ones included, as the redacted `SessionView`;\nthe main port's filters and errors.",
+        "description": "Every session, raw-spec and unmanageable ones included, as the redacted `SessionView`;\nthe main port's filters and errors. The slug filter is `session_slug`: the editor gate\ninvariant keeps a parameter named `slug` path-only.",
         "operationId": "list_sessions_agent_v1_admin_sessions_get",
         "parameters": [
           {
@@ -10049,7 +10049,7 @@
           },
           {
             "in": "query",
-            "name": "slug",
+            "name": "session_slug",
             "required": false,
             "schema": {
               "anyOf": [
@@ -10060,7 +10060,7 @@
                   "type": "null"
                 }
               ],
-              "title": "Slug"
+              "title": "Session Slug"
             }
           },
           {

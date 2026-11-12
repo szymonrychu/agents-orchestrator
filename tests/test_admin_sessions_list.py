@@ -52,7 +52,7 @@ async def test_admin_sessions_project_filter(pool, dsn):
     assert slugs(await list_as(app, boss, project=proj)) == ["pf-in", other_boss.slug]
     both = await list_as(app, boss, project=proj, superleaders="include")
     assert slugs(both) == sorted(["pf-in", "pf-oboss", "pf-boss"])
-    assert slugs(await list_as(app, boss, slug="pf-out")) == ["pf-out"]
+    assert slugs(await list_as(app, boss, session_slug="pf-out")) == ["pf-out"]
 
 
 async def test_admin_sessions_unknown_project_422(pool, dsn):

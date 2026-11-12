@@ -275,10 +275,11 @@ async def list_sessions(
     label: Annotated[list[str] | None, Query()] = None,
     project: str | None = None,
     superleaders: Literal["include"] | None = None,
-    slug: str | None = None,
+    session_slug: str | None = None,
 ) -> list[schemas.SessionView]:
     """Every session, raw-spec and unmanageable ones included, as the redacted `SessionView`;
-    the main port's filters and errors."""
+    the main port's filters and errors. The slug filter is `session_slug`: the editor gate
+    invariant keeps a parameter named `slug` path-only."""
     async with pool.connection() as conn:
         return await sessions_api.list_views(
             conn,
@@ -286,7 +287,7 @@ async def list_sessions(
             label=label,
             project=project,
             superleaders=superleaders == "include",
-            slug=slug,
+            slug=session_slug,
         )
 
 
