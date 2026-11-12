@@ -334,6 +334,31 @@ async def meta(settings: Cfg) -> schemas.Meta:
     )
 
 
+async def list_views(
+    conn,
+    settings: Settings,
+    *,
+    label: list[str] | None,
+    project: str | None,
+    superleaders: bool,
+    slug: str | None,
+) -> list[schemas.SessionView]:
+    """The session list behind the main port and the admin route: `label` (any match among live
+    sessions), `project` (422 `unknown_project`; an archived one still lists), `superleaders`
+    adds every superleader session to a project filter, `slug` is an exact match."""
+    try:
+        wanted = normalize_labels(label, allow_reserved=True) if label else None
+    except ValueError as exc:
+        raise ApiError(422, "invalid_request", str(exc)) from None
+    if project is not None and await projects.get_project(conn, project) is None:
+        raise project_error(projects.UnknownProject(project))
+    found = await repo.list_sessions(
+        conn, labels=wanted, project=project, slug=slug, superleaders=superleaders
+    )
+    aggs = await views.session_aggregates(conn)
+    return [_view(c, aggs.get(c.id), settings) for c in found]
+
+
 @router.get("/sessions", response_model=list[schemas.SessionView])
 async def list_sessions(
     pool: Pool,
@@ -347,22 +372,15 @@ async def list_sessions(
     `project` keeps that project's sessions (422 `unknown_project`; an archived one still
     lists), and with `superleaders=include` every superleader session is added; `slug` is an
     exact match. The filters combine."""
-    try:
-        wanted = normalize_labels(label, allow_reserved=True) if label else None
-    except ValueError as exc:
-        raise ApiError(422, "invalid_request", str(exc)) from None
     async with pool.connection() as conn:
-        if project is not None and await projects.get_project(conn, project) is None:
-            raise project_error(projects.UnknownProject(project))
-        found = await repo.list_sessions(
+        return await list_views(
             conn,
-            labels=wanted,
+            settings,
+            label=label,
             project=project,
-            slug=slug,
             superleaders=superleaders == "include",
+            slug=slug,
         )
-        aggs = await views.session_aggregates(conn)
-    return [_view(c, aggs.get(c.id), settings) for c in found]
 
 
 async def create(
