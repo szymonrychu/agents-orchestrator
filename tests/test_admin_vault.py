@@ -413,7 +413,7 @@ def att(preset_id, name="p"):
     return {"preset_id": preset_id, "preset_name": name, "env": "HOST", "entry_env": "HOST"}
 
 
-async def test_vault_list_scopes_entries_to_the_callers_project(app, call, vault):
+async def test_vault_list_names_every_entry_and_marks_the_callers_project_ones(app, call, vault):
     mine = await make(app, "mine")
     vault.listing = [
         listed(E_OPEN, "open", [], [att(mine["id"])]),
@@ -423,22 +423,34 @@ async def test_vault_list_scopes_entries_to_the_callers_project(app, call, vault
     ]
     r = await call("GET", V)
     assert r.status_code == 200, r.text
-    assert [e["name"] for e in r.json()["entries"]] == ["open", "tagged", "own-project"]
-    assert "other-project" not in r.text
+    # decision 388 (T-120): the superleader reads every entry, so other projects' entries are
+    # listed (without values) instead of dropped
+    assert [e["name"] for e in r.json()["entries"]] == [
+        "open",
+        "tagged",
+        "other-project",
+        "own-project",
+    ]
 
 
-async def test_vault_list_includes_the_callers_extra_projects(app, call, vault, pool, boss):
-    """A superleader that also belongs to project `other` (T-120 Q5) sees its entries too."""
+async def test_vault_list_keeps_readable_values_of_the_callers_extra_projects(
+    app, call, vault, pool, boss
+):
+    """A superleader that also belongs to project `other` (T-120 Q5) keeps readable values of
+    its entries; the third project's entry is listed without values."""
     await _exec(pool, "INSERT INTO projects (slug, name) VALUES ('other', 'Other')")
     async with pool.connection() as conn:
         await sessions_repo.set_extra_projects(conn, boss.id, ["other"])
+    mine = await make(app, "mine")
     vault.listing = [
-        listed(E_OTHER, "other-project", ["project:other"], []),
-        listed(E_HIDDEN, "third-project", ["project:third"], []),
+        listed(E_OTHER, "other-project", ["project:other"], [att(mine["id"])]),
+        listed(E_HIDDEN, "third-project", ["project:third"], [att(mine["id"])]),
     ]
     r = await call("GET", V)
     assert r.status_code == 200, r.text
-    assert [e["name"] for e in r.json()["entries"]] == ["other-project"]
+    got = {e["name"]: e for e in r.json()["entries"]}
+    assert [e["value"] for e in got["other-project"]["envs"]] == [READABLE, None]
+    assert [e["value"] for e in got["third-project"]["envs"]] == [None, None]
 
 
 async def test_vault_list_hides_readable_values_unless_attached_to_a_manageable_preset(
@@ -464,8 +476,13 @@ async def test_vault_list_hides_readable_values_unless_attached_to_a_manageable_
             ("HOST", False, None),
             ("TOKEN", True, None),
         ]
-    assert [a["preset_id"] for a in got["attached"]["attachments"]] == [mine["id"]]
-    assert got["only-hidden"]["attachments"] == []
+    assert [(a["preset_id"], a["manageable"]) for a in got["attached"]["attachments"]] == [
+        (mine["id"], True),
+        (locked["id"], False),
+    ]
+    assert [(a["preset_id"], a["manageable"]) for a in got["only-hidden"]["attachments"]] == [
+        (locked["id"], False)
+    ]
     assert got["unknown-attachments"]["attachments"] is None
     assert r.text.count(READABLE) == 1
 
@@ -516,7 +533,7 @@ async def test_vault_list_null_attachments_stay_null_and_hide_values(call, vault
     assert [e["value"] for e in entry["envs"]] == [None, None]
 
 
-async def test_vault_list_to_reattach_names_manageable_presets_only(app, call, pool):
+async def test_vault_list_to_reattach_includes_unmanageable(app, call, pool):
     mine = await make(app, "mine")
     locked = await make(app, "locked", manageable=False)
     await make(app, "clean")
@@ -524,9 +541,57 @@ async def test_vault_list_to_reattach_names_manageable_presets_only(app, call, p
         await repo.set_vault_reattach(conn, uuid.UUID(mine["id"]), ["B_KEY", "A_KEY"])
         await repo.set_vault_reattach(conn, uuid.UUID(locked["id"]), ["X_KEY"])
     r = await call("GET", V)
-    assert r.json()["to_reattach"] == [
-        {"preset_id": mine["id"], "preset_name": "mine", "envs": ["A_KEY", "B_KEY"]}
+    assert sorted(r.json()["to_reattach"], key=lambda x: x["preset_name"]) == [
+        {
+            "preset_id": locked["id"],
+            "preset_name": "locked",
+            "envs": ["X_KEY"],
+            "manageable": False,
+        },
+        {
+            "preset_id": mine["id"],
+            "preset_name": "mine",
+            "envs": ["A_KEY", "B_KEY"],
+            "manageable": True,
+        },
     ]
+
+
+async def test_vault_list_superleader_sees_other_project_entry_without_values(app, call, vault):
+    mine = await make(app, "mine")
+    foreign = listed(E_OTHER, "other-project", ["project:other"], [att(mine["id"])])
+    foreign["envs"] = [
+        {"env": "HOST", "protected": False, "value": READABLE},
+        {"env": "TOKEN", "protected": True, "value": CANARY},
+    ]
+    vault.listing = [foreign]
+    r = await call("GET", V)
+    assert r.status_code == 200, r.text
+    entry = r.json()["entries"][0]
+    assert entry["name"] == "other-project"
+    assert [(e["env"], e["value"]) for e in entry["envs"]] == [("HOST", None), ("TOKEN", None)]
+    assert READABLE not in r.text
+    assert CANARY not in r.text
+
+
+async def test_vault_list_own_project_readable_value_kept(app, call, vault):
+    mine = await make(app, "mine")
+    vault.listing = [listed(E_OPEN, "own", ["project:default"], [att(mine["id"])])]
+    r = await call("GET", V)
+    assert r.status_code == 200, r.text
+    assert [e["value"] for e in r.json()["entries"][0]["envs"]] == [READABLE, None]
+
+
+async def test_vault_attachment_on_unmanageable_listed_with_manageable_false(app, call, vault):
+    locked = await make(app, "locked", manageable=False)
+    vault.listing = [listed(E_OPEN, "own", [], [att(locked["id"], "locked")])]
+    r = await call("GET", V)
+    assert r.status_code == 200, r.text
+    entry = r.json()["entries"][0]
+    assert [(a["preset_id"], a["manageable"], a["privileged"]) for a in entry["attachments"]] == [
+        (locked["id"], False, False)
+    ]
+    assert [e["value"] for e in entry["envs"]] == [None, None]
 
 
 async def test_vault_list_forwards_q(call, vault):

@@ -10908,7 +10908,7 @@
     },
     "/agent/v1/admin/vault": {
       "get": {
-        "description": "The vault entries of the caller's projects (home and extra) and the env names to\nre-attach.",
+        "description": "Every vault entry (values only for the caller's projects) and the env names to\nre-attach.",
         "operationId": "admin_vault_list",
         "parameters": [
           {
@@ -13469,7 +13469,7 @@
     },
     "/agent/v1/projects": {
       "get": {
-        "description": "Scope `project` (projects plan 3.3): the caller's own projects, home first then its extra\nprojects (T-120), archived or not; a superleader session gets every active project. No\ncounts, as on the service port.",
+        "description": "Scope `project` (projects plan 3.3): the caller's own projects, home first then its extra\nprojects (T-120), archived or not; a superleader session gets every project, archived ones\nincluded. No counts, as on the service port.",
         "operationId": "projects_agent_v1_projects_get",
         "parameters": [
           {
@@ -13531,7 +13531,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "The caller's projects, or every active project for a superleader",
+        "summary": "The caller's projects, or every project for a superleader",
         "tags": [
           "agent"
         ]

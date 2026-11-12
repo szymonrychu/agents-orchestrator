@@ -85,7 +85,7 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("POST", f"{_A}/specs/{{path:path}}"): "project",
     ("PUT", f"{_A}/specs/{{path:path}}"): "project",
     ("PATCH", f"{_A}/specs/{{path:path}}"): "project",
-    # the caller's projects, or every active project for a superleader
+    # the caller's projects, or every project for a superleader
     ("GET", f"{_A}/projects"): "project",
     # chat relay: project in the plan, but no filter is sent until the complete stage (X1)
     ("GET", f"{_A}/chat/rooms"): "project",

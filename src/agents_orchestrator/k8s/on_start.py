@@ -54,7 +54,7 @@ TASK_TOOLS = [
     "decision_ask", "decision_withdraw", "todo_set", "todo_update", "session_labels_set",
 ]  # fmt: skip
 # Project tool (projects T-19): every session lists the projects its scope reaches
-# (GET /agent/v1/projects: its own project, or every active one for a superleader).
+# (GET /agent/v1/projects: its own project, or every one for a superleader).
 PROJECT_TOOLS = ["project_list"]
 # Spec tools (T-116): the spec relay on the agent port; every session gets them, trigger-created
 # ones included (accept and dismiss are user-only and have no tool).
