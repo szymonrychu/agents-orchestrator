@@ -12280,7 +12280,7 @@
     },
     "/agent/v1/admin/sessions/{slug}/scale": {
       "post": {
-        "description": "Set spec.replicas of a manageable session in place; the caller's own session is refused\n(422 `own_session`). A scale-up over the usage quota is 409 `usage_quota`: that check reads\non its own connection and fails open, like the main port's. No kube call.",
+        "description": "Set spec.replicas of a manageable session in place; the caller's own session is refused\n(422 `own_session`). A scale-up over the usage quota is 409 `usage_quota`: that check reads\non its own connection and fails open, like the main port's, so it runs between a short\nread of the target and the transaction (never while a connection is held). No kube call.",
         "operationId": "scale_session_agent_v1_admin_sessions__slug__scale_post",
         "parameters": [
           {
@@ -12412,16 +12412,8 @@
           }
         ],
         "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "The taskboard upstream's status and JSON body, unchanged"
-          },
           "204": {
-            "description": "deleted"
+            "description": "Successful Response"
           },
           "401": {
             "description": "unauthorized: missing or invalid agent credentials"

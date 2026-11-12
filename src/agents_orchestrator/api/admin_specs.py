@@ -42,8 +42,10 @@ async def _forward(
 
 @router.delete(
     "/specs/{key}",
+    status_code=204,
+    response_model=None,
     summary="Delete a spec through the taskboard, as every project",
-    responses={**_RESPONSES, 204: {"description": "deleted"}, 403: _FORBIDDEN},
+    responses={**{k: v for k, v in _RESPONSES.items() if k != 200}, 403: _FORBIDDEN},
 )
 async def delete_spec(key: str, request: Request, pool: Pool, settings: Cfg) -> Response:
     return await _forward(request, pool, settings, f"/specs/{key}", _DELETE)

@@ -137,3 +137,12 @@ async def test_admin_spec_routes_taskboard_unconfigured_503(pool, dsn, boss, see
     app = make_app(dsn, pool, seen, configured=False)
     assert_error(await call(app, boss, method, path), 503, "taskboard_unconfigured")
     assert seen == []
+
+
+def test_spec_delete_declares_204_only():
+    import json
+    import pathlib
+
+    doc = json.loads((pathlib.Path(__file__).parent.parent / "openapi.json").read_text())
+    codes = doc["paths"][f"{S}/{{key}}"]["delete"]["responses"]
+    assert "204" in codes and "200" not in codes
