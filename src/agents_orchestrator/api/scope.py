@@ -108,7 +108,8 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("GET", f"{_ADMIN}/sessions/{{slug}}"): "own",
     ("PATCH", f"{_ADMIN}/sessions/{{slug}}"): "own",
     ("POST", f"{_ADMIN}/sessions/{{slug}}/leadership/withdraw"): "own",
-    # proposals: the proposer's own proposals only (`proposal_routes`)
+    # proposals: the proposer's own proposals only (`proposal_routes`); a superleader's GETs read
+    # every proposal (T-120 slice 2), the scope class stays "own" for the write paths
     ("POST", f"{_ADMIN}/proposals"): "own",
     ("GET", f"{_ADMIN}/proposals"): "own",
     ("GET", f"{_ADMIN}/proposals/{{proposal_id}}"): "own",

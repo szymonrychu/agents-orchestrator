@@ -43,7 +43,7 @@ TASK_TOOLS = [
     "task_create", "task_update", "task_list", "task_get", "task_comment",
     "decision_ask", "decision_withdraw", "todo_set", "todo_update", "session_labels_set",
 ]  # fmt: skip
-PROJECT_TOOLS = ["project_list"]
+PROJECT_TOOLS = ["project_list", "project_summary"]
 SPEC_TOOLS = [
     "spec_list", "spec_get", "spec_create", "spec_update", "spec_versions", "spec_comment",
     "spec_comments", "spec_comment_resolve", "spec_pull", "spec_push",
@@ -71,6 +71,19 @@ PLUGIN_PENDING: set[str] = {
     "session_projects_revoke",
     "preset_projects_grant",
     "preset_projects_revoke",
+    "project_summary",
+    "sessions_admin_list",
+    "session_activity",
+    "session_events",
+    "session_messages",
+    "session_locks",
+    "session_commands",
+    "meta_get",
+    "archives_list",
+    "archives_settings_get",
+    "archives_cleanup_preview",
+    "usage_history",
+    "usage_sessions",
 }
 ALONE_TOOLS = ["me", *TAIL_TOOLS]
 PROPOSAL = [
@@ -99,6 +112,9 @@ ADMIN_TOOLS = [
     "history_records", "usage_get", "project_create",
     "session_projects_grant", "session_projects_revoke", "preset_projects_grant",
     "preset_projects_revoke",
+    "sessions_admin_list", "session_activity", "session_events", "session_messages",
+    "session_locks", "session_commands", "meta_get", "archives_list", "archives_settings_get",
+    "archives_cleanup_preview", "usage_history", "usage_sessions",
     *PROPOSAL,
 ]  # fmt: skip
 SECRET = "s3cr3t-token-value"
@@ -133,7 +149,7 @@ def entries(spec: SessionSpec, settings: Settings | None = None) -> dict:
 
 def test_history_tools_are_read_and_search_only():
     """The superleader reads and searches stored sessions; no tool deletes one (user decision)."""
-    history = [t for t in on_start.ADMIN_TOOLS if "history" in t]
+    history = [t for t in on_start.ADMIN_TOOLS if t.startswith("history_")]
     assert history == ["history_search", "history_get", "history_records"]
     assert not [t for t in on_start.ADMIN_TOOLS if "history" in t and "delete" in t]
     assert on_start.ADMIN_TOOLS == ADMIN_TOOLS
@@ -589,7 +605,7 @@ def test_alone_session_allow_is_the_literal_e2e_list():
         "chat_skills_save", "chat_skills_delete",
         "task_create", "task_update", "task_list", "task_get", "task_comment",
         "decision_ask", "decision_withdraw", "todo_set", "todo_update", "session_labels_set",
-        "project_list",
+        "project_list", "project_summary",
         "spec_list", "spec_get", "spec_create", "spec_update", "spec_versions", "spec_comment",
         "spec_comments", "spec_comment_resolve", "spec_pull", "spec_push",
         "plan_get", "plan_set", "plan_steps", "plan_step_get", "plan_step_add", "plan_step_edit",

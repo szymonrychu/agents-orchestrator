@@ -7194,6 +7194,12 @@
             },
             "description": "Successful Response"
           },
+          "400": {
+            "description": "bad_request: invalid prefix or cursor"
+          },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -7203,6 +7209,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "description": "unavailable: the cache archives are not configured for the api"
           }
         },
         "summary": "List Archives",
@@ -7259,6 +7268,9 @@
             },
             "description": "Successful Response"
           },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -7268,6 +7280,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "description": "unavailable: the cache archives are not configured for the api"
           }
         },
         "summary": "Archives Cleanup Preview",
@@ -7324,6 +7339,9 @@
             },
             "description": "Successful Response"
           },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -7333,6 +7351,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "description": "unavailable: the cache archives are not configured for the api"
           }
         },
         "summary": "Archives Settings",
