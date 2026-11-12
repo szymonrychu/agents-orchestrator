@@ -456,6 +456,28 @@ async def active_on_target(
     return [r["id"] for r in rows]
 
 
+async def active_on_preset(conn: psycopg.AsyncConnection, preset_id: uuid.UUID) -> list[int]:
+    """Ids, ascending, of the active proposals that concern the preset as they stand now: a
+    preset or preset_projects proposal targeting it, or a schedule proposal whose current
+    revision has it as the base `preset_id` or proposes it in a `preset_id` item. Session
+    proposals are not counted."""
+    pid = str(preset_id)
+    rows = await _all(
+        conn,
+        "SELECT p.id FROM change_proposals p WHERE p.status = ANY(%(active)s) AND ("
+        " (p.kind IN ('preset', 'preset_projects') AND p.target_id = %(id)s)"
+        " OR (p.kind = 'schedule' AND ("
+        "  EXISTS (SELECT 1 FROM change_proposal_revisions r WHERE r.proposal_id = p.id"
+        "   AND r.revision = p.revision AND r.base->>'preset_id' = %(id)s)"
+        "  OR EXISTS (SELECT 1 FROM change_proposal_items i WHERE i.proposal_id = p.id"
+        "   AND i.revision = p.revision AND i.path = 'preset_id'"
+        "   AND i.after #>> '{}' = %(id)s)))"
+        ") ORDER BY p.id",
+        {"active": list(ACTIVE), "id": pid},
+    )
+    return [r["id"] for r in rows]
+
+
 async def is_expired(conn: psycopg.AsyncConnection, proposal_id: int) -> bool:
     """Whether the proposal's expires_at has passed on the database clock (wall time, not the
     transaction start). A missing proposal is not expired."""

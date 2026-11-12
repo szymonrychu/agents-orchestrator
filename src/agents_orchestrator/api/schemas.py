@@ -72,6 +72,8 @@ class PresetPatch(BaseModel):
     labels: list[str] | None = None
     project: str | None = None
     spec: dict[str, Any] | None = None
+    # Only the user turns it on (a slice 4 proposal); false hands the preset back.
+    superleader_manageable: Literal[False] | None = None
 
     @field_validator("labels")
     @classmethod

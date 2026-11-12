@@ -389,7 +389,18 @@ async def replace_preset(
         return await presets_api.replace(request, conn, settings, found.id, body, superleader=True)
 
 
-@router.patch("/presets/{ref}", response_model=schemas.PresetView)
+@router.patch(
+    "/presets/{ref}",
+    response_model=schemas.PresetView,
+    responses={
+        403: WRITE_FORBIDDEN,
+        404: {"description": "not_found: no preset has that name or id"},
+        409: {
+            "description": "conflict: changed meanwhile; open_proposals: the preset has active "
+            "change proposals (extra.proposals lists their ids)"
+        },
+    },
+)
 async def patch_preset(
     ref: str, body: schemas.PresetPatch, request: Request, pool: Pool, settings: Cfg
 ) -> schemas.PresetView:

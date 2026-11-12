@@ -29,6 +29,7 @@ from agents_orchestrator.api.vault_refs import (
 )
 from agents_orchestrator.db import presets as repo
 from agents_orchestrator.db import projects
+from agents_orchestrator.db import proposals as proposals_repo
 from agents_orchestrator.preset_policy import (
     changed_paths,
     privileged,
@@ -200,6 +201,16 @@ async def _after_save(
     attached, detached = ref_diff(old_refs, refs_in(spec))
     await record_ref_events(conn, preset.id, actor, attached, detached)
     return preset
+
+
+def open_proposals(ids: list[int]) -> ApiError:
+    return ApiError(
+        409,
+        "open_proposals",
+        "the preset has active change proposals; it can stop being superleader_manageable once "
+        "the user has reviewed them or their proposers withdrew them",
+        extra={"proposals": ids},
+    )
 
 
 def _exists(name: str) -> ApiError:
@@ -522,15 +533,26 @@ async def patch(
         labels = stored.labels if merged.labels is None else merged.labels
         await check_vault(request, model, labels, merged.project)
         recheck = _unchanged_since(stored, labels=merged.labels is None, project=True)
+        flip = body.superleader_manageable is False
+
+        async def save(
+            m=merged, sp=spec, at=stored.updated_at, rc=recheck, flip=flip
+        ) -> repo.Preset:
+            if flip:  # judged in the save's transaction: a refusal rolls everything back
+                await repo.get_for_update(conn, preset_id)
+                if ids := await proposals_repo.active_on_preset(conn, preset_id):
+                    raise open_proposals(ids)
+            return await repo.update(
+                conn, preset_id, m.name, sp, False if flip else None, m.labels, at, m.project, rc
+            )
+
         try:
             preset = await _save(
                 request,
                 conn,
                 spec,
                 merged.project,
-                lambda m=merged, sp=spec, at=stored.updated_at, rc=recheck: repo.update(
-                    conn, preset_id, m.name, sp, None, m.labels, at, m.project, rc
-                ),
+                save,
                 _actor(request, True),
                 refs_in(stored.spec),
             )
@@ -549,6 +571,8 @@ async def patch(
             paths.append("labels")
         if merged.project != stored.project:
             paths.append("project")
+        if flip:
+            paths.append("superleader_manageable")
         note_fields(request, paths)
         return _view(preset)
     raise ApiError(409, "conflict", "the preset changed since it was read; retry")
