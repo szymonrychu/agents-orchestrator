@@ -112,20 +112,24 @@ async def relay(
     upstream_path: str,
     allowed: re.Pattern[str],
     *,
+    target: forward_core.Target,
+    available: bool,
+    unconfigured: str,
     mine: bool,
 ) -> Response:
-    """Forward one agent call to the taskboard as the caller's session.
+    """Forward one agent call to `target` as the caller's session.
 
-    `upstream_path` is the whole path under `/taskboard/api/v1` (`/tasks/T-1`, `/specs`) and
-    `allowed` must match it in full, else 404 `not_found` without an upstream call. `mine` turns
-    on the `labels=mine` expansion of `GET /tasks`; the specs relay passes False.
+    `upstream_path` is the whole path under the target base (`/tasks/T-1`, `/specs`) and
+    `allowed` must match it in full, else 404 `not_found` without an upstream call. `available`
+    False answers 503 `unconfigured`. `mine` turns on the taskboard `labels=mine` expansion of
+    `GET /tasks`; every other relay passes False.
     """
     if not allowed.fullmatch(upstream_path):
-        raise ApiError(404, "not_found", "no such taskboard path")
+        raise ApiError(404, "not_found", "no such relay path")
     async with pool.connection() as conn:
         own = await _session(conn, agent)
-    if not settings.taskboard_available:
-        raise ApiError(503, "taskboard_unconfigured", "no taskboard upstream is configured")
+    if not available:
+        raise ApiError(503, unconfigured, "no upstream is configured")
     query = None
     if mine and _wants_mine(request, upstream_path):
         if not own.labels:
@@ -135,7 +139,7 @@ async def relay(
     body = None if request.method == "GET" else await forward_core.capped_body(request)
     status, content = await forward_core.forward(
         request,
-        taskboard_target(settings),
+        target,
         request.method,
         upstream_path,
         body,
@@ -155,7 +159,18 @@ async def relay(
 
 
 async def _relay(request: Request, agent: Caller, pool: Pool, settings: Cfg, path: str) -> Response:
-    return await relay(request, agent, pool, settings, "/tasks" + path, _ALLOWED, mine=True)
+    return await relay(
+        request,
+        agent,
+        pool,
+        settings,
+        "/tasks" + path,
+        _ALLOWED,
+        target=taskboard_target(settings),
+        available=settings.taskboard_available,
+        unconfigured="taskboard_unconfigured",
+        mine=True,
+    )
 
 
 @router.get(
@@ -212,4 +227,15 @@ async def item(path: str, request: Request, agent: Caller, pool: Pool, settings:
     responses=_RESPONSES,
 )
 async def projects_summary(request: Request, agent: Caller, pool: Pool, settings: Cfg) -> Response:
-    return await relay(request, agent, pool, settings, "/projects/summary", _SUMMARY, mine=False)
+    return await relay(
+        request,
+        agent,
+        pool,
+        settings,
+        "/projects/summary",
+        _SUMMARY,
+        target=taskboard_target(settings),
+        available=settings.taskboard_available,
+        unconfigured="taskboard_unconfigured",
+        mine=False,
+    )
