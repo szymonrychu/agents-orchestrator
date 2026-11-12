@@ -206,7 +206,5 @@ async def item(path: str, request: Request, agent: Caller, pool: Pool, settings:
     summary="Per-project task and spec counts within the caller's project scope (taskboard relay)",
     responses=_RESPONSES,
 )
-async def projects_summary(
-    request: Request, agent: Caller, pool: Pool, settings: Cfg
-) -> Response:
+async def projects_summary(request: Request, agent: Caller, pool: Pool, settings: Cfg) -> Response:
     return await relay(request, agent, pool, settings, "/projects/summary", _SUMMARY, mine=False)
