@@ -1023,27 +1023,40 @@ async def gate_scale_up(
     await usage_gate.enforce(usage, spec.usage_quota, settings.usage_quota_default)
 
 
-@router.post("/sessions/{session_id}/scale", status_code=202, response_model=schemas.ScaleResult)
-async def scale_session(
-    session_id: uuid.UUID, body: schemas.ScaleRequest, pool: Pool, settings: Cfg, usage: Usage
+async def scale(
+    conn,
+    pool: AsyncConnectionPool,
+    usage: UsageSource | None,
+    settings: Settings,
+    session_id: uuid.UUID,
+    replicas: int,
 ) -> schemas.ScaleResult:
-    """Set spec.replicas in place (no caller agent: the public route has no leader check).
+    """Set spec.replicas in place (no caller agent: neither public route has a leader check).
     A scale-up over the usage quota is refused 409 `usage_quota`."""
-    await gate_scale_up(pool, usage, settings, session_id, body.replicas)
-    async with pool.connection() as conn:
-        try:
-            out = await repo.set_replicas(conn, session_id, body.replicas)
-        except repo.SessionNotFound:
-            raise not_found("session") from None
-        except repo.ScaleRefused as exc:
-            status = SCALE_STATUS.get(exc.code, 409)
-            raise ApiError(status, exc.code, str(exc)) from None
+    await gate_scale_up(pool, usage, settings, session_id, replicas)
+    try:
+        out = await repo.set_replicas(conn, session_id, replicas)
+    except repo.SessionNotFound:
+        raise not_found("session") from None
+    except repo.ScaleRefused as exc:
+        status = SCALE_STATUS.get(exc.code, 409)
+        raise ApiError(status, exc.code, str(exc)) from None
     return schemas.ScaleResult(
         session_id=out.session_id,
         replicas=out.replicas,
         previous_replicas=out.previous_replicas,
         max_replicas=out.max_replicas,
     )
+
+
+@router.post("/sessions/{session_id}/scale", status_code=202, response_model=schemas.ScaleResult)
+async def scale_session(
+    session_id: uuid.UUID, body: schemas.ScaleRequest, pool: Pool, settings: Cfg, usage: Usage
+) -> schemas.ScaleResult:
+    """Set spec.replicas in place (no caller agent: the public route has no leader check).
+    A scale-up over the usage quota is refused 409 `usage_quota`."""
+    async with pool.connection() as conn:
+        return await scale(conn, pool, usage, settings, session_id, body.replicas)
 
 
 @router.post(

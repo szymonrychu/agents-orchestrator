@@ -261,6 +261,7 @@ ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("GET", f"{ADMIN_PREFIX}/usage"): "none",
     ("POST", f"{ADMIN_PREFIX}/projects"): "none",
     ("PUT", f"{ADMIN_PREFIX}/sessions/{{slug}}/labels"): "session",
+    ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/scale"): "session",
     ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/projects"): "session",
     ("DELETE", f"{ADMIN_PREFIX}/sessions/{{slug}}/projects/{{project}}"): "session",
     ("POST", f"{ADMIN_PREFIX}/presets/{{ref}}/projects"): "preset",
@@ -770,6 +771,42 @@ async def set_session_labels(
         session = await sessions_repo.set_labels(conn, target.id, body.labels)
     note_fields(request, ["labels"])
     return OwnLabelsView(session_id=session.id, labels=session.labels)
+
+
+@router.post(
+    "/sessions/{slug}/scale",
+    status_code=202,
+    response_model=schemas.ScaleResult,
+    responses={
+        403: WRITE_FORBIDDEN,
+        404: SESSION_NOT_FOUND,
+        409: {"description": "usage_quota, static_session, leader_would_leave or session_deleting"},
+        422: {
+            "description": "out_of_range: replicas outside 1..max_replicas; "
+            "own_session: the caller's own session"
+        },
+    },
+)
+async def scale_session(
+    slug: str,
+    body: schemas.ScaleRequest,
+    request: Request,
+    pool: Pool,
+    settings: Cfg,
+    usage: Usage,
+) -> schemas.ScaleResult:
+    """Set spec.replicas of a manageable session in place; the caller's own session is refused
+    (422 `own_session`). A scale-up over the usage quota is 409 `usage_quota`: that check reads
+    on its own connection and fails open, like the main port's. No kube call."""
+    _, caller = caller_of(request)
+    async with pool.connection() as conn, conn.transaction():
+        target = await _writable_target(conn, slug, caller)
+        if target.id == caller.id:
+            raise own_session("scale")
+        out = await sessions_api.scale(conn, pool, usage, settings, target.id, body.replicas)
+    note_fields(request, ["replicas"])
+    note_detail(request, replicas_before=out.previous_replicas, replicas_after=out.replicas)
+    return out
 
 
 # ---------------------------------------------------------------- usage

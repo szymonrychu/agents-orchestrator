@@ -33,6 +33,7 @@ BODIES = {
     ("POST", "/agent/v1/admin/sessions/{slug}/projects"): {"project": "default", "reason": "r"},
     ("POST", "/agent/v1/admin/presets/{ref}/projects"): {"project": "default", "reason": "r"},
     ("PUT", "/agent/v1/admin/sessions/{slug}/labels"): {"labels": ["x"]},
+    ("POST", "/agent/v1/admin/sessions/{slug}/scale"): {"replicas": 1},
 }
 
 

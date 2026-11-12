@@ -11871,6 +11871,93 @@
         ]
       }
     },
+    "/agent/v1/admin/sessions/{slug}/scale": {
+      "post": {
+        "description": "Set spec.replicas of a manageable session in place; the caller's own session is refused\n(422 `own_session`). A scale-up over the usage quota is 409 `usage_quota`: that check reads\non its own connection and fails open, like the main port's. No kube call.",
+        "operationId": "scale_session_agent_v1_admin_sessions__slug__scale_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScaleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScaleResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader; not_manageable: the target is not superleader_manageable (needs the user's approval)"
+          },
+          "404": {
+            "description": "not_found: no session has that slug"
+          },
+          "409": {
+            "description": "usage_quota, static_session, leader_would_leave or session_deleting"
+          },
+          "422": {
+            "description": "out_of_range: replicas outside 1..max_replicas; own_session: the caller's own session"
+          }
+        },
+        "summary": "Scale Session",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/agent/v1/admin/usage": {
       "get": {
         "description": "The account's five_hour and seven_day windows, read-only, from the same cached\n`UsageSource` the usage gate reads. An unconfigured or unreachable usage service answers\n200 with `available` false and null windows: the gate allows then, and so does this.",

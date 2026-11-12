@@ -21,6 +21,7 @@ DECLARED: dict[tuple[str, str], set[int]] = {
     ("GET", f"{S}/locks"): {403, 404},
     ("GET", f"{S}/commands"): {403, 404},
     ("PUT", f"{S}/labels"): {403, 404},
+    ("POST", f"{S}/scale"): {403, 404, 409},
     ("GET", f"{ADMIN_PREFIX}/vault"): {403, 502, 503},
     ("GET", f"{ADMIN_PREFIX}/usage/history"): {403, 503},
     ("GET", f"{ADMIN_PREFIX}/usage/sessions"): {403, 503},

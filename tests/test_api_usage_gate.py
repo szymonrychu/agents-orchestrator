@@ -387,3 +387,19 @@ async def test_meta_usage():
     async with client_for(app) as http:
         meta = (await http.get("/api/v1/meta")).json()
     assert meta["usage"] == {"configured": False, "quota_default_pct": 90}
+
+
+async def test_admin_scale_up_over_quota_409(pool, dsn):
+    boss = await alone(pool, "usage-boss", superleader=True)
+    spec = {"replicas": 1, "max_replicas": 2, "usage_quota": {"seven_day_pct": 80}}
+    c = await insert_session(pool, slug="usage-target", spec=spec)
+    await attach_preset(pool, c["id"], manageable=True)
+    app = gated(agent_settings(dsn), pool, Upstream(windows(seven_day=85.0)))
+    async with agent_client(app, boss.leader_ip) as http:
+        r = await http.post(
+            f"{ADMIN_PREFIX}/sessions/usage-target/scale",
+            headers=headers(boss.id),
+            json={"replicas": 2},
+        )
+    assert_refused(r, "seven_day", 85.0, 80)
+    assert await replicas_of(pool, c["id"]) == 1
