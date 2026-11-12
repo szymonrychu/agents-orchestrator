@@ -240,6 +240,7 @@ ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("GET", f"{ADMIN_PREFIX}/meta"): "list",
     ("GET", f"{ADMIN_PREFIX}/archives"): "list",
     ("GET", f"{ADMIN_PREFIX}/archives/settings"): "list",
+    ("PUT", f"{ADMIN_PREFIX}/archives/settings"): "list",
     ("GET", f"{ADMIN_PREFIX}/archives/cleanup/preview"): "list",
     ("POST", f"{ADMIN_PREFIX}/presets"): "create",
     ("GET", f"{ADMIN_PREFIX}/presets/{{ref}}"): "preset",

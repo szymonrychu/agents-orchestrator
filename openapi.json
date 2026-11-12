@@ -7426,6 +7426,83 @@
         "tags": [
           "admin"
         ]
+      },
+      "put": {
+        "description": "Replace the whole cleanup policy (every field required, same bounds as the main port).\nPostgres only: it needs no api S3 key pair. The audit row lists the field names, no values.",
+        "operationId": "put_archives_settings_agent_v1_admin_archives_settings_put",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SweepPolicyIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CleanupSettingsView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Archives Settings",
+        "tags": [
+          "admin"
+        ]
       }
     },
     "/agent/v1/admin/chats/room-requests": {

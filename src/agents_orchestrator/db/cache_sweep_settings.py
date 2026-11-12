@@ -33,10 +33,10 @@ class EffectivePolicy:
     updated_at: datetime | None
 
 
-async def get(conn: psycopg.AsyncConnection) -> StoredPolicy | None:
+async def get(conn: psycopg.AsyncConnection, *, for_update: bool = False) -> StoredPolicy | None:
     cur = await conn.execute(
         "SELECT enabled, dry_run, retention_days, keep_newest, interval_seconds, grace_seconds,"
-        " updated_at FROM cache_sweep_settings WHERE id = 1"
+        " updated_at FROM cache_sweep_settings WHERE id = 1" + (" FOR UPDATE" if for_update else "")
     )
     row = await cur.fetchone()
     if row is None:
