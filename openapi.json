@@ -11257,6 +11257,97 @@
         ]
       }
     },
+    "/agent/v1/admin/sessions/{slug}/labels": {
+      "put": {
+        "description": "Replace the labels of the caller's own session or of a manageable one; labels are\nnormalised and limited as on the main port.",
+        "operationId": "set_session_labels_agent_v1_admin_sessions__slug__labels_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionLabelsIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnLabelsView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader; not_manageable: the target is not superleader_manageable (needs the user's approval)"
+          },
+          "404": {
+            "description": "not_found: no session has that slug"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Session Labels",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/agent/v1/admin/sessions/{slug}/leadership/withdraw": {
       "post": {
         "description": "Withdraw a pending handover request (`request_id`), or every one of the session when it\nis omitted: the session's own leader, or a superleader on its own or a manageable session.\nA withdrawn request is rejected with reason `withdrawn` and never applied. The reconciler's\n`rollout` request is never withdrawn (409 `rollout_request` by id, left queued without).",

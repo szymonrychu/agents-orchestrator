@@ -39,6 +39,7 @@ from agents_orchestrator.api.agent import (
     locks_of,
 )
 from agents_orchestrator.api.errors import ApiError, not_found, not_manageable
+from agents_orchestrator.api.session_labels import OwnLabelsView
 from agents_orchestrator.api.sessions import Cfg, Pool, Usage
 from agents_orchestrator.api.spec_edit import note_fields
 from agents_orchestrator.db import agents as agents_repo
@@ -259,6 +260,7 @@ ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("GET", f"{ADMIN_PREFIX}/commands/{{command_id}}"): "none",
     ("GET", f"{ADMIN_PREFIX}/usage"): "none",
     ("POST", f"{ADMIN_PREFIX}/projects"): "none",
+    ("PUT", f"{ADMIN_PREFIX}/sessions/{{slug}}/labels"): "session",
     ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/projects"): "session",
     ("DELETE", f"{ADMIN_PREFIX}/sessions/{{slug}}/projects/{{project}}"): "session",
     ("POST", f"{ADMIN_PREFIX}/presets/{{ref}}/projects"): "preset",
@@ -747,6 +749,27 @@ async def session_commands(
         target = await _readable_target(conn, slug, caller)
         rows = await views.list_commands(conn, target.id, limit)
     return [schemas.CommandView(**r) for r in rows]
+
+
+# ---- superleader writes on any manageable session (T-120 slice 3)
+
+
+@router.put(
+    "/sessions/{slug}/labels",
+    response_model=OwnLabelsView,
+    responses={403: WRITE_FORBIDDEN, 404: SESSION_NOT_FOUND},
+)
+async def set_session_labels(
+    slug: str, body: schemas.SessionLabelsIn, request: Request, pool: Pool
+) -> OwnLabelsView:
+    """Replace the labels of the caller's own session or of a manageable one; labels are
+    normalised and limited as on the main port."""
+    _, caller = caller_of(request)
+    async with pool.connection() as conn, conn.transaction():
+        target = await _writable_target(conn, slug, caller)
+        session = await sessions_repo.set_labels(conn, target.id, body.labels)
+    note_fields(request, ["labels"])
+    return OwnLabelsView(session_id=session.id, labels=session.labels)
 
 
 # ---------------------------------------------------------------- usage
