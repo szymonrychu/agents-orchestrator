@@ -9007,7 +9007,7 @@
     },
     "/agent/v1/admin/proposals": {
       "get": {
-        "description": "The caller's own proposals, newest first, current revision only.",
+        "description": "A superleader: every proposal. A regular leader: its own, newest first, current revision\nonly.",
         "operationId": "list_own_proposals_agent_v1_admin_proposals_get",
         "parameters": [
           {
@@ -9175,6 +9175,7 @@
     },
     "/agent/v1/admin/proposals/{proposal_id}": {
       "get": {
+        "description": "A superleader reads any proposal (404 only when unknown); a regular leader its own.",
         "operationId": "get_own_proposal_agent_v1_admin_proposals__proposal_id__get",
         "parameters": [
           {

@@ -1,7 +1,8 @@
 """Every admin route is classified by what it withholds from a superleader. Decision 388: a scoped
 route reads any target (200) and its writes answer 403 `not_manageable` for one the superleader
-may not manage; every proposal route answers 404 for another session's proposal and for one
-whose preset the superleader may not manage, and a create on such a target is 403."""
+may not manage; the proposal reads (list, get) show every proposal, revise and withdraw answer 404
+for another session's proposal and for one whose preset the superleader may not manage, and a
+create on such a target is 403."""
 
 from __future__ import annotations
 
@@ -114,8 +115,8 @@ PROPOSAL_BODIES = {
 async def test_every_proposal_route_hides_what_the_caller_may_not_see(
     pool, dsn, method, path, hidden_by
 ):
-    """Another session's proposal, or one on a preset the superleader may not manage (any longer),
-    answers 404 (a list leaves it out); create on a hidden preset is 404 too."""
+    """Another session's proposal, or one on a preset the superleader may not manage (any longer):
+    reads (list, get) show it, revise and withdraw answer 404, create on it is 403."""
     app = create_app(make_settings(dsn), pool, kube=FakeKube(namespace="agents"))
     boss = await alone(pool, "vis-p-boss", superleader=True)
     filer = await alone(pool, "vis-p-filer", superleader=True)
@@ -156,8 +157,11 @@ async def test_every_proposal_route_hides_what_the_caller_may_not_see(
     async with client_for(app, boss.leader_ip) as http:
         r = await http.request(method, url, headers=headers(boss.id), **kw)
     if (method, path) == ("GET", "/agent/v1/admin/proposals"):
+        assert r.status_code == 200, r.text  # decision 388: a superleader reads every proposal
+        assert [v["id"] for v in r.json()] == [proposal_id]
+    elif (method, path) == ("GET", "/agent/v1/admin/proposals/{proposal_id}"):
         assert r.status_code == 200, r.text
-        assert r.json() == []
+        assert r.json()["id"] == proposal_id
     elif (method, path) == ("POST", "/agent/v1/admin/proposals") and hidden_by == "another_session":
         assert r.status_code == 201, r.text  # a manageable target: the caller files its own
     elif (method, path) == ("POST", "/agent/v1/admin/proposals"):

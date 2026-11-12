@@ -188,7 +188,8 @@ def touched(request: Request, *names: str) -> None:
 # What each non-relay admin route withholds from the superleader: "preset" and "session" routes
 # are read open (200 for any target) and write-guarded (403 `not_manageable` outside its remit),
 # "list" and "create" are filtered or forced,
-# "proposal" routes see only the caller's own proposals on targets it may manage (404 otherwise).
+# "proposal" GETs show a superleader every proposal; its revise and withdraw see only the
+# caller's own on targets it may manage (404 otherwise).
 ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("GET", f"{ADMIN_PREFIX}/presets"): "list",
     ("GET", f"{ADMIN_PREFIX}/vault"): "list",

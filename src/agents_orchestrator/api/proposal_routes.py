@@ -1,8 +1,10 @@
 """Change proposal routes (preset-change-proposals plan 3.3, 4).
 
 `proposal_router` (agent port, `/agent/v1/admin/proposals`, audited by `AdminRoute`) lets the
-proposer file, list, read, revise and withdraw its OWN proposals; another session's proposal, or
-one whose target the caller may no longer see, answers 404 exactly like an unknown id.
+proposer file, list, read, revise and withdraw proposals. A superleader READS every proposal
+(any proposer, any target, decision 388); a regular leader reads its own only, on a target it may
+still see. Revise and withdraw stay own-only for everyone: another session's proposal, or one
+whose target the caller may no longer see, answers 404 exactly like an unknown id.
 
 `main_router` (main port, `/api/v1/proposals`) is the human's: list, read and review every
 proposal. `PortGate` keeps it off the agent port and `ServiceGate` off the service port; no
@@ -86,11 +88,18 @@ async def create_proposal(
 async def list_own_proposals(
     request: Request, pool: Pool, settings: Cfg, status: Status = "active", limit: Limit = 50
 ) -> list[schemas.ProposalView]:
-    """The caller's own proposals, newest first, current revision only."""
+    """A superleader: every proposal. A regular leader: its own, newest first, current revision
+    only."""
     _, caller = caller_of(request)
+    superleader = bool(caller.spec.session_messaging)
     async with pool.connection() as conn:
         return await proposals.list_views(
-            conn, settings, proposer=caller.id, status=status, limit=limit, visible_only=True
+            conn,
+            settings,
+            proposer=None if superleader else caller.id,
+            status=status,
+            limit=limit,
+            visible_only=not superleader,
         )
 
 
@@ -98,8 +107,11 @@ async def list_own_proposals(
 async def get_own_proposal(
     proposal_id: int, request: Request, pool: Pool, settings: Cfg
 ) -> schemas.ProposalView:
+    """A superleader reads any proposal (404 only when unknown); a regular leader its own."""
     _, caller = caller_of(request)
     async with pool.connection() as conn:
+        if caller.spec.session_messaging:
+            return await proposals.get_view(conn, settings, proposal_id, proposer=None)
         await _own(conn, proposal_id, caller)
         return await proposals.get_view(conn, settings, proposal_id, proposer=caller.id)
 
