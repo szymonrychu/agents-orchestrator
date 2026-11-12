@@ -13,8 +13,16 @@ from agents_orchestrator.api import archives, schemas
 from agents_orchestrator.api.admin import router
 from agents_orchestrator.api.sessions import Cfg, Pool
 
+_FORBIDDEN = {"description": "not_superleader: the caller is not a superleader"}
+_UNAVAILABLE = {"description": "unavailable: the cache archives are not configured for the api"}
+_BAD_REQUEST = {"description": "bad_request: invalid prefix or cursor"}
 
-@router.get("/archives", response_model=schemas.ArchivePage)
+
+@router.get(
+    "/archives",
+    response_model=schemas.ArchivePage,
+    responses={400: _BAD_REQUEST, 403: _FORBIDDEN, 503: _UNAVAILABLE},
+)
 async def list_archives(
     pool: Pool,
     settings: Cfg,
@@ -25,14 +33,22 @@ async def list_archives(
     return await archives.list_archives(pool, settings, prefix, cursor, limit)
 
 
-@router.get("/archives/settings", response_model=schemas.CleanupSettingsView)
+@router.get(
+    "/archives/settings",
+    response_model=schemas.CleanupSettingsView,
+    responses={403: _FORBIDDEN, 503: _UNAVAILABLE},
+)
 async def archives_settings(
     pool: Pool, settings: Cfg, response: Response
 ) -> schemas.CleanupSettingsView:
     return await archives.get_cleanup_settings(pool, settings, response)
 
 
-@router.get("/archives/cleanup/preview", response_model=schemas.CleanupPreview)
+@router.get(
+    "/archives/cleanup/preview",
+    response_model=schemas.CleanupPreview,
+    responses={403: _FORBIDDEN, 503: _UNAVAILABLE},
+)
 async def archives_cleanup_preview(
     pool: Pool, settings: Cfg, response: Response
 ) -> schemas.CleanupPreview:

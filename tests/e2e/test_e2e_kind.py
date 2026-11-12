@@ -322,6 +322,7 @@ ALONE_SESSION_TOOLS = [
     "todo_update",
     "session_labels_set",
     "project_list",
+    "project_summary",
     "spec_list",
     "spec_get",
     "spec_create",

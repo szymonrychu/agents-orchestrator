@@ -238,3 +238,65 @@ def test_failure_modes_are_laden(mode):
     vault.mode = mode
     r = vault._failure()
     assert r is not None and CANARY_ERROR in r.text
+
+
+CANARY_TOKENS = {
+    "taskboard_token": "CANARY-TASKBOARD-TOKEN-5b1d",
+    "usage_token": "CANARY-USAGE-TOKEN-0e7c",
+    "vault_token": "CANARY-VAULT-TOKEN-a42f",
+}
+
+
+async def test_superleader_reads_never_leak_tokens_or_values(pool, dsn, tmp_path, caplog):
+    """T-120 slice 2: the new superleader reads (sessions list, meta, archives, activity, events,
+    messages, locks, commands, vault list, usage relay) carry names and ids only. Canary service
+    tokens, a readable vault value and an any-mcp config file that names a token env appear in
+    no answer and no log record."""
+    caplog.set_level(logging.DEBUG)
+    config = tmp_path / "any-mcp.yaml"
+    config.write_text("plugins:\n  - name: tracker\n    env:\n      TOKEN: ${TRACKER_TOKEN_ENV}\n")
+    vault = CanaryVault()
+
+    def usage(req: httpx.Request) -> httpx.Response:
+        assert req.headers["authorization"] == f"Bearer {CANARY_TOKENS['usage_token']}"
+        return httpx.Response(200, json={"items": [], "total": 0})
+
+    settings = agent_settings(dsn).model_copy(
+        update={
+            "vault_url": "http://vault",
+            "usage_url": "http://usage.test",
+            "any_mcp_config_file": str(config),
+            **CANARY_TOKENS,
+        }
+    )
+    app = create_app(settings, pool, vault_transport=httpx.MockTransport(vault.handler))
+    app.state.admin_http = httpx.AsyncClient(transport=httpx.MockTransport(usage))
+    boss = await alone(pool, "canary-reader", superleader=True)
+    peer = await alone(pool, "canary-peer")
+    bodies: list[str] = []
+    gets = [
+        f"{ADMIN_PREFIX}/sessions",
+        f"{ADMIN_PREFIX}/meta",
+        f"{ADMIN_PREFIX}/archives",
+        f"{ADMIN_PREFIX}/archives/settings",
+        f"{ADMIN_PREFIX}/archives/cleanup/preview",
+        f"{ADMIN_PREFIX}/sessions/{peer.slug}/activity",
+        f"{ADMIN_PREFIX}/sessions/{peer.slug}/events",
+        f"{ADMIN_PREFIX}/sessions/{peer.slug}/messages",
+        f"{ADMIN_PREFIX}/sessions/{peer.slug}/locks",
+        f"{ADMIN_PREFIX}/sessions/{peer.slug}/commands",
+        f"{ADMIN_PREFIX}/usage",
+        f"{ADMIN_PREFIX}/usage/history",
+        f"{ADMIN_PREFIX}/usage/sessions",
+        V,
+    ]
+    async with agent_client(app, boss.leader_ip) as http:
+        for path in gets:
+            r = await http.get(path, headers=headers(boss.id))
+            assert r.status_code in (200, 503), (path, r.status_code, r.text)
+            bodies.append(r.text)
+    forbidden = [CANARY_VALUE, CANARY_ERROR, *CANARY_TOKENS.values()]
+    forbidden += [base64.b64encode(x.encode()).decode().rstrip("=") for x in forbidden]
+    for needle in forbidden:
+        assert not [b for b in bodies if needle in b], f"{needle} in a response"
+        assert needle not in caplog.text, f"{needle} in a log record"

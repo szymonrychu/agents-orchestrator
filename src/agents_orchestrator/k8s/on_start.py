@@ -55,7 +55,7 @@ TASK_TOOLS = [
 ]  # fmt: skip
 # Project tool (projects T-19): every session lists the projects its scope reaches
 # (GET /agent/v1/projects: its own project, or every one for a superleader).
-PROJECT_TOOLS = ["project_list"]
+PROJECT_TOOLS = ["project_list", "project_summary"]
 # Spec tools (T-116): the spec relay on the agent port; every session gets them, trigger-created
 # ones included (accept and dismiss are user-only and have no tool).
 SPEC_TOOLS = [
@@ -74,7 +74,9 @@ PROJECT_CHAT_TOOLS = ["project_chat_send", "project_chat_read"]
 # Superleader admin tools: the plugin's declarative admin rows (any-mcp-tatara-plugins
 # orchestration/orchestrator admin.py), the vault tools included. History is read and search
 # only: there is no history delete tool, deleting a stored session is for the user (web UI).
-# A project grant tool files a proposal the user reviews (T-120); revoke tools act at once.
+# The slice 2 reads (T-120): any session's live work, the deploy meta, the cache archives
+# (no download) and the usage history. A project grant tool files a proposal the user reviews
+# (T-120); revoke tools act at once.
 ADMIN_TOOLS = [
     "presets_list", "preset_get", "preset_create", "preset_replace", "preset_patch",
     "preset_delete", "preset_copy", "session_get", "session_patch", "session_create",
@@ -92,6 +94,9 @@ ADMIN_TOOLS = [
     "history_records", "usage_get", "project_create",
     "session_projects_grant", "session_projects_revoke", "preset_projects_grant",
     "preset_projects_revoke",
+    "sessions_admin_list", "session_activity", "session_events", "session_messages",
+    "session_locks", "session_commands", "meta_get", "archives_list", "archives_settings_get",
+    "archives_cleanup_preview", "usage_history", "usage_sessions",
     *PROPOSAL_TOOLS,
 ]  # fmt: skip
 
