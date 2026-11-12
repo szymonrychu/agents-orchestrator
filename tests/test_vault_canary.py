@@ -12,7 +12,8 @@ import uuid
 
 import httpx
 import pytest
-from factories import attach_preset
+from factories import attach_preset, insert_message
+from fakes.fake_kube import FakeKube
 from test_agent_session_messaging import alone, hive
 from test_api_agent import client_for as agent_client
 from test_api_agent import headers
@@ -311,8 +312,23 @@ async def test_superleader_writes_never_leak_tokens_or_values(pool, dsn, caplog)
     value and canary service tokens appear in no answer, no table row and no log record."""
     caplog.set_level(logging.DEBUG)
     vault = CanaryVault()
-    settings = agent_settings(dsn).model_copy(update={"vault_url": "http://vault", **CANARY_TOKENS})
-    app = create_app(settings, pool, vault_transport=httpx.MockTransport(vault.handler))
+    settings = agent_settings(dsn).model_copy(
+        update={
+            "vault_url": "http://vault",
+            "taskboard_url": "http://taskboard.test:9002",
+            "taskboard_token": "canary-tb-token",
+            **CANARY_TOKENS,
+        }
+    )
+    app = create_app(
+        settings,
+        pool,
+        kube=FakeKube(namespace="agents"),
+        vault_transport=httpx.MockTransport(vault.handler),
+    )
+    app.state.taskboard_http = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(204))
+    )
     boss = await hive(pool, "canary-w-boss", superleader=True)
     other = await hive(pool, "canary-w-other")
     await attach_preset(pool, other.id, manageable=True)
@@ -328,6 +344,7 @@ async def test_superleader_writes_never_leak_tokens_or_values(pool, dsn, caplog)
         await conn.execute(
             "INSERT INTO projects (slug, name, description) VALUES ('canary-proj', 'C', '')"
         )
+    queued = await insert_message(pool, other.id, text="canary queued")
     policy = {
         "enabled": True,
         "dry_run": True,
@@ -343,10 +360,27 @@ async def test_superleader_writes_never_leak_tokens_or_values(pool, dsn, caplog)
         ("POST", f"{S}/locks/reassign", {"path": "src/a.py", "to": pods[1]}, 200),
         ("PUT", f"{ADMIN_PREFIX}/archives/settings", policy, 200),
         ("PATCH", f"{ADMIN_PREFIX}/projects/canary-proj", {"description": "d"}, 200),
+        ("DELETE", f"{S}/messages/{queued['id']}", None, 204),
+        ("DELETE", f"{ADMIN_PREFIX}/specs/S-1", None, 204),
+        ("POST", f"{ADMIN_PREFIX}/specs/S-1/comments/1/dismiss", None, 204),
         ("PUT", f"{ADMIN_PREFIX}/archives/settings", {**policy, "retention_days": 0}, 422),
     ]
     bodies: list[str] = []
     async with agent_client(app, boss.leader_ip) as http:
+        r = await http.post(
+            f"{ADMIN_PREFIX}/presets",
+            headers=headers(boss.id),
+            json={"name": "canary-flip", "spec": {"env": {"PLAIN": {"value": "v"}}}},
+        )
+        assert r.status_code == 201, r.text
+        calls.append(
+            (
+                "PATCH",
+                f"{ADMIN_PREFIX}/presets/{r.json()['id']}",
+                {"superleader_manageable": False},
+                200,
+            )
+        )
         for method, path, body, expected in calls:
             r = await http.request(method, path, headers=headers(boss.id), json=body)
             assert r.status_code == expected, (method, path, r.status_code, r.text)
