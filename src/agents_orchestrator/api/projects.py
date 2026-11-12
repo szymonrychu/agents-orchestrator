@@ -74,8 +74,7 @@ async def get_project(slug: str, request: Request, pool: Pool) -> schemas.Projec
     return view(project)
 
 
-@router.patch("/projects/{slug}", response_model=schemas.ProjectView)
-async def patch_project(slug: str, body: schemas.ProjectPatch, pool: Pool) -> schemas.ProjectView:
+async def patch(pool: Pool, slug: str, body: schemas.ProjectPatch) -> schemas.ProjectView:
     try:
         async with pool.connection() as conn:
             project = await repo.update_project(conn, slug, **body.model_dump(exclude_unset=True))
@@ -87,3 +86,8 @@ async def patch_project(slug: str, body: schemas.ProjectPatch, pool: Pool) -> sc
     except repo.DefaultProject as exc:
         raise project_error(exc) from None
     return view(replace(project, **counts))
+
+
+@router.patch("/projects/{slug}", response_model=schemas.ProjectView)
+async def patch_project(slug: str, body: schemas.ProjectPatch, pool: Pool) -> schemas.ProjectView:
+    return await patch(pool, slug, body)

@@ -146,7 +146,7 @@ async def _session(conn: Any, agent: agents_repo.Agent) -> sessions_repo.Session
     return session
 
 
-async def _member_id(conn: Any, session_id: uuid.UUID, pod_name: str) -> uuid.UUID:
+async def member_id(conn: Any, session_id: uuid.UUID, pod_name: str) -> uuid.UUID:
     """Id of the not-gone agent `pod_name` of the session; 404 when there is none."""
     for member in await agents_repo.list_members(conn, session_id):
         if member["pod_name"] == pod_name:
@@ -346,7 +346,7 @@ async def handover(
             raise ApiError(
                 409, "stale_epoch", f"epoch {body.epoch} is not the current epoch {leader.epoch}"
             )
-        to_id = await _member_id(conn, agent.session_id, body.to) if body.to is not None else None
+        to_id = await member_id(conn, agent.session_id, body.to) if body.to is not None else None
         request_id = await leadership.insert_request(
             conn, agent.session_id, "handover", agent.id, to_id, body.reason, body.epoch
         )
@@ -422,7 +422,7 @@ def _invalid(path: str) -> ApiError:
     return ApiError(400, "invalid_path", f"path {path!r} is empty or outside the session workdir")
 
 
-def _normalise_all(paths: list[str], workdir: str) -> list[str]:
+def normalise_all(paths: list[str], workdir: str) -> list[str]:
     out: list[str] = []
     for path in paths:
         clean = _normalise(path, workdir)
@@ -436,7 +436,7 @@ def _normalise_all(paths: list[str], workdir: str) -> list[str]:
 @router.post("/locks/claim", response_model=LocksClaimed, summary="Claim files with advisory locks")
 async def locks_claim(body: LockPaths, agent: Caller, pool: Pool) -> LocksClaimed:
     async with pool.connection() as conn:
-        paths = _normalise_all(body.paths, await _workdir(conn, agent))
+        paths = normalise_all(body.paths, await _workdir(conn, agent))
         claimed, held = await file_locks.claim(conn, agent.session_id, agent.id, paths)
     return LocksClaimed(claimed=claimed, held=[LockHeld(path=p, agent=a) for p, a in held])
 
@@ -444,7 +444,7 @@ async def locks_claim(body: LockPaths, agent: Caller, pool: Pool) -> LocksClaime
 @router.post("/locks/release", response_model=LocksReleased, summary="Release own file locks")
 async def locks_release(body: LockPaths, agent: Caller, pool: Pool) -> LocksReleased:
     async with pool.connection() as conn:
-        paths = _normalise_all(body.paths, await _workdir(conn, agent))
+        paths = normalise_all(body.paths, await _workdir(conn, agent))
         released = await file_locks.release(conn, agent.session_id, agent.id, paths)
     return LocksReleased(released=released)
 
@@ -473,8 +473,8 @@ async def locks_reassign(body: LockReassignIn, agent: Caller, pool: Pool) -> Loc
         leader = await leadership.current_leader(conn, agent.session_id)
         if leader is None or leader.agent_id != agent.id:
             raise ApiError(403, "not_leader", "only the current leader can reassign locks")
-        (path,) = _normalise_all([body.path], await _workdir(conn, agent))
-        to_id = await _member_id(conn, agent.session_id, body.to) if body.to is not None else None
+        (path,) = normalise_all([body.path], await _workdir(conn, agent))
+        to_id = await member_id(conn, agent.session_id, body.to) if body.to is not None else None
         await file_locks.assign(conn, agent.session_id, path, to_id)
     return LockReassigned(path=path, agent=body.to)
 

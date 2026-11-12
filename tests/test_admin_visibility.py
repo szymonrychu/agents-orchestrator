@@ -18,6 +18,7 @@ from agents_orchestrator.api import (  # noqa: F401
     admin,
     admin_archives,
     admin_relay,
+    admin_specs,
     proposal_routes,
 )
 from agents_orchestrator.api.admin import ADMIN_VISIBILITY
@@ -32,6 +33,9 @@ BODIES = {
     ("PUT", "/agent/v1/admin/presets/{ref}/vault/{entry_id}"): {},
     ("POST", "/agent/v1/admin/sessions/{slug}/projects"): {"project": "default", "reason": "r"},
     ("POST", "/agent/v1/admin/presets/{ref}/projects"): {"project": "default", "reason": "r"},
+    ("PUT", "/agent/v1/admin/sessions/{slug}/labels"): {"labels": ["x"]},
+    ("POST", "/agent/v1/admin/sessions/{slug}/scale"): {"replicas": 1},
+    ("POST", "/agent/v1/admin/sessions/{slug}/locks/reassign"): {"path": "a.txt", "to": None},
 }
 
 
@@ -89,6 +93,7 @@ async def test_every_scoped_admin_route_reads_open_and_refuses_writes_on_unmanag
         .replace("{slug}", other.slug)
         .replace("{pod}", pod)
         .replace("{name}", "API_KEY")
+        .replace("{message_id}", "1")
         .replace("{entry_id}", "11111111-1111-4111-8111-111111111111")
     )
     kw = {"json": BODIES[(method, path)]} if (method, path) in BODIES else {}

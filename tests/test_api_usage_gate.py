@@ -7,6 +7,7 @@ allows. The usage service is an httpx.MockTransport behind the app's own `UsageS
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -387,3 +388,66 @@ async def test_meta_usage():
     async with client_for(app) as http:
         meta = (await http.get("/api/v1/meta")).json()
     assert meta["usage"] == {"configured": False, "quota_default_pct": 90}
+
+
+async def test_admin_scale_up_over_quota_409(pool, dsn):
+    boss = await alone(pool, "usage-boss", superleader=True)
+    spec = {"replicas": 1, "max_replicas": 2, "usage_quota": {"seven_day_pct": 80}}
+    c = await insert_session(pool, slug="usage-target", spec=spec)
+    await attach_preset(pool, c["id"], manageable=True)
+    app = gated(agent_settings(dsn), pool, Upstream(windows(seven_day=85.0)))
+    async with agent_client(app, boss.leader_ip) as http:
+        r = await http.post(
+            f"{ADMIN_PREFIX}/sessions/usage-target/scale",
+            headers=headers(boss.id),
+            json={"replicas": 2},
+        )
+    assert_refused(r, "seven_day", 85.0, 80)
+    assert await replicas_of(pool, c["id"]) == 1
+
+
+class NestSpyPool:
+    """Delegates to the real pool and records the deepest nesting of `connection()` per task."""
+
+    def __init__(self, pool):
+        self._pool = pool
+        self.depth = 0
+        self.deepest = 0
+
+    @contextlib.asynccontextmanager
+    async def connection(self):
+        self.depth += 1
+        self.deepest = max(self.deepest, self.depth)
+        try:
+            async with self._pool.connection() as conn:
+                yield conn
+        finally:
+            self.depth -= 1
+
+
+async def test_main_scale_up_never_nests_pool_connections(pool, dsn):
+    spec = {"replicas": 1, "max_replicas": 3, "usage_quota": {"seven_day_pct": 80}}
+    c = await insert_session(pool, spec=spec)
+    app = gated(make_settings(dsn), pool, Upstream(windows(seven_day=10.0)))
+    spy = app.state.pool = NestSpyPool(pool)
+    async with client_for(app) as http:
+        r = await http.post(f"{C}/{c['id']}/scale", json={"replicas": 2})
+    assert r.status_code == 202, r.text
+    assert spy.deepest == 1, "the usage gate took a second connection while one was held"
+
+
+async def test_admin_scale_up_never_nests_pool_connections(pool, dsn):
+    boss = await alone(pool, "nest-boss", superleader=True)
+    spec = {"replicas": 1, "max_replicas": 3, "usage_quota": {"seven_day_pct": 80}}
+    c = await insert_session(pool, slug="nest-target", spec=spec)
+    await attach_preset(pool, c["id"], manageable=True)
+    app = gated(agent_settings(dsn), pool, Upstream(windows(seven_day=10.0)))
+    spy = app.state.pool = NestSpyPool(pool)
+    async with agent_client(app, boss.leader_ip) as http:
+        r = await http.post(
+            f"{ADMIN_PREFIX}/sessions/nest-target/scale",
+            headers=headers(boss.id),
+            json={"replicas": 2},
+        )
+    assert r.status_code == 202, r.text
+    assert spy.deepest == 1, "the usage gate took a second connection while one was held"

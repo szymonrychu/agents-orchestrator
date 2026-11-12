@@ -46,6 +46,43 @@
         "title": "ActivityLine",
         "type": "object"
       },
+      "AdminLockReassigned": {
+        "properties": {
+          "agent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "previous": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previous"
+          }
+        },
+        "required": [
+          "path",
+          "agent",
+          "previous"
+        ],
+        "title": "AdminLockReassigned",
+        "type": "object"
+      },
       "AgentAttention": {
         "description": "The agent's claude is waiting on a person; `state` is unchanged by it.",
         "properties": {
@@ -3664,6 +3701,18 @@
               }
             ],
             "title": "Spec"
+          },
+          "superleader_manageable": {
+            "anyOf": [
+              {
+                "const": false,
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Superleader Manageable"
           }
         },
         "title": "PresetPatch",
@@ -7394,6 +7443,83 @@
         "tags": [
           "admin"
         ]
+      },
+      "put": {
+        "description": "Replace the whole cleanup policy (every field required, same bounds as the main port).\nPostgres only: it needs no api S3 key pair. The audit row lists the field names, no values.",
+        "operationId": "put_archives_settings_agent_v1_admin_archives_settings_put",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SweepPolicyIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CleanupSettingsView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Archives Settings",
+        "tags": [
+          "admin"
+        ]
       }
     },
     "/agent/v1/admin/chats/room-requests": {
@@ -8734,6 +8860,15 @@
             },
             "description": "Successful Response"
           },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader; not_manageable: the target is not superleader_manageable (needs the user's approval)"
+          },
+          "404": {
+            "description": "not_found: no preset has that name or id"
+          },
+          "409": {
+            "description": "conflict: changed meanwhile; open_proposals: the preset has active change proposals (extra.proposals lists their ids)"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -9358,6 +9493,100 @@
           }
         },
         "summary": "Create Project",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/agent/v1/admin/projects/{slug}": {
+      "patch": {
+        "description": "Rename, describe, archive or unarchive a project, same body, answer and errors as the\nmain-port route. An explicit null keeps the stored value and is still listed in the audit\nrow, which carries the set field names only.",
+        "operationId": "update_project_agent_v1_admin_projects__slug__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader"
+          },
+          "404": {
+            "description": "not_found: no project has that slug"
+          },
+          "409": {
+            "description": "default_project: the default project cannot be archived"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Project",
         "tags": [
           "admin"
         ]
@@ -11262,6 +11491,97 @@
         ]
       }
     },
+    "/agent/v1/admin/sessions/{slug}/labels": {
+      "put": {
+        "description": "Replace the labels of the caller's own session or of a manageable one; labels are\nnormalised and limited as on the main port.",
+        "operationId": "set_session_labels_agent_v1_admin_sessions__slug__labels_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionLabelsIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnLabelsView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader; not_manageable: the target is not superleader_manageable (needs the user's approval)"
+          },
+          "404": {
+            "description": "not_found: no session has that slug"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Session Labels",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/agent/v1/admin/sessions/{slug}/leadership/withdraw": {
       "post": {
         "description": "Withdraw a pending handover request (`request_id`), or every one of the session when it\nis omitted: the session's own leader, or a superleader on its own or a manageable session.\nA withdrawn request is rejected with reason `withdrawn` and never applied. The reconciler's\n`rollout` request is never withdrawn (409 `rollout_request` by id, left queued without).",
@@ -11428,6 +11748,93 @@
         ]
       }
     },
+    "/agent/v1/admin/sessions/{slug}/locks/reassign": {
+      "post": {
+        "description": "Give a file lock of a manageable session to one of its agents, or discard it with\n`to: null`. The path is read against the target's workdir; the caller's own session is\nrefused (422 `own_session`).",
+        "operationId": "reassign_session_lock_agent_v1_admin_sessions__slug__locks_reassign_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LockReassignIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminLockReassigned"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "description": "invalid_path: empty or outside the target session workdir"
+          },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader; not_manageable: the target is not superleader_manageable (needs the user's approval)"
+          },
+          "404": {
+            "description": "not_found: no session has that slug, or `to` is not a live agent of it"
+          },
+          "422": {
+            "description": "own_session: the target is the caller's own session (use the leader-only agent route)"
+          }
+        },
+        "summary": "Reassign Session Lock",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/agent/v1/admin/sessions/{slug}/messages": {
       "get": {
         "description": "The message queue of any session, with the main port's `status` filter.",
@@ -11536,6 +11943,92 @@
           }
         },
         "summary": "Session Messages",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/agent/v1/admin/sessions/{slug}/messages/{message_id}": {
+      "delete": {
+        "description": "Cancel a queued message of a manageable session (the caller's own included). The id is\nmatched inside the session: another session's message is 404 and stays queued.",
+        "operationId": "cancel_session_message_agent_v1_admin_sessions__slug__messages__message_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "message_id",
+            "required": true,
+            "schema": {
+              "title": "Message Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader; not_manageable: the target is not superleader_manageable (needs the user's approval)"
+          },
+          "404": {
+            "description": "not_found: no session has that slug, or no message with that id in it"
+          },
+          "409": {
+            "description": "not_queued: only a queued message can be cancelled"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Session Message",
         "tags": [
           "admin"
         ]
@@ -11780,6 +12273,271 @@
           }
         },
         "summary": "Restart Session",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/agent/v1/admin/sessions/{slug}/scale": {
+      "post": {
+        "description": "Set spec.replicas of a manageable session in place; the caller's own session is refused\n(422 `own_session`). A scale-up over the usage quota is 409 `usage_quota`: that check reads\non its own connection and fails open, like the main port's, so it runs between a short\nread of the target and the transaction (never while a connection is held). No kube call.",
+        "operationId": "scale_session_agent_v1_admin_sessions__slug__scale_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScaleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScaleResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader; not_manageable: the target is not superleader_manageable (needs the user's approval)"
+          },
+          "404": {
+            "description": "not_found: no session has that slug"
+          },
+          "409": {
+            "description": "usage_quota, static_session, leader_would_leave or session_deleting"
+          },
+          "422": {
+            "description": "out_of_range: replicas outside 1..max_replicas; own_session: the caller's own session"
+          }
+        },
+        "summary": "Scale Session",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/agent/v1/admin/specs/{key}": {
+      "delete": {
+        "operationId": "delete_spec_agent_v1_admin_specs__key__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "unauthorized: missing or invalid agent credentials"
+          },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader; or the taskboard's forbidden"
+          },
+          "404": {
+            "description": "not_found: the path is not one the relay forwards"
+          },
+          "413": {
+            "description": "payload_too_large: the body exceeds 256 KiB"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "taskboard_unconfigured or taskboard_unavailable"
+          }
+        },
+        "summary": "Delete a spec through the taskboard, as every project",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/agent/v1/admin/specs/{key}/comments/{comment_id}/dismiss": {
+      "post": {
+        "operationId": "dismiss_suggestion_agent_v1_admin_specs__key__comments__comment_id__dismiss_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "comment_id",
+            "required": true,
+            "schema": {
+              "title": "Comment Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "The taskboard upstream's status and JSON body, unchanged"
+          },
+          "401": {
+            "description": "unauthorized: missing or invalid agent credentials"
+          },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader; or the taskboard's forbidden"
+          },
+          "404": {
+            "description": "not_found: the path is not one the relay forwards"
+          },
+          "413": {
+            "description": "payload_too_large: the body exceeds 256 KiB"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "taskboard_unconfigured or taskboard_unavailable"
+          }
+        },
+        "summary": "Dismiss a spec suggestion through the taskboard, as every project",
         "tags": [
           "admin"
         ]

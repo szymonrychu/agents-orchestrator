@@ -12,7 +12,9 @@ import uuid
 
 import httpx
 import pytest
-from test_agent_session_messaging import alone
+from factories import attach_preset, insert_message
+from fakes.fake_kube import FakeKube
+from test_agent_session_messaging import alone, hive
 from test_api_agent import client_for as agent_client
 from test_api_agent import headers
 from test_api_agent import make_settings as agent_settings
@@ -302,3 +304,93 @@ async def test_superleader_reads_never_leak_tokens_or_values(pool, dsn, tmp_path
     for needle in forbidden:
         assert not [b for b in bodies if needle in b], f"{needle} in a response"
         assert needle not in caplog.text, f"{needle} in a log record"
+
+
+async def test_superleader_writes_never_leak_tokens_or_values(pool, dsn, caplog):
+    """T-120 slice 3: the superleader writes (labels PUT, scale POST, lock reassign POST, cleanup
+    settings PUT, project PATCH) answer and audit ids, names and counts only. A readable vault
+    value and canary service tokens appear in no answer, no table row and no log record."""
+    caplog.set_level(logging.DEBUG)
+    vault = CanaryVault()
+    settings = agent_settings(dsn).model_copy(
+        update={
+            "vault_url": "http://vault",
+            "taskboard_url": "http://taskboard.test:9002",
+            "taskboard_token": "canary-tb-token",
+            **CANARY_TOKENS,
+        }
+    )
+    app = create_app(
+        settings,
+        pool,
+        kube=FakeKube(namespace="agents"),
+        vault_transport=httpx.MockTransport(vault.handler),
+    )
+    app.state.taskboard_http = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(204))
+    )
+    boss = await hive(pool, "canary-w-boss", superleader=True)
+    other = await hive(pool, "canary-w-other")
+    await attach_preset(pool, other.id, manageable=True)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO file_locks (session_id, path, agent_id) VALUES (%s, 'src/a.py', %s)",
+            (other.id, other.leader_id),
+        )
+        cur = await conn.execute(
+            "SELECT pod_name FROM agents WHERE session_id = %s ORDER BY ordinal", (other.id,)
+        )
+        pods = [row[0] for row in await cur.fetchall()]
+        await conn.execute(
+            "INSERT INTO projects (slug, name, description) VALUES ('canary-proj', 'C', '')"
+        )
+    queued = await insert_message(pool, other.id, text="canary queued")
+    policy = {
+        "enabled": True,
+        "dry_run": True,
+        "retention_days": 30,
+        "keep_newest": 3,
+        "interval_seconds": 3600,
+        "grace_seconds": 600,
+    }
+    S = f"{ADMIN_PREFIX}/sessions/{other.slug}"
+    calls = [
+        ("PUT", f"{S}/labels", {"labels": ["canary-label"]}, 200),
+        ("POST", f"{S}/scale", {"replicas": 1}, 202),
+        ("POST", f"{S}/locks/reassign", {"path": "src/a.py", "to": pods[1]}, 200),
+        ("PUT", f"{ADMIN_PREFIX}/archives/settings", policy, 200),
+        ("PATCH", f"{ADMIN_PREFIX}/projects/canary-proj", {"description": "d"}, 200),
+        ("DELETE", f"{S}/messages/{queued['id']}", None, 204),
+        ("DELETE", f"{ADMIN_PREFIX}/specs/S-1", None, 204),
+        ("POST", f"{ADMIN_PREFIX}/specs/S-1/comments/1/dismiss", None, 204),
+        ("PUT", f"{ADMIN_PREFIX}/archives/settings", {**policy, "retention_days": 0}, 422),
+    ]
+    bodies: list[str] = []
+    async with agent_client(app, boss.leader_ip) as http:
+        r = await http.post(
+            f"{ADMIN_PREFIX}/presets",
+            headers=headers(boss.id),
+            json={"name": "canary-flip", "spec": {"env": {"PLAIN": {"value": "v"}}}},
+        )
+        assert r.status_code == 201, r.text
+        calls.append(
+            (
+                "PATCH",
+                f"{ADMIN_PREFIX}/presets/{r.json()['id']}",
+                {"superleader_manageable": False},
+                200,
+            )
+        )
+        for method, path, body, expected in calls:
+            r = await http.request(method, path, headers=headers(boss.id), json=body)
+            assert r.status_code == expected, (method, path, r.status_code, r.text)
+            bodies.append(r.text)
+    forbidden = [CANARY_VALUE, CANARY_ERROR, *CANARY_TOKENS.values()]
+    forbidden += [base64.b64encode(x.encode()).decode().rstrip("=") for x in forbidden]
+    rows = await table_texts(pool)
+    for needle in forbidden:
+        assert not [b for b in bodies if needle in b], f"{needle} in a response"
+        assert needle not in caplog.text, f"{needle} in a log record"
+        assert not [t for t, row in rows if needle in row], f"{needle} in a row"
+    audits = [r for t, r in rows if t == "events" and "admin_call" in r]
+    assert len(audits) >= len(calls) - 1

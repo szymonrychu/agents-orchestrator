@@ -7,6 +7,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from test_admin_audit_detail import admin_rows
 from test_agent_session_messaging import alone
 from test_api_agent import AGENT_PORT, KEY, client_for, headers
 from test_api_archives import NO_CREDS, PRE, client, obj, s3, settings_for  # noqa: F401
@@ -101,3 +102,76 @@ async def test_download_is_not_exposed(pool, dsn, s3):  # noqa: F811
     r = await admin_get(pool, dsn, f"{A}/download", params={"key": f"{PRE}proj/a.tar.zst"})
     assert r.status_code in (404, 405)
     assert "location" not in r.headers
+
+
+POLICY = {
+    "enabled": True,
+    "dry_run": True,
+    "retention_days": 30,
+    "keep_newest": 3,
+    "interval_seconds": 3600,
+    "grace_seconds": 600,
+}
+
+
+async def admin_put(pool, dsn, body, *, superleader=True, **kw):
+    boss = await alone(pool, f"mp-{uuid.uuid4().hex[:8]}", superleader=superleader)
+    app = create_app(agent_settings(dsn, **kw), pool)
+    async with client_for(app, boss.leader_ip) as http:
+        return await http.put(f"{A}/settings", headers=headers(boss.id), json=body)
+
+
+async def stored_policy(pool):
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT count(*) FROM cache_sweep_settings")
+        return (await cur.fetchone())[0]
+
+
+async def test_admin_put_cleanup_settings_200(pool, dsn):
+    r = await admin_put(pool, dsn, POLICY)
+    assert r.status_code == 200, r.text
+    assert r.headers["cache-control"] == "no-store"
+    assert r.json()["policy"] == POLICY
+    assert r.json()["source"] == "database"
+    main = await main_get(pool, dsn, "/api/v1/cache/cleanup/settings")
+    assert main.json()["policy"] == POLICY
+
+
+async def test_admin_put_cleanup_settings_without_s3_pair(pool, dsn):
+    r = await admin_put(pool, dsn, POLICY, **NO_CREDS)
+    assert r.status_code == 200, r.text
+    assert r.json()["policy"] == POLICY
+
+
+async def test_admin_put_cleanup_settings_out_of_bounds_422(pool, dsn):
+    r = await admin_put(pool, dsn, {**POLICY, "retention_days": 0})
+    assert r.status_code == 422, r.text
+    assert '"input"' not in r.text
+    assert await stored_policy(pool) == 0
+
+
+async def test_admin_put_cleanup_settings_partial_body_422(pool, dsn):
+    r = await admin_put(pool, dsn, {"enabled": False})
+    assert r.status_code == 422, r.text
+    assert await stored_policy(pool) == 0
+
+
+async def test_admin_put_cleanup_settings_audit_keys_only(pool, dsn):
+    r = await admin_put(pool, dsn, POLICY)
+    assert r.status_code == 200, r.text
+    row = [x for x in await admin_rows(pool) if x["method"] == "PUT"][-1]
+    assert row["fields"] == [
+        "dry_run",
+        "enabled",
+        "grace_seconds",
+        "interval_seconds",
+        "keep_newest",
+        "retention_days",
+    ]
+    assert set(row) == {"method", "path", "status", "session", "secrets", "fields"}
+
+
+async def test_admin_put_cleanup_settings_regular_leader_403(pool, dsn):
+    r = await admin_put(pool, dsn, POLICY, superleader=False)
+    assert_error(r, 403, "not_superleader")
+    assert await stored_policy(pool) == 0

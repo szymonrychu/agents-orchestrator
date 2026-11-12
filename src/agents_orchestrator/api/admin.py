@@ -10,6 +10,7 @@ one `events` row the UI feed shows.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 import uuid
@@ -20,6 +21,7 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.exceptions import HTTPException, RequestValidationError
 from fastapi.routing import APIRoute
+from pydantic import BaseModel
 from starlette.responses import Response as StarletteResponse
 
 from agents_orchestrator.api import messages as messages_api
@@ -32,17 +34,21 @@ from agents_orchestrator.api.agent import (
     ACTIVITY_MAX_LIMIT,
     Activity,
     Caller,
+    LockReassignIn,
     LocksOut,
     _leads,
     activity_lines,
     locks_of,
+    member_id,
+    normalise_all,
 )
 from agents_orchestrator.api.errors import ApiError, not_found, not_manageable
+from agents_orchestrator.api.session_labels import OwnLabelsView
 from agents_orchestrator.api.sessions import Cfg, Pool, Usage
 from agents_orchestrator.api.spec_edit import note_fields
 from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import events as events_repo
-from agents_orchestrator.db import leadership, views
+from agents_orchestrator.db import file_locks, leadership, views
 from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.db import queue as q
 from agents_orchestrator.db import sessions as sessions_repo
@@ -103,6 +109,17 @@ def caller_of(request: Request):
     return request.state.admin_caller
 
 
+def note_detail(request: Request, **detail: Any) -> None:
+    """Record non-value detail (ids, names, counts, paths; JSON scalars only) in the audit row.
+    A non-scalar is a programming error and raises here, at the call site."""
+    for key, value in detail.items():
+        if value is not None and not isinstance(value, str | int | float | bool):
+            raise TypeError(
+                f"admin audit detail {key!r} must be a JSON scalar, not {type(value).__name__}"
+            )
+    request.state.admin_detail = detail
+
+
 async def _audit(request: Request, status: int) -> None:
     admitted = getattr(request.state, "admin_caller", None)
     if admitted is None:
@@ -112,9 +129,11 @@ async def _audit(request: Request, status: int) -> None:
     vault = sorted({(v["env"], v["entry"], v["entry_env"]) for v in request.state.admin_vault})
     vault = [{"env": e, "entry": i, "entry_env": x} for e, i, x in vault]
     fields = getattr(request.state, "preset_fields", None)
+    detail = getattr(request.state, "admin_detail", None)
+    detail = detail if isinstance(detail, dict) else None
     path = request.url.path
     log.info(
-        "admin %s %s -> %s session=%s secrets=%s%s%s",
+        "admin %s %s -> %s session=%s secrets=%s%s%s%s",
         request.method,
         path,
         status,
@@ -122,6 +141,7 @@ async def _audit(request: Request, status: int) -> None:
         secrets,
         f" vault={vault}" if vault else "",
         "" if fields is None else f" fields={fields}",
+        "" if detail is None else f" detail={json.dumps(detail, sort_keys=True)}",
     )
     data = {
         "method": request.method,
@@ -134,6 +154,8 @@ async def _audit(request: Request, status: int) -> None:
         data["vault"] = vault
     if fields is not None:
         data["fields"] = fields
+    if detail is not None:
+        data["detail"] = detail
     await write_audit(request.app.state.pool, session, agent, data)
 
 
@@ -185,6 +207,14 @@ class AdminRoute(APIRoute):
 FORBIDDEN: dict[int | str, Any] = {
     "description": "not_superleader: the caller is not a superleader"
 }
+WRITE_FORBIDDEN: dict[int | str, Any] = {
+    "description": "not_superleader: the caller is not a superleader; not_manageable: the target "
+    "is not superleader_manageable (needs the user's approval)"
+}
+OWN_SESSION: dict[int | str, Any] = {
+    "description": "own_session: the target is the caller's own session "
+    "(use the leader-only agent route)"
+}
 SESSION_NOT_FOUND: dict[int | str, Any] = {"description": "not_found: no session has that slug"}
 router = APIRouter(
     prefix=ADMIN_PREFIX, tags=["admin"], route_class=AdminRoute, dependencies=[Superleader]
@@ -192,6 +222,12 @@ router = APIRouter(
 # The routes with {slug} carry the editor gate themselves: it reads the path parameter `slug`, so
 # a router-level dependency would make it a required query parameter on any route without one.
 session_router = APIRouter(prefix=ADMIN_PREFIX, tags=["admin"], route_class=AdminRoute)
+
+
+def own_session(what: str) -> ApiError:
+    return ApiError(
+        422, "own_session", f"{what} of your own session goes through the leader-only agent route"
+    )
 
 
 def touched(request: Request, *names: str) -> None:
@@ -210,6 +246,7 @@ ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("GET", f"{ADMIN_PREFIX}/meta"): "list",
     ("GET", f"{ADMIN_PREFIX}/archives"): "list",
     ("GET", f"{ADMIN_PREFIX}/archives/settings"): "list",
+    ("PUT", f"{ADMIN_PREFIX}/archives/settings"): "list",
     ("GET", f"{ADMIN_PREFIX}/archives/cleanup/preview"): "list",
     ("POST", f"{ADMIN_PREFIX}/presets"): "create",
     ("GET", f"{ADMIN_PREFIX}/presets/{{ref}}"): "preset",
@@ -233,7 +270,14 @@ ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/agents/{{pod}}/restart"): "session",
     ("GET", f"{ADMIN_PREFIX}/commands/{{command_id}}"): "none",
     ("GET", f"{ADMIN_PREFIX}/usage"): "none",
+    ("DELETE", f"{ADMIN_PREFIX}/specs/{{key}}"): "none",
+    ("POST", f"{ADMIN_PREFIX}/specs/{{key}}/comments/{{comment_id}}/dismiss"): "none",
     ("POST", f"{ADMIN_PREFIX}/projects"): "none",
+    ("PATCH", f"{ADMIN_PREFIX}/projects/{{slug}}"): "none",
+    ("PUT", f"{ADMIN_PREFIX}/sessions/{{slug}}/labels"): "session",
+    ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/scale"): "session",
+    ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/locks/reassign"): "session",
+    ("DELETE", f"{ADMIN_PREFIX}/sessions/{{slug}}/messages/{{message_id}}"): "session",
     ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/projects"): "session",
     ("DELETE", f"{ADMIN_PREFIX}/sessions/{{slug}}/projects/{{project}}"): "session",
     ("POST", f"{ADMIN_PREFIX}/presets/{{ref}}/projects"): "preset",
@@ -257,6 +301,25 @@ async def create_project(
     carries the field names only."""
     note_fields(request, ["slug", "name"])
     return await projects_api.create(pool, body)
+
+
+@router.patch(
+    "/projects/{slug}",
+    response_model=schemas.ProjectView,
+    responses={
+        403: FORBIDDEN,
+        404: {"description": "not_found: no project has that slug"},
+        409: {"description": "default_project: the default project cannot be archived"},
+    },
+)
+async def update_project(
+    slug: str, body: schemas.ProjectPatch, request: Request, pool: Pool
+) -> schemas.ProjectView:
+    """Rename, describe, archive or unarchive a project, same body, answer and errors as the
+    main-port route. An explicit null keeps the stored value and is still listed in the audit
+    row, which carries the set field names only."""
+    note_fields(request, sorted(body.model_fields_set))
+    return await projects_api.patch(pool, slug, body)
 
 
 # ---------------------------------------------------------------- presets (O6)
@@ -334,7 +397,18 @@ async def replace_preset(
         return await presets_api.replace(request, conn, settings, found.id, body, superleader=True)
 
 
-@router.patch("/presets/{ref}", response_model=schemas.PresetView)
+@router.patch(
+    "/presets/{ref}",
+    response_model=schemas.PresetView,
+    responses={
+        403: WRITE_FORBIDDEN,
+        404: {"description": "not_found: no preset has that name or id"},
+        409: {
+            "description": "conflict: changed meanwhile; open_proposals: the preset has active "
+            "change proposals (extra.proposals lists their ids)"
+        },
+    },
+)
 async def patch_preset(
     ref: str, body: schemas.PresetPatch, request: Request, pool: Pool, settings: Cfg
 ) -> schemas.PresetView:
@@ -588,7 +662,7 @@ async def restart_agent(
         target = await _writable_target(conn, slug, caller)
         if target.desired == "deleting":
             raise ApiError(409, "session_deleting", "session is being discarded")
-        agent_id = await _member_id(conn, target.id, pod)
+        agent_id = await member_id(conn, target.id, pod)
         own = target.id == caller.id
         note_id = None
         if own:
@@ -598,13 +672,6 @@ async def restart_agent(
             conn, agent_id, "restart", caller.id, note_id
         )
     return schemas.CommandAccepted(command_id=command_id)
-
-
-async def _member_id(conn, session_id: uuid.UUID, pod_name: str) -> uuid.UUID:
-    for member in await agents_repo.list_members(conn, session_id):
-        if member["pod_name"] == pod_name:
-            return member["id"]
-    raise not_found(f"agent {pod_name}")
 
 
 @router.get("/commands/{command_id}", response_model=schemas.CommandView)
@@ -722,6 +789,129 @@ async def session_commands(
         target = await _readable_target(conn, slug, caller)
         rows = await views.list_commands(conn, target.id, limit)
     return [schemas.CommandView(**r) for r in rows]
+
+
+# ---- superleader writes on any manageable session (T-120 slice 3)
+
+
+@router.put(
+    "/sessions/{slug}/labels",
+    response_model=OwnLabelsView,
+    responses={403: WRITE_FORBIDDEN, 404: SESSION_NOT_FOUND},
+)
+async def set_session_labels(
+    slug: str, body: schemas.SessionLabelsIn, request: Request, pool: Pool
+) -> OwnLabelsView:
+    """Replace the labels of the caller's own session or of a manageable one; labels are
+    normalised and limited as on the main port."""
+    _, caller = caller_of(request)
+    async with pool.connection() as conn, conn.transaction():
+        target = await _writable_target(conn, slug, caller)
+        session = await sessions_repo.set_labels(conn, target.id, body.labels)
+    note_fields(request, ["labels"])
+    return OwnLabelsView(session_id=session.id, labels=session.labels)
+
+
+@router.post(
+    "/sessions/{slug}/scale",
+    status_code=202,
+    response_model=schemas.ScaleResult,
+    responses={
+        403: WRITE_FORBIDDEN,
+        404: SESSION_NOT_FOUND,
+        409: {"description": "usage_quota, static_session, leader_would_leave or session_deleting"},
+        422: {
+            "description": "out_of_range: replicas outside 1..max_replicas; "
+            "own_session: the caller's own session"
+        },
+    },
+)
+async def scale_session(
+    slug: str,
+    body: schemas.ScaleRequest,
+    request: Request,
+    pool: Pool,
+    settings: Cfg,
+    usage: Usage,
+) -> schemas.ScaleResult:
+    """Set spec.replicas of a manageable session in place; the caller's own session is refused
+    (422 `own_session`). A scale-up over the usage quota is 409 `usage_quota`: that check reads
+    on its own connection and fails open, like the main port's, so it runs between a short
+    read of the target and the transaction (never while a connection is held). No kube call."""
+    _, caller = caller_of(request)
+    async with pool.connection() as conn:
+        target = await _writable_target(conn, slug, caller)
+    if target.id == caller.id:
+        raise own_session("scale")
+    await sessions_api.gate_scale_up(pool, usage, settings, target.id, body.replicas)
+    async with pool.connection() as conn, conn.transaction():
+        target = await _writable_target(conn, slug, caller)
+        out = await sessions_api.scale(conn, target.id, body.replicas)
+    note_fields(request, ["replicas"])
+    note_detail(request, replicas_before=out.previous_replicas, replicas_after=out.replicas)
+    return out
+
+
+class AdminLockReassigned(BaseModel):
+    path: str
+    agent: str | None
+    previous: str | None
+
+
+@router.post(
+    "/sessions/{slug}/locks/reassign",
+    response_model=AdminLockReassigned,
+    responses={
+        400: {"description": "invalid_path: empty or outside the target session workdir"},
+        403: WRITE_FORBIDDEN,
+        404: {
+            "description": "not_found: no session has that slug, or `to` is not a live agent of it"
+        },
+        422: OWN_SESSION,
+    },
+)
+async def reassign_session_lock(
+    slug: str, body: LockReassignIn, request: Request, pool: Pool
+) -> AdminLockReassigned:
+    """Give a file lock of a manageable session to one of its agents, or discard it with
+    `to: null`. The path is read against the target's workdir; the caller's own session is
+    refused (422 `own_session`)."""
+    _, caller = caller_of(request)
+    async with pool.connection() as conn, conn.transaction():
+        target = await _writable_target(conn, slug, caller)
+        if target.id == caller.id:
+            raise own_session("lock reassign")
+        (path,) = normalise_all([body.path], target.spec.workdir)
+        to_id = await member_id(conn, target.id, body.to) if body.to is not None else None
+        previous = await file_locks.holder_for_update(conn, target.id, path)
+        await file_locks.assign(conn, target.id, path, to_id)
+    note_fields(request, ["path", "to"])
+    note_detail(request, path=path, previous=previous, to=body.to)
+    return AdminLockReassigned(path=path, agent=body.to, previous=previous)
+
+
+@router.delete(
+    "/sessions/{slug}/messages/{message_id}",
+    status_code=204,
+    response_model=None,
+    responses={
+        403: WRITE_FORBIDDEN,
+        404: {
+            "description": "not_found: no session has that slug, or no message with that id in it"
+        },
+        409: {"description": "not_queued: only a queued message can be cancelled"},
+    },
+)
+async def cancel_session_message(
+    slug: str, message_id: int, request: Request, pool: Pool
+) -> Response:
+    """Cancel a queued message of a manageable session (the caller's own included). The id is
+    matched inside the session: another session's message is 404 and stays queued."""
+    _, caller = caller_of(request)
+    async with pool.connection() as conn, conn.transaction():
+        target = await _writable_target(conn, slug, caller)
+        await messages_api.cancel(conn, message_id, target.id)
+    return Response(status_code=204)
 
 
 # ---------------------------------------------------------------- usage

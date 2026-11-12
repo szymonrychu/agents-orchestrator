@@ -209,21 +209,30 @@ async def get_cleanup_settings(
         return await _settings_view(conn, settings)
 
 
-@router.put("/cache/cleanup/settings", response_model=schemas.CleanupSettingsView)
-async def put_cleanup_settings(
-    body: schemas.SweepPolicyIn, request: Request, pool: Pool, settings: Cfg, response: Response
+async def write_cleanup_settings(
+    pool: AsyncConnectionPool, settings: Settings, body: schemas.SweepPolicyIn, by: str
 ) -> schemas.CleanupSettingsView:
+    """Replace the saved sweep policy (read-for-update, put and NOTIFY in one transaction) and
+    log the change with `by`; shared by the main port and the superleader route."""
     new = SweepPolicy(**body.model_dump())
-    async with pool.connection() as conn:
-        stored = await cache_sweep_settings.get(conn)
+    async with pool.connection() as conn, conn.transaction():
+        stored = await cache_sweep_settings.get(conn, for_update=True)
         await cache_sweep_settings.put(conn, new)
         view = await _settings_view(conn, settings)
     log.info(
         "audit: cache cleanup settings by=%s old=%s new=%s",
-        _caller(request),
+        by,
         stored.policy.to_dict() if stored else "env",
         new.to_dict(),
     )
+    return view
+
+
+@router.put("/cache/cleanup/settings", response_model=schemas.CleanupSettingsView)
+async def put_cleanup_settings(
+    body: schemas.SweepPolicyIn, request: Request, pool: Pool, settings: Cfg, response: Response
+) -> schemas.CleanupSettingsView:
+    view = await write_cleanup_settings(pool, settings, body, _caller(request))
     response.headers["Cache-Control"] = "no-store"
     return view
 

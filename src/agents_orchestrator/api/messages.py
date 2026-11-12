@@ -138,13 +138,21 @@ async def get_message(message_id: int, pool: Pool) -> schemas.MessageView:
     return message_view(row)
 
 
+async def cancel(conn, message_id: int, session_id: uuid.UUID | None) -> None:
+    """Cancel a queued message, scoped to `session_id` when given: an unknown id and another
+    session's message answer alike (404); a message that is not queued is 409."""
+    if await queue.cancel_message(conn, message_id, session_id):
+        return
+    row = await views.get_message(conn, message_id, DEFAULT_ATTEMPTS)
+    if row is None or (session_id is not None and row["session_id"] != session_id):
+        raise not_found("message")
+    raise ApiError(409, "not_queued", "only a queued message can be cancelled")
+
+
 @router.delete("/messages/{message_id}", status_code=204)
 async def cancel_message(message_id: int, pool: Pool) -> Response:
     async with pool.connection() as conn:
-        if await views.get_message(conn, message_id, DEFAULT_ATTEMPTS) is None:
-            raise not_found("message")
-        if not await queue.cancel_message(conn, message_id):
-            raise ApiError(409, "not_queued", "only a queued message can be cancelled")
+        await cancel(conn, message_id, None)
     return Response(status_code=204)
 
 
