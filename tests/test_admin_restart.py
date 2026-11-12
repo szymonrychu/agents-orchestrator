@@ -267,23 +267,23 @@ async def test_a_gone_agent_does_not_hold_the_note(call, pool, boss):
     assert not await held(pool, boss.id)
 
 
-async def test_commands_are_scoped_to_the_issuing_superleader(call, pool, app, boss):
+async def test_commands_of_any_issuer_are_visible_to_a_superleader(call, pool, app, boss):
     other = await hive(pool, "rs-victim")
     await attach_preset(pool, other.id)
     mine = (await call("POST", f"{S}/{other.slug}/restart")).json()["command_ids"][0]
     assert (await call("GET", f"{ADMIN_PREFIX}/commands/{mine}")).status_code == 200
-    # a command made on the main port, and one issued by another superleader, are not visible
+    # a command made on the main port, and one issued by another superleader, are visible too
     async with pool.connection() as conn:
         from agents_orchestrator.db import queue
 
         main_cmd = await queue.enqueue_command(
             conn, (await agents_of(pool, other.id))[0]["id"], "restart"
         )
-    assert_error(await call("GET", f"{ADMIN_PREFIX}/commands/{main_cmd}"), 404, "not_found")
+    assert (await call("GET", f"{ADMIN_PREFIX}/commands/{main_cmd}")).status_code == 200
     rival = await alone(pool, "rs-rival", superleader=True)
     async with client_for(app, rival.leader_ip) as http:
         r = await http.get(f"{ADMIN_PREFIX}/commands/{mine}", headers=headers(rival.id))
-    assert_error(r, 404, "not_found")
+    assert r.status_code == 200, r.text
 
 
 async def test_restart_unmanageable_session_403(call, pool):

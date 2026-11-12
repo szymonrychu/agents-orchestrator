@@ -68,6 +68,35 @@ def _split_types(types: list[str] | None) -> list[str] | None:
     return out or None
 
 
+async def events_page(
+    conn,
+    session_id: uuid.UUID,
+    *,
+    before_id: int | None,
+    after_id: int | None,
+    limit: int,
+    agent_id: uuid.UUID | None,
+    types: list[str] | None,
+) -> EventsPage:
+    """One page of a session's events; 400 when both cursors are given."""
+    if before_id is not None and after_id is not None:
+        raise _bad_request("before_id and after_id are mutually exclusive")
+    page = await ev.page(
+        conn,
+        session_id,
+        before_id=before_id,
+        after_id=after_id,
+        limit=limit,
+        agent_id=agent_id,
+        types=_split_types(types),
+    )
+    return EventsPage(
+        events=[EventView(**e) for e in page.events],
+        has_more_before=page.has_more_before,
+        next_after_id=page.next_after_id,
+    )
+
+
 @router.get("/sessions/{session_id}/events", response_model=EventsPage)
 async def list_events(
     session_id: uuid.UUID,
@@ -83,20 +112,15 @@ async def list_events(
     async with pool.connection() as conn:
         if await repo.get(conn, session_id) is None:
             raise not_found("session")
-        page = await ev.page(
+        return await events_page(
             conn,
             session_id,
             before_id=before_id,
             after_id=after_id,
             limit=limit,
             agent_id=agent_id,
-            types=_split_types(types),
+            types=types,
         )
-    return EventsPage(
-        events=[EventView(**e) for e in page.events],
-        has_more_before=page.has_more_before,
-        next_after_id=page.next_after_id,
-    )
 
 
 async def resume_cursor(

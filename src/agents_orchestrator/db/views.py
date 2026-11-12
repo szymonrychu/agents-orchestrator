@@ -194,6 +194,19 @@ async def get_command(
     return rows[0] if rows else None
 
 
+async def list_commands(
+    conn: psycopg.AsyncConnection, session_id: uuid.UUID, limit: int
+) -> list[dict]:
+    """The commands of a session's agents, newest first, with the columns of `get_command`."""
+    return await _rows(
+        conn,
+        "SELECT c.id, c.agent_id, c.kind, c.status, c.result, c.created_at, c.started_at,"
+        " c.finished_at FROM commands c JOIN agents a ON a.id = c.agent_id"
+        " WHERE a.session_id = %s ORDER BY c.id DESC LIMIT %s",
+        (session_id, limit),
+    )
+
+
 async def get_check(conn: psycopg.AsyncConnection, id: int) -> dict | None:
     rows = await _rows(
         conn,

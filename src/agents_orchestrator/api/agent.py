@@ -449,13 +449,18 @@ async def locks_release(body: LockPaths, agent: Caller, pool: Pool) -> LocksRele
     return LocksReleased(released=released)
 
 
-@router.get("/locks", response_model=LocksOut, summary="File locks held by live agents")
-async def locks_list(agent: Caller, pool: Pool) -> LocksOut:
-    async with pool.connection() as conn:
-        locks = await file_locks.list_live(conn, agent.session_id)
+async def locks_of(conn: Any, session_id: uuid.UUID) -> LocksOut:
+    """The file locks held by the live agents of a session."""
+    locks = await file_locks.list_live(conn, session_id)
     return LocksOut(
         locks=[LockOut(path=x.path, agent=x.agent, claimed_at=x.claimed_at) for x in locks]
     )
+
+
+@router.get("/locks", response_model=LocksOut, summary="File locks held by live agents")
+async def locks_list(agent: Caller, pool: Pool) -> LocksOut:
+    async with pool.connection() as conn:
+        return await locks_of(conn, agent.session_id)
 
 
 @router.post(
@@ -664,6 +669,23 @@ class Activity(BaseModel):
     lines: list[ActivityLine]
 
 
+async def activity_lines(
+    conn: Any, session: sessions_repo.Session, peer: str | None, limit: int
+) -> Activity:
+    """The newest `limit` digest lines of `session`, oldest first; `peer` keeps one pod's."""
+    workdir = f"{WORKDIR_ROOT}/{session.spec.workdir}"
+    rows = await events_repo.recent_activity_rows(conn, session.id)
+    lines = feed.digest_lines(rows, datetime.now(UTC), workdir)
+    stamps = {row["id"]: row["ts"] for row in rows}
+    kept = [line for line in lines if peer is None or line.agent == peer]
+    return Activity(
+        lines=[
+            ActivityLine(id=line.id, agent=line.agent, text=line.text, ts=stamps[line.id])
+            for line in kept[-limit:]
+        ]
+    )
+
+
 @router.get(
     "/activity",
     response_model=Activity,
@@ -679,14 +701,4 @@ async def activity(
     session, own lines included. `agent` keeps one pod's lines; a name that matches nothing
     gives an empty list, since gone agents' lines are history."""
     async with pool.connection() as conn:
-        workdir = f"{WORKDIR_ROOT}/{await _workdir(conn, agent)}"
-        rows = await events_repo.recent_activity_rows(conn, agent.session_id)
-    lines = feed.digest_lines(rows, datetime.now(UTC), workdir)
-    stamps = {row["id"]: row["ts"] for row in rows}
-    kept = [line for line in lines if peer is None or line.agent == peer]
-    return Activity(
-        lines=[
-            ActivityLine(id=line.id, agent=line.agent, text=line.text, ts=stamps[line.id])
-            for line in kept[-limit:]
-        ]
-    )
+        return await activity_lines(conn, await _session(conn, agent), peer, limit)
