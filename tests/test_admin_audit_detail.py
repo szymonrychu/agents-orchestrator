@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 from psycopg.rows import dict_row
 from test_agent_session_messaging import alone
 
@@ -53,3 +54,11 @@ async def test_audit_row_without_detail_has_no_detail_key(pool):
 def test_own_session_error():
     e = admin.own_session("scale")
     assert (e.status, e.code) == (422, "own_session")
+
+
+@pytest.mark.parametrize("value", [["a"], {"k": "v"}, b"x", (1, 2), object()])
+async def test_note_detail_refuses_non_scalar(pool, value):
+    req = await _request(pool)
+    with pytest.raises(TypeError, match="JSON scalar"):
+        admin.note_detail(req, path=value)
+    assert not hasattr(req.state, "admin_detail")

@@ -110,7 +110,13 @@ def caller_of(request: Request):
 
 
 def note_detail(request: Request, **detail: Any) -> None:
-    """Record non-value detail (ids, names, counts, paths; JSON scalars only) in the audit row."""
+    """Record non-value detail (ids, names, counts, paths; JSON scalars only) in the audit row.
+    A non-scalar is a programming error and raises here, at the call site."""
+    for key, value in detail.items():
+        if value is not None and not isinstance(value, str | int | float | bool):
+            raise TypeError(
+                f"admin audit detail {key!r} must be a JSON scalar, not {type(value).__name__}"
+            )
     request.state.admin_detail = detail
 
 
