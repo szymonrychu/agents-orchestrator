@@ -79,6 +79,8 @@ class Session:
     # inactivity limits: the api-written quiet-clock stamp, when the reminder went out, who asked
     # for the close ('self' or 'inactivity') and when an inactivity close is forced
     last_update_at: datetime | None = None
+    # the user-authored message clock (written only by the api); null = never
+    last_user_message_at: datetime | None = None
     inactivity_reminded_at: datetime | None = None
     close_kind: str | None = None
     close_deadline_at: datetime | None = None
@@ -123,6 +125,7 @@ def _from_row(row: dict[str, Any]) -> Session:
         close_reason=row["close_reason"],
         labels=row["labels"],
         last_update_at=row["last_update_at"],
+        last_user_message_at=row["last_user_message_at"],
         inactivity_reminded_at=row["inactivity_reminded_at"],
         close_kind=row["close_kind"],
         close_deadline_at=row["close_deadline_at"],
@@ -502,6 +505,16 @@ async def touch_update(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> 
     unknown session is left alone."""
     await conn.execute(
         "UPDATE sessions SET last_update_at = now() WHERE id = %s AND desired = 'active'",
+        (session_id,),
+    )
+
+
+async def mark_user_message(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> None:
+    """Stamp `last_user_message_at`: the user-authored message clock. Written only by the api, in
+    the transaction that enqueues the message (that enqueue already NOTIFYs `status`), so no
+    NOTIFY and no generation bump here. A deleting or unknown session is left alone."""
+    await conn.execute(
+        "UPDATE sessions SET last_user_message_at = now() WHERE id = %s AND desired = 'active'",
         (session_id,),
     )
 

@@ -177,6 +177,7 @@ def _view(session: repo.Session, agg: dict | None, settings: Settings) -> schema
         close_deadline_at=session.close_deadline_at,
         inactivity_reminded_at=session.inactivity_reminded_at,
         last_update_at=last_update,
+        last_user_message_at=session.last_user_message_at,
         reminder_at=reminder_at,
         inactivity_closes_at=inactivity_closes_at,
         created_by_service=session.created_by_service,

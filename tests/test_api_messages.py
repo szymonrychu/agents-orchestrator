@@ -498,3 +498,73 @@ async def test_start_prompt_session_post_keeps_attachments_unprefixed(http, pool
     assert got["text"] == "go"
     assert [a["name"] for a in got["attachments"]] == ["s.png"]
     assert await _count(pool, "message_attachments") == 1
+
+
+async def _last_user_message_at(pool, session_id):
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT last_user_message_at FROM sessions WHERE id = %s", (session_id,)
+        )
+        return (await cur.fetchone())[0]
+
+
+async def _view_last_user_message_at(http, session_id):
+    return (await http.get(f"/api/v1/sessions/{session_id}")).json()["last_user_message_at"]
+
+
+async def test_post_message_main_port_marks_last_user_message_at(http, pool):
+    cl = await insert_session(pool)
+    assert await _view_last_user_message_at(http, cl["id"]) is None
+    r = await http.post(f"/api/v1/sessions/{cl['id']}/messages", json={"text": "hi"})
+    assert r.status_code == 202, r.text
+    row = await _last_user_message_at(pool, cl["id"])
+    assert abs(datetime.now(UTC) - row) < timedelta(seconds=10)
+    view = await _view_last_user_message_at(http, cl["id"])
+    assert datetime.fromisoformat(view) == row
+
+
+async def test_post_message_from_user_false_leaves_last_user_message_at(http, pool):
+    cl = await insert_session(pool)
+    r = await http.post(
+        f"/api/v1/sessions/{cl['id']}/messages", json={"text": "hi", "from_user": False}
+    )
+    assert r.status_code == 202, r.text
+    assert await _last_user_message_at(pool, cl["id"]) is None
+    assert await _view_last_user_message_at(http, cl["id"]) is None
+
+
+async def test_refused_post_leaves_last_user_message_at(http, pool):
+    gone = await insert_session(pool, desired="deleting")
+    r = await http.post(f"/api/v1/sessions/{gone['id']}/messages", json={"text": "hi"})
+    assert_error(r, 409, "session_deleting")
+    assert await _last_user_message_at(pool, gone["id"]) is None
+    cl = await insert_session(pool)
+    other = await insert_session(pool)
+    foreign = await insert_agent(pool, other["id"])
+    r = await http.post(
+        f"/api/v1/sessions/{cl['id']}/messages",
+        json={"text": "hi", "target_agent_id": str(foreign["id"])},
+    )
+    assert_error(r, 422, "invalid_request")
+    assert await _last_user_message_at(pool, cl["id"]) is None
+
+
+async def test_retry_does_not_touch_last_user_message_at(http, pool):
+    cl = await insert_session(pool)
+    past = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE sessions SET last_user_message_at = %s WHERE id = %s", (past, cl["id"])
+        )
+    f = await insert_message(pool, cl["id"], status="failed", attempts=5, error="unavailable")
+    r = await http.post(f"/api/v1/messages/{f['id']}/retry")
+    assert r.status_code == 202, r.text
+    assert await _last_user_message_at(pool, cl["id"]) == past
+
+
+async def test_post_message_rejects_non_bool_from_user(http, pool):
+    cl = await insert_session(pool)
+    r = await http.post(
+        f"/api/v1/sessions/{cl['id']}/messages", json={"text": "hi", "from_user": "yes"}
+    )
+    assert_error(r, 422, "invalid_request")

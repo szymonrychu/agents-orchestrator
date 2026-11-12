@@ -5,10 +5,10 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Query, Response
+from fastapi import APIRouter, Query, Request, Response
 
 from agents_orchestrator.api import attachments as attachments_mod
-from agents_orchestrator.api import schemas
+from agents_orchestrator.api import schemas, service_auth
 from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.sessions import Cfg, Pool
 from agents_orchestrator.db import queue, views
@@ -69,8 +69,13 @@ async def _require_open_session(conn, session_id: uuid.UUID) -> repo.Session:
     "/sessions/{session_id}/messages", status_code=202, response_model=schemas.MessageAccepted
 )
 async def post_message(
-    session_id: uuid.UUID, body: schemas.PostMessage, pool: Pool, settings: Cfg
+    session_id: uuid.UUID, body: schemas.PostMessage, request: Request, pool: Pool, settings: Cfg
 ) -> schemas.MessageAccepted:
+    from_user = (
+        body.from_user
+        if body.from_user is not None
+        else service_auth.calling_service(request) is None
+    )
     stored = attachments_mod.decode(body.attachments, settings)
     async with pool.connection() as conn, conn.transaction():
         await _require_open_session(conn, session_id)
@@ -80,6 +85,10 @@ async def post_message(
                 raise ApiError(422, "invalid_request", "target agent is not in this session")
             if agent["gone_at"] is not None:
                 raise ApiError(422, "target_gone", "target agent is gone")
+        if from_user:
+            # before the enqueue: it share-locks the session row, and upgrading that lock to the
+            # update here would deadlock concurrent posts to one session
+            await repo.mark_user_message(conn, session_id)
         try:
             mid = await queue.enqueue_message(
                 conn,

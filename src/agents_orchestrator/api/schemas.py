@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictBool, field_validator
 
 from agents_orchestrator.labels import normalize_labels
 from agents_orchestrator.settings import (
@@ -388,6 +388,8 @@ class SessionView(BaseModel):
     inactivity_reminded_at: datetime | None = None
     # the quiet clock: the last user-visible update of the session
     last_update_at: datetime | None = None
+    # when the user last messaged this session (any chat path); null = never
+    last_user_message_at: datetime | None = None
     # when the reminder is due; null when it is off, for a superleader or with a close pending
     reminder_at: datetime | None = None
     # when the inactivity limit requests the close; null when it is off or for a superleader
@@ -670,6 +672,13 @@ class PostMessage(BaseModel):
     target_agent_id: uuid.UUID | None = None
     lane: Lane = "regular"
     attachments: list[MessageAttachment] = []
+    from_user: StrictBool | None = Field(
+        default=None,
+        description=(
+            "True when a human wrote this message. Omitted: true on the main (web) port, "
+            "false on the service port."
+        ),
+    )
 
 
 class MessageAccepted(BaseModel):

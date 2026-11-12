@@ -757,3 +757,37 @@ def test_service_scopes_validation(monkeypatch):
     with pytest.raises(SettingsError) as e:
         Settings()
     assert "ORCH_SERVICE_SCOPES" in e.value.problems
+
+
+async def last_user_message_at(pool, session_id):
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT last_user_message_at FROM sessions WHERE id = %s", (session_id,)
+        )
+        return (await cur.fetchone())[0]
+
+
+async def test_service_post_message_is_not_from_user_by_default(app, pool):
+    cl = await insert_session(pool)
+    async with client(app, 8002) as c:
+        r = await c.post(f"/api/v1/sessions/{cl['id']}/messages", json={"text": "hi"})
+        assert r.status_code == 202, r.text
+    assert await last_user_message_at(pool, cl["id"]) is None
+
+
+async def test_service_post_message_from_user_true_marks(app, pool):
+    cl = await insert_session(pool)
+    async with client(app, 8002) as c:
+        r = await c.post(
+            f"/api/v1/sessions/{cl['id']}/messages", json={"text": "hi", "from_user": True}
+        )
+        assert r.status_code == 202, r.text
+    assert await last_user_message_at(pool, cl["id"]) is not None
+
+
+async def test_main_port_post_message_marks(app, pool):
+    cl = await insert_session(pool)
+    async with client(app, 8000, peer=INSIDE, token=None) as c:
+        r = await c.post(f"/api/v1/sessions/{cl['id']}/messages", json={"text": "hi"})
+        assert r.status_code == 202, r.text
+    assert await last_user_message_at(pool, cl["id"]) is not None
