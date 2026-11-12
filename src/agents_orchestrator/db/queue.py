@@ -300,12 +300,17 @@ async def count_queued_session_messages(
     )
 
 
-async def cancel_message(conn: psycopg.AsyncConnection, id: int) -> bool:
+async def cancel_message(
+    conn: psycopg.AsyncConnection, id: int, session_id: uuid.UUID | None = None
+) -> bool:
+    """Cancel a queued message; with `session_id` only when it belongs to that session (the
+    guard is in the UPDATE, so a slug can never reach another session's message)."""
     row = await _transition(
         conn,
         "UPDATE messages SET status = 'cancelled' WHERE id = %(id)s AND status = 'queued'"
+        " AND (%(session_id)s::uuid IS NULL OR session_id = %(session_id)s)"
         " RETURNING session_id",
-        {"id": id},
+        {"id": id, "session_id": session_id},
         clear_attachments=True,
     )
     return row is not None

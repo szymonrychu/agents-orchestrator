@@ -92,6 +92,7 @@ async def test_every_scoped_admin_route_reads_open_and_refuses_writes_on_unmanag
         .replace("{slug}", other.slug)
         .replace("{pod}", pod)
         .replace("{name}", "API_KEY")
+        .replace("{message_id}", "1")
         .replace("{entry_id}", "11111111-1111-4111-8111-111111111111")
     )
     kw = {"json": BODIES[(method, path)]} if (method, path) in BODIES else {}

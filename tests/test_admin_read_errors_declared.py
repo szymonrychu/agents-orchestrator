@@ -23,6 +23,7 @@ DECLARED: dict[tuple[str, str], set[int]] = {
     ("PUT", f"{S}/labels"): {403, 404},
     ("POST", f"{S}/scale"): {403, 404, 409},
     ("POST", f"{S}/locks/reassign"): {400, 403, 404},
+    ("DELETE", f"{S}/messages/{{message_id}}"): {403, 404, 409},
     ("PATCH", f"{ADMIN_PREFIX}/projects/{{slug}}"): {403, 404, 409},
     ("GET", f"{ADMIN_PREFIX}/vault"): {403, 502, 503},
     ("GET", f"{ADMIN_PREFIX}/usage/history"): {403, 503},

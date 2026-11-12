@@ -268,6 +268,7 @@ ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("PUT", f"{ADMIN_PREFIX}/sessions/{{slug}}/labels"): "session",
     ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/scale"): "session",
     ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/locks/reassign"): "session",
+    ("DELETE", f"{ADMIN_PREFIX}/sessions/{{slug}}/messages/{{message_id}}"): "session",
     ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/projects"): "session",
     ("DELETE", f"{ADMIN_PREFIX}/sessions/{{slug}}/projects/{{project}}"): "session",
     ("POST", f"{ADMIN_PREFIX}/presets/{{ref}}/projects"): "preset",
@@ -863,6 +864,30 @@ async def reassign_session_lock(
     note_fields(request, ["path", "to"])
     note_detail(request, path=path, previous=previous, to=body.to)
     return AdminLockReassigned(path=path, agent=body.to, previous=previous)
+
+
+@router.delete(
+    "/sessions/{slug}/messages/{message_id}",
+    status_code=204,
+    response_model=None,
+    responses={
+        403: WRITE_FORBIDDEN,
+        404: {
+            "description": "not_found: no session has that slug, or no message with that id in it"
+        },
+        409: {"description": "not_queued: only a queued message can be cancelled"},
+    },
+)
+async def cancel_session_message(
+    slug: str, message_id: int, request: Request, pool: Pool
+) -> Response:
+    """Cancel a queued message of a manageable session (the caller's own included). The id is
+    matched inside the session: another session's message is 404 and stays queued."""
+    _, caller = caller_of(request)
+    async with pool.connection() as conn, conn.transaction():
+        target = await _writable_target(conn, slug, caller)
+        await messages_api.cancel(conn, message_id, target.id)
+    return Response(status_code=204)
 
 
 # ---------------------------------------------------------------- usage

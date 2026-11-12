@@ -11845,6 +11845,92 @@
         ]
       }
     },
+    "/agent/v1/admin/sessions/{slug}/messages/{message_id}": {
+      "delete": {
+        "description": "Cancel a queued message of a manageable session (the caller's own included). The id is\nmatched inside the session: another session's message is 404 and stays queued.",
+        "operationId": "cancel_session_message_agent_v1_admin_sessions__slug__messages__message_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "message_id",
+            "required": true,
+            "schema": {
+              "title": "Message Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader; not_manageable: the target is not superleader_manageable (needs the user's approval)"
+          },
+          "404": {
+            "description": "not_found: no session has that slug, or no message with that id in it"
+          },
+          "409": {
+            "description": "not_queued: only a queued message can be cancelled"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Session Message",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/agent/v1/admin/sessions/{slug}/projects": {
       "post": {
         "description": "File a grant of an extra project to a session as a `session_projects` proposal; the\nsession gets full membership in that project once the user approves it (no restart). 200\nwith the first proposal on a `client_key` replay.",
