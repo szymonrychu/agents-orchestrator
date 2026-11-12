@@ -309,6 +309,9 @@ class SessionSummary(BaseModel):
     start_state: Literal["booting", "ready", "bootstrap_failed"]
     bootstrap_failures: list[BootstrapFailure]
     ready: int
+    # live agents that are ready, not dead and hold a wrapper session: the agents the dispatcher
+    # can hand a message to now (`ready` counts pods whose readiness probe passes)
+    ready_with_session: int
     replicas: int
     context_pct_max: float | None
     auto_compact_pct: int

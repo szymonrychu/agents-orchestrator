@@ -5619,6 +5619,10 @@
             "title": "Ready",
             "type": "integer"
           },
+          "ready_with_session": {
+            "title": "Ready With Session",
+            "type": "integer"
+          },
           "replicas": {
             "title": "Replicas",
             "type": "integer"
@@ -5649,6 +5653,7 @@
           "start_state",
           "bootstrap_failures",
           "ready",
+          "ready_with_session",
           "replicas",
           "context_pct_max",
           "auto_compact_pct",

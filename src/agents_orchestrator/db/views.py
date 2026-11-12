@@ -8,6 +8,7 @@ from typing import Any
 import psycopg
 from psycopg.rows import dict_row
 
+from agents_orchestrator.db.eligibility import HOLDS_SESSION
 from agents_orchestrator.db.sessions import Session, quiet_clock_sql
 from agents_orchestrator.db.start_state import start_state
 from agents_orchestrator.dispatcher.hive import compact_pct
@@ -16,6 +17,7 @@ from agents_orchestrator.settings import Settings
 _AGGREGATES = f"""
 SELECT c.id AS session_id,
        count(a.id) FILTER (WHERE a.ready AND a.gone_at IS NULL) AS ready,
+       count(a.id) FILTER (WHERE {HOLDS_SESSION}) AS ready_with_session,
        count(s.agent_id) FILTER (WHERE a.gone_at IS NULL AND s.state = 'busy') AS busy,
        count(s.agent_id) FILTER (
            WHERE a.gone_at IS NULL AND s.waiting_reason IS NOT NULL) AS attention_agents,
@@ -91,6 +93,7 @@ def summarize(session: Session, agg: dict[str, Any] | None, settings: Settings) 
         "start_state": start_state(ready, failures),
         "bootstrap_failures": failures,
         "ready": ready,
+        "ready_with_session": agg.get("ready_with_session", 0),
         "replicas": session.spec.replicas,
         "context_pct_max": agg.get("context_pct_max"),
         "auto_compact_pct": compact_pct(session.spec.auto_compact_pct, settings),
