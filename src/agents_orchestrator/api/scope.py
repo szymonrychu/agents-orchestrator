@@ -76,6 +76,7 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("POST", f"{_A}/tasks/{{path:path}}"): "project",
     ("PUT", f"{_A}/tasks/{{path:path}}"): "project",
     ("PATCH", f"{_A}/tasks/{{path:path}}"): "project",
+    ("GET", f"{_A}/projects/summary"): "project",
     # spec relay: same shape as the task relay (T-116)
     ("GET", f"{_A}/specs"): "project",
     ("POST", f"{_A}/specs"): "project",

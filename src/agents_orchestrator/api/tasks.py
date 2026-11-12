@@ -36,6 +36,7 @@ from agents_orchestrator.settings import Settings
 from agents_orchestrator.taskboard_client import UPSTREAM_PREFIX
 
 router = APIRouter(prefix="/agent/v1/tasks", tags=["agent"])
+summary_router = APIRouter(prefix="/agent/v1/projects", tags=["agent"])
 
 MAX_BODY_BYTES = forward_core.MAX_BODY_BYTES
 TIMEOUT_SECONDS = forward_core.TIMEOUT_SECONDS
@@ -46,6 +47,7 @@ _KEY = r"T-[0-9]+"
 _ALLOWED = re.compile(
     rf"/tasks(?:|/{_KEY}(?:|/comments|/todo|/todo/{_ID}|/deps|/decisions|/decisions/{_ID}/withdraw))"
 )
+_SUMMARY = re.compile(r"/projects/summary")
 
 
 def client(app: FastAPI) -> httpx.AsyncClient:
@@ -197,3 +199,14 @@ async def collection(request: Request, agent: Caller, pool: Pool, settings: Cfg)
 )
 async def item(path: str, request: Request, agent: Caller, pool: Pool, settings: Cfg) -> Response:
     return await _relay(request, agent, pool, settings, "/" + path)
+
+
+@summary_router.get(
+    "/summary",
+    summary="Per-project task and spec counts within the caller's project scope (taskboard relay)",
+    responses=_RESPONSES,
+)
+async def projects_summary(
+    request: Request, agent: Caller, pool: Pool, settings: Cfg
+) -> Response:
+    return await relay(request, agent, pool, settings, "/projects/summary", _SUMMARY, mine=False)

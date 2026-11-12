@@ -408,3 +408,66 @@ async def test_task_read_and_client_error_do_not_touch(pool, dsn):
         app, sid, old = await _db_app(pool, dsn, Upstream(reply=httpx.Response(status, json={})))
         assert (await _call_db(app, sid, method, path)).status_code == status
         assert await _last_update(pool, sid) == old, (method, path, status)
+
+
+# ------------------------------------------------------------ projects summary relay (T-120)
+
+
+def _scoped(rig: Rig, **changes: Any) -> None:
+    session = dataclasses.replace(rig.session, **changes)
+    assert rig.db is not None
+    rig.db.sessions[session.id] = session
+
+
+async def test_projects_summary_relay_path_query_and_default_scope(monkeypatch):
+    rig = make_rig(monkeypatch)
+    r = await rig.call("GET", "/agent/v1/projects/summary?project=alpha")
+    assert r.status_code == 200
+    (sent,) = rig.upstream.seen
+    assert sent.method == "GET"
+    assert sent.url.raw_path == b"/taskboard/api/v1/projects/summary?project=alpha"
+    assert sent.headers["authorization"] == f"Bearer {TB_TOKEN}"
+    assert sent.headers["x-orch-session"] == str(rig.session.id)
+    assert sent.headers["x-orch-projects"] == "default"
+
+
+async def test_projects_summary_superleader_sends_star(monkeypatch):
+    rig = make_rig(monkeypatch)
+    spec = rig.session.spec.model_copy(update={"session_messaging": True})
+    _scoped(rig, spec=spec)
+    await rig.call("GET", "/agent/v1/projects/summary", headers={"X-Orch-Projects": "a"})
+    (sent,) = rig.upstream.seen
+    assert sent.headers.get_list("x-orch-projects") == ["*"]
+    assert sent.url.raw_path == b"/taskboard/api/v1/projects/summary"
+
+
+async def test_projects_summary_granted_session_sends_home_and_extra(monkeypatch):
+    rig = make_rig(monkeypatch)
+    _scoped(rig, project="home", extra_projects=("extra",))
+    await rig.call("GET", "/agent/v1/projects/summary")
+    (sent,) = rig.upstream.seen
+    assert sent.headers["x-orch-projects"] == "home,extra"
+
+
+async def test_projects_summary_passes_upstream_answer_unchanged(monkeypatch):
+    rig = make_rig(monkeypatch)
+    rig.upstream.reply = httpx.Response(403, json={"error": {"code": "forbidden"}})
+    r = await rig.call("GET", "/agent/v1/projects/summary?project=x")
+    assert r.status_code == 403
+    assert r.json() == {"error": {"code": "forbidden"}}
+
+
+async def test_projects_summary_unconfigured_503(monkeypatch):
+    rig = make_rig(monkeypatch, taskboard_url="", taskboard_token="")
+    assert_error(
+        await rig.call("GET", "/agent/v1/projects/summary"), 503, "taskboard_unconfigured"
+    )
+    assert rig.upstream.seen == []
+
+
+def test_projects_listing_is_not_shadowed_by_the_summary_relay(monkeypatch):
+    rig = make_rig(monkeypatch)
+    paths = rig.app.openapi()["paths"]
+    listing = paths["/agent/v1/projects"]["get"]["operationId"]
+    summary = paths["/agent/v1/projects/summary"]["get"]["operationId"]
+    assert listing.startswith("projects_") and summary.startswith("projects_summary_")
