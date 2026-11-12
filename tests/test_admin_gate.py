@@ -13,7 +13,7 @@ from test_agent_session_messaging import alone, hive
 from test_api_agent import client_for, headers, make_settings
 from test_api_sessions import assert_error
 
-from agents_orchestrator.api import admin, proposal_routes
+from agents_orchestrator.api import admin, admin_archives, proposal_routes  # noqa: F401
 from agents_orchestrator.api.admin import (
     ADMIN_PREFIX,
     require_session_editor,

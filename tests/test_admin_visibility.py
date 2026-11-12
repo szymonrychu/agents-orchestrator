@@ -14,7 +14,7 @@ from test_api_agent import client_for, headers, make_settings
 from test_api_sessions import assert_error
 from test_api_sessions import client_for as main_client
 
-from agents_orchestrator.api import admin, admin_relay, proposal_routes
+from agents_orchestrator.api import admin, admin_archives, admin_relay, proposal_routes  # noqa: F401
 from agents_orchestrator.api.admin import ADMIN_VISIBILITY
 from agents_orchestrator.api.app import create_app
 

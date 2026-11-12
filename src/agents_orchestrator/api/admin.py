@@ -203,6 +203,10 @@ ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("GET", f"{ADMIN_PREFIX}/presets"): "list",
     ("GET", f"{ADMIN_PREFIX}/vault"): "list",
     ("GET", f"{ADMIN_PREFIX}/sessions"): "list",
+    ("GET", f"{ADMIN_PREFIX}/meta"): "list",
+    ("GET", f"{ADMIN_PREFIX}/archives"): "list",
+    ("GET", f"{ADMIN_PREFIX}/archives/settings"): "list",
+    ("GET", f"{ADMIN_PREFIX}/archives/cleanup/preview"): "list",
     ("POST", f"{ADMIN_PREFIX}/presets"): "create",
     ("GET", f"{ADMIN_PREFIX}/presets/{{ref}}"): "preset",
     ("PUT", f"{ADMIN_PREFIX}/presets/{{ref}}"): "preset",
@@ -274,6 +278,12 @@ async def writable_preset(conn, ref: str) -> presets_repo.Preset:
     if not found.superleader_manageable:
         raise not_manageable("preset")
     return found
+
+
+@router.get("/meta", response_model=schemas.Meta)
+async def get_meta(settings: Cfg) -> schemas.Meta:
+    """The deploy settings the main port answers (defaults, images, models, caps)."""
+    return await sessions_api.meta(settings)
 
 
 @router.get("/presets", response_model=list[schemas.PresetView])
