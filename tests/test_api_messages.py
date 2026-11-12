@@ -402,7 +402,29 @@ async def _post_att(http, pool, *items):
 
 
 async def test_attachment_mime_not_allowed_422(http, pool):
-    r = await _post_att(http, pool, _att("a.gif", "image/gif", b"GIF89a"))
+    r = await _post_att(http, pool, _att("a.svg", "image/svg+xml", b"<svg/>"))
+    assert_error(r, 422, "invalid_attachment")
+    assert await _count(pool, "messages") == 0
+    r = await _post_att(http, pool, _att("a.bin", "application/octet-stream", b"abc"))
+    assert_error(r, 422, "invalid_attachment")
+    assert await _count(pool, "messages") == 0
+
+
+async def test_attachment_gif_webp_pdf_accepted(http, pool):
+    r = await _post_att(
+        http,
+        pool,
+        _att("a.gif", "image/gif", b"GIF89a" + b"\x00" * 8),
+        _att("b.gif", "image/gif", b"GIF87a" + b"\x00" * 8),
+        _att("c.webp", "image/webp", b"RIFF\x10\x00\x00\x00WEBPVP8 "),
+        _att("d.pdf", "application/pdf", b"%PDF-1.7\n%%EOF"),
+    )
+    assert r.status_code == 202, r.text
+
+
+@pytest.mark.parametrize("mime", ["image/gif", "image/webp", "application/pdf"])
+async def test_attachment_magic_mismatch_refused(http, pool, mime):
+    r = await _post_att(http, pool, _att("f.bin", mime, _PNG))
     assert_error(r, 422, "invalid_attachment")
     assert await _count(pool, "messages") == 0
 
