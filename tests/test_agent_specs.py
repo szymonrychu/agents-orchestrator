@@ -170,3 +170,18 @@ async def test_spec_write_touches_session(monkeypatch):
 def test_every_relayed_write_method_is_a_stamped_one():
     methods = {m for route in specs.router.routes for m in route.methods}
     assert methods - {"GET"} == tasks._WRITES
+
+
+async def test_steps_next_204_passes_through_without_body(monkeypatch):
+    rig = make_rig(monkeypatch)
+    rig.upstream.reply = httpx.Response(204)
+    r = await rig.call("POST", "/agent/v1/specs/S-1/steps/next", json={})
+    assert r.status_code == 204
+    assert r.content == b""
+
+
+async def test_empty_non_204_answer_is_still_503(monkeypatch):
+    rig = make_rig(monkeypatch)
+    rig.upstream.reply = httpx.Response(200, content=b"")
+    r = await rig.call("POST", "/agent/v1/specs/S-1/steps/next", json={})
+    assert_error(r, 503, "taskboard_unavailable")

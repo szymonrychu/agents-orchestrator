@@ -141,9 +141,14 @@ async def relay(
         own.slug,
         query=query,
         extra_headers=projects_header(own),
+        empty_ok=True,
     )
+    if not content and status != 204:
+        raise ApiError(503, "taskboard_unavailable", "taskboard relay upstream is unavailable")
     if request.method in _WRITES:
         await forward_core.touch_on_success(pool, own.id, status)
+    if not content:
+        return Response(status_code=status)
     return Response(content, status, media_type="application/json")
 
 
