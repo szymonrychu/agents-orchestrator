@@ -211,16 +211,16 @@ async def me(agent: Caller, pool: Pool, settings: Cfg) -> Me:
 @router.get(
     "/projects",
     response_model=list[schemas.ProjectView],
-    summary="The caller's projects, or every active project for a superleader",
+    summary="The caller's projects, or every project for a superleader",
 )
 async def projects(agent: Caller, pool: Pool) -> list[schemas.ProjectView]:
     """Scope `project` (projects plan 3.3): the caller's own projects, home first then its extra
-    projects (T-120), archived or not; a superleader session gets every active project. No
-    counts, as on the service port."""
+    projects (T-120), archived or not; a superleader session gets every project, archived ones
+    included. No counts, as on the service port."""
     async with pool.connection() as conn:
         session = await _session(conn, agent)
         if scope_of(session) == ALL_PROJECTS:
-            rows = await projects_repo.list_projects(conn)
+            rows = await projects_repo.list_projects(conn, archived=None)
         else:
             rows = []
             for slug in session.projects:

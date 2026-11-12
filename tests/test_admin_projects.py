@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from factories import two_project_fixture
 from fakes.fake_kube import FakeKube
 from psycopg.rows import dict_row
 from test_agent_session_messaging import alone
@@ -63,3 +64,31 @@ async def test_invalid_slug_is_422(pool, dsn):
     boss = await alone(pool, "pj-bad", superleader=True)
     _, r = await post(pool, dsn, boss, {"slug": "Not A Slug!", "name": "x"})
     assert_error(r, 422, "invalid_request")
+
+
+async def _agent_projects(pool, dsn, who):
+    app = create_app(make_settings(dsn), pool)
+    async with client_for(app, who.ip) as http:
+        r = await http.get("/agent/v1/projects", headers=headers(who.id))
+    assert r.status_code == 200, r.text
+    return {p["slug"]: p["archived"] for p in r.json()}
+
+
+async def test_superleader_project_list_includes_archived(pool, dsn):
+    seats = await two_project_fixture(pool)
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE projects SET archived_at = now() WHERE slug = 'b'")
+    assert await _agent_projects(pool, dsn, seats["S"]) == {
+        "a": False,
+        "b": True,
+        "default": False,
+    }
+
+
+async def test_regular_session_project_list_unchanged(pool, dsn):
+    seats = await two_project_fixture(pool)
+    assert await _agent_projects(pool, dsn, seats["A1"]) == {"a": False}
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE projects SET archived_at = now() WHERE slug = 'a'")
+    assert await _agent_projects(pool, dsn, seats["A1"]) == {"a": True}
+    assert await _agent_projects(pool, dsn, seats["B1"]) == {"b": False}

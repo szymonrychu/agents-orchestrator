@@ -45,12 +45,13 @@ Usage is read-only too (`GET /usage/history`, `GET /usage/sessions` of agents-us
 windows and session marks); any other method is 405.
 
 The vault list (`GET /agent/v1/admin/vault`, `vault_list`) is read-only too (any other method is
-405) and is scoped to the caller: it answers only the entries whose labels match the caller
-session's project (`labels_match` against `project:<project>`; an entry without a `project:` label
-stays visible, as attach allows it). An entry's `attachments` keep only presets the superleader
-may manage, and an env's readable value is kept only for an entry attached to such a preset;
-otherwise the env shows its name and `protected` flag with `value: null`. `to_reattach` lists, per
-manageable preset, the env names a user still has to re-attach.
+405) and answers every entry, metadata only for other projects: an entry whose labels do not match
+the caller session's projects (`labels_match` against `project:<project>`; an entry without a
+`project:` label counts as the caller's, as attach allows it) has every env `value: null`. An
+entry's `attachments` list every preset, each with `privileged` and `manageable`; an env of the
+caller's own entry shows its readable value only when attached to a manageable preset, otherwise
+its name and `protected` flag with `value: null`. `to_reattach` lists, per preset, the env names a
+user still has to re-attach, with `manageable`.
 """
 
 from __future__ import annotations
@@ -509,30 +510,38 @@ def _register() -> None:
 _VAULT_SHAPE = ApiError(502, "upstream_shape", "the vault upstream answered an unexpected shape")
 
 
-def _scoped_entry(
-    entry: Any, project_labels: list[str], visible: set[str], marked: set[str]
-) -> dict | None:
-    """The entry as the superleader may see it, or None when its project labels exclude the
-    caller. Attachments keep manageable presets, each marked `privileged` when its preset is in
-    `marked`; readable values need one of them."""
+def _scoped_entry(entry: Any, own_labels: list[str], writable: set[str], marked: set[str]) -> dict:
+    """The entry as the superleader may see it; none is dropped. Attachments list every preset,
+    each marked `privileged` (in `marked`) and `manageable` (in `writable`). An entry whose
+    labels do not match `own_labels` (the caller's own projects) belongs to another project, so
+    every env value is None; a matching entry keeps a readable value only when it is attached to
+    a manageable preset."""
     if not isinstance(entry, dict):
         raise _VAULT_SHAPE
     labels = entry.get("labels")
-    if not isinstance(labels, list) or not labels_match(
-        (x for x in labels if isinstance(x, str)), project_labels
-    ):
-        return None
+    own = isinstance(labels, list) and labels_match(
+        (x for x in labels if isinstance(x, str)), own_labels
+    )
     attachments = entry.get("attachments")
+    manageable_attached = False
     if isinstance(attachments, list):
         attachments = [
-            {**a, "privileged": str(a["preset_id"]) in marked}
+            {
+                **a,
+                "privileged": str(a.get("preset_id")) in marked,
+                "manageable": str(a.get("preset_id")) in writable,
+            }
             for a in attachments
-            if isinstance(a, dict) and str(a.get("preset_id")) in visible
+            if isinstance(a, dict)
         ]
+        manageable_attached = any(a["manageable"] for a in attachments)
         entry = {**entry, "attachments": attachments}
     elif attachments is not None:
         raise _VAULT_SHAPE
-    if not attachments:
+    if not own:
+        envs = [{**e, "value": None} if isinstance(e, dict) else e for e in entry.get("envs") or []]
+        entry = {**entry, "envs": envs}
+    elif not manageable_attached:
         entry = {
             **entry,
             "envs": [
@@ -551,7 +560,7 @@ def _scoped_entry(
     tags=["admin"],
 )
 async def vault_list(request: Request, q: str | None = None) -> Response:
-    """The vault entries of the caller's projects (home and extra) and the env names to
+    """Every vault entry (values only for the caller's projects) and the env names to
     re-attach."""
     _, session = caller_of(request)
     client = request.app.state.vault
@@ -565,16 +574,21 @@ async def vault_list(request: Request, q: str | None = None) -> Response:
         raise ApiError(503, "upstream_unavailable", "the vault upstream is unavailable") from None
     except vault_client.VaultRefused:
         raise vault_refs.unavailable() from None
-    visible = await _writable(request)
+    writable = await _writable(request)
     project_labels = [f"{PROJECT_PREFIX}{p}" for p in session.projects]
     async with request.app.state.pool.connection() as conn:
         presets = await presets_repo.list_presets(conn)
     marked = {str(p.id) for p in presets if privileged(p.spec)}
-    entries = [e for e in (_scoped_entry(x, project_labels, visible, marked) for x in listed) if e]
+    entries = [_scoped_entry(x, project_labels, writable, marked) for x in listed]
     to_reattach = [
-        {"preset_id": str(p.id), "preset_name": p.name, "envs": sorted(p.vault_reattach)}
+        {
+            "preset_id": str(p.id),
+            "preset_name": p.name,
+            "envs": sorted(p.vault_reattach),
+            "manageable": str(p.id) in writable,
+        }
         for p in presets
-        if p.vault_reattach and str(p.id) in visible
+        if p.vault_reattach
     ]
     return JSONResponse({"entries": entries, "to_reattach": to_reattach})
 
