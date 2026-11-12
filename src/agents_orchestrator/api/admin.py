@@ -15,9 +15,9 @@ import time
 import uuid
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
-from typing import Any
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.exceptions import HTTPException, RequestValidationError
 from fastapi.routing import APIRoute
 from starlette.responses import Response as StarletteResponse
@@ -193,6 +193,7 @@ def touched(request: Request, *names: str) -> None:
 ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("GET", f"{ADMIN_PREFIX}/presets"): "list",
     ("GET", f"{ADMIN_PREFIX}/vault"): "list",
+    ("GET", f"{ADMIN_PREFIX}/sessions"): "list",
     ("POST", f"{ADMIN_PREFIX}/presets"): "create",
     ("GET", f"{ADMIN_PREFIX}/presets/{{ref}}"): "preset",
     ("PUT", f"{ADMIN_PREFIX}/presets/{{ref}}"): "preset",
@@ -265,6 +266,28 @@ async def writable_preset(conn, ref: str) -> presets_repo.Preset:
 async def list_presets(pool: Pool) -> list[schemas.PresetView]:
     async with pool.connection() as conn:
         return await presets_api.list_all(conn)
+
+
+@router.get("/sessions", response_model=list[schemas.SessionView])
+async def list_sessions(
+    pool: Pool,
+    settings: Cfg,
+    label: Annotated[list[str] | None, Query()] = None,
+    project: str | None = None,
+    superleaders: Literal["include"] | None = None,
+    slug: str | None = None,
+) -> list[schemas.SessionView]:
+    """Every session, raw-spec and unmanageable ones included, as the redacted `SessionView`;
+    the main port's filters and errors."""
+    async with pool.connection() as conn:
+        return await sessions_api.list_views(
+            conn,
+            settings,
+            label=label,
+            project=project,
+            superleaders=superleaders == "include",
+            slug=slug,
+        )
 
 
 @router.post("/presets", status_code=201, response_model=schemas.PresetView)

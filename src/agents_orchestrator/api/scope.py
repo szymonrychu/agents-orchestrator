@@ -122,6 +122,7 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("DELETE", f"{_ADMIN}/presets/{{ref}}"): "superleader",
     ("POST", f"{_ADMIN}/presets/{{ref}}/copy"): "superleader",
     ("GET", f"{_ADMIN}/vault"): "superleader",
+    ("GET", f"{_ADMIN}/sessions"): "superleader",
     ("PUT", f"{_ADMIN}/presets/{{ref}}/vault/{{entry_id}}"): "superleader",
     ("DELETE", f"{_ADMIN}/presets/{{ref}}/vault/{{entry_id}}"): "superleader",
     ("POST", f"{_ADMIN}/sessions"): "superleader",
