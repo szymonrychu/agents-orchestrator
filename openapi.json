@@ -12360,6 +12360,192 @@
         ]
       }
     },
+    "/agent/v1/admin/specs/{key}": {
+      "delete": {
+        "operationId": "delete_spec_agent_v1_admin_specs__key__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "The taskboard upstream's status and JSON body, unchanged"
+          },
+          "204": {
+            "description": "deleted"
+          },
+          "401": {
+            "description": "unauthorized: missing or invalid agent credentials"
+          },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader; or the taskboard's forbidden"
+          },
+          "404": {
+            "description": "not_found: the path is not one the relay forwards"
+          },
+          "413": {
+            "description": "payload_too_large: the body exceeds 256 KiB"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "taskboard_unconfigured or taskboard_unavailable"
+          }
+        },
+        "summary": "Delete a spec through the taskboard, as every project",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/agent/v1/admin/specs/{key}/comments/{comment_id}/dismiss": {
+      "post": {
+        "operationId": "dismiss_suggestion_agent_v1_admin_specs__key__comments__comment_id__dismiss_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "comment_id",
+            "required": true,
+            "schema": {
+              "title": "Comment Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "The taskboard upstream's status and JSON body, unchanged"
+          },
+          "401": {
+            "description": "unauthorized: missing or invalid agent credentials"
+          },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader; or the taskboard's forbidden"
+          },
+          "404": {
+            "description": "not_found: the path is not one the relay forwards"
+          },
+          "413": {
+            "description": "payload_too_large: the body exceeds 256 KiB"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "taskboard_unconfigured or taskboard_unavailable"
+          }
+        },
+        "summary": "Dismiss a spec suggestion through the taskboard, as every project",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/agent/v1/admin/usage": {
       "get": {
         "description": "The account's five_hour and seven_day windows, read-only, from the same cached\n`UsageSource` the usage gate reads. An unconfigured or unreachable usage service answers\n200 with `available` false and null windows: the gate allows then, and so does this.",

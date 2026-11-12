@@ -57,7 +57,8 @@ TASK_TOOLS = [
 # (GET /agent/v1/projects: its own project, or every one for a superleader).
 PROJECT_TOOLS = ["project_list", "project_summary"]
 # Spec tools (T-116): the spec relay on the agent port; every session gets them, trigger-created
-# ones included (accept and dismiss are user-only and have no tool).
+# ones included. Accept is user-only and has no tool; dismiss and delete are superleader admin
+# tools (ADMIN_TOOLS), the agent relay refuses both.
 SPEC_TOOLS = [
     "spec_list", "spec_get", "spec_create", "spec_update", "spec_versions", "spec_comment",
     "spec_comments", "spec_comment_resolve", "spec_pull", "spec_push",

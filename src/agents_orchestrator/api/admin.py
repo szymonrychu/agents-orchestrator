@@ -264,6 +264,8 @@ ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/agents/{{pod}}/restart"): "session",
     ("GET", f"{ADMIN_PREFIX}/commands/{{command_id}}"): "none",
     ("GET", f"{ADMIN_PREFIX}/usage"): "none",
+    ("DELETE", f"{ADMIN_PREFIX}/specs/{{key}}"): "none",
+    ("POST", f"{ADMIN_PREFIX}/specs/{{key}}/comments/{{comment_id}}/dismiss"): "none",
     ("POST", f"{ADMIN_PREFIX}/projects"): "none",
     ("PATCH", f"{ADMIN_PREFIX}/projects/{{slug}}"): "none",
     ("PUT", f"{ADMIN_PREFIX}/sessions/{{slug}}/labels"): "session",

@@ -18,6 +18,7 @@ from agents_orchestrator.api import (  # noqa: F401
     admin,
     admin_archives,
     admin_relay,
+    admin_specs,
     proposal_routes,
 )
 from agents_orchestrator.api.admin import ADMIN_VISIBILITY
