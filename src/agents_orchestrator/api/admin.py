@@ -10,6 +10,7 @@ one `events` row the UI feed shows.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 import uuid
@@ -103,6 +104,11 @@ def caller_of(request: Request):
     return request.state.admin_caller
 
 
+def note_detail(request: Request, **detail: Any) -> None:
+    """Record non-value detail (ids, names, counts, paths; JSON scalars only) in the audit row."""
+    request.state.admin_detail = detail
+
+
 async def _audit(request: Request, status: int) -> None:
     admitted = getattr(request.state, "admin_caller", None)
     if admitted is None:
@@ -112,9 +118,11 @@ async def _audit(request: Request, status: int) -> None:
     vault = sorted({(v["env"], v["entry"], v["entry_env"]) for v in request.state.admin_vault})
     vault = [{"env": e, "entry": i, "entry_env": x} for e, i, x in vault]
     fields = getattr(request.state, "preset_fields", None)
+    detail = getattr(request.state, "admin_detail", None)
+    detail = detail if isinstance(detail, dict) else None
     path = request.url.path
     log.info(
-        "admin %s %s -> %s session=%s secrets=%s%s%s",
+        "admin %s %s -> %s session=%s secrets=%s%s%s%s",
         request.method,
         path,
         status,
@@ -122,6 +130,7 @@ async def _audit(request: Request, status: int) -> None:
         secrets,
         f" vault={vault}" if vault else "",
         "" if fields is None else f" fields={fields}",
+        "" if detail is None else f" detail={json.dumps(detail, sort_keys=True)}",
     )
     data = {
         "method": request.method,
@@ -134,6 +143,8 @@ async def _audit(request: Request, status: int) -> None:
         data["vault"] = vault
     if fields is not None:
         data["fields"] = fields
+    if detail is not None:
+        data["detail"] = detail
     await write_audit(request.app.state.pool, session, agent, data)
 
 
@@ -185,6 +196,14 @@ class AdminRoute(APIRoute):
 FORBIDDEN: dict[int | str, Any] = {
     "description": "not_superleader: the caller is not a superleader"
 }
+WRITE_FORBIDDEN: dict[int | str, Any] = {
+    "description": "not_superleader: the caller is not a superleader; not_manageable: the target "
+    "is not superleader_manageable (needs the user's approval)"
+}
+OWN_SESSION: dict[int | str, Any] = {
+    "description": "own_session: the target is the caller's own session "
+    "(use the leader-only agent route)"
+}
 SESSION_NOT_FOUND: dict[int | str, Any] = {"description": "not_found: no session has that slug"}
 router = APIRouter(
     prefix=ADMIN_PREFIX, tags=["admin"], route_class=AdminRoute, dependencies=[Superleader]
@@ -192,6 +211,12 @@ router = APIRouter(
 # The routes with {slug} carry the editor gate themselves: it reads the path parameter `slug`, so
 # a router-level dependency would make it a required query parameter on any route without one.
 session_router = APIRouter(prefix=ADMIN_PREFIX, tags=["admin"], route_class=AdminRoute)
+
+
+def own_session(what: str) -> ApiError:
+    return ApiError(
+        422, "own_session", f"{what} of your own session goes through the leader-only agent route"
+    )
 
 
 def touched(request: Request, *names: str) -> None:
