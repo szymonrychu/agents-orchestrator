@@ -237,14 +237,14 @@ async def _visible_session(
     conn, session_id: uuid.UUID, caller: Session, *, hidden_as: str
 ) -> tuple[Session, dict[str, Any]]:
     """The target session as stored now (a plain read, no row lock: the review rechecks the
-    fingerprint under `replace_spec`'s lock), if the caller may still see it (`admin._target`:
-    its own, or one of a manageable preset; else as missing as an unknown); 409 while
-    deleting."""
+    fingerprint under `replace_spec`'s lock), if the caller may still write it
+    (`admin._writable_target`: its own, or one of a manageable preset; else as missing as an
+    unknown, the race with a change of manageability); 409 while deleting."""
     found = await sessions_repo.get_stored(conn, session_id)
     if found is None:
         raise not_found(hidden_as)
     try:
-        await admin._target(conn, found[0].slug, caller)
+        await admin._writable_target(conn, found[0].slug, caller)
     except ApiError:
         raise not_found(hidden_as) from None
     if found[0].desired != "active":
@@ -346,9 +346,9 @@ async def create(
         return await _create_schedule(request, conn, settings, body, caller, superleader)
     async with conn.transaction():
         if body.kind == "session":
-            target_id = (await admin._target(conn, body.target, caller)).id
+            target_id = (await admin._writable_target(conn, body.target, caller)).id
         else:
-            target_id = (await admin.manageable_preset(conn, body.target)).id
+            target_id = (await admin.writable_preset(conn, body.target)).id
     try:
         async with conn.transaction():
             name, plan = await _based(
@@ -369,14 +369,15 @@ async def create(
 async def _grant_target(
     conn, kind: str, ref: str, caller: Session
 ) -> tuple[str, str, str, tuple[str, ...]]:
-    """The grant's target as the superleader may see it (else 404 like an unknown): id, display
-    name, home project and extra projects. A session being deleted is 409."""
+    """The grant's target as the superleader may write it (unknown is 404, unmanageable is 403
+    `not_manageable`): id, display name, home project and extra projects. A session being
+    deleted is 409."""
     if kind == "session_projects":
-        session = await admin._target(conn, ref, caller)
+        session = await admin._writable_target(conn, ref, caller)
         if session.desired != "active":
             raise _deleting()
         return str(session.id), session.slug, session.project, session.extra_projects
-    preset = await admin.manageable_preset(conn, ref)
+    preset = await admin.writable_preset(conn, ref)
     return str(preset.id), preset.name, preset.project, preset.extra_projects
 
 

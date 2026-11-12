@@ -76,6 +76,7 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("POST", f"{_A}/tasks/{{path:path}}"): "project",
     ("PUT", f"{_A}/tasks/{{path:path}}"): "project",
     ("PATCH", f"{_A}/tasks/{{path:path}}"): "project",
+    ("GET", f"{_A}/projects/summary"): "project",
     # spec relay: same shape as the task relay (T-116)
     ("GET", f"{_A}/specs"): "project",
     ("POST", f"{_A}/specs"): "project",
@@ -85,7 +86,7 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("POST", f"{_A}/specs/{{path:path}}"): "project",
     ("PUT", f"{_A}/specs/{{path:path}}"): "project",
     ("PATCH", f"{_A}/specs/{{path:path}}"): "project",
-    # the caller's projects, or every active project for a superleader
+    # the caller's projects, or every project for a superleader
     ("GET", f"{_A}/projects"): "project",
     # chat relay: project in the plan, but no filter is sent until the complete stage (X1)
     ("GET", f"{_A}/chat/rooms"): "project",
@@ -107,7 +108,8 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("GET", f"{_ADMIN}/sessions/{{slug}}"): "own",
     ("PATCH", f"{_ADMIN}/sessions/{{slug}}"): "own",
     ("POST", f"{_ADMIN}/sessions/{{slug}}/leadership/withdraw"): "own",
-    # proposals: the proposer's own proposals only (`proposal_routes`)
+    # proposals: the proposer's own proposals only (`proposal_routes`); a superleader's GETs read
+    # every proposal (T-120 slice 2), the scope class stays "own" for the write paths
     ("POST", f"{_ADMIN}/proposals"): "own",
     ("GET", f"{_ADMIN}/proposals"): "own",
     ("GET", f"{_ADMIN}/proposals/{{proposal_id}}"): "own",
@@ -122,12 +124,22 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("DELETE", f"{_ADMIN}/presets/{{ref}}"): "superleader",
     ("POST", f"{_ADMIN}/presets/{{ref}}/copy"): "superleader",
     ("GET", f"{_ADMIN}/vault"): "superleader",
+    ("GET", f"{_ADMIN}/sessions"): "superleader",
+    ("GET", f"{_ADMIN}/meta"): "superleader",
+    ("GET", f"{_ADMIN}/archives"): "superleader",
+    ("GET", f"{_ADMIN}/archives/settings"): "superleader",
+    ("GET", f"{_ADMIN}/archives/cleanup/preview"): "superleader",
     ("PUT", f"{_ADMIN}/presets/{{ref}}/vault/{{entry_id}}"): "superleader",
     ("DELETE", f"{_ADMIN}/presets/{{ref}}/vault/{{entry_id}}"): "superleader",
     ("POST", f"{_ADMIN}/sessions"): "superleader",
     ("DELETE", f"{_ADMIN}/sessions/{{slug}}"): "superleader",
     ("POST", f"{_ADMIN}/sessions/{{slug}}/restart"): "superleader",
     ("POST", f"{_ADMIN}/sessions/{{slug}}/agents/{{pod}}/restart"): "superleader",
+    ("GET", f"{_ADMIN}/sessions/{{slug}}/activity"): "superleader",
+    ("GET", f"{_ADMIN}/sessions/{{slug}}/events"): "superleader",
+    ("GET", f"{_ADMIN}/sessions/{{slug}}/messages"): "superleader",
+    ("GET", f"{_ADMIN}/sessions/{{slug}}/locks"): "superleader",
+    ("GET", f"{_ADMIN}/sessions/{{slug}}/commands"): "superleader",
     ("GET", f"{_ADMIN}/commands/{{command_id}}"): "superleader",
     ("GET", f"{_ADMIN}/usage"): "superleader",
     ("POST", f"{_ADMIN}/projects"): "superleader",
@@ -172,4 +184,6 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("GET", f"{_ADMIN}/history/sessions"): "superleader",
     ("GET", f"{_ADMIN}/history/sessions/{{session_id}}"): "superleader",
     ("GET", f"{_ADMIN}/history/sessions/{{session_id}}/records"): "superleader",
+    ("GET", f"{_ADMIN}/usage/history"): "superleader",
+    ("GET", f"{_ADMIN}/usage/sessions"): "superleader",
 }

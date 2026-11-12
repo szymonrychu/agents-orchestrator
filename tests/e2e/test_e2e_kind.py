@@ -322,6 +322,7 @@ ALONE_SESSION_TOOLS = [
     "todo_update",
     "session_labels_set",
     "project_list",
+    "project_summary",
     "spec_list",
     "spec_get",
     "spec_create",
@@ -2988,7 +2989,9 @@ def test_admin_preset_crud(superleader: dict[str, Any]) -> None:
     assert admin_call(pod, "GET", f"/presets/{pid}")[0] == 404
 
 
-def test_superleader_sees_only_manageable(api: httpx.Client, superleader: dict[str, Any]) -> None:
+def test_superleader_reads_unmanageable_but_cannot_write(
+    api: httpx.Client, superleader: dict[str, Any]
+) -> None:
     pod = superleader["pod"]
     slug = "e2e-hidden"
     spec = {"replicas": 1, "env": FAKE_TURN_ENV}
@@ -3000,10 +3003,29 @@ def test_superleader_sees_only_manageable(api: httpx.Client, superleader: dict[s
         resp = api.post("/sessions", json={"preset_id": pid, "slug": slug})
         assert resp.status_code == 201, resp.text
         cid = resp.json()["id"]
-        assert admin_call(pod, "GET", f"/presets/{pid}")[0] == 404
-        assert admin_call(pod, "GET", f"/sessions/{slug}")[0] == 404
+        # decisions 388 and 394: reads of an unmanageable target are open, writes are refused
+        assert admin_call(pod, "GET", f"/presets/{pid}")[0] == 200
+        assert admin_call(pod, "GET", f"/sessions/{slug}")[0] == 200
         status, listed = admin_call(pod, "GET", "/presets")
-        assert status == 200 and pid not in [p["id"] for p in listed], listed
+        assert status == 200 and pid in [p["id"] for p in listed], listed
+        writes = [
+            ("PUT", f"/presets/{pid}", {"name": "E2E hidden", "spec": spec}),
+            ("DELETE", f"/presets/{pid}", None),
+            ("PATCH", f"/sessions/{slug}", {"spec": {"replicas": 1}}),
+            ("DELETE", f"/sessions/{slug}", None),
+            ("POST", f"/sessions/{slug}/restart", None),
+            ("POST", "/sessions", {"preset_id": pid, "slug": "e2e-hidden-copy"}),
+        ]
+        for method, path, body in writes:
+            status, refused = admin_call(pod, method, path, body)
+            assert status == 403 and refused["error"]["code"] == "not_manageable", (
+                method,
+                path,
+                status,
+                refused,
+            )
+        # the regular (main port) leader behaviour is unchanged: the session is still there
+        assert api.get(f"/sessions/{cid}").status_code == 200
         resp = api.put(
             f"/presets/{pid}",
             json={"name": "E2E hidden", "spec": spec, "superleader_manageable": True},

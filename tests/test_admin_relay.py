@@ -1,5 +1,5 @@
-"""O9: the admin relay forwards superleader calls to the webhook, schedule, connector and history
-upstreams.
+"""O9: the admin relay forwards superleader calls to the webhook, schedule, connector, history and
+usage upstreams.
 
 The upstreams are `FakeUpstream`s held to the OpenAPI documents vendored in `tests/fakes` (each
 `*_openapi.source` names the commit it was copied from), so the relay's idea of every route is
@@ -32,8 +32,10 @@ from agents_orchestrator.settings import Settings
 HOSTS = {"webhook": "http://webhook.test", "schedule": "http://schedule.test"}
 HOSTS["connector"] = "http://connector.test"
 HOSTS["history"] = "http://history.test"
+HOSTS["usage"] = "http://usage.test"
 DOCS = {name: fu.load(name) for name in HOSTS}
 NEXT = "x-next-before-id"
+USAGE_RELAYED = {"/usage/v1/history", "/usage/v1/sessions"}
 RELAY_PREFIX = {name: spec[0] for name, spec in admin_relay.SERVICES.items()}
 UPSTREAM_PREFIX = {name: spec[1] for name, spec in admin_relay.SERVICES.items()}
 
@@ -206,6 +208,8 @@ def admin_ops(service: str) -> dict[tuple[str, str], dict]:
     ops = fu.operations(DOCS[service])
     if service == "connector":  # the chat relay owns the non-admin routes
         ops = {k: v for k, v in ops.items() if k[1].startswith("/chat/v1/admin/")}
+    if service == "usage":  # current and samples serve the usage gate and the ingest, not admin
+        ops = {k: v for k, v in ops.items() if k[1] in USAGE_RELAYED}
     return ops
 
 
@@ -456,34 +460,6 @@ def ids(response, field: str = "id") -> set[str]:
     return {str(i[field]) for i in response.json()}
 
 
-@pytest.mark.parametrize(
-    ("service", "template", "field"),
-    [
-        ("webhook", "/endpoints", "id"),
-        ("webhook", "/events", "id"),
-        ("schedule", "/schedules", "id"),
-        ("schedule", "/runs", "id"),
-    ],
-)
-async def test_lists_filtered(rig, service, template, field):
-    r = await rig.call("GET", relay_url(service, template))
-    assert r.status_code == 200
-    # object 10 (endpoint, schedule, room) sits on the visible privileged preset: listed,
-    # not writable
-    seen = (7, 10) if template in ("/endpoints", "/schedules") else (7,)
-    assert ids(r, field) == {str(ident(service, n)) for n in seen}
-
-
-async def test_list_with_non_list_payload_fails_closed(rig):
-    async def answer(request):
-        return httpx.Response(200, json={"items": [{"id": 8, "preset_id": rig.vis}]})
-
-    rig.app.state.admin_http = httpx.AsyncClient(transport=httpx.MockTransport(answer))
-    r = await rig.call("GET", relay_url("webhook", "/endpoints"))
-    assert_error(r, 502, "upstream_shape")
-    assert "items" not in r.text
-
-
 def _body_for(rig, service: str, method: str, template: str, preset):
     key = (method, UPSTREAM_PREFIX[service] + template)
     fake = rig.fakes[service]
@@ -512,11 +488,14 @@ def _success(service: str, method: str, template: str) -> int:
 
 @pytest.mark.parametrize(("service", "method", "template"), STORED)
 async def test_hidden_mutation_never_forwarded(rig, service, method, template):
-    for n in (8, 9, 404):  # hidden preset, no preset, unknown
-        body = _body_for(rig, service, method, template, rig.vis)
-        r = await rig.call(method, relay_url(service, template, n), json=body)
-        assert_error(r, 404, "not_found")
-        assert not _sent(rig, service, method, template, n), (n, r.text)
+    body = _body_for(rig, service, method, template, rig.vis)
+    r = await rig.call(method, relay_url(service, template, 8), json=body)  # a hidden preset
+    assert_error(r, 403, "not_manageable")
+    assert not _sent(rig, service, method, template, 8), r.text
+    body = _body_for(rig, service, method, template, rig.vis)
+    r = await rig.call(method, relay_url(service, template, 404), json=body)
+    assert_error(r, 404, "not_found")  # unknown stays 404
+    assert not _sent(rig, service, method, template, 404)
 
 
 @pytest.mark.parametrize(("service", "method", "template"), STORED)
@@ -528,24 +507,15 @@ async def test_visible_mutation_is_forwarded(rig, service, method, template):
 
 
 @pytest.mark.parametrize(("service", "method", "template"), BODY)
-async def test_body_hidden_preset_404(rig, service, method, template):
+async def test_body_hidden_preset_403(rig, service, method, template):
     for preset in (rig.hid, None, str(uuid.uuid4())):
         body = _body_for(rig, service, method, template, preset)
         r = await rig.call(method, relay_url(service, template), json=body)
-        assert_error(r, 404, "not_found")
+        assert_error(r, 403, "not_manageable")
         assert not _sent(rig, service, method, template), preset
     body = _body_for(rig, service, method, template, rig.vis)
     r = await rig.call(method, relay_url(service, template), json=body)
     assert r.status_code == _success(service, method, template), r.text
-
-
-@pytest.mark.parametrize(
-    ("service", "template"), [("webhook", "/events/{id}"), ("schedule", "/runs/{run_id}")]
-)
-async def test_answer_hidden_404(rig, service, template):
-    for n in (8, 9):
-        assert_error(await rig.call("GET", relay_url(service, template, n)), 404, "not_found")
-    assert (await rig.call("GET", relay_url(service, template))).status_code == 200
 
 
 async def test_unguarded_routes_unchanged(rig):
@@ -590,21 +560,20 @@ def history_paths(rig) -> list[str]:
     return [c.path for c in rig.fakes["history"].calls]
 
 
-async def test_history_list_filtered_by_preset(rig):
+async def test_history_list_is_not_filtered_by_preset(rig):
     r = await rig.call("GET", relay_url("history", "/sessions"))
     assert r.status_code == 200
-    # visible, hidden and null presets in the upstream page: only the visible one is shown
-    assert ids(r, "session_id") == {ident("history", 7)}
+    # visible, hidden and null presets in the upstream page: all are shown (decision 388)
+    assert ids(r, "session_id") == {ident("history", n) for n in (7, 8, 9)}
     assert NEXT not in r.headers  # a short page is the end: no cursor
 
 
 async def test_history_list_full_page_carries_the_upstream_cursor(rig):
     r = await rig.call("GET", relay_url("history", "/sessions"), params={"limit": 3})
-    assert ids(r, "session_id") == {ident("history", 7)}
-    assert r.headers[NEXT] == "7"  # the smallest id of the upstream page, hidden rows included
-    rig.summaries[:] = rig.summaries[1:]  # a page of hidden sessions only: [] and still a cursor
+    assert r.headers[NEXT] == "7"  # the smallest id of the upstream page
+    rig.summaries[:] = rig.summaries[1:]
     r = await rig.call("GET", relay_url("history", "/sessions"), params={"limit": 2})
-    assert r.status_code == 200 and r.json() == []
+    assert r.status_code == 200 and len(r.json()) == 2
     assert r.headers[NEXT] == "8"
     r = await rig.call("GET", relay_url("history", "/sessions"), params={"limit": 3})
     assert NEXT not in r.headers  # two rows for a limit of three: the end
@@ -613,7 +582,7 @@ async def test_history_list_full_page_carries_the_upstream_cursor(rig):
 async def test_history_list_default_limit_full_page_carries_the_cursor(rig):
     rig.summaries[:] = [history_session("SessionSummary", n, None) for n in range(100, 50, -1)]
     r = await rig.call("GET", relay_url("history", "/sessions"))  # no `limit`: the default of 50
-    assert r.status_code == 200 and r.json() == []
+    assert r.status_code == 200 and len(r.json()) == 50
     assert r.headers[NEXT] == "51"  # 50 rows is a full default page
     rig.summaries[:] = rig.summaries[1:]
     r = await rig.call("GET", relay_url("history", "/sessions"))
@@ -632,37 +601,25 @@ def test_history_list_documents_the_cursor_header(rig):
     assert "headers" not in one["responses"]["200"]
 
 
-async def test_history_get_hidden_is_404(rig):
-    for n in (8, 9):
+async def test_history_get_and_records_of_any_preset_are_read(rig):
+    for n in (7, 8, 9):
         r = await rig.call("GET", relay_url("history", "/sessions/{session_id}", n))
-        assert_error(r, 404, "not_found")
-    r = await rig.call("GET", relay_url("history", "/sessions/{session_id}"))
-    assert r.status_code == 200 and r.json()["session_id"] == ident("history", 7)
-
-
-async def test_history_records_hidden_never_forwarded(rig):
-    for n in (8, 9):  # hidden preset, no preset
+        assert r.status_code == 200 and r.json()["session_id"] == ident("history", n)
         r = await rig.call("GET", relay_url("history", "/sessions/{session_id}/records", n))
-        assert_error(r, 404, "not_found")
-    lookups = [f"/history/v1/sessions/{ident('history', n)}" for n in (8, 9)]
-    assert history_paths(rig) == lookups  # the lookups only: no /records call
-    r = await rig.call("GET", relay_url("history", "/sessions/{session_id}/records"))
-    assert r.status_code == 200
-    assert history_paths(rig)[-1] == f"/history/v1/sessions/{ident('history', 7)}/records"
+        assert r.status_code == 200, r.text
 
 
-async def test_history_lookup_404(rig):
-    r = await rig.call("GET", relay_url("history", "/sessions/{session_id}/records", 404))
+async def test_history_unknown_session_is_the_upstream_404(rig):
+    r = await rig.call("GET", relay_url("history", "/sessions/{session_id}", 404))
     assert_error(r, 404, "not_found")
-    assert history_paths(rig) == [f"/history/v1/sessions/{ident('history', 404)}"]
 
 
-async def test_history_lookup_is_bare_and_the_records_call_keeps_the_query(rig):
+async def test_history_records_call_keeps_the_query(rig):
     url = relay_url("history", "/sessions/{session_id}/records")
     r = await rig.call("GET", url, params={"q": "needle", "limit": 5})
     assert r.status_code == 200
-    lookup, records = rig.fakes["history"].calls
-    assert lookup.query == "" and records.query == "q=needle&limit=5"
+    (records,) = rig.fakes["history"].calls
+    assert records.query == "q=needle&limit=5"
 
 
 async def test_history_delete_refused(rig):
@@ -740,11 +697,11 @@ async def test_relay_safe_preset_still_forwarded(rig, service, method, template)
     assert _sent(rig, service, method, template)
 
 
-async def test_relay_hidden_privileged_is_404(rig):
+async def test_relay_hidden_privileged_is_403(rig):
     hidden = str(await add_preset(rig.pool, False, {"kube_cluster_access": True}))
     body = _body_for(rig, "webhook", "POST", "/endpoints", hidden)
     r = await rig.call("POST", relay_url("webhook", "/endpoints"), json=body)
-    assert_error(r, 404, "not_found")
+    assert_error(r, 403, "not_manageable")
     assert not _sent(rig, "webhook", "POST", "/endpoints")
 
 

@@ -15,9 +15,9 @@ import time
 import uuid
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
-from typing import Any
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.exceptions import HTTPException, RequestValidationError
 from fastapi.routing import APIRoute
 from starlette.responses import Response as StarletteResponse
@@ -25,15 +25,24 @@ from starlette.responses import Response as StarletteResponse
 from agents_orchestrator.api import messages as messages_api
 from agents_orchestrator.api import presets as presets_api
 from agents_orchestrator.api import projects as projects_api
-from agents_orchestrator.api import schemas, session_spec
+from agents_orchestrator.api import schemas, session_spec, streams
 from agents_orchestrator.api import sessions as sessions_api
-from agents_orchestrator.api.agent import Caller, _leads
-from agents_orchestrator.api.errors import ApiError, not_found
+from agents_orchestrator.api.agent import (
+    ACTIVITY_DEFAULT_LIMIT,
+    ACTIVITY_MAX_LIMIT,
+    Activity,
+    Caller,
+    LocksOut,
+    _leads,
+    activity_lines,
+    locks_of,
+)
+from agents_orchestrator.api.errors import ApiError, not_found, not_manageable
 from agents_orchestrator.api.sessions import Cfg, Pool, Usage
 from agents_orchestrator.api.spec_edit import note_fields
 from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import events as events_repo
-from agents_orchestrator.db import leadership
+from agents_orchestrator.db import leadership, views
 from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.db import queue as q
 from agents_orchestrator.db import sessions as sessions_repo
@@ -70,7 +79,7 @@ async def require_session_editor(
     request: Request, agent: Caller, pool: Pool, slug: str
 ) -> sessions_repo.Session:
     """The caller's session. A superleader session passes for any slug (the route resolves the
-    target with _target). Any other session passes only for its own slug (else 403
+    target with _writable_target). Any other session passes only for its own slug (else 403
     not_superleader, before any lookup, so another slug and an unknown one answer alike) and
     only for its leader (else 403 not_leader). Sets admin_caller and admin_secrets like
     require_superleader."""
@@ -173,6 +182,10 @@ class AdminRoute(APIRoute):
         return handler
 
 
+FORBIDDEN: dict[int | str, Any] = {
+    "description": "not_superleader: the caller is not a superleader"
+}
+SESSION_NOT_FOUND: dict[int | str, Any] = {"description": "not_found: no session has that slug"}
 router = APIRouter(
     prefix=ADMIN_PREFIX, tags=["admin"], route_class=AdminRoute, dependencies=[Superleader]
 )
@@ -185,12 +198,19 @@ def touched(request: Request, *names: str) -> None:
     request.state.admin_secrets.extend(names)
 
 
-# What each non-relay admin route hides from the superleader: "preset" and "session" routes
-# answer 404 for a target outside its remit, "list" and "create" are filtered or forced,
-# "proposal" routes see only the caller's own proposals on targets it may manage (404 otherwise).
+# What each non-relay admin route withholds from the superleader: "preset" and "session" routes
+# are read open (200 for any target) and write-guarded (403 `not_manageable` outside its remit),
+# "list" and "create" are filtered or forced,
+# "proposal" GETs show a superleader every proposal; its revise and withdraw see only the
+# caller's own on targets it may manage (404 otherwise).
 ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("GET", f"{ADMIN_PREFIX}/presets"): "list",
     ("GET", f"{ADMIN_PREFIX}/vault"): "list",
+    ("GET", f"{ADMIN_PREFIX}/sessions"): "list",
+    ("GET", f"{ADMIN_PREFIX}/meta"): "list",
+    ("GET", f"{ADMIN_PREFIX}/archives"): "list",
+    ("GET", f"{ADMIN_PREFIX}/archives/settings"): "list",
+    ("GET", f"{ADMIN_PREFIX}/archives/cleanup/preview"): "list",
     ("POST", f"{ADMIN_PREFIX}/presets"): "create",
     ("GET", f"{ADMIN_PREFIX}/presets/{{ref}}"): "preset",
     ("PUT", f"{ADMIN_PREFIX}/presets/{{ref}}"): "preset",
@@ -200,6 +220,11 @@ ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("PUT", f"{ADMIN_PREFIX}/presets/{{ref}}/vault/{{entry_id}}"): "preset",
     ("DELETE", f"{ADMIN_PREFIX}/presets/{{ref}}/vault/{{entry_id}}"): "preset",
     ("GET", f"{ADMIN_PREFIX}/sessions/{{slug}}"): "session",
+    ("GET", f"{ADMIN_PREFIX}/sessions/{{slug}}/activity"): "session",
+    ("GET", f"{ADMIN_PREFIX}/sessions/{{slug}}/events"): "session",
+    ("GET", f"{ADMIN_PREFIX}/sessions/{{slug}}/messages"): "session",
+    ("GET", f"{ADMIN_PREFIX}/sessions/{{slug}}/locks"): "session",
+    ("GET", f"{ADMIN_PREFIX}/sessions/{{slug}}/commands"): "session",
     ("PATCH", f"{ADMIN_PREFIX}/sessions/{{slug}}"): "session",
     ("POST", f"{ADMIN_PREFIX}/sessions/{{slug}}/leadership/withdraw"): "session",
     ("POST", f"{ADMIN_PREFIX}/sessions"): "create",
@@ -237,18 +262,52 @@ async def create_project(
 # ---------------------------------------------------------------- presets (O6)
 
 
-async def manageable_preset(conn, ref: str) -> presets_repo.Preset:
-    """A preset by id or name; one the superleader may not manage is as missing as an unknown."""
-    found = await presets_api.by_ref(conn, ref)
+async def readable_preset(conn, ref: str) -> presets_repo.Preset:
+    """A preset by id or name; 404 only when unknown."""
+    return await presets_api.by_ref(conn, ref)
+
+
+async def writable_preset(conn, ref: str) -> presets_repo.Preset:
+    """A preset by id or name the superleader may write: 403 `not_manageable` for any other."""
+    found = await readable_preset(conn, ref)
     if not found.superleader_manageable:
-        raise not_found("preset")
+        raise not_manageable("preset")
     return found
+
+
+@router.get("/meta", response_model=schemas.Meta, responses={403: FORBIDDEN})
+async def get_meta(settings: Cfg) -> schemas.Meta:
+    """The deploy settings the main port answers (defaults, images, models, caps)."""
+    return await sessions_api.meta(settings)
 
 
 @router.get("/presets", response_model=list[schemas.PresetView])
 async def list_presets(pool: Pool) -> list[schemas.PresetView]:
     async with pool.connection() as conn:
-        return await presets_api.list_all(conn, only_manageable=True)
+        return await presets_api.list_all(conn)
+
+
+@router.get("/sessions", response_model=list[schemas.SessionView], responses={403: FORBIDDEN})
+async def list_sessions(
+    pool: Pool,
+    settings: Cfg,
+    label: Annotated[list[str] | None, Query()] = None,
+    project: str | None = None,
+    superleaders: Literal["include"] | None = None,
+    session_slug: str | None = None,
+) -> list[schemas.SessionView]:
+    """Every session, raw-spec and unmanageable ones included, as the redacted `SessionView`;
+    the main port's filters and errors. The slug filter is `session_slug`: the editor gate
+    invariant keeps a parameter named `slug` path-only."""
+    async with pool.connection() as conn:
+        return await sessions_api.list_views(
+            conn,
+            settings,
+            label=label,
+            project=project,
+            superleaders=superleaders == "include",
+            slug=session_slug,
+        )
 
 
 @router.post("/presets", status_code=201, response_model=schemas.PresetView)
@@ -262,7 +321,7 @@ async def create_preset(
 @router.get("/presets/{ref}", response_model=schemas.PresetView)
 async def get_preset(ref: str, pool: Pool) -> schemas.PresetView:
     async with pool.connection() as conn:
-        found = await manageable_preset(conn, ref)
+        found = await readable_preset(conn, ref)
         return await presets_api.get_one(conn, found.id)
 
 
@@ -271,7 +330,7 @@ async def replace_preset(
     ref: str, body: schemas.PresetIn, request: Request, pool: Pool, settings: Cfg
 ) -> schemas.PresetView:
     async with pool.connection() as conn:
-        found = await manageable_preset(conn, ref)
+        found = await writable_preset(conn, ref)
         return await presets_api.replace(request, conn, settings, found.id, body, superleader=True)
 
 
@@ -280,14 +339,14 @@ async def patch_preset(
     ref: str, body: schemas.PresetPatch, request: Request, pool: Pool, settings: Cfg
 ) -> schemas.PresetView:
     async with pool.connection() as conn:
-        found = await manageable_preset(conn, ref)
+        found = await writable_preset(conn, ref)
         return await presets_api.patch(request, conn, settings, found.id, body)
 
 
 @router.delete("/presets/{ref}", status_code=204, response_model=None)
 async def delete_preset(ref: str, request: Request, pool: Pool) -> Response:
     async with pool.connection() as conn:
-        found = await manageable_preset(conn, ref)
+        found = await writable_preset(conn, ref)
         await presets_api.remove(request, conn, found.id, superleader=True)
     return Response(status_code=204)
 
@@ -297,7 +356,7 @@ async def copy_preset(
     ref: str, request: Request, pool: Pool, body: schemas.CopyPreset | None = None
 ) -> schemas.PresetView:
     async with pool.connection() as conn:
-        found = await manageable_preset(conn, ref)
+        found = await writable_preset(conn, ref)
         body = body or schemas.CopyPreset()
         return await presets_api.copy(
             conn, found.id, body.name, superleader=True, request=request, project=body.project
@@ -319,7 +378,7 @@ async def attach_vault(
     attached under its own name. A preset env that is taken is 409 `env_exists` unless
     `replace`. The answer marks `attachment_privileged` (marked, never blocked)."""
     async with pool.connection() as conn:
-        found = await manageable_preset(conn, ref)
+        found = await writable_preset(conn, ref)
         view = await presets_api.attach_vault(request, conn, settings, found.id, entry_id, body)
     return schemas.VaultAttachView(**view.model_dump(), attachment_privileged=bool(view.privileged))
 
@@ -336,24 +395,31 @@ async def detach_vault(
     """Remove every ref to the entry from a manageable preset, or only the one under preset env
     `?env=`; 404 `not_attached` when nothing matches."""
     async with pool.connection() as conn:
-        found = await manageable_preset(conn, ref)
+        found = await writable_preset(conn, ref)
         return await presets_api.detach_vault(request, conn, settings, found.id, entry_id, env)
 
 
 # ---------------------------------------------------------------- sessions (O7)
 
 
-async def _target(conn, slug: str, caller: sessions_repo.Session) -> sessions_repo.Session:
-    """The caller's own session, or one whose preset the superleader may manage; any other
-    (hidden preset, no preset) is as missing as an unknown slug."""
+async def _readable_target(conn, slug: str, caller: sessions_repo.Session) -> sessions_repo.Session:
+    """Any session by slug (raw-spec ones too); 404 only when unknown. The route gate already
+    limits a non-superleader caller to its own slug."""
     session = await sessions_repo.get_by_slug(conn, slug)
     if session is None:
         raise not_found("session")
+    return session
+
+
+async def _writable_target(conn, slug: str, caller: sessions_repo.Session) -> sessions_repo.Session:
+    """The caller's own session, or one whose preset the superleader may manage; any other
+    (unmanageable preset, no preset) is 403 `not_manageable`."""
+    session = await _readable_target(conn, slug, caller)
     if session.id != caller.id and (
         session.preset_id is None
         or session.preset_id not in await presets_repo.manageable_ids(conn)
     ):
-        raise not_found("session")
+        raise not_manageable("session")
     return session
 
 
@@ -363,10 +429,12 @@ async def _target(conn, slug: str, caller: sessions_repo.Session) -> sessions_re
 async def get_session(
     slug: str, request: Request, pool: Pool, settings: Cfg
 ) -> schemas.SessionView:
-    """A superleader reads its own or a manageable session; any other leader its own."""
+    """A superleader reads any session; any other leader its own."""
     _, caller = caller_of(request)
     async with pool.connection() as conn:
-        return await sessions_api.one_view(conn, await _target(conn, slug, caller), settings)
+        return await sessions_api.one_view(
+            conn, await _readable_target(conn, slug, caller), settings
+        )
 
 
 @session_router.patch(
@@ -380,7 +448,7 @@ async def patch_session(
     agent, caller = caller_of(request)
     superleader = bool(caller.spec.session_messaging)
     async with pool.connection() as conn:
-        target = await _target(conn, slug, caller) if superleader else caller
+        target = await _writable_target(conn, slug, caller) if superleader else caller
         return await session_spec.patch(
             request,
             conn,
@@ -407,7 +475,9 @@ async def withdraw_handover(
     `rollout` request is never withdrawn (409 `rollout_request` by id, left queued without)."""
     _, caller = caller_of(request)
     async with pool.connection() as conn:
-        target = await _target(conn, slug, caller) if caller.spec.session_messaging else caller
+        target = (
+            await _writable_target(conn, slug, caller) if caller.spec.session_messaging else caller
+        )
         withdrawn = await leadership.withdraw_handovers(conn, target.id, body.request_id)
         if body.request_id is not None and not withdrawn:
             reason = await leadership.handover_reason(conn, target.id, body.request_id)
@@ -447,7 +517,7 @@ async def discard_session(
     _, caller = caller_of(request)
     force = sessions_api.force_flag(request)
     async with pool.connection() as conn:
-        target = await _target(conn, slug, caller)
+        target = await _writable_target(conn, slug, caller)
         if target.id == caller.id:
             raise ApiError(422, "own_session", "a session cannot discard itself")
         return await sessions_api.discard(conn, target.id, settings, force=force)
@@ -496,7 +566,7 @@ async def restart_session(
     cooldown and gets one note, all in the same transaction as the commands."""
     _, caller = caller_of(request)
     async with pool.connection() as conn, conn.transaction():
-        target = await _target(conn, slug, caller)
+        target = await _writable_target(conn, slug, caller)
         own = target.id == caller.id
         note_id = None
         if own:
@@ -515,7 +585,7 @@ async def restart_agent(
     """Restart one agent by pod name; an agent of the caller's own session is a self-restart."""
     _, caller = caller_of(request)
     async with pool.connection() as conn, conn.transaction():
-        target = await _target(conn, slug, caller)
+        target = await _writable_target(conn, slug, caller)
         if target.desired == "deleting":
             raise ApiError(409, "session_deleting", "session is being discarded")
         agent_id = await _member_id(conn, target.id, pod)
@@ -538,11 +608,120 @@ async def _member_id(conn, session_id: uuid.UUID, pod_name: str) -> uuid.UUID:
 
 
 @router.get("/commands/{command_id}", response_model=schemas.CommandView)
-async def get_command(command_id: int, request: Request, pool: Pool) -> schemas.CommandView:
-    """Only a command this superleader issued; any other id is 404."""
+async def get_command(command_id: int, pool: Pool) -> schemas.CommandView:
+    """Any command, whoever issued it; 404 only when unknown."""
+    async with pool.connection() as conn:
+        return await messages_api.command_view(conn, command_id)
+
+
+# ------------------------------------------------- live work of any session (T-120)
+
+
+@router.get(
+    "/sessions/{slug}/activity",
+    response_model=Activity,
+    responses={403: FORBIDDEN, 404: SESSION_NOT_FOUND},
+)
+async def session_activity(
+    slug: str,
+    request: Request,
+    pool: Pool,
+    peer: Annotated[str | None, Query(alias="agent")] = None,
+    limit: Annotated[int, Query(ge=1, le=ACTIVITY_MAX_LIMIT)] = ACTIVITY_DEFAULT_LIMIT,
+) -> Activity:
+    """The agent-port activity digest of any session."""
     _, caller = caller_of(request)
     async with pool.connection() as conn:
-        return await messages_api.command_view(conn, command_id, caller.id)
+        target = await _readable_target(conn, slug, caller)
+        return await activity_lines(conn, target, peer, limit)
+
+
+@router.get(
+    "/sessions/{slug}/events",
+    response_model=streams.EventsPage,
+    responses={
+        400: {"description": "bad_request: before_id and after_id are mutually exclusive"},
+        403: FORBIDDEN,
+        404: SESSION_NOT_FOUND,
+    },
+)
+async def session_events(
+    slug: str,
+    request: Request,
+    pool: Pool,
+    before_id: Annotated[int | None, Query(ge=0)] = None,
+    after_id: Annotated[int | None, Query(ge=0)] = None,
+    limit: Annotated[int, Query(ge=1, le=events_repo.MAX_LIMIT)] = 200,
+    agent_id: uuid.UUID | None = None,
+    types: Annotated[list[str] | None, Query()] = None,
+) -> streams.EventsPage:
+    """One page of any session's stored events, as the main port's events route (no SSE)."""
+    _, caller = caller_of(request)
+    async with pool.connection() as conn:
+        target = await _readable_target(conn, slug, caller)
+        return await streams.events_page(
+            conn,
+            target.id,
+            before_id=before_id,
+            after_id=after_id,
+            limit=limit,
+            agent_id=agent_id,
+            types=types,
+        )
+
+
+@router.get(
+    "/sessions/{slug}/messages",
+    response_model=list[schemas.MessageView],
+    responses={403: FORBIDDEN, 404: SESSION_NOT_FOUND},
+)
+async def session_messages(
+    slug: str,
+    request: Request,
+    pool: Pool,
+    status: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+) -> list[schemas.MessageView]:
+    """The message queue of any session, with the main port's `status` filter."""
+    _, caller = caller_of(request)
+    statuses = messages_api.parse_statuses(status)
+    async with pool.connection() as conn:
+        target = await _readable_target(conn, slug, caller)
+        rows = await views.list_messages(
+            conn, target.id, statuses, limit, messages_api.DEFAULT_ATTEMPTS
+        )
+    return [messages_api.message_view(r) for r in rows]
+
+
+@router.get(
+    "/sessions/{slug}/locks",
+    response_model=LocksOut,
+    responses={403: FORBIDDEN, 404: SESSION_NOT_FOUND},
+)
+async def session_locks(slug: str, request: Request, pool: Pool) -> LocksOut:
+    """The file locks held by the live agents of any session."""
+    _, caller = caller_of(request)
+    async with pool.connection() as conn:
+        return await locks_of(conn, (await _readable_target(conn, slug, caller)).id)
+
+
+@router.get(
+    "/sessions/{slug}/commands",
+    response_model=list[schemas.CommandView],
+    responses={403: FORBIDDEN, 404: SESSION_NOT_FOUND},
+)
+async def session_commands(
+    slug: str,
+    request: Request,
+    pool: Pool,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> list[schemas.CommandView]:
+    """The newest commands issued to the agents of any session."""
+    _, caller = caller_of(request)
+    async with pool.connection() as conn:
+        target = await _readable_target(conn, slug, caller)
+        rows = await views.list_commands(conn, target.id, limit)
+    return [schemas.CommandView(**r) for r in rows]
 
 
 # ---------------------------------------------------------------- usage

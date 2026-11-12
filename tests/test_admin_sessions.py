@@ -99,10 +99,14 @@ async def test_create_from_preset_with_slug_conflict(call):
     assert_error(await call("POST", S, json=body), 409, "conflict")
 
 
-async def test_admin_create_from_hidden_preset_404(call, main):
+async def test_admin_create_from_unmanageable_preset_403_unknown_404(call, main):
+    """A write on an unmanageable target is refused 403 (decision 388, R2), not hidden as 404;
+    an unknown preset id stays 404."""
     hidden = (await main("POST", M, json={"name": "hid", "spec": {}})).json()
     r = await call("POST", S, json={"preset_id": hidden["id"], "slug": "child-h"})
-    assert_error(r, 404, "not_found")
+    assert_error(r, 403, "not_manageable")
+    unknown = {"preset_id": "00000000-0000-0000-0000-000000000000", "slug": "child-u"}
+    assert_error(await call("POST", S, json=unknown), 404, "not_found")
 
 
 async def test_admin_create_from_manageable_preset_201(call, main):
@@ -113,29 +117,29 @@ async def test_admin_create_from_manageable_preset_201(call, main):
     assert r.status_code == 201, r.text
 
 
-async def test_get_session_of_hidden_preset_404(call, pool):
+async def test_get_session_of_unmanageable_preset_200(call, pool):
     other = await alone(pool, "hid-get")
     await attach_preset(pool, other.id, manageable=False)
-    assert_error(await call("GET", f"{S}/{other.slug}"), 404, "not_found")
-    assert (await call("GET", f"{S}/nope")).json() == (
-        await call("GET", f"{S}/{other.slug}")
-    ).json()
+    r = await call("GET", f"{S}/{other.slug}")
+    assert r.status_code == 200 and r.json()["slug"] == other.slug
+    assert_error(await call("GET", f"{S}/nope"), 404, "not_found")
 
 
-async def test_discard_session_of_hidden_preset_404(call, pool):
+async def test_discard_session_of_unmanageable_preset_403(call, pool):
     other = await alone(pool, "hid-del")
     await attach_preset(pool, other.id, manageable=False)
-    assert_error(await call("DELETE", f"{S}/{other.slug}"), 404, "not_found")
+    assert_error(await call("DELETE", f"{S}/{other.slug}"), 403, "not_manageable")
     assert (await row(pool, other.slug))["desired"] == "active"
 
 
-async def test_session_without_preset_404(call, pool, main):
+async def test_session_without_preset_read_200_write_403(call, pool, main):
     r = await main("POST", "/api/v1/sessions", json={"slug": "raw-one", "spec": {}})
     assert r.status_code == 201, r.text
-    assert_error(await call("GET", f"{S}/raw-one"), 404, "not_found")
+    assert (await call("GET", f"{S}/raw-one")).status_code == 200
+    assert_error(await call("DELETE", f"{S}/raw-one"), 403, "not_manageable")
 
 
-async def test_session_after_preset_deleted_404(call, pool, main):
+async def test_session_after_preset_deleted_write_403(call, pool, main):
     p = (
         await main("POST", M, json={"name": "gone", "spec": {}, "superleader_manageable": True})
     ).json()
@@ -144,7 +148,8 @@ async def test_session_after_preset_deleted_404(call, pool, main):
     assert (await call("GET", f"{S}/orphan")).status_code == 200
     assert (await main("DELETE", f"{M}/{p['id']}")).status_code == 204
     assert (await row(pool, "orphan"))["preset_id"] is None
-    assert_error(await call("GET", f"{S}/orphan"), 404, "not_found")
+    assert (await call("GET", f"{S}/orphan")).status_code == 200
+    assert_error(await call("DELETE", f"{S}/orphan"), 403, "not_manageable")
 
 
 async def test_own_session_visible_with_hidden_preset(call, pool, boss):
@@ -268,11 +273,11 @@ async def test_admin_create_from_preset_with_flags_off_201(call, main):
     assert r.status_code == 201, r.text
 
 
-async def test_admin_create_hidden_privileged_is_404(call, main):
+async def test_admin_create_unmanageable_privileged_is_403(call, main):
     made = await main("POST", M, json={"name": "hidp", "spec": {"kube_cluster_access": True}})
     assert made.status_code == 201, made.text
     r = await call("POST", S, json={"preset_id": made.json()["id"], "slug": "child-hp"})
-    assert_error(r, 404, "not_found")
+    assert_error(r, 403, "not_manageable")
 
 
 async def test_main_create_from_privileged_preset_201(main):

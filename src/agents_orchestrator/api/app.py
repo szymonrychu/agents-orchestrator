@@ -15,6 +15,7 @@ from psycopg_pool import AsyncConnectionPool
 from agents_orchestrator import __version__
 from agents_orchestrator.api import (
     admin,
+    admin_archives,  # noqa: F401  (registers its routes on admin.router)
     admin_relay,
     agent,
     archives,
@@ -155,6 +156,7 @@ def create_app(
     app.include_router(proposal_routes.proposal_router)
     app.include_router(chat.router)
     app.include_router(tasks.router)
+    app.include_router(tasks.summary_router)
     app.include_router(specs.router)
     app.include_router(session_labels.router)
     app.include_router(presets.router)

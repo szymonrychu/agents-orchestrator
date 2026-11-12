@@ -9,13 +9,13 @@ forwarded request carries only the upstream's service bearer and the caller's `X
 body come back unchanged, except for webhook credentials (D9, `credentials` below). A failed call or
 a non-JSON answer is 503 `upstream_unavailable`. The upstream validates the bodies.
 
-The superleader sees only objects of presets it may manage (`superleader_manageable`), except chat
-rooms (below). `GUARDS` holds one `Guard` per route: a body naming a hidden or null preset, or a
-stored object (endpoint, schedule) on a hidden preset, is 404 and never forwarded. A body without
-`preset_id` passes: the upstream requires it on create and PUT, and the stored check covers PATCH
-and clone. Lists are filtered (a non-list answer is 502 `upstream_shape`) and a single event or
-run of a hidden preset is 404. An object without a preset counts as hidden. Run objects are mapped
-to their preset through one upstream `GET /schedules`.
+The superleader READS every object (decision 388, T-120): GET routes are forwarded as is and
+lists are not filtered (objects without a preset are listed too). WRITES (every method other than
+GET) are guarded: `GUARDS` holds one `Guard` per route, and a body naming a preset the superleader
+may not manage (`superleader_manageable` false, null or unknown), or a stored object (endpoint,
+schedule) on such a preset or on none, is 403 `not_manageable` and never forwarded. A body
+without `preset_id` passes: the upstream requires it on create and PUT, and the stored check covers
+PATCH and clone. A stored object the upstream does not list is 404.
 
 A preset with `kube_cluster_access`, `session_messaging` or `docker` on is a valid target of a
 relayed trigger object (endpoint, schedule, room, rule) as long as the superleader may
@@ -38,20 +38,20 @@ answer (`api/chat_requests.py`).
 
 History is read-only for the superleader: three GET routes and no DELETE (deleting a stored
 session is for the user, through the web UI), so the router answers any other method 405 and
-nothing reaches the upstream. The session list is paged upstream by `before_id`, and agents-history
-has no set filter, so the relay filters the page it got and, when that page was full, sends the
-upstream's next cursor in `X-Next-Before-Id` (also on an empty page, so a caller can tell "keep
-paging" from "end"). The records of a session are checked against one upstream lookup of that
-single session (`GET /sessions/{session_id}`): hidden, null-preset or unknown is 404 and the
-records are never requested.
+nothing reaches the upstream. The session list is paged upstream by `before_id`; when a page was
+full the relay sends the upstream's next cursor in `X-Next-Before-Id`.
+
+Usage is read-only too (`GET /usage/history`, `GET /usage/sessions` of agents-usage, plan usage
+windows and session marks); any other method is 405.
 
 The vault list (`GET /agent/v1/admin/vault`, `vault_list`) is read-only too (any other method is
-405) and is scoped to the caller: it answers only the entries whose labels match the caller
-session's project (`labels_match` against `project:<project>`; an entry without a `project:` label
-stays visible, as attach allows it). An entry's `attachments` keep only presets the superleader
-may manage, and an env's readable value is kept only for an entry attached to such a preset;
-otherwise the env shows its name and `protected` flag with `value: null`. `to_reattach` lists, per
-manageable preset, the env names a user still has to re-attach.
+405) and answers every entry, metadata only for other projects: an entry whose labels do not match
+the caller session's projects (`labels_match` against `project:<project>`; an entry without a
+`project:` label counts as the caller's, as attach allows it) has every env `value: null`. An
+entry's `attachments` list every preset, each with `privileged` and `manageable`; an env of the
+caller's own entry shows its readable value only when attached to a manageable preset, otherwise
+its name and `protected` flag with `value: null`. `to_reattach` lists, per preset, the env names a
+user still has to re-attach, with `manageable`.
 """
 
 from __future__ import annotations
@@ -70,8 +70,8 @@ from pydantic import SecretStr
 
 from agents_orchestrator.api import chat_requests, secret_store, vault_client, vault_refs
 from agents_orchestrator.api import forward as forward_core
-from agents_orchestrator.api.admin import caller_of, router, touched
-from agents_orchestrator.api.errors import ApiError, not_found
+from agents_orchestrator.api.admin import FORBIDDEN, caller_of, router, touched
+from agents_orchestrator.api.errors import ApiError, not_found, not_manageable
 from agents_orchestrator.api.scope import projects_header
 from agents_orchestrator.api.sessions import Cfg
 from agents_orchestrator.db import presets as presets_repo
@@ -128,24 +128,26 @@ _HISTORY = [
     ("GET", "/sessions/{session_id}", 200),
     ("GET", "/sessions/{session_id}/records", 200),
 ]
+# Read only: plan usage windows and session marks (agents-usage).
+_USAGE = [("GET", "/history", 200), ("GET", "/sessions", 200)]
 # name -> (relay prefix, upstream prefix, label, routes)
 SERVICES: dict[str, tuple[str, str, str, list[tuple[str, str, int]]]] = {
     "webhook": ("/webhooks", "/webhooks/api/v1", "webhook admin relay", _WEBHOOKS),
     "schedule": ("/schedules", "/schedules/api/v1", "schedule admin relay", _SCHEDULES),
     "connector": ("/chats", "/chat/v1/admin", "chat admin relay", _CHATS),
     "history": ("/history", "/history/v1", "history admin relay", _HISTORY),
+    "usage": ("/usage", "/usage/v1", "usage admin relay", _USAGE),
 }
 STATE_ATTR = "admin_http"
 
 
 @dataclass(frozen=True)
 class Guard:
-    """What the superleader's remit changes on one relay route (see the module docstring)."""
+    """What the superleader's remit changes on one relay route (see the module docstring). The
+    preset checks apply to writes only (a method other than GET); reads are never filtered."""
 
     body_preset: bool = False
-    stored: Literal["endpoint", "schedule", "history_session"] | None = None
-    list_filter: Literal["preset_id", "schedule_id"] | None = None
-    answer: Literal["preset_id", "schedule_id"] | None = None
+    stored: Literal["endpoint", "schedule"] | None = None
     cursor: bool = False  # a full list page also answers the upstream's next `before_id`
     rule: Literal["body", "stored"] | None = None  # a chat routing rule, see `_rule_room`
     ask_decision: bool = False  # a 201 room request asks the user's yes (`chat_requests`)
@@ -153,27 +155,27 @@ class Guard:
 
 _E, _S = "endpoint", "schedule"
 GUARDS: dict[tuple[str, str, str], Guard] = {
-    ("webhook", "GET", "/endpoints"): Guard(list_filter="preset_id"),
+    ("webhook", "GET", "/endpoints"): Guard(),
     ("webhook", "POST", "/endpoints"): Guard(body_preset=True),
     ("webhook", "PATCH", "/endpoints/{id}"): Guard(body_preset=True, stored=_E),
     ("webhook", "DELETE", "/endpoints/{id}"): Guard(stored=_E),
     ("webhook", "POST", "/endpoints/{id}/clone"): Guard(body_preset=True, stored=_E),
     ("webhook", "PUT", "/endpoints/{id}/filters"): Guard(stored=_E),
     ("webhook", "POST", "/endpoints/{id}/rotate"): Guard(stored=_E),
-    ("webhook", "GET", "/events"): Guard(list_filter="preset_id"),
-    ("webhook", "GET", "/events/{id}"): Guard(answer="preset_id"),
+    ("webhook", "GET", "/events"): Guard(),
+    ("webhook", "GET", "/events/{id}"): Guard(),
     ("webhook", "GET", "/meta"): Guard(),
     ("webhook", "POST", "/templates/preview"): Guard(),
-    ("schedule", "GET", "/runs"): Guard(list_filter="schedule_id"),
-    ("schedule", "GET", "/runs/{run_id}"): Guard(answer="schedule_id"),
-    ("schedule", "GET", "/schedules"): Guard(list_filter="preset_id"),
+    ("schedule", "GET", "/runs"): Guard(),
+    ("schedule", "GET", "/runs/{run_id}"): Guard(),
+    ("schedule", "GET", "/schedules"): Guard(),
     ("schedule", "POST", "/schedules"): Guard(body_preset=True),
     ("schedule", "POST", "/schedules/preview"): Guard(body_preset=True),
-    ("schedule", "GET", "/schedules/{schedule_id}"): Guard(stored=_S),
+    ("schedule", "GET", "/schedules/{schedule_id}"): Guard(),
     ("schedule", "PUT", "/schedules/{schedule_id}"): Guard(body_preset=True, stored=_S),
     ("schedule", "DELETE", "/schedules/{schedule_id}"): Guard(stored=_S),
     ("schedule", "POST", "/schedules/{schedule_id}/run"): Guard(stored=_S),
-    ("schedule", "GET", "/schedules/{schedule_id}/runs"): Guard(stored=_S),
+    ("schedule", "GET", "/schedules/{schedule_id}/runs"): Guard(),
     ("connector", "GET", "/rooms"): Guard(),
     ("connector", "GET", "/rooms/{room_id}"): Guard(),
     ("connector", "PUT", "/rooms/{room_id}/settings"): Guard(),
@@ -184,18 +186,17 @@ GUARDS: dict[tuple[str, str, str], Guard] = {
     ("connector", "GET", "/rules"): Guard(),
     ("connector", "POST", "/rules"): Guard(rule="body"),
     ("connector", "DELETE", "/rules/{rule_id}"): Guard(rule="stored"),
-    ("history", "GET", "/sessions"): Guard(list_filter="preset_id", cursor=True),
-    ("history", "GET", "/sessions/{session_id}"): Guard(answer="preset_id"),
-    ("history", "GET", "/sessions/{session_id}/records"): Guard(stored="history_session"),
+    ("history", "GET", "/sessions"): Guard(cursor=True),
+    ("history", "GET", "/sessions/{session_id}"): Guard(),
+    ("history", "GET", "/sessions/{session_id}/records"): Guard(),
+    ("usage", "GET", "/history"): Guard(),
+    ("usage", "GET", "/sessions"): Guard(),
 }
 # stored object kind -> (upstream list path below the service prefix, id field, path parameter)
 _STORED = {
     "endpoint": ("/endpoints", "id", "id"),
     "schedule": ("/schedules", "id", "schedule_id"),
 }
-# stored object kind -> (upstream path of the one object below the service prefix, path
-# parameter that fills it): kinds whose list is paged, so the object is looked up on its own
-_STORED_ONE = {"history_session": ("/sessions/{session_id}", "session_id")}
 # routes whose answer may carry a credential the upstream issues once
 _ISSUING = {
     ("POST", "/endpoints"),
@@ -272,13 +273,13 @@ async def sanitise(
     return payload
 
 
-async def _visible(request: Request) -> set[str]:
-    """The ids of the presets the superleader may manage, read once per request."""
-    cached = getattr(request.state, "visible_presets", None)
+async def _writable(request: Request) -> set[str]:
+    """The ids of the presets the superleader may manage (write), read once per request."""
+    cached = getattr(request.state, "writable_presets", None)
     if cached is None:
         async with request.app.state.pool.connection() as conn:
             cached = {str(i) for i in await presets_repo.manageable_ids(conn)}
-        request.state.visible_presets = cached
+        request.state.writable_presets = cached
     return cached
 
 
@@ -317,22 +318,11 @@ def _bare(request: Request) -> Request:
     return Request(scope, request.receive)
 
 
-async def _schedule_presets(request: Request, settings: Settings) -> dict[str, Any]:
-    items = await _upstream_json(_bare(request), settings, "schedule", "/schedules")
-    return {str(i.get("id")): i.get("preset_id") for i in items if isinstance(i, dict)}
-
-
 async def _stored_preset(
     request: Request, settings: Settings, service: str, guard: Guard
 ) -> str | None:
-    """The preset id of the object a route acts on (None when it has none); an object the
+    """The preset id of the object a route writes (None when it has none); an object the
     upstream does not list is 404."""
-    if guard.stored in _STORED_ONE:
-        template, param = _STORED_ONE[guard.stored]
-        path = _fill(template, {param: request.path_params[param]})
-        one = await _upstream_json(_bare(request), settings, service, path)
-        preset = one.get("preset_id") if isinstance(one, dict) else None
-        return None if preset is None else str(preset)
     list_path, id_field, param = _STORED[guard.stored]
     wanted = request.path_params[param]
     items = await _upstream_json(_bare(request), settings, service, list_path)
@@ -406,42 +396,12 @@ def _body_preset(body: bytes | None) -> str | None:
     return None if preset is None else str(preset)
 
 
-def _body_hidden(body: bytes | None, visible: set[str]) -> bool:
-    """True when a JSON body names a preset outside the visible set (null counts as hidden)."""
+def _body_hidden(body: bytes | None, writable: set[str]) -> bool:
+    """True when a JSON body names a preset outside the writable set (null counts as outside)."""
     if "preset_id" not in _body_object(body):
         return False
     preset = _body_preset(body)
-    return preset is None or preset not in visible
-
-
-async def _filter_answer(
-    request: Request, settings: Settings, guard: Guard, status: int, content: bytes
-) -> bytes:
-    """Apply the list filter or single-object check of `guard` to a 2xx JSON answer."""
-    if not (200 <= status < 300 and content and (guard.list_filter or guard.answer)):
-        return content
-    visible = await _visible(request)
-    payload = json.loads(content)
-    field = guard.list_filter or guard.answer
-    mapping = None
-    if field == "schedule_id":
-        mapping = await _schedule_presets(request, settings)
-
-    def shown(item: Any) -> bool:
-        if not isinstance(item, dict):
-            return False
-        preset = mapping.get(str(item.get("schedule_id"))) if mapping is not None else None
-        if mapping is None:
-            preset = item.get("preset_id")
-        return preset is not None and str(preset) in visible
-
-    if guard.list_filter:
-        if not isinstance(payload, list):
-            raise ApiError(502, "upstream_shape", "upstream list answer is not a list")
-        return json.dumps([i for i in payload if shown(i)]).encode()
-    if not shown(payload):
-        raise not_found("object")
-    return content
+    return preset is None or preset not in writable
 
 
 def _next_cursor(request: Request, guard: Guard, status: int, content: bytes) -> dict[str, str]:
@@ -471,12 +431,13 @@ def _handler(service: str, method: str, template: str) -> Callable[..., Awaitabl
         body = None
         if method in _BODY_METHODS:
             body = await forward_core.capped_body(request) or None
-        if guard.body_preset and _body_hidden(body, await _visible(request)):
-            raise not_found("preset")
-        if guard.stored:
-            stored = await _stored_preset(request, settings, service, guard)
-            if stored is None or stored not in await _visible(request):
-                raise not_found("object")
+        if method != "GET":
+            if guard.body_preset and _body_hidden(body, await _writable(request)):
+                raise not_manageable("preset")
+            if guard.stored:
+                stored = await _stored_preset(request, settings, service, guard)
+                if stored is None or stored not in await _writable(request):
+                    raise not_manageable("object")
         if guard.rule:
             await _rule_room(request, settings, guard, body)
         if guard.ask_decision:
@@ -497,7 +458,6 @@ def _handler(service: str, method: str, template: str) -> Callable[..., Awaitabl
             row = await chat_requests.on_created(request, settings, json.loads(content))
             return JSONResponse(row, status)
         headers = _next_cursor(request, guard, status, content)
-        content = await _filter_answer(request, settings, guard, status, content)
         if service == "webhook":
             if content:
                 payload = await sanitise(request, settings, status, content, issuing)
@@ -531,6 +491,18 @@ def _cursor_responses(service: str, method: str, template: str) -> dict[int | st
     return {200: {"description": "Successful Response", "headers": {NEXT_CURSOR_HEADER: header}}}
 
 
+def _relay_responses(service: str, method: str, template: str) -> dict[int | str, Any]:
+    """The OpenAPI entries of one relay route: the cursor header, and for the usage reads the
+    gate's 403 and the 503 of an unconfigured or unreachable upstream."""
+    responses = _cursor_responses(service, method, template)
+    if service == "usage":
+        responses[403] = FORBIDDEN
+        responses[503] = {
+            "description": "upstream_unconfigured or upstream_unavailable: the usage service"
+        }
+    return responses
+
+
 def _register() -> None:
     for service, (relay_prefix, _, _, routes) in SERVICES.items():
         for method, template, success in routes:
@@ -540,7 +512,7 @@ def _register() -> None:
                 methods=[method],
                 status_code=success,
                 response_class=Response,
-                responses=_cursor_responses(service, method, template),
+                responses=_relay_responses(service, method, template),
                 operation_id="admin_" + service + "_" + method.lower() + _slug(template),
                 summary=f"{method} {service} {template}",
                 tags=["admin"],
@@ -550,30 +522,38 @@ def _register() -> None:
 _VAULT_SHAPE = ApiError(502, "upstream_shape", "the vault upstream answered an unexpected shape")
 
 
-def _scoped_entry(
-    entry: Any, project_labels: list[str], visible: set[str], marked: set[str]
-) -> dict | None:
-    """The entry as the superleader may see it, or None when its project labels exclude the
-    caller. Attachments keep manageable presets, each marked `privileged` when its preset is in
-    `marked`; readable values need one of them."""
+def _scoped_entry(entry: Any, own_labels: list[str], writable: set[str], marked: set[str]) -> dict:
+    """The entry as the superleader may see it; none is dropped. Attachments list every preset,
+    each marked `privileged` (in `marked`) and `manageable` (in `writable`). An entry whose
+    labels do not match `own_labels` (the caller's own projects) belongs to another project, so
+    every env value is None; a matching entry keeps a readable value only when it is attached to
+    a manageable preset."""
     if not isinstance(entry, dict):
         raise _VAULT_SHAPE
     labels = entry.get("labels")
-    if not isinstance(labels, list) or not labels_match(
-        (x for x in labels if isinstance(x, str)), project_labels
-    ):
-        return None
+    own = isinstance(labels, list) and labels_match(
+        (x for x in labels if isinstance(x, str)), own_labels
+    )
     attachments = entry.get("attachments")
+    manageable_attached = False
     if isinstance(attachments, list):
         attachments = [
-            {**a, "privileged": str(a["preset_id"]) in marked}
+            {
+                **a,
+                "privileged": str(a.get("preset_id")) in marked,
+                "manageable": str(a.get("preset_id")) in writable,
+            }
             for a in attachments
-            if isinstance(a, dict) and str(a.get("preset_id")) in visible
+            if isinstance(a, dict)
         ]
+        manageable_attached = any(a["manageable"] for a in attachments)
         entry = {**entry, "attachments": attachments}
     elif attachments is not None:
         raise _VAULT_SHAPE
-    if not attachments:
+    if not own:
+        envs = [{**e, "value": None} if isinstance(e, dict) else e for e in entry.get("envs") or []]
+        entry = {**entry, "envs": envs}
+    elif not manageable_attached:
         entry = {
             **entry,
             "envs": [
@@ -588,11 +568,20 @@ def _scoped_entry(
     "/vault",
     response_class=Response,
     operation_id="admin_vault_list",
+    responses={
+        403: FORBIDDEN,
+        502: {"description": "upstream_shape: the vault answered an unexpected shape"},
+        503: {
+            "description": (
+                "upstream_unconfigured, upstream_unavailable or vault_unavailable: the vault"
+            )
+        },
+    },
     summary="GET vault entries",
     tags=["admin"],
 )
 async def vault_list(request: Request, q: str | None = None) -> Response:
-    """The vault entries of the caller's projects (home and extra) and the env names to
+    """Every vault entry (values only for the caller's projects) and the env names to
     re-attach."""
     _, session = caller_of(request)
     client = request.app.state.vault
@@ -606,16 +595,21 @@ async def vault_list(request: Request, q: str | None = None) -> Response:
         raise ApiError(503, "upstream_unavailable", "the vault upstream is unavailable") from None
     except vault_client.VaultRefused:
         raise vault_refs.unavailable() from None
-    visible = await _visible(request)
+    writable = await _writable(request)
     project_labels = [f"{PROJECT_PREFIX}{p}" for p in session.projects]
     async with request.app.state.pool.connection() as conn:
         presets = await presets_repo.list_presets(conn)
     marked = {str(p.id) for p in presets if privileged(p.spec)}
-    entries = [e for e in (_scoped_entry(x, project_labels, visible, marked) for x in listed) if e]
+    entries = [_scoped_entry(x, project_labels, writable, marked) for x in listed]
     to_reattach = [
-        {"preset_id": str(p.id), "preset_name": p.name, "envs": sorted(p.vault_reattach)}
+        {
+            "preset_id": str(p.id),
+            "preset_name": p.name,
+            "envs": sorted(p.vault_reattach),
+            "manageable": str(p.id) in writable,
+        }
         for p in presets
-        if p.vault_reattach and str(p.id) in visible
+        if p.vault_reattach
     ]
     return JSONResponse({"entries": entries, "to_reattach": to_reattach})
 

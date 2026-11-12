@@ -67,6 +67,15 @@ def not_found(what: str) -> ApiError:
     return ApiError(404, "not_found", f"{what} not found")
 
 
+def not_manageable(kind: str) -> ApiError:
+    """The refusal of a write on a target the superleader may read but not manage (decision 388)."""
+    return ApiError(
+        403,
+        "not_manageable",
+        f"this {kind} is not superleader_manageable: writes need the user's approval",
+    )
+
+
 def project_error(exc: Exception) -> ApiError:
     """The api error for a projects repository exception."""
     match exc:

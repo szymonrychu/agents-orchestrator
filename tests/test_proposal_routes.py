@@ -220,15 +220,15 @@ async def test_replay_answers_200_with_the_first_proposal(app, pool, kube, boss,
     assert len(await _rows(pool, "SELECT id FROM change_proposals")) == 1
 
 
-async def test_hidden_and_unknown_preset_answer_alike(app, pool, boss, preset):
+async def test_unmanageable_preset_is_403_and_unknown_404(app, pool, boss, preset):
     async with pool.connection() as conn:
         await presets_repo.create(conn, "secret-ops", {}, superleader_manageable=False)
     hidden = await agent(app, boss, "POST", P, json=body(target="secret-ops"))
     unknown = await agent(app, boss, "POST", P, json=body(target="no-such-preset"))
-    assert_error(hidden, 404, "not_found")
-    assert hidden.json() == unknown.json()
+    assert_error(hidden, 403, "not_manageable")
+    assert_error(unknown, 404, "not_found")
     assert await _rows(pool, "SELECT id FROM change_proposals") == []
-    assert [a["status"] for a in await audits(pool, boss.id)] == [404, 404]
+    assert [a["status"] for a in await audits(pool, boss.id)] == [403, 404]
 
 
 async def test_refused_patch_is_proposable_and_files_as_a_proposal(app, pool, boss, preset):
@@ -271,26 +271,61 @@ async def test_preset_proposal_with_a_vault_ref_over_http(pool, settings, kube, 
 # ---------------------------------------------------------------- own proposals only
 
 
-async def test_list_and_get_show_own_proposals_only(app, pool, boss, other_boss, preset):
-    mine = await filed(app, boss)
+async def test_regular_leader_lists_own_only(app, pool, boss, other_boss, preset):
+    plain = await hive(pool, "pr-plain-leader")
+    own = {"kind": "session", "target": "pr-plain-leader", "patch": MCP_PATCH}
+    mine = await filed(app, plain, **own)
     theirs = await filed(app, other_boss, patch=PLAIN_PATCH)
-    r = await agent(app, boss, "GET", P)
+    await filed(app, boss)
+    r = await agent(app, plain, "GET", P)
     assert r.status_code == 200, r.text
     assert [v["id"] for v in r.json()] == [mine["id"]]
-    r = await agent(app, boss, "GET", f"{P}/{mine['id']}")
+    r = await agent(app, plain, "GET", f"{P}/{mine['id']}")
     assert r.status_code == 200 and r.json()["id"] == mine["id"]
-    assert [a["status"] for a in await audits(pool, boss.id)] == [201, 200, 200]
-    unknown = await agent(app, boss, "GET", f"{P}/999999")
+    assert [a["status"] for a in await audits(pool, plain.id)] == [201, 200, 200]
+    unknown = await agent(app, plain, "GET", f"{P}/999999")
     for method, suffix, kw in [
         ("GET", "", {}),
         ("POST", "/revise", {"json": {"patch": PLAIN_PATCH}}),
         ("POST", "/withdraw", {}),
     ]:
-        r = await agent(app, boss, method, f"{P}/{theirs['id']}{suffix}", **kw)
+        r = await agent(app, plain, method, f"{P}/{theirs['id']}{suffix}", **kw)
         assert_error(r, 404, "not_found")
         assert r.json() == unknown.json(), suffix
     r = await human(app, "GET", f"{M}/{theirs['id']}")
     assert r.json()["status"] == "open" and r.json()["revision"] == 1
+
+
+async def test_superleader_lists_every_proposal(app, pool, boss, other_boss, preset):
+    async with pool.connection() as conn:
+        secret = await presets_repo.create(conn, "secret-ops", {}, superleader_manageable=True)
+    mine = await filed(app, boss)
+    theirs = await filed(app, other_boss, patch=PLAIN_PATCH)
+    hidden = await filed(app, other_boss, target="secret-ops", patch=PLAIN_PATCH)
+    await hide(pool, secret.id)
+    r = await agent(app, boss, "GET", P)
+    assert r.status_code == 200, r.text
+    assert {v["id"] for v in r.json()} == {mine["id"], theirs["id"], hidden["id"]}
+
+
+async def test_superleader_gets_other_proposal(app, pool, boss, other_boss, preset):
+    theirs = await filed(app, other_boss, patch=PLAIN_PATCH)
+    r = await agent(app, boss, "GET", f"{P}/{theirs['id']}")
+    assert r.status_code == 200, r.text
+    assert r.json()["id"] == theirs["id"]
+    assert_error(await agent(app, boss, "GET", f"{P}/999999"), 404, "not_found")
+
+
+async def test_superleader_cannot_withdraw_other_proposal_404(app, pool, boss, other_boss, preset):
+    theirs = await filed(app, other_boss, patch=PLAIN_PATCH)
+    unknown = await agent(app, boss, "POST", f"{P}/999999/withdraw")
+    r = await agent(app, boss, "POST", f"{P}/{theirs['id']}/withdraw")
+    assert_error(r, 404, "not_found")
+    assert r.json() == unknown.json()
+    r = await agent(app, boss, "POST", f"{P}/{theirs['id']}/revise", json={"patch": PLAIN_PATCH})
+    assert_error(r, 404, "not_found")
+    r = await human(app, "GET", f"{M}/{theirs['id']}")
+    assert r.json()["status"] == "open"
 
 
 async def test_status_filter_and_bad_status(app, pool, boss, preset):
@@ -305,20 +340,21 @@ async def test_status_filter_and_bad_status(app, pool, boss, preset):
     assert (await audits(pool, boss.id))[-1]["status"] == 422
 
 
-async def test_hidden_target_answers_404_like_unknown(app, pool, kube, boss, preset):
-    """A target the superleader may no longer manage hides its proposals on every agent route."""
+async def test_hidden_target_writes_404_like_unknown_reads_stay_open(app, pool, kube, boss, preset):
+    """A target the superleader may no longer manage: revise, withdraw 404; reads stay open."""
     view = await filed(app, boss)
     await hide(pool, preset.id)
     unknown = await agent(app, boss, "GET", f"{P}/999999")
     for method, suffix, kw in [
-        ("GET", "", {}),
         ("POST", "/revise", {"json": {"patch": PLAIN_PATCH}}),
         ("POST", "/withdraw", {}),
     ]:
         r = await agent(app, boss, method, f"{P}/{view['id']}{suffix}", **kw)
         assert_error(r, 404, "not_found")
         assert r.json() == unknown.json(), suffix
-    assert (await agent(app, boss, "GET", P)).json() == []
+    r = await agent(app, boss, "GET", f"{P}/{view['id']}")
+    assert r.status_code == 200 and r.json()["id"] == view["id"]
+    assert [v["id"] for v in (await agent(app, boss, "GET", P)).json()] == [view["id"]]
     r = await human(app, "GET", f"{M}/{view['id']}")
     assert r.json()["status"] == "open" and r.json()["revision"] == 1
 
@@ -473,7 +509,9 @@ def test_review_route_only_on_the_main_router():
     assert not [p for p in agent_side if "review" in p.split("/")]
 
 
-async def test_list_page_straddling_hidden_rows_is_full(app, pool, kube, boss, preset):
+async def test_list_page_with_hidden_target_rows_is_full_and_unfiltered(
+    app, pool, kube, boss, preset
+):
     async with pool.connection() as conn:
         other = await presets_repo.create(conn, "pr-other-target", {}, superleader_manageable=True)
     first = await filed(app, boss)
@@ -481,8 +519,8 @@ async def test_list_page_straddling_hidden_rows_is_full(app, pool, kube, boss, p
     await hide(pool, other.id)
     third = await filed(app, boss)
     r = await agent(app, boss, "GET", P, params={"limit": 2})
-    assert [v["id"] for v in r.json()] == [third["id"], first["id"]]
-    assert second["id"] not in [v["id"] for v in r.json()]
+    assert [v["id"] for v in r.json()] == [third["id"], second["id"]]
+    assert first["id"] not in [v["id"] for v in r.json()]
 
 
 async def test_revise_on_target_hidden_mid_call_answers_proposal_404(
@@ -515,35 +553,36 @@ async def _session_of(pool, slug: str, preset_id) -> Sess:
 
 
 async def test_session_proposal_hidden_when_its_preset_turns_unmanageable(app, pool, boss, preset):
-    """A foreign session's proposal follows `admin._target`: once the session's preset is no
-    longer manageable, get, list, revise and withdraw answer like an unknown id."""
+    """Once the session's preset is no longer manageable, get and list still show the proposal
+    to a superleader (decision 388); revise and withdraw answer like an unknown id."""
     target = await _session_of(pool, "pr-target", preset.id)
     view = await filed(app, boss, kind="session", target=target.slug, patch=PLAIN_PATCH)
     await hide(pool, preset.id)
     unknown = await agent(app, boss, "GET", f"{P}/999999")
     for method, suffix, kw in [
-        ("GET", "", {}),
         ("POST", "/revise", {"json": {"patch": MCP_PATCH}}),
         ("POST", "/withdraw", {}),
     ]:
         r = await agent(app, boss, method, f"{P}/{view['id']}{suffix}", **kw)
         assert_error(r, 404, "not_found")
         assert r.json() == unknown.json(), suffix
-    assert (await agent(app, boss, "GET", P)).json() == []
+    r = await agent(app, boss, "GET", f"{P}/{view['id']}")
+    assert r.status_code == 200 and r.json()["id"] == view["id"]
+    assert [v["id"] for v in (await agent(app, boss, "GET", P)).json()] == [view["id"]]
     r = await human(app, "GET", f"{M}/{view['id']}")
     assert r.json()["status"] == "open" and r.json()["revision"] == 1
 
 
 async def test_session_proposal_hidden_when_its_preset_is_deleted(app, pool, boss, preset):
-    """A deleted preset leaves the session with no preset: `admin._target` hides it, so does
-    the listing (unlike a deleted preset target, which stays readable)."""
+    """A deleted preset leaves the session with no preset: a superleader still reads the
+    proposal and lists it (decision 388)."""
     target = await _session_of(pool, "pr-target", preset.id)
     view = await filed(app, boss, kind="session", target=target.slug, patch=PLAIN_PATCH)
     async with pool.connection() as conn:
         await conn.execute("DELETE FROM presets WHERE id = %s", (preset.id,))
     r = await agent(app, boss, "GET", f"{P}/{view['id']}")
-    assert_error(r, 404, "not_found")
-    assert (await agent(app, boss, "GET", P)).json() == []
+    assert r.status_code == 200, r.text
+    assert [v["id"] for v in (await agent(app, boss, "GET", P)).json()] == [view["id"]]
 
 
 async def test_own_session_proposal_stays_visible_on_an_unmanageable_preset(

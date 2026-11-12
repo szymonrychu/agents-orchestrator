@@ -142,10 +142,10 @@ async def test_only_a_superleader_grants(app, world):
     assert_error(r, 403, "not_superleader")
 
 
-async def test_hidden_session_is_404(pool, app, world):
+async def test_unmanageable_session_grant_is_403(pool, app, world):
     hidden = await alone(pool, "grant-hidden", project="b")
     await attach_preset(pool, hidden.id, manageable=False)
-    assert_error(await _grant(app, world["S"], hidden.slug, "a"), 404, "not_found")
+    assert_error(await _grant(app, world["S"], hidden.slug, "a"), 403, "not_manageable")
 
 
 async def test_client_key_replays_the_first(app, world):
@@ -252,7 +252,7 @@ async def test_preset_grant_proposal_and_revoke(pool, app, world):
     assert r.status_code == 202
     hidden = await _preset(pool, manageable=False)
     r = await _agent(app, world["S"], "POST", f"/presets/{hidden.id}/projects", json=body)
-    assert_error(r, 404, "not_found")
+    assert_error(r, 403, "not_manageable")
 
 
 # ---------------------------------------------------------------- main port (the human)

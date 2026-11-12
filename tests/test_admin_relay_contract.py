@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from agents_orchestrator.api.admin_relay import _STORED_ONE, GUARDS, HISTORY_DEFAULT_LIMIT, SERVICES
+from agents_orchestrator.api.admin_relay import GUARDS, HISTORY_DEFAULT_LIMIT, SERVICES
 
 FIXTURES = Path(__file__).parent / "fixtures" / "upstream"
 SPECS = {
@@ -20,7 +20,10 @@ SPECS = {
     "schedule": "agents-schedule.openapi.json",
     "connector": "agents-matrix-connector.openapi-agent.json",
     "history": "agents-history.openapi.json",
+    "usage": "agents-usage.openapi.json",
 }
+# usage routes of the usage gate and the statusLine ingest, not part of the admin surface
+NOT_RELAYED = {"/usage/v1/current", "/usage/v1/samples"}
 HTTP = {"get", "put", "post", "patch", "delete"}
 
 
@@ -31,7 +34,7 @@ def upstream_routes(service: str) -> set[tuple[str, str]]:
     return {
         (method.upper(), path[len(prefix) :])
         for path, item in paths.items()
-        if path.startswith(prefix + "/")
+        if path.startswith(prefix + "/") and path not in NOT_RELAYED
         for method in item
         if method in HTTP
     }
@@ -88,12 +91,6 @@ def test_guard_fields_exist_upstream():
                 method,
                 template,
             )
-        field = guard.list_filter or guard.answer
-        if field:
-            ok = next(v for k, v in op["responses"].items() if k.startswith("2"))
-            schema = ok["content"]["application/json"]["schema"]
-            item = _resolve(doc, schema.get("items", schema))
-            assert field in item["properties"], (service, method, template)
         if guard.rule:
             schemas = doc["components"]["schemas"]
             assert {"list", "kind", "value"} <= set(schemas["RuleIn"]["properties"])
@@ -104,21 +101,8 @@ def test_guard_fields_exist_upstream():
             params = {p["name"]: p for p in op["parameters"]}
             assert params["limit"]["schema"]["default"] == HISTORY_DEFAULT_LIMIT, template
             assert "before_id" in params, template
-        if guard.list_filter == "schedule_id" or guard.answer == "schedule_id":
-            assert (
-                "preset_id"
-                in _spec("schedule")["components"]["schemas"]["ScheduleView"]["properties"]
-            )
-        if guard.stored in _STORED_ONE:
-            one_path, param = _STORED_ONE[guard.stored]
-            assert "{" + param + "}" in one_path and "{" + param + "}" in template
-            one = _op(service, "GET", one_path)
-            ok = next(v for k, v in one["responses"].items() if k.startswith("2"))
-            item = _resolve(doc, ok["content"]["application/json"]["schema"])
-            assert "preset_id" in item["properties"], (service, method, template)
-            assert "404" in one["responses"]
-        elif guard.stored:
-            list_path = {"endpoint": "/endpoints", "schedule": "/schedules", "room": "/rooms"}
+        if guard.stored:
+            list_path = {"endpoint": "/endpoints", "schedule": "/schedules"}
             lister = _op(service, "GET", list_path[guard.stored])
             ok = next(v for k, v in lister["responses"].items() if k.startswith("2"))
             item = _resolve(doc, ok["content"]["application/json"]["schema"]["items"])

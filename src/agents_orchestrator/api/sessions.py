@@ -16,7 +16,7 @@ from pydantic import ValidationError
 
 from agents_orchestrator import inactivity, rendering
 from agents_orchestrator.api import schemas, usage_gate, vault_client, vault_refs
-from agents_orchestrator.api.errors import ApiError, not_found, project_error
+from agents_orchestrator.api.errors import ApiError, not_found, not_manageable, project_error
 from agents_orchestrator.api.service_auth import calling_service
 from agents_orchestrator.api.usage_gate import UsageSource
 from agents_orchestrator.api.vault_client import Pin, VaultClient
@@ -334,6 +334,31 @@ async def meta(settings: Cfg) -> schemas.Meta:
     )
 
 
+async def list_views(
+    conn,
+    settings: Settings,
+    *,
+    label: list[str] | None,
+    project: str | None,
+    superleaders: bool,
+    slug: str | None,
+) -> list[schemas.SessionView]:
+    """The session list behind the main port and the admin route: `label` (any match among live
+    sessions), `project` (422 `unknown_project`; an archived one still lists), `superleaders`
+    adds every superleader session to a project filter, `slug` is an exact match."""
+    try:
+        wanted = normalize_labels(label, allow_reserved=True) if label else None
+    except ValueError as exc:
+        raise ApiError(422, "invalid_request", str(exc)) from None
+    if project is not None and await projects.get_project(conn, project) is None:
+        raise project_error(projects.UnknownProject(project))
+    found = await repo.list_sessions(
+        conn, labels=wanted, project=project, slug=slug, superleaders=superleaders
+    )
+    aggs = await views.session_aggregates(conn)
+    return [_view(c, aggs.get(c.id), settings) for c in found]
+
+
 @router.get("/sessions", response_model=list[schemas.SessionView])
 async def list_sessions(
     pool: Pool,
@@ -347,22 +372,15 @@ async def list_sessions(
     `project` keeps that project's sessions (422 `unknown_project`; an archived one still
     lists), and with `superleaders=include` every superleader session is added; `slug` is an
     exact match. The filters combine."""
-    try:
-        wanted = normalize_labels(label, allow_reserved=True) if label else None
-    except ValueError as exc:
-        raise ApiError(422, "invalid_request", str(exc)) from None
     async with pool.connection() as conn:
-        if project is not None and await projects.get_project(conn, project) is None:
-            raise project_error(projects.UnknownProject(project))
-        found = await repo.list_sessions(
+        return await list_views(
             conn,
-            labels=wanted,
+            settings,
+            label=label,
             project=project,
-            slug=slug,
             superleaders=superleaders == "include",
+            slug=slug,
         )
-        aggs = await views.session_aggregates(conn)
-    return [_view(c, aggs.get(c.id), settings) for c in found]
 
 
 async def create(
@@ -526,8 +544,9 @@ async def _pin_preset(
         return None
     async with pool.connection() as conn:
         preset = await presets.get(conn, preset_id)
-    if not _visible(preset, created_by_session):
+    if preset is None:
         return None  # the transaction answers 404
+    _writable(preset, created_by_session)
     refs = vault_refs.refs_in(preset.spec)
     if not refs:
         return None
@@ -586,9 +605,11 @@ async def _insert(conn, slug: str, spec: SessionSpec, **provenance) -> repo.Sess
 PLACE_ATTEMPTS = 3
 
 
-def _visible(preset: presets.Preset | None, created_by_session: uuid.UUID | None) -> bool:
-    """A superleader (admin create) sees only manageable presets; any other is as missing."""
-    return preset is not None and (created_by_session is None or preset.superleader_manageable)
+def _writable(preset: presets.Preset, created_by_session: uuid.UUID | None) -> None:
+    """A superleader (admin create) starts sessions only from manageable presets: it may read
+    any other, but the write is 403 `not_manageable` (decision 388)."""
+    if created_by_session is not None and not preset.superleader_manageable:
+        raise not_manageable("preset")
 
 
 async def _placed_preset(
@@ -604,15 +625,17 @@ async def _placed_preset(
     meanwhile is read again."""
     for _ in range(PLACE_ATTEMPTS):
         peek = await presets.get(conn, preset_id)
-        if peek is None or not _visible(peek, created_by_session):
+        if peek is None:
             raise not_found("preset")
+        _writable(peek, created_by_session)
         target = peek.project if project is None else project
         extras = [p for p in peek.extra_projects if p != target]
         for slug in (target, *extras):
             await hold_project(conn, slug)
         preset = await presets.get_for_share(conn, preset_id)
-        if preset is None or not _visible(preset, created_by_session):
+        if preset is None:
             raise not_found("preset")
+        _writable(preset, created_by_session)
         if (project is not None or preset.project == target) and (
             preset.extra_projects == peek.extra_projects
         ):

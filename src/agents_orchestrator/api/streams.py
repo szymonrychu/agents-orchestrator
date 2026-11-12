@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.listener import Listener, Subscription, SubscriptionDropped
-from agents_orchestrator.api.messages import _DEFAULT_ATTEMPTS, _message_view
+from agents_orchestrator.api.messages import DEFAULT_ATTEMPTS, message_view
 from agents_orchestrator.api.sessions import Cfg, Pool, agent_view
 from agents_orchestrator.api.sessions import _view as session_view
 from agents_orchestrator.db import events as ev
@@ -68,6 +68,35 @@ def _split_types(types: list[str] | None) -> list[str] | None:
     return out or None
 
 
+async def events_page(
+    conn,
+    session_id: uuid.UUID,
+    *,
+    before_id: int | None,
+    after_id: int | None,
+    limit: int,
+    agent_id: uuid.UUID | None,
+    types: list[str] | None,
+) -> EventsPage:
+    """One page of a session's events; 400 when both cursors are given."""
+    if before_id is not None and after_id is not None:
+        raise _bad_request("before_id and after_id are mutually exclusive")
+    page = await ev.page(
+        conn,
+        session_id,
+        before_id=before_id,
+        after_id=after_id,
+        limit=limit,
+        agent_id=agent_id,
+        types=_split_types(types),
+    )
+    return EventsPage(
+        events=[EventView(**e) for e in page.events],
+        has_more_before=page.has_more_before,
+        next_after_id=page.next_after_id,
+    )
+
+
 @router.get("/sessions/{session_id}/events", response_model=EventsPage)
 async def list_events(
     session_id: uuid.UUID,
@@ -83,20 +112,15 @@ async def list_events(
     async with pool.connection() as conn:
         if await repo.get(conn, session_id) is None:
             raise not_found("session")
-        page = await ev.page(
+        return await events_page(
             conn,
             session_id,
             before_id=before_id,
             after_id=after_id,
             limit=limit,
             agent_id=agent_id,
-            types=_split_types(types),
+            types=types,
         )
-    return EventsPage(
-        events=[EventView(**e) for e in page.events],
-        has_more_before=page.has_more_before,
-        next_after_id=page.next_after_id,
-    )
 
 
 async def resume_cursor(
@@ -175,12 +199,12 @@ async def _session_state(conn, session: repo.Session, settings) -> dict[str, Any
     aggs = await views.session_aggregates(conn, session.id)
     agg = aggs.get(session.id) or {}
     rows = await views.agent_rows(conn, session.id)
-    msgs = await views.list_messages(conn, session.id, None, _RECENT_MESSAGES, _DEFAULT_ATTEMPTS)
+    msgs = await views.list_messages(conn, session.id, None, _RECENT_MESSAGES, DEFAULT_ATTEMPTS)
     view = session_view(session, agg, settings).model_dump(mode="json")
     return {
         "session": view,
         "agents": {str(r["id"]): agent_view(r).model_dump(mode="json") for r in rows},
-        "messages": {m["id"]: _message_view(m).model_dump(mode="json") for m in msgs},
+        "messages": {m["id"]: message_view(m).model_dump(mode="json") for m in msgs},
         "queued": agg.get("queued", 0),
         "failed": agg.get("failed", 0),
         "oldest_queued_at": view["summary"]["oldest_queued_at"],

@@ -99,7 +99,8 @@ async def test_agent_projects_superleader_all(pool, dsn):
     assert await _projects(app, seats["S"]) == ["a", "b", "default"]
     async with pool.connection() as conn:
         await conn.execute("UPDATE projects SET archived_at = now() WHERE slug = 'b'")
-    assert await _projects(app, seats["S"]) == ["a", "default"]
+    # archived projects stay listed for a superleader (T-120 slice 2)
+    assert await _projects(app, seats["S"]) == ["a", "b", "default"]
 
 
 def _taskboard_app(pool, dsn):
