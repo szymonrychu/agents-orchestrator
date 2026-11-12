@@ -30,7 +30,7 @@ BODIES = {
 
 
 def own_routes() -> list[tuple[str, str]]:
-    prefixes = tuple(admin.ADMIN_PREFIX + v[0] for v in admin_relay.SERVICES.values())
+    prefixes = tuple(admin.ADMIN_PREFIX + v[0] + "/" for v in admin_relay.SERVICES.values())
     return sorted(
         (m, r.path)
         for r in [
