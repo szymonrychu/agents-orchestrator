@@ -829,3 +829,36 @@ def test_project_chat_settings_defaults_and_bounds(monkeypatch):
             Settings()
         monkeypatch.setenv(name, "1")
         Settings()
+
+
+def test_mindmap_settings(monkeypatch):
+    s = Settings()
+    assert (s.mindmap_url, s.mindmap_token, s.mindmap_available) == ("", "", False)
+    token = "mm-" + secrets.token_hex(16)
+    monkeypatch.setenv("ORCH_MINDMAP_URL", "http://agents-mindmap-service:8082")
+    monkeypatch.setenv("ORCH_MINDMAP_TOKEN", token)
+    s = Settings()
+    assert (s.mindmap_url, s.mindmap_token) == ("http://agents-mindmap-service:8082", token)
+    assert s.mindmap_available
+    assert token not in repr(s)
+
+
+def test_settings_mindmap_token_required_with_url(monkeypatch):
+    token = "mm-" + secrets.token_hex(16)
+    for bad in ("ftp://mm", "mm:8082", "http://", "http://mm/?q=1", "http://mm/#f"):
+        monkeypatch.setenv("ORCH_MINDMAP_URL", bad)
+        monkeypatch.setenv("ORCH_MINDMAP_TOKEN", token)
+        with pytest.raises(SettingsError) as exc:
+            Settings()
+        assert "ORCH_MINDMAP_URL" in exc.value.problems, bad
+    monkeypatch.delenv("ORCH_MINDMAP_TOKEN")
+    monkeypatch.setenv("ORCH_MINDMAP_URL", "http://mm:8082")
+    with pytest.raises(SettingsError) as exc:
+        Settings()
+    assert "ORCH_MINDMAP_URL" in str(exc.value) and "ORCH_MINDMAP_TOKEN" in str(exc.value)
+    monkeypatch.delenv("ORCH_MINDMAP_URL")
+    monkeypatch.setenv("ORCH_MINDMAP_TOKEN", token)
+    with pytest.raises(SettingsError) as exc:
+        Settings()
+    assert "ORCH_MINDMAP_URL" in str(exc.value) and "ORCH_MINDMAP_TOKEN" in str(exc.value)
+    assert token not in str(exc.value)

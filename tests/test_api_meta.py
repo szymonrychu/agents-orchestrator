@@ -31,3 +31,11 @@ async def test_meta_reports_inactivity(pool, dsn):
         "close_seconds": 14400,
         "handoff_seconds": 300,
     }
+
+
+async def test_meta_mindmap_flag(pool, dsn):
+    async with client_for(create_app(make_settings(dsn), pool)) as c:
+        assert (await c.get("/api/v1/meta")).json()["mindmap"] is False
+    settings = make_settings(dsn, mindmap_url="http://mm:8082", mindmap_token="t")
+    async with client_for(create_app(settings, pool)) as c:
+        assert (await c.get("/api/v1/meta")).json()["mindmap"] is True

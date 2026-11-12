@@ -642,6 +642,7 @@ class Meta(BaseModel):
     permission_modes: list[MetaPermissionMode]
     usage: MetaUsage
     inactivity: MetaInactivity
+    mindmap: bool
 
 
 Lane = Literal["idle", "regular", "priority"]

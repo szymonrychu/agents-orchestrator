@@ -196,6 +196,41 @@ ConfigMap, the migrate init containers or the other components. Empty when the t
 {{- end }}
 
 {{/*
+"true" when the mindmap relay is configured, empty when it is off. mindmap.url and a token source
+(mindmap.token or mindmap.existingSecret) go together; one without the other fails the render.
+*/}}
+{{- define "agents-orchestrator.mindmapEnabled" -}}
+{{- $token := or .Values.mindmap.token .Values.mindmap.existingSecret -}}
+{{- if and .Values.mindmap.url $token -}}
+true
+{{- else if or .Values.mindmap.url $token -}}
+{{- fail "agents-orchestrator: set mindmap.url together with mindmap.token or mindmap.existingSecret, or none of them" -}}
+{{- end -}}
+{{- end }}
+
+{{/* Name of the Secret holding ORCH_MINDMAP_TOKEN: existingSecret wins over the chart Secret. */}}
+{{- define "agents-orchestrator.mindmapSecretName" -}}
+{{- default (printf "%s-mindmap" (include "agents-orchestrator.fullname" .)) .Values.mindmap.existingSecret -}}
+{{- end }}
+
+{{/*
+ORCH_MINDMAP_URL and ORCH_MINDMAP_TOKEN env entries, always together (Settings refuses one without the
+other). Only the api main container, which serves the mindmap relay, includes this; never the shared
+ConfigMap, the migrate init containers or the other components. Empty when the mindmap relay is off.
+*/}}
+{{- define "agents-orchestrator.mindmapEnv" -}}
+{{- if include "agents-orchestrator.mindmapEnabled" . -}}
+- name: ORCH_MINDMAP_URL
+  value: {{ .Values.mindmap.url | quote }}
+- name: ORCH_MINDMAP_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "agents-orchestrator.mindmapSecretName" . }}
+      key: {{ .Values.mindmap.existingSecretKey | default "mindmap-token" }}
+{{- end -}}
+{{- end }}
+
+{{/*
 "true" when the usage gate is configured, empty when it is off. usage.url and a token source
 (usage.token or usage.existingSecret) go together; one without the other fails the render.
 */}}

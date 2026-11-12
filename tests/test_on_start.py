@@ -679,3 +679,38 @@ def test_project_chat_tools_in_every_session(fields):
     allow = on_start.orchestrator_allow(SessionSpec(**fields))
     for name in ("project_chat_send", "project_chat_read"):
         assert allow.count(name) == 1
+
+
+# Copied from on_start.MINDMAP_TOOLS on purpose; the plugin's mindmap module
+# (any-mcp-tatara-plugins) registers the same 19 names with the orchestrator_ prefix.
+MINDMAP = [
+    "mindmap_map_list", "mindmap_map_get", "mindmap_map_create", "mindmap_map_update",
+    "mindmap_node_get", "mindmap_node_history", "mindmap_search", "mindmap_traverse",
+    "mindmap_node_create", "mindmap_node_update", "mindmap_note_put",
+    "mindmap_growth_area_update", "mindmap_edge_create", "mindmap_edge_delete", "mindmap_link",
+    "mindmap_task_nodes", "mindmap_direction_list", "mindmap_direction_create",
+    "mindmap_direction_update",
+]  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    "spec", [SessionSpec(replicas=1), SessionSpec(replicas=2), SessionSpec(session_messaging=True)]
+)
+def test_allow_with_and_without_mindmap(spec):
+    assert on_start.MINDMAP_TOOLS == MINDMAP
+    without = on_start.orchestrator_allow(spec, mindmap=False)
+    assert not set(MINDMAP) & set(without)
+    assert without == on_start.orchestrator_allow(spec, mindmap=False)
+    with_ = on_start.orchestrator_allow(spec, mindmap=True)
+    assert [t for t in with_ if t not in MINDMAP] == without
+    at = with_.index("project_chat_read") + 1
+    assert with_[at : at + len(MINDMAP)] == MINDMAP
+    assert len(with_) == len(set(with_))
+
+
+def test_entry_allow_follows_mindmap_available():
+    spec = SessionSpec(replicas=1)
+    assert not set(MINDMAP) & set(entries(spec)["orchestrator"]["allow"])
+    configured = make_settings(mindmap_url="http://mm:8082", mindmap_token="t")
+    allow = entries(spec, configured)["orchestrator"]["allow"]
+    assert allow == on_start.orchestrator_allow(spec, mindmap=True)

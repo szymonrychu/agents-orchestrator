@@ -332,6 +332,7 @@ async def meta(settings: Cfg) -> schemas.Meta:
             close_seconds=settings.inactivity_close_seconds,
             handoff_seconds=settings.inactivity_handoff_seconds,
         ),
+        mindmap=settings.mindmap_available,
     )
 
 
