@@ -274,26 +274,28 @@ async def test_superleader_reads_never_leak_tokens_or_values(pool, dsn, tmp_path
     boss = await alone(pool, "canary-reader", superleader=True)
     peer = await alone(pool, "canary-peer")
     bodies: list[str] = []
-    gets = [
-        f"{ADMIN_PREFIX}/sessions",
-        f"{ADMIN_PREFIX}/meta",
-        f"{ADMIN_PREFIX}/archives",
-        f"{ADMIN_PREFIX}/archives/settings",
-        f"{ADMIN_PREFIX}/archives/cleanup/preview",
-        f"{ADMIN_PREFIX}/sessions/{peer.slug}/activity",
-        f"{ADMIN_PREFIX}/sessions/{peer.slug}/events",
-        f"{ADMIN_PREFIX}/sessions/{peer.slug}/messages",
-        f"{ADMIN_PREFIX}/sessions/{peer.slug}/locks",
-        f"{ADMIN_PREFIX}/sessions/{peer.slug}/commands",
-        f"{ADMIN_PREFIX}/usage",
-        f"{ADMIN_PREFIX}/usage/history",
-        f"{ADMIN_PREFIX}/usage/sessions",
-        V,
-    ]
+    # The fixture has no api S3 pair, so the three archives reads answer 503 `unavailable`
+    # (their answer is still scanned); every other read has a real backing and must answer 200.
+    no_s3 = 503
+    gets = {
+        f"{ADMIN_PREFIX}/sessions": 200,
+        f"{ADMIN_PREFIX}/meta": 200,
+        f"{ADMIN_PREFIX}/archives": no_s3,
+        f"{ADMIN_PREFIX}/archives/settings": 200,
+        f"{ADMIN_PREFIX}/archives/cleanup/preview": no_s3,
+        f"{ADMIN_PREFIX}/sessions/{peer.slug}/activity": 200,
+        f"{ADMIN_PREFIX}/sessions/{peer.slug}/events": 200,
+        f"{ADMIN_PREFIX}/sessions/{peer.slug}/messages": 200,
+        f"{ADMIN_PREFIX}/sessions/{peer.slug}/locks": 200,
+        f"{ADMIN_PREFIX}/sessions/{peer.slug}/commands": 200,
+        f"{ADMIN_PREFIX}/usage/history": 200,
+        f"{ADMIN_PREFIX}/usage/sessions": 200,
+        V: 200,
+    }
     async with agent_client(app, boss.leader_ip) as http:
-        for path in gets:
+        for path, expected in gets.items():
             r = await http.get(path, headers=headers(boss.id))
-            assert r.status_code in (200, 503), (path, r.status_code, r.text)
+            assert r.status_code == expected, (path, r.status_code, r.text)
             bodies.append(r.text)
     forbidden = [CANARY_VALUE, CANARY_ERROR, *CANARY_TOKENS.values()]
     forbidden += [base64.b64encode(x.encode()).decode().rstrip("=") for x in forbidden]

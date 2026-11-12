@@ -8334,6 +8334,9 @@
             },
             "description": "Successful Response"
           },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -10432,6 +10435,9 @@
             },
             "description": "Successful Response"
           },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -10852,6 +10858,12 @@
             },
             "description": "Successful Response"
           },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader"
+          },
+          "404": {
+            "description": "not_found: no session has that slug"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -11027,6 +11039,12 @@
             },
             "description": "Successful Response"
           },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader"
+          },
+          "404": {
+            "description": "not_found: no session has that slug"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -11183,6 +11201,15 @@
               }
             },
             "description": "Successful Response"
+          },
+          "400": {
+            "description": "bad_request: before_id and after_id are mutually exclusive"
+          },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader"
+          },
+          "404": {
+            "description": "not_found: no session has that slug"
           },
           "422": {
             "content": {
@@ -11344,6 +11371,12 @@
             },
             "description": "Successful Response"
           },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader"
+          },
+          "404": {
+            "description": "not_found: no session has that slug"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -11450,6 +11483,12 @@
               }
             },
             "description": "Successful Response"
+          },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader"
+          },
+          "404": {
+            "description": "not_found: no session has that slug"
           },
           "422": {
             "content": {
@@ -11819,6 +11858,9 @@
           "200": {
             "description": "Successful Response"
           },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -11828,6 +11870,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "description": "upstream_unconfigured or upstream_unavailable: the usage service"
           }
         },
         "summary": "GET usage /history",
@@ -11878,6 +11923,9 @@
           "200": {
             "description": "Successful Response"
           },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -11887,6 +11935,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "description": "upstream_unconfigured or upstream_unavailable: the usage service"
           }
         },
         "summary": "GET usage /sessions",
