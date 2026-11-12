@@ -34,7 +34,11 @@ HIVE_TOOLS = [
 ]
 SESSION_TOOLS = ["sessions_list", "session_send"]
 INIT_SCRIPTS_TOOLS = ["init_scripts_get", "init_scripts_edit"]
-CHAT_TOOLS = ["chat_rooms", "chat_send", "chat_react", "chat_status"]
+CHAT_TOOLS = [
+    "chat_rooms", "chat_send", "chat_react", "chat_status",
+    "chat_notes_get", "chat_notes_update",
+    "chat_skills_list", "chat_skills_get", "chat_skills_save", "chat_skills_delete",
+]  # fmt: skip
 TASK_TOOLS = [
     "task_create", "task_update", "task_list", "task_get", "task_comment",
     "decision_ask", "decision_withdraw", "todo_set", "todo_update", "session_labels_set",
@@ -582,6 +586,8 @@ def test_alone_session_allow_is_the_literal_e2e_list():
     assert allow == [
         "me", "sessions_list", "session_send", "init_scripts_get", "init_scripts_edit",
         "chat_rooms", "chat_send", "chat_react", "chat_status",
+        "chat_notes_get", "chat_notes_update", "chat_skills_list", "chat_skills_get",
+        "chat_skills_save", "chat_skills_delete",
         "task_create", "task_update", "task_list", "task_get", "task_comment",
         "decision_ask", "decision_withdraw", "todo_set", "todo_update", "session_labels_set",
         "project_list",
