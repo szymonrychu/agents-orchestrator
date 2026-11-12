@@ -172,4 +172,6 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("GET", f"{_ADMIN}/history/sessions"): "superleader",
     ("GET", f"{_ADMIN}/history/sessions/{{session_id}}"): "superleader",
     ("GET", f"{_ADMIN}/history/sessions/{{session_id}}/records"): "superleader",
+    ("GET", f"{_ADMIN}/usage/history"): "superleader",
+    ("GET", f"{_ADMIN}/usage/sessions"): "superleader",
 }

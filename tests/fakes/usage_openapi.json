@@ -1,0 +1,753 @@
+{
+  "components": {
+    "schemas": {
+      "CurrentView": {
+        "properties": {
+          "last_probe": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LastProbeView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_sample": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LastSampleView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "windows": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/WindowView"
+            },
+            "title": "Windows",
+            "type": "object"
+          }
+        },
+        "required": [
+          "windows",
+          "last_sample",
+          "last_probe"
+        ],
+        "title": "CurrentView",
+        "type": "object"
+      },
+      "ErrorBody": {
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "ErrorBody",
+        "type": "object"
+      },
+      "ErrorResponse": {
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorBody"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "title": "ErrorResponse",
+        "type": "object"
+      },
+      "HistoryView": {
+        "properties": {
+          "bucket_seconds": {
+            "title": "Bucket Seconds",
+            "type": "integer"
+          },
+          "from": {
+            "format": "date-time",
+            "title": "From",
+            "type": "string"
+          },
+          "points": {
+            "items": {
+              "$ref": "#/components/schemas/PointView"
+            },
+            "title": "Points",
+            "type": "array"
+          },
+          "to": {
+            "format": "date-time",
+            "title": "To",
+            "type": "string"
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "bucket_seconds",
+          "points"
+        ],
+        "title": "HistoryView",
+        "type": "object"
+      },
+      "LastProbeView": {
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "title": "At",
+            "type": "string"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "at",
+          "ok",
+          "error"
+        ],
+        "title": "LastProbeView",
+        "type": "object"
+      },
+      "LastSampleView": {
+        "properties": {
+          "agent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent"
+          },
+          "at": {
+            "format": "date-time",
+            "title": "At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "at",
+          "agent"
+        ],
+        "title": "LastSampleView",
+        "type": "object"
+      },
+      "MarkView": {
+        "description": "One session: `ended_at` is null while it is open (clients run it to now).",
+        "properties": {
+          "ended_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended At"
+          },
+          "origin": {
+            "title": "Origin",
+            "type": "string"
+          },
+          "preset_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preset Id"
+          },
+          "preset_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preset Name"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          },
+          "started_at": {
+            "format": "date-time",
+            "title": "Started At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "slug",
+          "preset_id",
+          "preset_name",
+          "origin",
+          "started_at",
+          "ended_at"
+        ],
+        "title": "MarkView",
+        "type": "object"
+      },
+      "PointView": {
+        "properties": {
+          "metric": {
+            "title": "Metric",
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "percent": {
+            "title": "Percent",
+            "type": "number"
+          },
+          "resets_at": {
+            "format": "date-time",
+            "title": "Resets At",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "statusline",
+              "probe"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "observed_at",
+          "metric",
+          "percent",
+          "resets_at",
+          "source"
+        ],
+        "title": "PointView",
+        "type": "object"
+      },
+      "SampleIn": {
+        "additionalProperties": false,
+        "description": "What the wrapper of an agent pod posts: its statusLine `rate_limits` as received.",
+        "properties": {
+          "agent": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Za-z0-9._-]{1,128}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Agent"
+          },
+          "cli_version": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Cli Version"
+          },
+          "rate_limits": {
+            "additionalProperties": true,
+            "title": "Rate Limits",
+            "type": "object"
+          }
+        },
+        "required": [
+          "rate_limits"
+        ],
+        "title": "SampleIn",
+        "type": "object"
+      },
+      "SessionsView": {
+        "properties": {
+          "from": {
+            "format": "date-time",
+            "title": "From",
+            "type": "string"
+          },
+          "marks": {
+            "items": {
+              "$ref": "#/components/schemas/MarkView"
+            },
+            "title": "Marks",
+            "type": "array"
+          },
+          "to": {
+            "format": "date-time",
+            "title": "To",
+            "type": "string"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "truncated",
+          "marks"
+        ],
+        "title": "SessionsView",
+        "type": "object"
+      },
+      "WindowView": {
+        "description": "The current reading of one metric: the newest reading's percent in its newest window.",
+        "properties": {
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "percent": {
+            "title": "Percent",
+            "type": "number"
+          },
+          "resets_at": {
+            "format": "date-time",
+            "title": "Resets At",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "statusline",
+              "probe"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "stale": {
+            "title": "Stale",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "percent",
+          "resets_at",
+          "observed_at",
+          "stale",
+          "source"
+        ],
+        "title": "WindowView",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "agents-usage",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/healthz": {
+      "get": {
+        "operationId": "healthz_healthz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Healthz Healthz Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Healthz"
+      }
+    },
+    "/readyz": {
+      "get": {
+        "operationId": "readyz_readyz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Readyz"
+      }
+    },
+    "/usage/v1/current": {
+      "get": {
+        "operationId": "current_usage_v1_current_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CurrentView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "no or an unknown bearer token on the service or ingest listener (unauthorized)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "source address is not allowed on the UI listener (forbidden)"
+          }
+        },
+        "summary": "Current"
+      }
+    },
+    "/usage/v1/history": {
+      "get": {
+        "operationId": "history_usage_v1_history_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "From"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "To"
+            }
+          },
+          {
+            "in": "query",
+            "name": "metric",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^[a-z0-9_]{1,64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Metric"
+            }
+          },
+          {
+            "in": "query",
+            "name": "max_points",
+            "required": false,
+            "schema": {
+              "default": 500,
+              "maximum": 1000,
+              "minimum": 10,
+              "title": "Max Points",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "no or an unknown bearer token on the service or ingest listener (unauthorized)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "source address is not allowed on the UI listener (forbidden)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "invalid request (invalid_request, no_windows)"
+          }
+        },
+        "summary": "History"
+      }
+    },
+    "/usage/v1/samples": {
+      "post": {
+        "operationId": "post_sample_usage_v1_samples_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SampleIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "windows": {
+                      "title": "Windows",
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "windows"
+                  ],
+                  "title": "SampleAccepted",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "the sample was stored; the number of windows it held"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "no or an unknown bearer token on the service or ingest listener (unauthorized)"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "body exceeds 8192 bytes (too_large)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "invalid request (invalid_request, no_windows)"
+          }
+        },
+        "summary": "Post Sample"
+      }
+    },
+    "/usage/v1/sessions": {
+      "get": {
+        "operationId": "sessions_usage_v1_sessions_get",
+        "parameters": [
+          {
+            "description": "Start of the range (default: to minus 7 days)",
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Start of the range (default: to minus 7 days)",
+              "title": "From"
+            }
+          },
+          {
+            "description": "End of the range (default: now)",
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "End of the range (default: now)",
+              "title": "To"
+            }
+          },
+          {
+            "description": "Marks at most",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 1000,
+              "description": "Marks at most",
+              "maximum": 2000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionsView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "no or an unknown bearer token on the service or ingest listener (unauthorized)"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "source address is not allowed on the UI listener (forbidden)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "invalid request (invalid_request, no_windows)"
+          }
+        },
+        "summary": "Sessions"
+      }
+    }
+  }
+}
