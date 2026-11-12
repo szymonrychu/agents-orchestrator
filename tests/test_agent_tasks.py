@@ -10,6 +10,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import re
 import secrets
 import uuid
 from dataclasses import dataclass, field
@@ -18,11 +19,15 @@ from typing import Any
 
 import httpx
 import pytest
+from fastapi import Request, Response
 from test_agent_chat import AGENT_PORT, KEY, LEADER_IP, FakeDb, agent_token
 from test_api_sessions import assert_error
 
+from agents_orchestrator.api import forward as forward_core
 from agents_orchestrator.api import tasks
+from agents_orchestrator.api.agent import Caller
 from agents_orchestrator.api.app import create_app
+from agents_orchestrator.api.sessions import Cfg, Pool
 from agents_orchestrator.db import sessions as sessions_repo
 from agents_orchestrator.settings import Settings
 
@@ -408,3 +413,55 @@ async def test_task_read_and_client_error_do_not_touch(pool, dsn):
         app, sid, old = await _db_app(pool, dsn, Upstream(reply=httpx.Response(status, json={})))
         assert (await _call_db(app, sid, method, path)).status_code == status
         assert await _last_update(pool, sid) == old, (method, path, status)
+
+
+def _relay_rig(
+    monkeypatch: pytest.MonkeyPatch, available: bool, unconfigured: str = "x_unconfigured"
+):
+    rig = make_rig(monkeypatch)
+    rig.app.state.other_http = httpx.AsyncClient(
+        transport=httpx.MockTransport(rig.upstream.handler)
+    )
+    target = forward_core.Target(
+        "other relay", "http://other.test:9100/other/api", "other-token", "other_http", "x_down"
+    )
+    allowed = re.compile(r"/things(/\d+)?")
+
+    @rig.app.api_route("/agent/v1/other/{path:path}", methods=["GET"])
+    async def other(request: Request, agent: Caller, pool: Pool, cfg: Cfg, path: str) -> Response:
+        return await tasks.relay(
+            request,
+            agent,
+            pool,
+            cfg,
+            "/" + path,
+            allowed,
+            target=target,
+            available=available,
+            unconfigured=unconfigured,
+            mine=False,
+        )
+
+    return rig
+
+
+async def test_relay_uses_given_target(monkeypatch):
+    rig = _relay_rig(monkeypatch, True)
+    r = await rig.call("GET", "/agent/v1/other/things/3")
+    assert r.status_code == 200, r.text
+    (sent,) = rig.upstream.seen
+    assert sent.url.host == "other.test" and sent.url.port == 9100
+    assert sent.url.path == "/other/api/things/3"
+    assert sent.headers["Authorization"] == "Bearer other-token"
+    assert sent.headers["X-Orch-Session"] == str(rig.session.id)
+    assert sent.headers["X-Orch-Slug"] == rig.session.slug
+    assert "X-Orch-Projects" in sent.headers
+    r = await rig.call("GET", "/agent/v1/other/nope")
+    assert r.status_code == 404 and len(rig.upstream.seen) == 1
+
+
+async def test_relay_unconfigured_code(monkeypatch):
+    rig = _relay_rig(monkeypatch, False)
+    r = await rig.call("GET", "/agent/v1/other/things")
+    assert_error(r, 503, "x_unconfigured")
+    assert rig.upstream.seen == []

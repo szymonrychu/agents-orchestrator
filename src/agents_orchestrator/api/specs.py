@@ -20,7 +20,7 @@ from fastapi import APIRouter, Request, Response
 from agents_orchestrator.api.agent import Caller
 from agents_orchestrator.api.errors import ApiError
 from agents_orchestrator.api.sessions import Cfg, Pool
-from agents_orchestrator.api.tasks import _RESPONSES, relay
+from agents_orchestrator.api.tasks import _RESPONSES, relay, taskboard_target
 
 router = APIRouter(prefix="/agent/v1/specs", tags=["agent"])
 
@@ -36,7 +36,18 @@ _ALLOWED = re.compile(
 async def _relay(request: Request, agent: Caller, pool: Pool, settings: Cfg, path: str) -> Response:
     if ".." in path or any(seg in ("", ".") for seg in path.split("/")[1:]):
         raise ApiError(404, "not_found", "no such taskboard path")
-    return await relay(request, agent, pool, settings, "/specs" + path, _ALLOWED, mine=False)
+    return await relay(
+        request,
+        agent,
+        pool,
+        settings,
+        "/specs" + path,
+        _ALLOWED,
+        target=taskboard_target(settings),
+        available=settings.taskboard_available,
+        unconfigured="taskboard_unconfigured",
+        mine=False,
+    )
 
 
 @router.get(
