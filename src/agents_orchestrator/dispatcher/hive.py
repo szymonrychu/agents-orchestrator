@@ -29,6 +29,11 @@ dispatcher fills both. It is evaluated on every push tick, outside the hash and 
 above, and remembered per session in `HiveState`. Solo agents get only this note (no hive
 state, rollout or outcome pushes).
 
+While a strong-limit handoff row (dispatcher/handoff.py) of a leader or solo agent counts down
+(phase notified or extended), the agent also gets the keyed `handoff_notice` note with the
+countdown text and the minutes left, once per row and phase (so again after an extension); a
+failed push is retried next tick. Members never get it.
+
 The leader's keyed `rollout_due` note (voluntary handover 3.7) tells it a rollout waits on it: sent
 once per (leader, epoch, revision) while the reconciler's `status.rollout.leader_since` is set and
 the current leader's own ordinal is in `status.rollout.pending` (the stored status may still name
@@ -71,6 +76,7 @@ from agents_orchestrator.handoff_texts import (
     WEAK_LEADER_NONE,
     WEAK_SOLO,
     WEAK_WRAP_UP,
+    strong_notice,
 )
 from agents_orchestrator.handover_transcript import REREAD_RULE
 from agents_orchestrator.settings import Settings
@@ -86,6 +92,7 @@ STATE_KEY = "hive_state"
 DUE_KEY = "handover_due"
 ROLLOUT_KEY = "rollout_due"
 OUTCOME_KEY = "leadership_request"
+NOTICE_KEY = "handoff_notice"
 OUTCOME_WINDOW_SECONDS = 300
 BUCKET_PCT = 5
 PULL_SENTENCE = (
@@ -125,6 +132,8 @@ class HiveState:
     due_sent: dict[uuid.UUID, DueKey] = field(default_factory=dict)
     rollout_sent: dict[uuid.UUID, RolloutKey] = field(default_factory=dict)
     outcome_sent: dict[uuid.UUID, set[int]] = field(default_factory=dict)
+    # the strong countdown note last sent per session: (handoff row id, phase)
+    notice_sent: dict[uuid.UUID, tuple[int, str]] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------- the note text
@@ -339,6 +348,8 @@ class _Plan:
     rollout: dict[str, Any] | None = None
     # a session of one agent: the agent is its own leader, there is no hive state to push
     solo: bool = False
+    # the leader's strong row while it counts down: (row id, phase, minutes left)
+    countdown: tuple[int, str, int] | None = None
 
     @property
     def receivers(self) -> list[dict[str, Any]]:
@@ -416,6 +427,7 @@ async def _read(
             (cid, OUTCOME_WINDOW_SECONDS),
         )
         outcomes = await cur.fetchall()
+    countdown = await handoffs.countdown(conn, leader["agent_id"])
     typed = SessionSpec.model_validate(spec, context=legacy_context(session.get("secret_versions")))
     return _Plan(
         session_id=cid,
@@ -436,6 +448,7 @@ async def _read(
         outcomes=outcomes,
         candidates=candidates,
         rollout=rollout if rollout.get("leader_since") else None,
+        countdown=countdown,
     )
 
 
@@ -509,6 +522,28 @@ async def _push_due(plan: _Plan, state: HiveState, client_factory: ClientFactory
     outcome = await _note(client, leader["wrapper_session_id"], text, DUE_KEY)
     if outcome != "failed":
         state.due_sent[plan.session_id] = key
+    return int(outcome == "ok")
+
+
+async def _push_countdown(
+    plan: _Plan, state: HiveState, settings: Settings, client_factory: ClientFactory
+) -> int:
+    """Repeat the strong countdown notice as the keyed `handoff_notice` note, once per row and
+    phase; forgotten once nothing counts down. A failed push is retried on the next tick."""
+    if plan.countdown is None:
+        state.notice_sent.pop(plan.session_id, None)
+        return 0
+    leader = next((m for m in plan.receivers if m["pod_name"] == plan.leader), None)
+    row_id, phase, minutes = plan.countdown
+    if leader is None or state.notice_sent.get(plan.session_id) == (row_id, phase):
+        return 0
+    text = strong_notice(
+        minutes, round(settings.handover_extension_seconds / 60), hive=not plan.solo
+    )
+    client = client_factory(plan.session_id, leader["url"])
+    outcome = await _note(client, leader["wrapper_session_id"], text, NOTICE_KEY)
+    if outcome != "failed":
+        state.notice_sent[plan.session_id] = (row_id, phase)
     return int(outcome == "ok")
 
 
@@ -640,6 +675,7 @@ async def _push_session(
         await _release(pool, plan, current, failed, all_ok=not failed)
         sent = sum(outcome == "ok" for outcome in outcomes)
     sent += await _push_due(plan, state, client_factory)
+    sent += await _push_countdown(plan, state, settings, client_factory)
     sent += await _push_rollout(plan, state, settings, client_factory)
     return sent + await _push_outcomes(plan, state, client_factory)
 
@@ -750,6 +786,7 @@ async def _push_solo_session(
         if fill is not None:
             await handoffs.set_limits_start(conn, row["agent_id"], fill)
         candidates = [] if level != "none" else None
+        countdown = await handoffs.countdown(conn, row["agent_id"])
     member = {k: row[k] for k in ("pod_name", "url", "wrapper_session_id", "ready", "state")}
     member.update(
         id=row["agent_id"],
@@ -776,8 +813,10 @@ async def _push_solo_session(
         outcomes=[],
         candidates=candidates,
         solo=True,
+        countdown=countdown,
     )
-    return await _push_due(plan, state, client_factory)
+    sent = await _push_due(plan, state, client_factory)
+    return sent + await _push_countdown(plan, state, settings, client_factory)
 
 
 async def push_once(

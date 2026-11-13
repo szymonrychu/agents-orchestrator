@@ -112,13 +112,16 @@ async def insert(
     deadline_at: datetime | None = None,
     handoff_text: str | None = None,
 ) -> Handoff:
-    """Open a row; raises UniqueViolation while the agent already has an open one."""
+    """Open a row; raises UniqueViolation while the agent already has an open one.
+
+    `notified_at` is set only for a row that opens with a notice (phase `notified`)."""
     row = await _fetch(
         conn,
         "INSERT INTO agent_handoffs (session_id, agent_id, trigger, phase, notified_at,"
-        " deadline_at, handoff_text) VALUES (%s, %s, %s, %s, now(), %s, %s)"
+        " deadline_at, handoff_text)"
+        " VALUES (%s, %s, %s, %s, CASE WHEN %s THEN now() END, %s, %s)"
         f" RETURNING {_COLUMNS}",
-        (session_id, agent_id, trigger, phase, deadline_at, handoff_text),
+        (session_id, agent_id, trigger, phase, phase == "notified", deadline_at, handoff_text),
     )
     assert row is not None
     return row
@@ -131,7 +134,11 @@ async def advance(
     to_phase: str,
     **fields: Any,
 ) -> bool:
-    """Move a row to `to_phase` when it is in one of `from_phases`; True when a row changed."""
+    """Move a row to `to_phase` when it is in one of `from_phases`; True when a row changed.
+
+    Open phases only, on both sides: a row is closed through `close` and never reopened."""
+    if to_phase not in OPEN_PHASES or not set(from_phases) <= set(OPEN_PHASES):
+        raise ValueError("advance moves between open phases only")
     unknown = set(fields) - _SETTABLE
     if unknown:
         raise ValueError(f"unknown agent_handoffs fields: {sorted(unknown)}")
@@ -141,6 +148,21 @@ async def advance(
         + (f", {sets}" if sets else "")
         + " WHERE id = %s AND phase = ANY(%s)",
         (to_phase, *fields.values(), row_id, list(from_phases)),
+    )
+    return cur.rowcount == 1
+
+
+async def start_clear(
+    conn: psycopg.AsyncConnection, row_id: int, from_phases: Sequence[str], command_id: int
+) -> bool:
+    """Move a row to `clearing` for the clear command `command_id`, counting the attempt in the
+    same guarded UPDATE (`clear_attempts + 1`); True when a row changed."""
+    if not set(from_phases) <= set(OPEN_PHASES):
+        raise ValueError("start_clear moves from open phases only")
+    cur = await conn.execute(
+        "UPDATE agent_handoffs SET phase = 'clearing', clear_command_id = %s,"
+        " clear_attempts = clear_attempts + 1 WHERE id = %s AND phase = ANY(%s)",
+        (command_id, row_id, list(from_phases)),
     )
     return cur.rowcount == 1
 
@@ -162,14 +184,43 @@ async def close(
 async def extend(
     conn: psycopg.AsyncConnection, agent_id: uuid.UUID, seconds: int
 ) -> Handoff | None:
-    """Push the deadline of the agent's `notified` row out once; None when it is not notified."""
+    """Push the deadline of the agent's `notified` row out once; None when it is not notified
+    or its deadline already passed (the request may be on its way)."""
     return await _fetch(
         conn,
         "UPDATE agent_handoffs SET phase = 'extended', extended_at = now(),"
         " deadline_at = deadline_at + make_interval(secs => %s)"
-        f" WHERE agent_id = %s AND phase = 'notified' RETURNING {_COLUMNS}",
+        " WHERE agent_id = %s AND phase = 'notified' AND deadline_at > now()"
+        f" RETURNING {_COLUMNS}",
         (seconds, agent_id),
     )
+
+
+async def open_rows(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> list[Handoff]:
+    """The open rows of a session's agents, oldest first."""
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            f"SELECT {_COLUMNS} FROM agent_handoffs WHERE session_id = %s AND phase = ANY(%s)"
+            " ORDER BY id",
+            (session_id, list(OPEN_PHASES)),
+        )
+        return [Handoff(**row) for row in await cur.fetchall()]
+
+
+async def countdown(
+    conn: psycopg.AsyncConnection, agent_id: uuid.UUID
+) -> tuple[int, str, int] | None:
+    """The agent's strong row while it counts down (notified or extended): its id, phase and the
+    minutes left until the handoff request (rounded up, at least 1); None otherwise."""
+    cur = await conn.execute(
+        "SELECT id, phase,"
+        " greatest(1, ceil(extract(epoch FROM deadline_at - now()) / 60))::int"
+        " FROM agent_handoffs WHERE agent_id = %s AND trigger = 'strong'"
+        " AND phase IN ('notified', 'extended')",
+        (agent_id,),
+    )
+    row = await cur.fetchone()
+    return (row[0], row[1], row[2]) if row else None
 
 
 async def limits_start(conn: psycopg.AsyncConnection, agent_id: uuid.UUID) -> int | None:

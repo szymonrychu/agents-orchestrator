@@ -87,3 +87,46 @@ async def test_limits_start_upsert(pool):
         assert await handoffs.limits_start(conn, agent_id) == 99
         await handoffs.set_limits_start(conn, agent_id, None)
         assert await handoffs.limits_start(conn, agent_id) is None
+
+
+async def test_advance_never_closes_or_reopens(pool):
+    session_id, agent_id = await _agent(pool)
+    async with pool.connection() as conn:
+        row = await handoffs.insert(conn, session_id, agent_id, "strong", "notified")
+        with pytest.raises(ValueError):
+            await handoffs.advance(conn, row.id, ["notified"], "done")
+        assert await handoffs.close(conn, row.id, "cancelled", "compacted")
+        with pytest.raises(ValueError):
+            await handoffs.advance(conn, row.id, ["cancelled"], "notified")
+        cur = await conn.execute("SELECT phase FROM agent_handoffs WHERE id = %s", (row.id,))
+        assert (await cur.fetchone())[0] == "cancelled"
+
+
+async def test_start_clear_counts_attempts_in_the_update(pool):
+    session_id, agent_id = await _agent(pool)
+    async with pool.connection() as conn:
+        row = await handoffs.insert(conn, session_id, agent_id, "voluntary", "handed")
+        assert await handoffs.start_clear(conn, row.id, ["handed"], 11)
+        assert not await handoffs.start_clear(conn, row.id, ["handed"], 12)
+        assert await handoffs.start_clear(conn, row.id, ["clearing"], 13)
+        after = await handoffs.open_row(conn, agent_id)
+    assert (after.phase, after.clear_command_id, after.clear_attempts) == ("clearing", 13, 2)
+
+
+async def test_insert_sets_notified_at_only_for_a_notice(pool):
+    session_id, agent_id = await _agent(pool)
+    async with pool.connection() as conn:
+        row = await handoffs.insert(conn, session_id, agent_id, "voluntary", "handed")
+        assert row.notified_at is None
+        assert await handoffs.close(conn, row.id, "done", "x")
+        row = await handoffs.insert(conn, session_id, agent_id, "strong", "notified")
+    assert row.notified_at is not None
+
+
+async def test_extend_refused_after_the_deadline(pool):
+    session_id, agent_id = await _agent(pool)
+    past = datetime.now(UTC) - timedelta(seconds=1)
+    async with pool.connection() as conn:
+        await handoffs.insert(conn, session_id, agent_id, "strong", "notified", deadline_at=past)
+        assert await handoffs.extend(conn, agent_id, 300) is None
+        assert (await handoffs.open_row(conn, agent_id)).phase == "notified"

@@ -205,6 +205,14 @@ class Settings(BaseSettings):
     #: compact minus this many tokens of headroom (floored at 0).
     handover_strong_margin_pct: int = Field(default=10, ge=1, le=50)
     handover_strong_headroom_tokens: int = Field(default=60000, ge=0, le=500000)
+    #: Strong-limit handoff (dispatcher/handoff.py): the notice countdown, the one extension,
+    #: the idle time that ends the countdown early, and the quiet window (capped) a hive gets
+    #: to discuss before the ex-leader is cleared.
+    handover_notify_seconds: int = Field(default=300, ge=30, le=3600)
+    handover_extension_seconds: int = Field(default=300, ge=0, le=3600)
+    handover_idle_proceed_seconds: int = Field(default=60, ge=0, le=600)
+    handover_quiet_seconds: int = Field(default=60, ge=0, le=3600)
+    handover_quiet_cap_seconds: int = Field(default=600, ge=60, le=7200)
     #: Rollout: seconds the leader has, once only its pod is outdated, to hand over at a natural
     #: boundary before the reconciler queues the forced `rollout` handover; and the cap after
     #: which background work stops holding a rollout (members since the rollout began, the
@@ -391,6 +399,14 @@ class Settings(BaseSettings):
     # Checks are field validators (not one mode="after" model validator) so they still run
     # when an unrelated field fails type or required checks; cross-field checks skip
     # silently when a dependency already failed (that failure is reported on its own).
+
+    @field_validator("handover_quiet_cap_seconds")
+    @classmethod
+    def _check_quiet_cap(cls, v: int, info: ValidationInfo) -> int:
+        quiet = info.data.get("handover_quiet_seconds")
+        if quiet is not None and v < quiet:
+            raise ValueError("handover_quiet_cap_seconds must be at least handover_quiet_seconds")
+        return v
 
     @field_validator("service_port")
     @classmethod
