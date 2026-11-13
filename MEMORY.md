@@ -393,3 +393,10 @@ in the namespace, so an attached vault value is exposed to it. Decision: attach 
 - 2026-11-12: plugins pin moved to v0.47.0 (slice 3 tools live, PLUGIN_PENDING emptied) (T-120).
 
 - 2026-11-13 (research-mindmaps): the chart now includes the mindmap env (ORCH_MINDMAP_URL and ORCH_MINDMAP_TOKEN) in the reconciler main container as well as api. Why: the reconciler is the only process calling `render_session`/`render_on_start`, which grants the `orchestrator_mindmap_*` tools only when `settings.mindmap_available`; with the env only on api, session pods never got the tools. Chart/app versions are not bumped by hand (Chart.yaml stays 0.1.0 and appVersion dev; the release workflow tags vX.Y.Z).
+
+## 2026-11-13 agent_handoffs and agent_limits (T-256, migration 0047)
+- Migration 0047 adds `agent_handoffs` (one handover row per agent, partial unique index `agent_handoffs_one_open` allows one open row per agent), `agent_limits` (start context tokens per agent) and `agent_status.stopping_since`; `messages_notice_check` gains `handoff_notice`, `handoff_request`, `handoff_return` (the `Notice` literal too).
+- Single writer: `db/handoffs.py` is the only module that writes both tables. The dispatcher process and the agent route share it, like `leadership_requests` (route inserts and extends, dispatcher decides); every change is a status-guarded update (`advance` WHERE phase = ANY(from_phases), `close` guarded on OPEN_PHASES), so a row moves once whichever caller commits first.
+- `advance` accepts only a fixed set of column names as keyword fields (ValueError otherwise), because the names are interpolated into the SQL.
+- `extend` is a single guarded UPDATE from `notified` only (deadline_at + make_interval, phase `extended`), so an extension happens once.
+- tests/test_migrations.py: the hard-coded applied-migration lists gained "0047" (the migration set grew; the tests are otherwise accurate).

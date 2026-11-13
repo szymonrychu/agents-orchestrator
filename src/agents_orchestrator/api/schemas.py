@@ -653,7 +653,16 @@ class Meta(BaseModel):
 Lane = Literal["idle", "regular", "priority"]
 MessageStatus = Literal["queued", "dispatching", "verifying", "sent", "failed", "cancelled"]
 # an orchestrator-written message; null for every other message
-Notice = Literal["inactivity_reminder", "inactivity_close", "handover", "proposal", "project_grant"]
+Notice = Literal[
+    "inactivity_reminder",
+    "inactivity_close",
+    "handover",
+    "proposal",
+    "project_grant",
+    "handoff_notice",
+    "handoff_request",
+    "handoff_return",
+]
 
 
 class MessageAttachment(BaseModel):

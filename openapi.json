@@ -2818,7 +2818,10 @@
                   "inactivity_close",
                   "handover",
                   "proposal",
-                  "project_grant"
+                  "project_grant",
+                  "handoff_notice",
+                  "handoff_request",
+                  "handoff_return"
                 ],
                 "type": "string"
               },
