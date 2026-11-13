@@ -1069,7 +1069,10 @@ async def test_clear_command_never_finished_times_out(env, status):
     assert await env.step(c["id"]) == [f"clear_retry:{a['id']}"]
     first, retry = await env.commands(a["id"])
     # the lost command is finished, so it can never run after the retry (or after the return)
-    assert first["status"] == ("cancelled" if status == "queued" else "failed")
+    # failed with the retryable clear_timeout in both cases (F1: a cancelled one reads as the
+    # non-retryable `cancelled` on a later pass)
+    assert first["status"] == "failed"
+    assert first["result"] == {"error": "clear_timeout"}
     assert retry["status"] == "queued"
     # the last attempt is lost too: closed clear_failed, the solo agent still gets its return
     await env.run("UPDATE agent_handoffs SET clear_attempts = 5 WHERE agent_id = %s", (a["id"],))

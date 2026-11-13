@@ -276,7 +276,7 @@ class _Pass:
     async def _has_successor(self, agent_id: uuid.UUID) -> bool:
         policy = self._pass_policy()
         return (
-            await leadership._successor(self.conn, self.session["id"], agent_id, policy) is not None
+            await leadership.successor(self.conn, self.session["id"], agent_id, policy) is not None
         )
 
     # ------------------------------------------------------------ 1. open
@@ -560,12 +560,12 @@ class _Pass:
         await self.cancel(row, "clear_failed", messages=False)
 
     async def drop_lost_clear(self, command_id: int | None) -> None:
-        """Finish a clear that timed out still queued (cancelled) or running (failed),
+        """Finish a clear that timed out, still queued or running, as `failed` with the retryable
+        `clear_timeout` (never `cancelled`, which reads as non-retryable on a later pass),
         status-guarded, so it never runs after its retry or the return; a late completion of a
         running one then changes nothing."""
         await self.conn.execute(
-            "UPDATE commands SET finished_at = now(), result = %s,"
-            " status = CASE status WHEN 'queued' THEN 'cancelled' ELSE 'failed' END"
+            "UPDATE commands SET finished_at = now(), result = %s, status = 'failed'"
             " WHERE id = %s AND status IN ('queued', 'running')",
             (Jsonb({"error": "clear_timeout"}), command_id),
         )

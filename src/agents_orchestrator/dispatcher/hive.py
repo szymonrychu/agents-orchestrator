@@ -351,7 +351,7 @@ class _Plan:
     solo: bool = False
     # the leader's strong row while it counts down: (row id, phase, minutes left)
     countdown: tuple[int, str, int] | None = None
-    # while it counts down: a successor exists (`leadership._successor`, the one the handoff
+    # while it counts down: a successor exists (`leadership.successor`, the one the handoff
     # pass and `handed()` use, so the note promises what the notice message promised)
     successor: bool = False
 
@@ -433,7 +433,7 @@ async def _read(
         outcomes = await cur.fetchall()
     countdown = await handoffs.countdown(conn, leader["agent_id"])
     successor = countdown is not None and (
-        await leadership._successor(
+        await leadership.successor(
             conn,
             cid,
             leader["agent_id"],

@@ -233,7 +233,7 @@ async def _leader(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> dict 
     )
 
 
-async def _successor(
+async def successor(
     conn: psycopg.AsyncConnection,
     session_id: uuid.UUID,
     other_than: uuid.UUID,
@@ -341,7 +341,7 @@ async def _judge(
         if target == current or not await _target_ready(conn, session_id, target):
             return "target_not_ready", None, ""
         return None, target, reason
-    picked = await _successor(conn, session_id, current, policy)
+    picked = await successor(conn, session_id, current, policy)
     if picked is None:
         return "no_peers", None, ""
     return None, picked, reason
@@ -446,7 +446,7 @@ async def leadership_pass(
         # handled here, before step 4 can see it, so its reason is `scale_down`. With no
         # staying agent the leader stays and the next pass retries.
         if leader is not None and leader["leaving"] and not leader["gone"]:
-            picked = await _successor(conn, session_id, leader["agent_id"], policy)
+            picked = await successor(conn, session_id, leader["agent_id"], policy)
             if picked is not None:
                 change = await _set_leader(
                     conn, session_id, picked, "scale_down", leader["agent_id"]
@@ -463,7 +463,7 @@ async def leadership_pass(
                         (session_id,),
                     )
             elif leader["gone"] or leader["grace_over"]:
-                picked = await _successor(conn, session_id, leader["agent_id"], policy)
+                picked = await successor(conn, session_id, leader["agent_id"], policy)
                 if picked is not None:
                     change = await _set_leader(
                         conn, session_id, picked, "leader_lost", leader["agent_id"]

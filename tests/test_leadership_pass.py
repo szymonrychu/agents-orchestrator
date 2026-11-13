@@ -441,7 +441,7 @@ async def test_note_candidates_equal_pass_pick(pool):
                     {"session": c["id"], "leader": agents[0]["id"], "compact": 95},
                 )
                 note = await cur.fetchall()
-            pick = await leadership._successor(
+            pick = await leadership.successor(
                 conn, c["id"], agents[0]["id"], leadership.PassPolicy()
             )
         assert note, mix
