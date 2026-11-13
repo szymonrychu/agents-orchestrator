@@ -190,17 +190,21 @@ class Settings(BaseSettings):
     #: A session's `spec.inactivity` overrides either one.
     inactivity_reminder_seconds: int = 0
     inactivity_close_seconds: int = 0
-    #: Seconds the leader has to hand off after the hard-limit notice; 0 means no window.
+    #: Seconds the leader has to hand off after the strong-limit notice; 0 means no window.
     inactivity_handoff_seconds: int = Field(default=300, ge=0, le=3600)
     #: Size budget of the predecessor's rendered transcript attached to a handover notice (the
     #: oldest lines are dropped first), and the cap on each tool output in it.
     handover_transcript_bytes: int = Field(default=16384, ge=8192, le=1048576)
     #: Tokens a leader may work on top of its context at the start of its leadership before it
-    #: is due to hand over (the hard limit always wins), and the minimum time as leader before
-    #: a soft handover is requested.
+    #: is due to hand over (the strong limit always wins), and the minimum time as leader before
+    #: a weak handover note is sent.
     handover_budget_tokens: int = Field(default=150000, ge=10000, le=2000000)
     handover_min_tenure_seconds: int = Field(default=1200, ge=0, le=86400)
     handover_output_chars: int = Field(default=500, ge=100, le=4000)
+    #: The strong limit sits at the smaller of: compact minus this many percent points, and
+    #: compact minus this many tokens of headroom (floored at 0).
+    handover_strong_margin_pct: int = Field(default=10, ge=1, le=50)
+    handover_strong_headroom_tokens: int = Field(default=60000, ge=0, le=500000)
     #: Rollout: seconds the leader has, once only its pod is outdated, to hand over at a natural
     #: boundary before the reconciler queues the forced `rollout` handover; and the cap after
     #: which background work stops holding a rollout (members since the rollout began, the

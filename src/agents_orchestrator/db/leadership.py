@@ -148,7 +148,9 @@ class PassPolicy:
 DEFAULT_POLICY = PassPolicy()
 
 
-_HIVE = "coalesce(c.spec->>'max_replicas', c.spec->>'replicas')::int > 1"
+HIVE = "coalesce(c.spec->>'max_replicas', c.spec->>'replicas')::int > 1"
+# A session that is not a hive (neither field set counts as one agent).
+SOLO = "coalesce(coalesce(c.spec->>'max_replicas', c.spec->>'replicas')::int, 1) <= 1"
 
 # Hive sessions whose leadership needs a pass: queued requests, no leader row while an agent
 # could lead, a leader that is gone, not ready or dead, an unready mark to clear,
@@ -157,7 +159,7 @@ _CANDIDATES = f"""
 SELECT c.id FROM sessions c
 LEFT JOIN session_leaders l ON l.session_id = c.id
 LEFT JOIN agents a ON a.id = l.agent_id
-WHERE c.desired = 'active' AND {_HIVE} AND (
+WHERE c.desired = 'active' AND {HIVE} AND (
     EXISTS (SELECT 1 FROM leadership_requests r
             WHERE r.session_id = c.id AND r.status = 'queued')
     OR (l.session_id IS NULL AND EXISTS (
@@ -205,7 +207,7 @@ async def hive_sessions(conn: psycopg.AsyncConnection) -> list[dict]:
         conn,
         "SELECT c.id, c.slug, c.spec, c.status, c.secret_versions FROM sessions c"
         " JOIN session_leaders l ON l.session_id = c.id"
-        f" WHERE c.desired = 'active' AND {_HIVE} ORDER BY c.id",
+        f" WHERE c.desired = 'active' AND {HIVE} ORDER BY c.id",
     )
 
 
@@ -391,7 +393,7 @@ async def leadership_pass(
         if not (lock and lock["got"]):
             return None
         hive = await _one(
-            conn, f"SELECT {_HIVE} AS hive FROM sessions c WHERE c.id = %s", (session_id,)
+            conn, f"SELECT {HIVE} AS hive FROM sessions c WHERE c.id = %s", (session_id,)
         )
         if not (hive and hive["hive"]):
             return None

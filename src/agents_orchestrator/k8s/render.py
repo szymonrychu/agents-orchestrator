@@ -535,7 +535,7 @@ def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
             "shutdown_timeout_seconds": _shutdown_timeout(settings.agent_termination_grace_seconds)
         },
     }
-    cfg["notes"] = {"enabled": spec.hive}
+    cfg["notes"] = {"enabled": True}
     if spec.hive and settings.agent_api_url:
         cfg["hooks"]["onAgentToolCall"] = [_lock_check_hook()]
     if spec.peers and spec.hive:

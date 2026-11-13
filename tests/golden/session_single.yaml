@@ -56,7 +56,7 @@
       \ questions, and after each question give\n    your recommended answer, worded\
       \ so that replying \"yes\" accepts it. Then stop and\n    wait for the reply.\
       \ Never wait on an interactive question tool.'\nlimits:\n  shutdown_timeout_seconds:\
-      \ 80\nnotes:\n  enabled: false\n"
+      \ 80\nnotes:\n  enabled: true\n"
     on-start.sh: "#!/bin/sh\nset -eu\nREF=v0.5.0\nok=1\ninstall() {\n  step=$1\n \
       \ shift\n  [ \"$ok\" = 1 ] || return 0\n  \"$@\" && return 0\n  echo \"on-start:\
       \ $step failed (exit $?)\" >&2\n  ok=0\n}\nif ! grep -qxF -- \"$REF\" /opt/any-mcp/.ref\
@@ -110,7 +110,7 @@
           agents.szymonrichert.pl/session: solo
           app.kubernetes.io/managed-by: agents-orchestrator
         annotations:
-          agents.szymonrichert.pl/config-hash: eb0682af0a66d74f225877a4eeee633e78f400b148fd791cc2545d78c35045f6
+          agents.szymonrichert.pl/config-hash: 7eada13588a9b6360f64c6d939135466ad576ff19370730344c7b7353c3dd4f6
       spec:
         imagePullSecrets:
         - name: regcred

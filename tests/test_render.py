@@ -592,11 +592,15 @@ def test_peer_seeds_from_cap():
 def test_alone_session_no_hive_config():
     cfg = config_of(_render(make_session(replicas=1, static=True)))
     assert not cfg.get("peers", {}).get("enabled")
-    assert cfg["notes"]["enabled"] is False
     assert "onAgentToolCall" not in cfg["hooks"]
     cfg = config_of(_render(make_session(replicas=3, max_replicas=3, peers=False)))
     assert not cfg.get("peers", {}).get("enabled")
     assert cfg["notes"]["enabled"] is True
+
+
+def test_notes_enabled_for_solo_session():
+    cfg = config_of(_render(make_session(replicas=1, static=True)))
+    assert cfg["notes"] == {"enabled": True}
 
 
 def test_hive_session_config():
