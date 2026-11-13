@@ -257,3 +257,39 @@ async def test_initial_leader_not_held(pool):
     claim = await _claim(pool)
     assert claim is not None
     assert (claim.message_id, claim.agent_id) == (untargeted, leader["id"])
+
+
+async def test_no_claim_for_stopping_agent(pool):
+    # pod shutdown (T-256 step 10): a stopping agent takes nothing, targeted or untargeted
+    c = await insert_session(pool)
+    member = await _agent(pool, c["id"], free_ago=10, ordinal=0)
+    leader = await _agent(pool, c["id"], free_ago=100, ordinal=1)
+    await _lead(pool, c["id"], leader["id"])
+    await _exec(
+        pool, "UPDATE agent_status SET stopping_since = now() WHERE agent_id = %s", (leader["id"],)
+    )
+    untargeted = await _enqueue(pool, c["id"], "u1")
+    targeted = await _enqueue(pool, c["id"], "t1", target=leader["id"])
+    async with pool.connection() as conn:
+        regular = await q.enqueue_message(conn, c["id"], "r1", leader["id"], lane="regular")
+    assert await _claim(pool) is None
+    for message_id in (untargeted, targeted, regular):
+        assert await _status(pool, message_id) == "queued"
+
+    # leaderless (solo) routing: a stopping agent is not picked either
+    solo = await insert_session(pool)
+    alone = await _agent(pool, solo["id"], free_ago=10, ordinal=0)
+    await _exec(
+        pool, "UPDATE agent_status SET stopping_since = now() WHERE agent_id = %s", (alone["id"],)
+    )
+    queued = await _enqueue(pool, solo["id"], "s1")
+    assert await _claim(pool) is None
+    assert await _status(pool, queued) == "queued"
+
+    # the next pod attached: the mark is cleared and the messages flow
+    await _exec(
+        pool, "UPDATE agent_status SET stopping_since = NULL WHERE agent_id = %s", (alone["id"],)
+    )
+    claim = await _claim(pool)
+    assert claim is not None and (claim.message_id, claim.agent_id) == (queued, alone["id"])
+    assert member["id"] != leader["id"]

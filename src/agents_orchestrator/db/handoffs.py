@@ -44,8 +44,12 @@ OPEN_PHASES: tuple[str, ...] = (
 _COLUMNS = (
     "id, session_id, agent_id, trigger, phase, notified_at, deadline_at, extended_at,"
     " request_message_id, handoff_text, successor_agent_id, delivered_at, discuss_since,"
-    " clear_command_id, clear_attempts, cleared_at, return_message_id, closed_at, close_reason"
+    " clear_command_id, clear_attempts, cleared_at, return_message_id, created_at, closed_at,"
+    " close_reason"
 )
+# A `shutdown_handoff` event (alias `e`) that carries a handoff: the routine's turn completed
+# with a non-blank reply. Anything else leaves today's resume and transcript notice alone.
+SHUTDOWN_TEXT = "(e.data->>'status' = 'completed' AND coalesce(e.data->>'final_text', '') ~ '\\S')"
 _SETTABLE = frozenset(
     {
         "notified_at",
@@ -83,6 +87,7 @@ class Handoff:
     clear_attempts: int
     cleared_at: datetime | None
     return_message_id: int | None
+    created_at: datetime
     closed_at: datetime | None
     close_reason: str | None
 
@@ -181,6 +186,16 @@ async def close(
         "UPDATE agent_handoffs SET phase = %s, close_reason = %s, closed_at = now()"
         " WHERE id = %s AND phase = ANY(%s)",
         (phase, reason, row_id, list(from_phases)),
+    )
+    return cur.rowcount == 1
+
+
+async def mark_delivered(conn: psycopg.AsyncConnection, row_id: int) -> bool:
+    """Record that the row's handoff text reached its successor; True only for the first caller,
+    so the text goes out once whoever sends it (the notice sweeper or the handoff pass)."""
+    cur = await conn.execute(
+        "UPDATE agent_handoffs SET delivered_at = now() WHERE id = %s AND delivered_at IS NULL",
+        (row_id,),
     )
     return cur.rowcount == 1
 

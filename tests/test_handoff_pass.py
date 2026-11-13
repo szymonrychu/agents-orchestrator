@@ -22,7 +22,7 @@ from fakes import fake_wrapper
 from fakes.fake_wrapper import FakeWrapper
 from psycopg.rows import dict_row
 
-from agents_orchestrator.db import handoffs, leadership, queue
+from agents_orchestrator.db import handoffs, handover, leadership, queue
 from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE
 from agents_orchestrator.dispatcher import Dispatcher, handoff, hive
 from agents_orchestrator.handoff_texts import RETURN_EMPTY, strong_notice
@@ -1190,3 +1190,274 @@ async def test_hive_note_and_message_agree_on_successor_without_headroom(env, fa
     message, note = await _hive_note(env, fake, successor_used=STRONG)
     assert "successor" in message
     assert "successor" in note
+
+
+# ---------------------------------------------------------------- pod shutdown (step 10)
+
+
+async def _shutdown(env, session_id, agent_id, text: str | None, status: str = "completed"):
+    """The wrapper's SIGTERM routine as the ingester stores it: the agent is stopping, its pod
+    unready, and the handoff turn's outcome is an event."""
+    await env.run("UPDATE agent_status SET stopping_since = now() WHERE agent_id = %s", (agent_id,))
+    await env.run("UPDATE agents SET ready = false WHERE id = %s", (agent_id,))
+    await insert_event(env.pool, session_id, agent_id, type="shutdown_started", data={})
+    return await _shutdown_handoff(env, session_id, agent_id, text, status)
+
+
+async def _shutdown_handoff(env, session_id, agent_id, text, status="completed"):
+    return await insert_event(
+        env.pool,
+        session_id,
+        agent_id,
+        type="shutdown_handoff",
+        data={"turn_id": "t-sd", "status": status, "final_text": text},
+    )
+
+
+async def _next_pod(env, agent_id) -> None:
+    """The agent's next pod is ready and its stream attached (the mark is cleared)."""
+    await env.run("UPDATE agent_status SET stopping_since = NULL WHERE agent_id = %s", (agent_id,))
+    await env.run("UPDATE agents SET ready = true WHERE id = %s", (agent_id,))
+    await env.idle_for(agent_id, 1)
+
+
+async def _leader_lost(env, session_id) -> None:
+    async with env.pool.connection() as conn:
+        await leadership.leadership_pass(conn, session_id)  # marks unready_since
+    await env.run(
+        "UPDATE session_leaders SET unready_since = now() - interval '1 hour'"
+        " WHERE session_id = %s",
+        (session_id,),
+    )
+    async with env.pool.connection() as conn:
+        await leadership.leadership_pass(conn, session_id)
+
+
+async def _deliver(env) -> list:
+    async def no_decisions(session_id, slug, projects):
+        return []
+
+    async with env.pool.connection() as conn:
+        return await handover.deliver_handover(
+            conn,
+            budget_bytes=16384,
+            output_chars=500,
+            decisions=no_decisions,
+            shutdown_hold_seconds=330,
+        )
+
+
+async def test_shutdown_solo_next_pod_clears_then_returns(env):
+    c, a = await env.solo(LOW)
+    work = await insert_message(env.pool, c["id"], text="user work", lane="regular")
+    await _shutdown(env, c["id"], a["id"], "solo shutdown text")
+    assert await env.step(c["id"]) == [f"shutdown_handed:{a['id']}"]
+    row = await env.row(a["id"])
+    assert (row.trigger, row.phase, row.handoff_text) == (
+        "shutdown",
+        "handed",
+        "solo shutdown text",
+    )
+    # the old pod is still stopping: nothing until the next pod is ready (and the event is
+    # handled once)
+    assert await env.step(c["id"]) == []
+    assert await env.commands(a["id"]) == []
+    assert await _claim(env) is None
+    # ready, but its stream not attached yet (still marked stopping): no clear either
+    await env.run("UPDATE agents SET ready = true WHERE id = %s", (a["id"],))
+    assert await env.step(c["id"]) == []
+    assert await env.commands(a["id"]) == []
+
+    await _next_pod(env, a["id"])
+    assert await _claim(env) is None  # held: the clear and the return go first
+    assert await env.step(c["id"]) == [f"clearing:{a['id']}"]
+    assert await _claim(env) is None
+    (cmd,) = await env.commands(a["id"])
+    await env.finish_command(cmd["id"], "done", {"response": {"id": "c1"}})
+    await env.cleared(c["id"], a["id"])
+    assert await env.step(c["id"]) == [f"returning:{a['id']}"]
+    (ret,) = await env.messages(a["id"], "handoff_return")
+    assert ret["text"] == (
+        "Handoff from your previous context (pod shutdown, cleared just now):\n\nsolo shutdown text"
+    )
+    assert await _claim(env) == ret["id"]
+    await env.run("UPDATE messages SET status = 'sent' WHERE id = %s", (ret["id"],))
+    assert await env.step(c["id"]) == [f"done:{a['id']}"]
+    last = await env.last_row(a["id"])
+    assert (last["trigger"], last["phase"], last["close_reason"]) == (
+        "shutdown",
+        "done",
+        "returned",
+    )
+    assert await _claim(env) == work["id"]
+
+
+async def test_shutdown_leader_handoff_goes_to_successor_and_old_agent_is_cleared(env):
+    c, (a0, a1, a2) = await env.hive(used=LOW)
+    await env.gauge(a2["id"], 60000)  # a1 is the successor (lowest context)
+    await env.run("UPDATE agent_status SET stopping_since = now() WHERE agent_id = %s", (a0["id"],))
+    await env.run("UPDATE agents SET ready = false WHERE id = %s", (a0["id"],))
+    await insert_event(env.pool, c["id"], a0["id"], type="shutdown_started", data={})
+    # the pod went unready at SIGTERM: leadership moves (leader_lost) before the handoff turn
+    await _leader_lost(env, c["id"])
+    async with env.pool.connection() as conn:
+        leader = await leadership.current_leader(conn, c["id"])
+    assert leader.agent_id == a1["id"]
+    # the successor's notice waits for the dying leader's handoff
+    assert await _deliver(env) == []
+    await _shutdown_handoff(env, c["id"], a0["id"], "leader shutdown text")
+    assert await env.step(c["id"]) == [f"shutdown_handed:{a0['id']}"]
+    row = await env.row(a0["id"])
+    assert (row.phase, row.successor_agent_id) == ("handed", a1["id"])
+
+    assert await _deliver(env) == [c["id"]]
+    (notice,) = await env.messages(a1["id"], "handover")
+    assert notice["text"].startswith(
+        f"Handoff from {a0['pod_name']} (written by it):\nleader shutdown text\n\n"
+    )
+    assert (await env.row(a0["id"])).delivered_at is not None
+    assert await _deliver(env) == []  # once
+
+    assert await env.step(c["id"]) == []  # the old pod is still stopping
+    await _next_pod(env, a0["id"])
+    assert await env.step(c["id"]) == [f"clearing:{a0['id']}"]
+    (cmd,) = await env.commands(a0["id"])
+    await env.finish_command(cmd["id"], "done", {"response": {"id": "c1"}})
+    await env.cleared(c["id"], a0["id"])
+    assert await env.step(c["id"]) == [f"done:{a0['id']}"]
+    last = await env.last_row(a0["id"])
+    assert (last["phase"], last["close_reason"]) == ("done", "cleared")
+    assert await env.messages(a0["id"], "handoff_return") == []
+    assert len(await env.messages(a1["id"])) == 1  # nothing else: the text went out once
+
+
+async def test_shutdown_leader_text_follows_a_notice_already_sent(env):
+    # the successor's notice went out before the handoff (hold over, or a scale-down move): the
+    # pass sends the text to the successor itself, once
+    c, (a0, a1, a2) = await env.hive(used=LOW)
+    await env.gauge(a2["id"], 60000)
+    await env.run("UPDATE agent_status SET stopping_since = now() WHERE agent_id = %s", (a0["id"],))
+    await env.run("UPDATE agents SET ready = false WHERE id = %s", (a0["id"],))
+    await _leader_lost(env, c["id"])
+    await env.run(
+        "UPDATE agent_status SET stopping_since = now() - interval '1 hour' WHERE agent_id = %s",
+        (a0["id"],),
+    )
+    assert await _deliver(env) == [c["id"]]  # past the hold: the notice goes without the text
+    await env.run("UPDATE agent_status SET stopping_since = now() WHERE agent_id = %s", (a0["id"],))
+    await _shutdown_handoff(env, c["id"], a0["id"], "late text")
+    assert await env.step(c["id"]) == [
+        f"shutdown_handed:{a0['id']}",
+        f"handoff_sent:{a1['id']}",
+    ]
+    texts = [m["text"] for m in await env.messages(a1["id"])]
+    assert len(texts) == 2 and texts[1] == (
+        f"Handoff from {a0['pod_name']} (written by it before its pod shut down):\nlate text"
+    )
+    assert await env.step(c["id"]) == []
+    assert await _deliver(env) == []
+    assert len(await env.messages(a1["id"])) == 2
+
+
+async def test_shutdown_member_resumes_as_today(env):
+    c, (a0, a1, a2) = await env.hive(used=LOW)
+    await _shutdown(env, c["id"], a1["id"], "member text")
+    assert await env.step(c["id"]) == [f"shutdown_member:{a1['id']}"]
+    assert await env.row(a1["id"]) is None
+    last = await env.last_row(a1["id"])
+    assert (last["trigger"], last["phase"], last["close_reason"], last["handoff_text"]) == (
+        "shutdown",
+        "done",
+        "member",
+        "member text",
+    )
+    assert await env.step(c["id"]) == []
+    await _next_pod(env, a1["id"])
+    assert await env.step(c["id"]) == []
+    assert await env.commands(a1["id"]) == []
+    assert await env.messages(a1["id"]) == []
+    assert await env.messages(a0["id"]) == []
+
+
+@pytest.mark.parametrize(
+    ("text", "status"),
+    [("   ", "completed"), (None, "running"), (None, "not_started"), (None, "failed")],
+)
+async def test_shutdown_without_text_does_nothing(env, text, status):
+    c, a = await env.solo(LOW)
+    await _shutdown(env, c["id"], a["id"], text, status)
+    assert await env.step(c["id"]) == []
+    assert await env.rows("SELECT * FROM agent_handoffs WHERE agent_id = %s", (a["id"],)) == []
+    await _next_pod(env, a["id"])
+    assert await env.step(c["id"]) == []
+    assert await env.commands(a["id"]) == []
+    assert await env.messages(a["id"]) == []
+
+
+async def test_sigterm_during_open_strong_row_closes_it_shutdown(env):
+    # before handed (the request queued) and after it (the clear queued): both close at SIGTERM
+    c, a = await env.solo()
+    req = await env.to_requested(c["id"], a["id"])
+    await env.run("UPDATE agent_status SET stopping_since = now() WHERE agent_id = %s", (a["id"],))
+    assert await env.step(c["id"]) == [f"cancelled:{a['id']}:shutdown"]
+    assert await _status(env, req["id"]) == "cancelled"
+
+    c2, a2 = await env.solo()
+    req2 = await env.to_requested(c2["id"], a2["id"])
+    await env.turn_ends(req2, a2["id"], "strong text")
+    assert await env.step(c2["id"]) == [f"handed:{a2['id']}", f"clearing:{a2['id']}"]
+    (cmd,) = await env.commands(a2["id"])
+    await env.run("UPDATE agent_status SET stopping_since = now() WHERE agent_id = %s", (a2["id"],))
+    assert await env.step(c2["id"]) == [f"cancelled:{a2['id']}:shutdown"]
+    (cmd,) = await env.commands(a2["id"])
+    assert cmd["status"] == "cancelled"  # the queued clear never runs on the dying pod
+    # the shutdown handoff then opens the shutdown row
+    await _shutdown(env, c2["id"], a2["id"], "shutdown text")
+    assert await env.step(c2["id"]) == [f"shutdown_handed:{a2['id']}"]
+
+
+async def test_returning_row_survives_sigterm_and_keeps_its_return(env):
+    c, a = await env.solo()
+    req = await env.to_requested(c["id"], a["id"])
+    await env.turn_ends(req, a["id"], "strong text")
+    await env.step(c["id"])
+    (cmd,) = await env.commands(a["id"])
+    await env.finish_command(cmd["id"], "done", {"response": {"id": "c1"}})
+    await env.cleared(c["id"], a["id"])
+    assert await env.step(c["id"]) == [f"returning:{a['id']}"]
+    (ret,) = await env.messages(a["id"], "handoff_return")
+    await env.run("UPDATE agent_status SET stopping_since = now() WHERE agent_id = %s", (a["id"],))
+    assert await env.step(c["id"]) == []  # the return waits for the next pod
+    assert await _claim(env) is None
+    await _shutdown(env, c["id"], a["id"], "shutdown text")
+    assert await env.step(c["id"]) == [
+        f"cancelled:{a['id']}:shutdown",
+        f"shutdown_handed:{a['id']}",
+    ]
+    closed = (
+        await env.rows(
+            "SELECT * FROM agent_handoffs WHERE agent_id = %s AND trigger = 'strong'", (a["id"],)
+        )
+    )[0]
+    assert (closed["phase"], closed["close_reason"]) == ("cancelled", "shutdown")
+    assert await _status(env, ret["id"]) == "queued"  # still delivered, after the new return
+
+
+async def test_no_handoff_request_dispatched_to_stopping_agent(env):
+    c, a = await env.solo()
+    await env.step(c["id"])
+    await env.past_deadline(a["id"])
+    await env.run("UPDATE agent_status SET stopping_since = now() WHERE agent_id = %s", (a["id"],))
+    # stopping before the pass: no request is queued at all
+    assert await env.step(c["id"]) == [f"cancelled:{a['id']}:shutdown"]
+    assert await env.messages(a["id"], "handoff_request") == []
+    # a request queued just before SIGTERM is never claimed and is cancelled with its row
+    c2, a2 = await env.solo()
+    req = await env.to_requested(c2["id"], a2["id"])
+    await env.run("UPDATE agent_status SET stopping_since = now() WHERE agent_id = %s", (a2["id"],))
+    assert await _claim(env) is None
+    assert await _status(env, req["id"]) == "queued"
+    assert await env.step(c2["id"]) == [f"cancelled:{a2['id']}:shutdown"]
+    assert await _status(env, req["id"]) == "cancelled"
+    # no new countdown opens while stopping
+    assert await env.step(c2["id"]) == []

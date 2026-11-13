@@ -58,11 +58,19 @@ def strong_notice(minutes: int, extension_minutes: int, *, hive: bool) -> str:
     )
 
 
-def strong_return(text: str | None, *, cleared: bool = True) -> str:
+def strong_return(text: str | None, *, cleared: bool = True, shutdown: bool = False) -> str:
     """The handoff sent back to a solo agent (blank text: RETURN_EMPTY or RETURN_EMPTY_KEPT);
-    `cleared` False when the clear failed and the agent kept its context."""
+    `cleared` False when the clear failed and the agent kept its context; `shutdown` when it
+    was written at a pod shutdown (always non-blank there)."""
     if text is None or not text.strip():
         return RETURN_EMPTY if cleared else RETURN_EMPTY_KEPT
+    why = "pod shutdown" if shutdown else "strong limit"
     if not cleared:
-        return f"Handoff from your current context (strong limit, the clear failed):\n\n{text}"
-    return f"Handoff from your previous context (strong limit, cleared just now):\n\n{text}"
+        return f"Handoff from your current context ({why}, the clear failed):\n\n{text}"
+    return f"Handoff from your previous context ({why}, cleared just now):\n\n{text}"
+
+
+def shutdown_successor(pod: str, text: str) -> str:
+    """A leader's pod-shutdown handoff sent to its successor on its own, when the successor's
+    handover notice already went out without it."""
+    return f"Handoff from {pod} (written by it before its pod shut down):\n{text}"

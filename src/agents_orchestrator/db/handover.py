@@ -21,6 +21,7 @@ from agents_orchestrator import handover_transcript as ht
 from agents_orchestrator.api.scope import scope_of
 from agents_orchestrator.db import leader_state
 from agents_orchestrator.db import sessions as sessions_repo
+from agents_orchestrator.db.handoffs import SHUTDOWN_TEXT
 from agents_orchestrator.db.queue import StoredAttachment, enqueue_message
 from agents_orchestrator.db.sessions import _sweep_each
 from agents_orchestrator.taskboard_client import OpenDecision
@@ -73,8 +74,24 @@ _TRANSCRIPT_ROWS = (
 _OMITTED_TURNS = _SCOPE + " SELECT count(*) FROM turn_starts WHERE id < (SELECT id FROM bound)"
 
 _SOURCE = "sessions s JOIN session_leaders l ON l.session_id = s.id"
+# Pod shutdown (T-256): while the predecessor is stopping, its notice waits for the handoff the
+# wrapper's shutdown routine captures, so that text leads the notice. The wait ends once the
+# handoff pass opened the predecessor's shutdown row with a successor (or closed it), the routine
+# reported no usable text, the stream attached to the next pod (the mark is cleared) or
+# `shutdown_hold` seconds passed since the mark; a text that arrives later is sent to the
+# successor by the pass on its own.
+_SHUTDOWN_HOLD = f"""NOT EXISTS (
+    SELECT 1 FROM agent_status st WHERE st.agent_id = l.previous_agent_id
+      AND st.stopping_since > now() - make_interval(secs => %(shutdown_hold)s)
+      AND NOT EXISTS (SELECT 1 FROM agent_handoffs h WHERE h.agent_id = st.agent_id
+          AND h.trigger = 'shutdown' AND h.created_at >= st.stopping_since
+          AND (h.successor_agent_id IS NOT NULL OR h.closed_at IS NOT NULL))
+      AND NOT EXISTS (SELECT 1 FROM events e WHERE e.agent_id = st.agent_id
+          AND e.type = 'shutdown_handoff' AND e.created_at >= st.stopping_since
+          AND NOT {SHUTDOWN_TEXT}))"""
 _PENDING = (
-    "s.desired = 'active' AND l.previous_agent_id IS NOT NULL AND l.epoch > s.handover_notice_epoch"
+    "s.desired = 'active' AND l.previous_agent_id IS NOT NULL"
+    f" AND l.epoch > s.handover_notice_epoch AND {_SHUTDOWN_HOLD}"
 )
 _COLUMNS = "s.slug, l.agent_id, l.epoch, l.since, l.reason, l.previous_agent_id, l.previous_since"
 
@@ -112,12 +129,12 @@ async def transcript_rows(
 
 
 async def _fetch_decisions(
-    conn: psycopg.AsyncConnection, decisions: DecisionsFetcher
+    conn: psycopg.AsyncConnection, decisions: DecisionsFetcher, params: dict[str, Any]
 ) -> dict[uuid.UUID, list[OpenDecision] | None]:
     """Open decisions of every session a notice is pending for, asked outside any transaction
     concurrently under one overall timeout. A fetcher that raises counts as unavailable."""
     async with conn.transaction():
-        cur = await conn.execute(f"SELECT s.id FROM {_SOURCE} WHERE {_PENDING}")
+        cur = await conn.execute(f"SELECT s.id FROM {_SOURCE} WHERE {_PENDING}", params)
         ids = [row[0] for row in await cur.fetchall()]
         sessions = [s for s in [await sessions_repo.get(conn, i) for i in ids] if s is not None]
 
@@ -150,12 +167,16 @@ async def deliver_handover(
     budget_bytes: int,
     output_chars: int,
     decisions: DecisionsFetcher,
+    shutdown_hold_seconds: int,
 ) -> list[uuid.UUID]:
     """Queue one handover notice per pending leader change (epoch above
     `handover_notice_epoch`, a predecessor, session active); returns the sessions served. Two
     changes before one poll get one notice, for the current row. The epoch write is
-    status-guarded and shares the transaction of the notice, so two sweepers queue one."""
-    fetched = await _fetch_decisions(conn, decisions)
+    status-guarded and shares the transaction of the notice, so two sweepers queue one. A
+    stopping predecessor's notice waits for its shutdown handoff, at most
+    `shutdown_hold_seconds` from its stopping mark (`_SHUTDOWN_HOLD`)."""
+    params = {"shutdown_hold": shutdown_hold_seconds}
+    fetched = await _fetch_decisions(conn, decisions, params)
 
     async def deliver(session_id: uuid.UUID, row: dict[str, Any]) -> str | None:
         cur = await conn.execute(
@@ -238,4 +259,4 @@ async def deliver_handover(
         )
         return f"handover: session {session_id} epoch {row['epoch']} notice queued"
 
-    return await _sweep_each(conn, _SOURCE, _PENDING, {}, _COLUMNS, deliver)
+    return await _sweep_each(conn, _SOURCE, _PENDING, params, _COLUMNS, deliver)

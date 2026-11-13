@@ -58,7 +58,11 @@ async def _no_decisions(session_id, slug, projects):
 async def _deliver(pool, decisions=_no_decisions) -> list:
     async with pool.connection() as conn:
         return await handover.deliver_handover(
-            conn, budget_bytes=BUDGET, output_chars=OUTPUT, decisions=decisions
+            conn,
+            budget_bytes=BUDGET,
+            output_chars=OUTPUT,
+            decisions=decisions,
+            shutdown_hold_seconds=330,
         )
 
 

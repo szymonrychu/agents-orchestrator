@@ -57,7 +57,7 @@ import logging
 import math
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import psycopg
@@ -69,7 +69,12 @@ from agents_orchestrator.db.eligibility import BACKGROUND_BUSY, HOLDS_SESSION, b
 from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE
 from agents_orchestrator.db.sessions import quiet_clock_sql
 from agents_orchestrator.dispatcher import hive
-from agents_orchestrator.handoff_texts import STRONG_REQUEST, strong_notice, strong_return
+from agents_orchestrator.handoff_texts import (
+    STRONG_REQUEST,
+    shutdown_successor,
+    strong_notice,
+    strong_return,
+)
 from agents_orchestrator.settings import Settings
 
 log = logging.getLogger(__name__)
@@ -105,17 +110,46 @@ class HandoffPolicy:
         )
 
 
+# A stopping mark older than this is not looked at for a shutdown handoff: the routine reports
+# within the pod grace, and the pass runs every few seconds.
+SHUTDOWN_WINDOW_SECONDS = 3600
+
+# The agent's newest `shutdown_handoff` with a handoff since its stopping mark that no shutdown
+# row was opened for yet (aliases `a` agents, `s` its agent_status row): its text, else NULL.
+_SHUTDOWN_TEXT = f"""
+SELECT e.data->>'final_text' FROM events e
+WHERE e.agent_id = a.id AND e.type = 'shutdown_handoff' AND e.created_at >= s.stopping_since
+  AND {handoffs.SHUTDOWN_TEXT}
+  AND NOT EXISTS (SELECT 1 FROM agent_handoffs h WHERE h.agent_id = a.id
+      AND h.trigger = 'shutdown' AND h.created_at >= e.created_at)
+ORDER BY e.id DESC LIMIT 1
+"""
+_STOPPING = (
+    "s.stopping_since IS NOT NULL AND s.stopping_since > now() - make_interval(secs => %(window)s)"
+)
+
 # Sessions a pass can do something for: active hive sessions with a leader, active solo sessions
-# with a live agent, and any session with an open row (closing ones included, to cancel it).
+# with a live agent, any session with an open row (closing ones included, to cancel it) and any
+# session with a shutdown handoff to store.
 _SESSIONS = f"""
 SELECT c.id FROM sessions c WHERE c.desired = 'active' AND (
     ({leadership.HIVE} AND EXISTS (SELECT 1 FROM session_leaders l WHERE l.session_id = c.id))
     OR ({leadership.SOLO} AND EXISTS (
         SELECT 1 FROM agents a WHERE a.session_id = c.id AND a.gone_at IS NULL)))
 UNION
-SELECT h.session_id FROM agent_handoffs h
-WHERE h.phase = ANY(%(open)s) AND h.trigger <> 'shutdown'
+SELECT h.session_id FROM agent_handoffs h WHERE h.phase = ANY(%(open)s)
+UNION
+SELECT a.session_id FROM agents a JOIN agent_status s ON s.agent_id = a.id
+WHERE {_STOPPING} AND EXISTS ({_SHUTDOWN_TEXT})
 ORDER BY 1
+"""
+
+# The session's agents with a shutdown handoff to store, oldest mark first.
+_SHUTDOWNS = f"""
+SELECT a.id AS agent_id, s.stopping_since, ({_SHUTDOWN_TEXT}) AS text
+FROM agents a JOIN agent_status s ON s.agent_id = a.id
+WHERE a.session_id = %(session)s AND {_STOPPING}
+ORDER BY s.stopping_since, a.id
 """
 
 # What the pass needs to know about one agent. `idle_long`: idle, no turn, no background
@@ -128,7 +162,7 @@ ORDER BY 1
 # way; after the block a later strong crossing starts one).
 _FACTS = f"""
 SELECT a.id, a.gone_at IS NOT NULL AS gone, {HOLDS_SESSION} AS live,
-    s.stopping_since IS NOT NULL AS stopping,
+    s.stopping_since IS NOT NULL AS stopping, s.stopping_since,
     coalesce({BACKGROUND_BUSY}, false) AS background_busy,
     coalesce(s.state = 'idle' AND s.current_turn_id IS NULL AND NOT {BACKGROUND_BUSY}
         AND s.free_since <= now() - make_interval(secs => %(idle)s), false) AS idle_long,
@@ -191,6 +225,14 @@ FROM commands k LEFT JOIN agent_status s ON s.agent_id = k.agent_id WHERE k.id =
 """
 
 
+def _hive_order(row: handoffs.Handoff) -> bool:
+    """The row's handoff went to a successor, so nothing comes back after the clear: a leader's
+    discussion (`discuss_since` set) or a leader's shutdown row with its successor recorded."""
+    return row.discuss_since is not None or (
+        row.trigger == "shutdown" and row.successor_agent_id is not None
+    )
+
+
 class _Lost(Exception):
     """A guarded update lost to a concurrent writer: roll back the savepoint's enqueue."""
 
@@ -204,7 +246,9 @@ async def _one(conn: psycopg.AsyncConnection, query: str, params: Any) -> dict |
 async def handoff_sessions(conn: psycopg.AsyncConnection) -> list[uuid.UUID]:
     """The sessions the dispatcher runs `handoff_pass` for on this wake (one query)."""
     async with conn.cursor() as cur:
-        await cur.execute(_SESSIONS, {"open": list(handoffs.OPEN_PHASES)})
+        await cur.execute(
+            _SESSIONS, {"open": list(handoffs.OPEN_PHASES), "window": SHUTDOWN_WINDOW_SECONDS}
+        )
         return [r[0] for r in await cur.fetchall()]
 
 
@@ -243,13 +287,14 @@ class _Pass:
             "gone": True,
             "live": False,
             "stopping": False,
+            "stopping_since": None,
             "background_busy": False,
             "idle_long": False,
             "compact_stale": False,
             "clear_failed": False,
         }
 
-    async def message(self, text: str, agent_id: uuid.UUID, notice: str) -> int:
+    async def message(self, text: str, agent_id: uuid.UUID, notice: str | None) -> int:
         return await queue.enqueue_message(
             self.conn, self.session["id"], text, agent_id, lane="regular", notice=notice
         )
@@ -318,11 +363,18 @@ class _Pass:
     # ------------------------------------------------------------ cancellation
 
     async def cancel(self, row: handoffs.Handoff, reason: str, *, messages: bool = True) -> None:
-        """Close the row `cancelled`; with `messages`, its queued messages are cancelled too."""
+        """Close the row `cancelled`; with `messages`, its queued messages are cancelled too, and
+        a clear of it still queued (so a dying pod is not cleared after its row closed)."""
         if not await handoffs.close(self.conn, row.id, "cancelled", reason):
             return
         for message_id in await self._queued_messages(row) if messages else []:
             await queue.cancel_message(self.conn, message_id)
+        if messages and row.clear_command_id is not None:
+            await self.conn.execute(
+                "UPDATE commands SET status = 'cancelled', finished_at = now()"
+                " WHERE id = %s AND status = 'queued'",
+                (row.clear_command_id,),
+            )
         log.info("handoff %s: agent %s cancelled (%s)", row.id, row.agent_id, reason)
         self.out.append(f"cancelled:{row.agent_id}:{reason}")
 
@@ -360,10 +412,10 @@ class _Pass:
             return "session_closing"
         if facts["gone"]:
             return "shutdown"
+        if self._sigterm_since(row, facts):
+            return "shutdown"
         if row.phase not in BEFORE_HANDED:
             return None
-        if facts["stopping"]:
-            return "shutdown"
         if subject is None:
             return "not_leader"
         reset = await self._reset_since(row)
@@ -373,10 +425,25 @@ class _Pass:
             return "compacted"
         return None
 
+    @staticmethod
+    def _sigterm_since(row: handoffs.Handoff, facts: dict) -> bool:
+        """The agent's pod got SIGTERM while the row is open: before `handed` any stopping mark,
+        later one set after the row opened (a shutdown row's own pod set its mark before it).
+        A `returning` row stays: its return waits for the next pod (the claim takes nothing
+        for a stopping agent) and goes out there."""
+        if not facts["stopping"]:
+            return False
+        if row.phase in BEFORE_HANDED:
+            return True
+        return row.phase != "returning" and facts["stopping_since"] >= row.created_at
+
     # ------------------------------------------------------------ the phases
 
     async def step(self, row: handoffs.Handoff, subject: dict | None) -> None:
         facts = await self.facts(row.agent_id)
+        if row.trigger == "shutdown" and row.phase == "handed":
+            await self.shutdown_handed(row, facts)
+            return
         reason = await self.cancel_reason(row, subject, facts)
         if reason is not None:
             await self.cancel(row, reason)
@@ -546,7 +613,7 @@ class _Pass:
                 await self.clear(row, ["clearing"])
             return
         log.info("handoff %s: clear of agent %s failed (%s)", row.id, row.agent_id, error)
-        if row.discuss_since is None:
+        if not _hive_order(row):
             await self.send_return(row, cleared=False)  # the solo agent still gets its handoff
         await self.cancel(row, "clear_failed", messages=False)
 
@@ -562,7 +629,7 @@ class _Pass:
         )
 
     async def cleared(self, row: handoffs.Handoff) -> None:
-        if row.discuss_since is not None:  # hive order: nothing comes back
+        if _hive_order(row):  # nothing comes back
             if await handoffs.advance(
                 self.conn, row.id, ["clearing"], "clearing", cleared_at=await self._in(0)
             ) and await handoffs.close(self.conn, row.id, "done", "cleared"):
@@ -579,7 +646,11 @@ class _Pass:
 
         async def send() -> bool:
             message_id = await self.message(
-                strong_return(row.handoff_text, cleared=cleared), row.agent_id, "handoff_return"
+                strong_return(
+                    row.handoff_text, cleared=cleared, shutdown=row.trigger == "shutdown"
+                ),
+                row.agent_id,
+                "handoff_return",
             )
             fields: dict[str, Any] = {"return_message_id": message_id}
             if cleared:
@@ -587,6 +658,121 @@ class _Pass:
             return await handoffs.advance(self.conn, row.id, ["clearing"], "returning", **fields)
 
         return await self.guarded(send)
+
+    # ------------------------------------------------------------ pod shutdown
+
+    async def shutdown(self, agent_id: uuid.UUID, stopping_since: Any, text: str) -> None:
+        """Store the agent's pod-shutdown handoff (its `shutdown_handoff` event; plan 5.8).
+
+        Whatever row is open closes `cancelled shutdown` (a `returning` row keeps its queued
+        return, which then follows this one on the next pod). The new row opens `handed` with
+        the text. A member (L2) closes it at once `done member`: its next pod resumes as today.
+        A leader's text goes to its successor and a solo agent's back to itself on its next pod
+        (`shutdown_handed`)."""
+        row = await handoffs.open_row(self.conn, agent_id)
+        if row is not None:
+            await self.cancel(row, "shutdown", messages=row.phase != "returning")
+        role = await self._shutdown_role(agent_id, stopping_since)
+        new = await handoffs.insert(
+            self.conn, self.session["id"], agent_id, "shutdown", "handed", handoff_text=text
+        )
+        if role == "member":
+            await handoffs.close(self.conn, new.id, "done", "member")
+            log.info("handoff %s: member %s shutdown handoff stored only", new.id, agent_id)
+            self.out.append(f"shutdown_member:{agent_id}")
+            return
+        log.info("handoff %s: agent %s shutdown handoff stored (%s)", new.id, agent_id, role)
+        self.out.append(f"shutdown_handed:{agent_id}")
+        await self.shutdown_handed(new, await self.facts(agent_id))
+
+    async def _shutdown_role(self, agent_id: uuid.UUID, stopping_since: Any) -> str:
+        """`solo` (a non-hive session), `leader` (it leads, or it led until a move made within
+        the pod grace before its stopping mark: leader_lost or scale_down) or `member`."""
+        got = await _one(
+            self.conn,
+            f"SELECT {leadership.SOLO} AS solo,"
+            " l.agent_id = %(agent)s OR (l.previous_agent_id = %(agent)s"
+            "  AND l.since >= %(since)s - make_interval(secs => %(grace)s)) AS led"
+            " FROM sessions c LEFT JOIN session_leaders l ON l.session_id = c.id"
+            " WHERE c.id = %(session)s",
+            {
+                "agent": agent_id,
+                "since": stopping_since,
+                "grace": self.settings.agent_termination_grace_seconds,
+                "session": self.session["id"],
+            },
+        )
+        if got is not None and got["solo"]:
+            return "solo"
+        return "leader" if got is not None and got["led"] else "member"
+
+    async def shutdown_handed(self, row: handoffs.Handoff, facts: dict) -> None:
+        """A shutdown row waits in `handed` for the agent's next pod.
+
+        Leadership moved off the agent: the new leader is recorded as successor, whose
+        handover notice then leads with the text (`deliver_handover`), or the pass sends it on
+        its own when that notice already went out. Once the next pod is ready and attached
+        (live, not stopping): `clear`, then nothing more when a successor took the text, else
+        (solo, or a leader that kept the lead) the text comes back after the clear. A gone
+        agent (scaled away) closes `done gone` once nothing is left to deliver."""
+        if not self.active:
+            await self.cancel(row, "session_closing")
+            return
+        if self._sigterm_since(row, facts):
+            await self.cancel(row, "shutdown")  # the next pod is stopping again
+            return
+        leader = await leadership.current_leader(self.conn, self.session["id"])
+        if (
+            row.successor_agent_id is None
+            and leader is not None
+            and leader.agent_id != row.agent_id
+            and await handoffs.advance(
+                self.conn, row.id, ["handed"], "handed", successor_agent_id=leader.agent_id
+            )
+        ):
+            row = replace(row, successor_agent_id=leader.agent_id)
+        pending = await self.deliver(row, leader)
+        if facts["gone"]:
+            if not pending and await handoffs.close(self.conn, row.id, "done", "gone"):
+                self.out.append(f"done:{row.agent_id}")
+            return
+        if facts["live"] and not facts["stopping"]:
+            await self.clear(row, ["handed"])
+
+    async def deliver(self, row: handoffs.Handoff, leader: Any) -> bool:
+        """The successor's copy of a shutdown text not delivered yet; True while the notice
+        sweeper may still lead the successor's notice with it (its epoch is not served).
+
+        Once that notice went out without it, the text is sent to the successor here, marked
+        delivered in the same savepoint (`mark_delivered` takes it once, against the sweeper
+        too). A successor that no longer leads gets nothing (logged)."""
+        if row.successor_agent_id is None or row.delivered_at is not None:
+            return False
+        if leader is None or leader.agent_id != row.successor_agent_id:
+            log.info("handoff %s: successor no longer leads, text not delivered", row.id)
+            return False
+        served = await _one(
+            self.conn,
+            "SELECT handover_notice_epoch >= %s AS served FROM sessions WHERE id = %s",
+            (leader.epoch, self.session["id"]),
+        )
+        if not (served and served["served"]):
+            return True
+        pod = await _one(self.conn, "SELECT pod_name FROM agents WHERE id = %s", (row.agent_id,))
+        assert row.handoff_text is not None
+
+        async def send() -> bool:
+            await self.message(
+                shutdown_successor(pod["pod_name"] if pod else str(row.agent_id), row.handoff_text),
+                leader.agent_id,
+                None,
+            )
+            return await handoffs.mark_delivered(self.conn, row.id)
+
+        if await self.guarded(send):
+            log.info("handoff %s: shutdown text sent to successor %s", row.id, leader.agent_id)
+            self.out.append(f"handoff_sent:{leader.agent_id}")
+        return False
 
     async def returning(self, row: handoffs.Handoff) -> None:
         msg = await _one(
@@ -627,9 +813,16 @@ async def handoff_pass(
         touched: set[uuid.UUID] = set()
         for row in await handoffs.open_rows(conn, session_id):
             touched.add(row.agent_id)
-            if row.trigger == "shutdown":
-                continue
             await run.step(row, by_agent.get(row.agent_id))
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                _SHUTDOWNS, {"session": session_id, "window": SHUTDOWN_WINDOW_SECONDS}
+            )
+            shutdowns = await cur.fetchall()
+        for got in shutdowns:
+            if got["text"] is not None:
+                touched.add(got["agent_id"])
+                await run.shutdown(got["agent_id"], got["stopping_since"], got["text"])
         for subject in subjects:
             if subject["agent_id"] not in touched:
                 await run.open(subject)

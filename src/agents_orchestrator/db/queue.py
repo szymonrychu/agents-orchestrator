@@ -20,7 +20,12 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from agents_orchestrator.db.eligibility import ELIGIBLE, HANDOVER_TRIGGER, NOTICE_PENDING
+from agents_orchestrator.db.eligibility import (
+    ELIGIBLE,
+    HANDOVER_TRIGGER,
+    NOT_STOPPING,
+    NOTICE_PENDING,
+)
 from agents_orchestrator.db.pool import notify
 
 COMMAND_KINDS = frozenset({"interrupt", "compact", "restart", "rebootstrap", "clear"})
@@ -355,13 +360,14 @@ GROUP BY m.session_id
 ORDER BY head
 """
 
-_PICK = """
+_PICK = f"""
 SELECT a.id AS agent_id, a.url, a.wrapper_session_id, s.free_since, a.last_dispatched_at
 FROM agents a JOIN agent_status s ON s.agent_id = a.id
 WHERE a.session_id = %(session_id)s
   AND a.ready
   AND a.gone_at IS NULL
   AND a.wrapper_session_id IS NOT NULL
+  AND {NOT_STOPPING}
   AND s.state = 'idle'
   AND s.free_since > coalesce(a.last_dispatched_at, '-infinity'::timestamptz)
   AND (%(target)s::uuid IS NULL OR a.id = %(target)s::uuid)
@@ -374,13 +380,14 @@ FOR UPDATE OF a SKIP LOCKED
 # The regular and priority lanes bypass agent_free (D2): any ready agent of the session, an idle
 # one first (longest free), because the wrapper takes the message mid-turn and answers 409
 # booting, dead, busy or dialog_open itself.
-_PICK_LIVE = """
+_PICK_LIVE = f"""
 SELECT a.id AS agent_id, a.url, a.wrapper_session_id, s.free_since, a.last_dispatched_at
 FROM agents a JOIN agent_status s ON s.agent_id = a.id
 WHERE a.session_id = %(session_id)s
   AND a.ready
   AND a.gone_at IS NULL
   AND a.wrapper_session_id IS NOT NULL
+  AND {NOT_STOPPING}
   AND (%(target)s::uuid IS NULL OR a.id = %(target)s::uuid)
 ORDER BY (s.state = 'idle') DESC, s.free_since ASC, a.id
 LIMIT 1
@@ -476,15 +483,19 @@ async def _claim_notice(conn: psycopg.AsyncConnection, session_id: uuid.UUID) ->
 # `reset`: the agent's context was compacted or cleared since the row opened.
 _HANDOFF_ROW = """
 SELECT h.phase, h.request_message_id, h.return_message_id, h.discuss_since IS NULL AS solo,
+    h.trigger = 'shutdown' AS shutdown,
     EXISTS (SELECT 1 FROM events e WHERE e.agent_id = h.agent_id
         AND e.type IN ('compacted', 'session_cleared') AND e.created_at >= h.created_at) AS reset
 FROM agent_handoffs h
-WHERE h.agent_id = %s AND h.trigger <> 'shutdown'
+WHERE h.agent_id = %s
   AND h.phase IN ('notified', 'extended', 'requested', 'handed', 'discussing', 'clearing',
                   'returning')
 """
 _HANDOFF_COUNTDOWN = ("notified", "extended")
 _HANDOFF_SOLO_HOLD = ("clearing", "returning")
+# A shutdown row holds the agent's other messages on its next pod until its clear (and, solo,
+# its return) ran: the fresh context reads nothing before them.
+_HANDOFF_SHUTDOWN_HOLD = ("handed", "clearing", "returning")
 
 
 async def _handoff_gate(
@@ -515,7 +526,11 @@ async def _handoff_gate(
         return "send" if own else "cancel"
     if row is None or message_id in (row["request_message_id"], row["return_message_id"]):
         return "send"
-    if row["phase"] == "requested" or (row["solo"] and row["phase"] in _HANDOFF_SOLO_HOLD):
+    if (
+        row["phase"] == "requested"
+        or (row["solo"] and row["phase"] in _HANDOFF_SOLO_HOLD)
+        or (row["shutdown"] and row["phase"] in _HANDOFF_SHUTDOWN_HOLD)
+    ):
         return "hold"
     return "send"
 
