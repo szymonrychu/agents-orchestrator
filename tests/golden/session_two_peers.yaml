@@ -56,9 +56,17 @@
       \ questions, and after each question give\n    your recommended answer, worded\
       \ so that replying \"yes\" accepts it. Then stop and\n    wait for the reply.\
       \ Never wait on an interactive question tool.'\nlimits:\n  shutdown_timeout_seconds:\
-      \ 80\nnotes:\n  enabled: true\npeers:\n  enabled: true\n  name: ${POD_NAME}\n\
+      \ 90\nnotes:\n  enabled: true\npeers:\n  enabled: true\n  name: ${POD_NAME}\n\
       \  advertise_url: ${CCW_PEER_URL}\n  token: ${CCW_PEER_TOKEN}\n  static:\n \
-      \ - http://agent-alpha-0.agent-alpha.agents.svc.cluster.local:8080\n  - http://agent-alpha-1.agent-alpha.agents.svc.cluster.local:8080\n"
+      \ - http://agent-alpha-0.agent-alpha.agents.svc.cluster.local:8080\n  - http://agent-alpha-1.agent-alpha.agents.svc.cluster.local:8080\n\
+      shutdown:\n  handoff:\n    enabled: true\n    notice_seconds: 120\n    handoff_seconds:\
+      \ 180\n    idle_proceed_seconds: 60\n    notice_prompt: 'This pod is shutting\
+      \ down: in about 2 minutes you will be asked\n      for a handoff, then the\
+      \ agent stops. Finish or park your current step now: commit\n      and push,\
+      \ update your task and todo. There is no extension.'\n    handoff_prompt: 'Write\
+      \ your handoff now as your reply: what you were doing, what\n      is done (commits,\
+      \ PRs), what is next and in which order, open decisions and\n      gotchas.\
+      \ Your reply text is the handoff; do not start new work.'\n"
     on-start.sh: "#!/bin/sh\nset -eu\nREF=v0.5.0\nok=1\ninstall() {\n  step=$1\n \
       \ shift\n  [ \"$ok\" = 1 ] || return 0\n  \"$@\" && return 0\n  echo \"on-start:\
       \ $step failed (exit $?)\" >&2\n  ok=0\n}\nif ! grep -qxF -- \"$REF\" /opt/any-mcp/.ref\
@@ -112,7 +120,7 @@
           agents.szymonrichert.pl/session: alpha
           app.kubernetes.io/managed-by: agents-orchestrator
         annotations:
-          agents.szymonrichert.pl/config-hash: d8b549981cdc2c945044e45c154b534b0849fb4d98e231474c2c08aa3cab46f5
+          agents.szymonrichert.pl/config-hash: 927bdc591add9ad768cdfc24d0fd4e77342b75120d3585eaf36f3ff7ac6613a6
       spec:
         imagePullSecrets:
         - name: regcred
@@ -122,7 +130,7 @@
           runAsUser: 1000
           fsGroup: 1000
           fsGroupChangePolicy: OnRootMismatch
-        terminationGracePeriodSeconds: 90
+        terminationGracePeriodSeconds: 420
         containers:
         - name: ccw
           image: harbor.example/containers/claude-code-wrapper:ca2ddf3

@@ -30,6 +30,15 @@ RETURN_EMPTY_KEPT = (
 )
 
 
+def shutdown_notice(minutes: int) -> str:
+    """The pod-shutdown notice (the wrapper's `shutdown.handoff.notice_prompt`)."""
+    return (
+        f"This pod is shutting down: in about {minutes} minutes you will be asked for a "
+        "handoff, then the agent stops. Finish or park your current step now: commit and "
+        "push, update your task and todo. There is no extension."
+    )
+
+
 def strong_notice(minutes: int, extension_minutes: int, *, hive: bool) -> str:
     """The strong-limit countdown notice (message and keyed note `handoff_notice`).
 

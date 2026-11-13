@@ -24,6 +24,7 @@ from agents_orchestrator.spec import (
 
 PREFIX = "ORCH_"
 MIN_MASTER_KEY_BYTES = 32
+SHUTDOWN_MARGIN_SECONDS = 30
 # Upper bounds of the archive sweep policy; also literals in the CHECKs of migration 0025.
 SWEEP_RETENTION_DAYS_MAX = 3650
 SWEEP_KEEP_NEWEST_MAX = 1000
@@ -152,7 +153,13 @@ class Settings(BaseSettings):
     any_mcp_config_file: str = ""
     wrapper_port: int = 8080
     cluster_domain: str = "cluster.local"
-    agent_termination_grace_seconds: int = 90
+    agent_termination_grace_seconds: int = 420
+    #: Pod shutdown handoff (wrapper `shutdown.handoff`): the notice countdown, the handoff
+    #: window and the wrapper's own stop time must fit the pod grace with SHUTDOWN_MARGIN_SECONDS
+    #: to spare.
+    agent_shutdown_notice_seconds: int = Field(default=120, ge=0, le=600)
+    agent_shutdown_handoff_seconds: int = Field(default=180, ge=0, le=600)
+    agent_shutdown_stop_seconds: int = Field(default=90, ge=10, le=600)
 
     http_host: str = "0.0.0.0"
     http_port: int = 8000
@@ -861,6 +868,19 @@ class Settings(BaseSettings):
         if unknown:
             raise _Bad(
                 "ORCH_SERVICE_SCOPES::names a service without a token: " + ", ".join(unknown)
+            )
+        budget = (
+            self.agent_shutdown_notice_seconds
+            + self.agent_shutdown_handoff_seconds
+            + self.agent_shutdown_stop_seconds
+            + SHUTDOWN_MARGIN_SECONDS
+        )
+        if budget > self.agent_termination_grace_seconds:
+            raise _Bad(
+                f"ORCH_AGENT_SHUTDOWN_NOTICE_SECONDS + ORCH_AGENT_SHUTDOWN_HANDOFF_SECONDS"
+                f" + ORCH_AGENT_SHUTDOWN_STOP_SECONDS + {SHUTDOWN_MARGIN_SECONDS} s margin"
+                f" ({budget} s) must not exceed ORCH_AGENT_TERMINATION_GRACE_SECONDS"
+                f" ({self.agent_termination_grace_seconds} s)"
             )
         return self
 

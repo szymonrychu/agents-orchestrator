@@ -28,7 +28,15 @@
       \ questions, and after each question give\n    your recommended answer, worded\
       \ so that replying \"yes\" accepts it. Then stop and\n    wait for the reply.\
       \ Never wait on an interactive question tool.'\nlimits:\n  shutdown_timeout_seconds:\
-      \ 80\nnotes:\n  enabled: true\n"
+      \ 90\nnotes:\n  enabled: true\nshutdown:\n  handoff:\n    enabled: true\n  \
+      \  notice_seconds: 120\n    handoff_seconds: 180\n    idle_proceed_seconds:\
+      \ 60\n    notice_prompt: 'This pod is shutting down: in about 2 minutes you\
+      \ will be asked\n      for a handoff, then the agent stops. Finish or park your\
+      \ current step now: commit\n      and push, update your task and todo. There\
+      \ is no extension.'\n    handoff_prompt: 'Write your handoff now as your reply:\
+      \ what you were doing, what\n      is done (commits, PRs), what is next and\
+      \ in which order, open decisions and\n      gotchas. Your reply text is the\
+      \ handoff; do not start new work.'\n"
     on-start.sh: "#!/bin/sh\nset -eu\nREF=v0.5.0\nok=1\ninstall() {\n  step=$1\n \
       \ shift\n  [ \"$ok\" = 1 ] || return 0\n  \"$@\" && return 0\n  echo \"on-start:\
       \ $step failed (exit $?)\" >&2\n  ok=0\n}\nif ! grep -qxF -- \"$REF\" /opt/any-mcp/.ref\
@@ -64,7 +72,7 @@
           agents.szymonrichert.pl/session: alpha
           app.kubernetes.io/managed-by: agents-orchestrator
         annotations:
-          agents.szymonrichert.pl/config-hash: 6a331d01361c370cea8165e5cef94d1ee4ed51b393be46516a4c3be0de7ae487
+          agents.szymonrichert.pl/config-hash: 69d0bdebc86e7d2ef083fa236a84d208d948fe404e00ecc49bd59bd47391fbbc
       spec:
         imagePullSecrets:
         - name: regcred
@@ -74,7 +82,7 @@
           runAsUser: 1000
           fsGroup: 1000
           fsGroupChangePolicy: OnRootMismatch
-        terminationGracePeriodSeconds: 90
+        terminationGracePeriodSeconds: 420
         containers:
         - name: ccw
           image: harbor.example/containers/claude-code-wrapper:ca2ddf3
