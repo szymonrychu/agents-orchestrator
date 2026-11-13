@@ -122,6 +122,9 @@ spec:
           {{- with include "agents-orchestrator.discardHookEnv" $ }}
           {{- . | nindent 12 }}
           {{- end }}
+          {{- with include "agents-orchestrator.mindmapEnv" $ }}
+          {{- . | nindent 12 }}
+          {{- end }}
           {{- end }}
           {{- if and (eq $component "api") $cache.bucket $cacheApi.existingSecret }}
             - name: ORCH_CACHE_S3_API_ACCESS_KEY_ID

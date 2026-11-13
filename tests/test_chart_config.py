@@ -562,7 +562,7 @@ MM_VALUES = {
 
 
 @pytest.mark.parametrize("mm", MM_VALUES.values(), ids=MM_VALUES.keys())
-def test_mindmap_pair_on_api_main_only(mm):
+def test_mindmap_pair_on_api_and_reconciler_main_only(mm):
     docs = render(values(postgres={"url": URL}, mindmap=mm))
     cm = by_kind(docs, "ConfigMap")[f"{FULL}-settings"]
     assert "ORCH_MINDMAP_URL" not in cm["data"] and "ORCH_MINDMAP_TOKEN" not in cm["data"]
@@ -570,15 +570,18 @@ def test_mindmap_pair_on_api_main_only(mm):
         for c in items:
             names = _env_names(c)
             assert ("ORCH_MINDMAP_URL" in names) == ("ORCH_MINDMAP_TOKEN" in names)
-            assert ("ORCH_MINDMAP_URL" in names) == _is_api_main(dep, c), (dep, c["name"])
-    api = next(c for c in _containers(docs)[f"{FULL}-api"] if c["name"] == "api")
-    env = {e["name"]: e for e in api["env"]}
-    assert env["ORCH_MINDMAP_URL"] == {"name": "ORCH_MINDMAP_URL", "value": MM_URL}
-    assert env["ORCH_MINDMAP_TOKEN"]["valueFrom"]["secretKeyRef"] == {
-        "name": mm.get("existingSecret", f"{FULL}-mindmap"),
-        "key": mm.get("existingSecretKey", "mindmap-token"),
-    }
-    assert "value" not in env["ORCH_MINDMAP_TOKEN"]
+            is_reconciler = dep == f"{FULL}-reconciler" and c["name"] == "reconciler"
+            main = _is_api_main(dep, c) or is_reconciler
+            assert ("ORCH_MINDMAP_URL" in names) == main, (dep, c["name"])
+    for comp in ("api", "reconciler"):
+        main = next(c for c in _containers(docs)[f"{FULL}-{comp}"] if c["name"] == comp)
+        env = {e["name"]: e for e in main["env"]}
+        assert env["ORCH_MINDMAP_URL"] == {"name": "ORCH_MINDMAP_URL", "value": MM_URL}
+        assert env["ORCH_MINDMAP_TOKEN"]["valueFrom"]["secretKeyRef"] == {
+            "name": mm.get("existingSecret", f"{FULL}-mindmap"),
+            "key": mm.get("existingSecretKey", "mindmap-token"),
+        }
+        assert "value" not in env["ORCH_MINDMAP_TOKEN"]
 
 
 def test_mindmap_token_secret_and_checksum():

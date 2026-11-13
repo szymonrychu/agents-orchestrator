@@ -215,8 +215,9 @@ true
 
 {{/*
 ORCH_MINDMAP_URL and ORCH_MINDMAP_TOKEN env entries, always together (Settings refuses one without the
-other). Only the api main container, which serves the mindmap relay, includes this; never the shared
-ConfigMap, the migrate init containers or the other components. Empty when the mindmap relay is off.
+other). Only the api main container (serves the mindmap relay) and the reconciler main container
+(renders each session's any-mcp config, so it needs settings.mindmap_available to grant the mindmap tools)
+include this; never the shared ConfigMap, the migrate init containers or the other components. Empty when the mindmap relay is off.
 */}}
 {{- define "agents-orchestrator.mindmapEnv" -}}
 {{- if include "agents-orchestrator.mindmapEnabled" . -}}
