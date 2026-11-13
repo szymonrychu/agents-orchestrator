@@ -309,3 +309,42 @@ async def test_solo_voluntary_does_not_cancel_row_that_moved_on(pool, dsn, monke
     assert (r.status_code, r.json()["error"]["code"]) == (409, "handoff_open")
     assert [row_[:2] for row_ in await handoff_rows(pool, a0["id"])] == [("strong", "discussing")]
     assert row.id
+
+
+async def test_solo_voluntary_insert_conflict_409_end_to_end(pool, dsn, monkeypatch):
+    # A row opened by a concurrent pass after the open_row read: the insert hits the one-open
+    # index. The route answers 409 and the row is untouched; the next call still works.
+    c, a0 = await solo_session(pool)
+    await open_handoff(pool, c["id"], a0["id"], phase="discussing")
+    real = handoffs.open_row
+
+    async def unseen(conn, agent_id):
+        return None
+
+    monkeypatch.setattr(handoffs, "open_row", unseen)
+    r = await post_handover(dsn, pool, c, ip=SOLO_IP, reason="x", epoch=None)
+    assert (r.status_code, r.json()["error"]["code"]) == (409, "handoff_open")
+    assert [row[:2] for row in await handoff_rows(pool, a0["id"])] == [("strong", "discussing")]
+    monkeypatch.setattr(handoffs, "open_row", real)
+    r = await post_handover(dsn, pool, c, ip=SOLO_IP, extend=True, reason=None, epoch=None)
+    assert (r.status_code, r.json()["error"]["code"]) == (409, "no_countdown")
+
+
+async def test_solo_insert_conflict_leaves_transaction_usable(pool, monkeypatch):
+    from agents_orchestrator.api import agent as agent_api
+    from agents_orchestrator.api.errors import ApiError
+    from agents_orchestrator.db import agents as agents_repo
+
+    c, a0 = await solo_session(pool)
+    await open_handoff(pool, c["id"], a0["id"], phase="discussing")
+
+    async def unseen(conn, agent_id):
+        return None
+
+    monkeypatch.setattr(handoffs, "open_row", unseen)
+    async with pool.connection() as conn:
+        agent = await agents_repo.get_agent(conn, a0["id"])
+        with pytest.raises(ApiError):
+            await agent_api._solo_handoff(conn, agent, "x")
+        cur = await conn.execute("SELECT 1")  # e.g. mark_handled after the conflict
+        assert await cur.fetchone() == (1,)

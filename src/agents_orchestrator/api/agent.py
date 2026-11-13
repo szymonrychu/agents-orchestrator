@@ -392,9 +392,10 @@ async def _solo_handoff(conn: Any, agent: agents_repo.Agent, text: str) -> None:
         for message_id in queued:
             await q.cancel_message(conn, message_id)
     try:
-        await handoffs.insert(
-            conn, agent.session_id, agent.id, "voluntary", "handed", handoff_text=text
-        )
+        async with conn.transaction():  # savepoint: a conflict leaves the request usable
+            await handoffs.insert(
+                conn, agent.session_id, agent.id, "voluntary", "handed", handoff_text=text
+            )
     except psycopg.errors.UniqueViolation:
         raise ApiError(409, "handoff_open", "a handoff was just opened") from None
 

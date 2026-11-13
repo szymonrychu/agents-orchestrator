@@ -1068,3 +1068,16 @@ def test_shutdown_notice_text():
     text = handoff_texts.shutdown_notice(2)
     assert "in about 2 minutes" in text
     assert "There is no extension." in text
+
+
+def test_shutdown_notice_minutes_round_up_with_minimum_one():
+    for notice, minutes in ((150, 3), (90, 2), (20, 1), (0, 1), (120, 2)):
+        objs = render.render_session(
+            make_session(),
+            make_settings(
+                agent_shutdown_notice_seconds=notice, agent_termination_grace_seconds=600
+            ),
+            TOKENS,
+        )
+        prompt = config_of(objs)["shutdown"]["handoff"]["notice_prompt"]
+        assert prompt == handoff_texts.shutdown_notice(minutes), notice
