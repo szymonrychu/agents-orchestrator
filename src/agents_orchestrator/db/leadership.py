@@ -424,11 +424,16 @@ async def leadership_pass(
         for req in await _all(
             conn,
             "SELECT id, kind, from_agent_id, to_agent_id, reason, epoch,"
-            " created_at < now() - make_interval(secs => CASE WHEN reason = 'rollout'"
+            " created_at < now() - make_interval(secs => CASE WHEN reason = ANY(%s)"
             "  THEN %s ELSE %s END) AS overdue"
             " FROM leadership_requests WHERE session_id = %s AND status = 'queued'"
             " ORDER BY id FOR UPDATE",
-            (policy.rollout_max_defer_seconds, policy.handover_max_wait_seconds, session_id),
+            (
+                list(handoffs.FORCED_REASONS),
+                policy.rollout_max_defer_seconds,
+                policy.handover_max_wait_seconds,
+                session_id,
+            ),
         ):
             if _waits_for_boundary(req, leader):
                 if _expired(req):

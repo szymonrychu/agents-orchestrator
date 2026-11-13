@@ -160,6 +160,30 @@ async def test_delivered_at_set_once(pool):
     assert row["delivered_at"] is None
 
 
+async def test_handoff_from_before_the_tenure_is_not_delivered(pool):
+    # M2: an undelivered row older than the predecessor's own leadership is stale
+    s, (a0, a1, _) = await _hive(pool)
+    await _lead(pool, s["id"], a0["id"], 1, "initial")
+    old = await _handoff(pool, s["id"], a0["id"], a1["id"], "stale handoff")
+    await _run(
+        pool,
+        "UPDATE agent_handoffs SET created_at = now() - interval '2 hours' WHERE id = %s",
+        (old,),
+    )
+    await _lead(pool, s["id"], a1["id"], 2, "handover: x", previous=a0["id"])
+    await _run(
+        pool,
+        "UPDATE session_leaders SET previous_since = now() - interval '1 hour'"
+        " WHERE session_id = %s",
+        (s["id"],),
+    )
+    await _deliver(pool)
+    [msg] = await _messages(pool, s["id"])
+    assert "stale handoff" not in msg["text"]
+    (row,) = await _rows(pool, "SELECT delivered_at FROM agent_handoffs WHERE id = %s", (old,))
+    assert row["delivered_at"] is None
+
+
 async def test_forced_move_gets_notice(pool):
     s, (a0, a1, _) = await _hive(pool)
     await _lead(pool, s["id"], a0["id"], 1, "initial")

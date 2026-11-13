@@ -1106,6 +1106,21 @@ async def test_limit_request_never_expires(pool):
     assert await decided(pool, rid) == ("applied", None)
 
 
+async def test_limit_request_uses_rollout_deferral_cap(pool):
+    # I1: a limit request waits for background work as long as rollout does, not 1800 s
+    c, (a0, a1, _) = await hive(pool)
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
+    await status(pool, a0["id"], "idle", 10, bg=True)
+    rid = await request(pool, c["id"], "handover", a0["id"], None, "limit", 3)
+    await age_request(pool, rid, 1800 + 60)
+    assert await lpass(pool, c["id"]) is None
+    got = await rows(pool, "SELECT status FROM leadership_requests WHERE id = %s", (rid,))
+    assert got[0]["status"] == "queued"
+    await age_request(pool, rid, 14400 + 60)
+    change = await lpass(pool, c["id"])
+    assert change is not None and change.agent_id == a1["id"]
+
+
 async def test_limit_request_is_not_voluntary(pool):
     # applying it opens no second row and no clear; the strong row moves on
     c, (a0, a1, _) = await hive(pool)

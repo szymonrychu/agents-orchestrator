@@ -28,6 +28,7 @@ ERROR_CHARS = 200
 HANDOVER_TURNS = 3
 _VOLUNTARY = "handover:"
 _FORCED_ROLLOUT = "rollout"
+_FORCED = (_FORCED_ROLLOUT, "limit")
 
 
 @dataclass(frozen=True)
@@ -45,15 +46,16 @@ def summary_of(reason: str) -> str | None:
     The reconciler's forced rollout request (`handover: rollout`) is a forced move."""
     if reason.startswith(_VOLUNTARY):
         text = reason[len(_VOLUNTARY) :].strip()
-        return None if text == _FORCED_ROLLOUT else text or None
+        return None if text in _FORCED else text or None
     return None
 
 
 def kind_of(reason: str) -> str:
-    """`handover` for a voluntary move, `rollout` for the reconciler's request, else the reason
+    """`handover` for a voluntary move, `rollout` or `limit` for a forced request, else the reason
     itself (`scale_down`, `leader_lost`, `user`, `initial`)."""
-    if reason == f"{_VOLUNTARY} {_FORCED_ROLLOUT}":
-        return _FORCED_ROLLOUT
+    for forced in _FORCED:
+        if reason == f"{_VOLUNTARY} {forced}":
+            return forced
     return "handover" if reason.startswith(_VOLUNTARY) else reason
 
 
@@ -86,9 +88,8 @@ def _one_line(text: str, limit: int) -> str:
 def _reason_label(header: Header) -> str:
     if header.summary is not None:
         return "handover"
-    if header.reason == f"{_VOLUNTARY} {_FORCED_ROLLOUT}":
-        return _FORCED_ROLLOUT
-    return _esc(header.reason)
+    kind = kind_of(header.reason)
+    return kind if kind in _FORCED else _esc(header.reason)
 
 
 def _call_line(data: Mapping[str, Any]) -> str:

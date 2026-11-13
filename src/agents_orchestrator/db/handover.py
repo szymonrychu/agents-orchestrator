@@ -191,13 +191,20 @@ async def deliver_handover(
         ).encode()
         notice = ht.notice_text(header, budget_bytes)
         # the predecessor's own handoff (graceful handover) leads the notice; marked delivered in
-        # this transaction so a later change never repeats it
+        # this transaction so a later change never repeats it. Only a row written during the
+        # predecessor's own tenure counts: an older undelivered one is stale.
         taken = await conn.execute(
             "UPDATE agent_handoffs SET delivered_at = now() WHERE id = ("
             " SELECT id FROM agent_handoffs WHERE agent_id = %s AND successor_agent_id = %s"
             " AND handoff_text IS NOT NULL AND delivered_at IS NULL"
+            " AND (%s::timestamptz IS NULL OR created_at >= %s)"
             " ORDER BY id DESC LIMIT 1) AND delivered_at IS NULL RETURNING handoff_text",
-            (row["previous_agent_id"], row["agent_id"]),
+            (
+                row["previous_agent_id"],
+                row["agent_id"],
+                row["previous_since"],
+                row["previous_since"],
+            ),
         )
         handoff = await taken.fetchone()
         if handoff is not None:
