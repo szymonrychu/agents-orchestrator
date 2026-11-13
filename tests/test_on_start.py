@@ -67,7 +67,7 @@ TAIL_TOOLS = [
 # plugin pin and remove it when the pin offers the tool (project room T-117 O9; project grants
 # T-120).
 PLUGIN_PENDING: set[str] = set()
-ALONE_TOOLS = ["me", *TAIL_TOOLS]
+ALONE_TOOLS = ["me", "leadership_handover", *TAIL_TOOLS]
 PROPOSAL = [
     "proposal_create",
     "proposal_revise",
@@ -583,7 +583,8 @@ def test_alone_session_allow_is_the_literal_e2e_list():
     pending ones included (the plugin pin only filters them at load, never from the allow list)."""
     allow = on_start.orchestrator_allow(SessionSpec(replicas=1))
     assert allow == [
-        "me", "sessions_list", "session_send", "init_scripts_get", "init_scripts_edit",
+        "me", "leadership_handover", "sessions_list", "session_send", "init_scripts_get",
+        "init_scripts_edit",
         "chat_rooms", "chat_send", "chat_react", "chat_status",
         "chat_notes_get", "chat_notes_update", "chat_skills_list", "chat_skills_get",
         "chat_skills_save", "chat_skills_delete",

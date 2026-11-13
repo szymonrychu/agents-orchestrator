@@ -434,6 +434,33 @@ async def test_solo_handed_enqueues_clear_then_return_after_session_cleared(env)
     assert len(await env.messages(a["id"], "handoff_return")) == 1
 
 
+async def test_solo_voluntary_row_clears_and_returns(env, dsn):
+    """The row the agent route opens for a solo voluntary handoff (T-256 step 8) is cleared by
+    the pass and its text comes back after the clear."""
+    from test_api_agent import client_for, headers, make_settings, set_ip
+
+    from agents_orchestrator.api.app import create_app
+
+    c, a = await env.solo(used=LOW)
+    await set_ip(env.pool, a["id"], "10.9.0.51")
+    async with client_for(create_app(make_settings(dsn), env.pool), "10.9.0.51") as http:
+        r = await http.post(
+            "/agent/v1/leadership/handover",
+            json={"reason": "voluntary handoff text"},
+            headers=headers(c["id"]),
+        )
+    assert r.status_code == 202, r.text
+    assert await env.step(c["id"]) == [f"clearing:{a['id']}"]
+    (cmd,) = await env.commands(a["id"])
+    await env.finish_command(cmd["id"], "done", {"response": {"id": "c1"}})
+    await env.cleared(c["id"], a["id"])
+    assert await env.step(c["id"]) == [f"returning:{a['id']}"]
+    (ret,) = await env.messages(a["id"], "handoff_return")
+    assert "voluntary handoff text" in ret["text"]
+    await env.run("UPDATE messages SET status = 'sent' WHERE id = %s", (ret["id"],))
+    assert await env.step(c["id"]) == [f"done:{a['id']}"]
+
+
 # ---------------------------------------------------------------- 4. discussing
 
 

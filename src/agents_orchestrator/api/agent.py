@@ -36,6 +36,7 @@ from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import events as events_repo
 from agents_orchestrator.db import (
     file_locks,
+    handoffs,
     leader_state,
     leadership,
     project_posts,
@@ -329,29 +330,81 @@ async def init_scripts_put(
     "/leadership/handover",
     status_code=202,
     response_model=schemas.LeadershipRequested,
-    summary="Hand leadership over (leader only)",
+    summary="Hand leadership over, extend the handoff countdown or hand a solo context off",
 )
 async def handover(
-    body: schemas.HandoverIn, agent: Caller, pool: Pool
+    body: schemas.HandoverIn, agent: Caller, pool: Pool, settings: Cfg
 ) -> schemas.LeadershipRequested:
-    """Queue a handover. The checks here fail fast; the dispatcher re-checks at apply time."""
+    """Queue a handover, extend the strong-limit countdown, or (solo agent) hand off its context.
+
+    The checks here fail fast; the dispatcher re-checks at apply time. A hive member is refused
+    in every branch; a solo agent has no leader to change, so its call is the voluntary handoff.
+    """
     async with pool.connection() as conn:
         session = await _session(conn, agent)
+        leader = None
+        if not session.spec.alone:
+            leader = await leadership.current_leader(conn, agent.session_id)
+            if leader is None or leader.agent_id != agent.id:
+                raise ApiError(
+                    409, "not_leader", "only the current leader can hand leadership over"
+                )
+        if body.extend:
+            deadline = await _extend_countdown(conn, agent, settings)
+            handled = await session_messaging.mark_handled(conn, agent.session_id, body.handled)
+            return schemas.LeadershipRequested(deadline_at=deadline, handled=handled)
+        assert body.reason is not None  # HandoverIn requires it unless extend
         if session.spec.alone:
-            raise ApiError(409, "alone", "a single-agent session has no leader to change")
-        leader = await leadership.current_leader(conn, agent.session_id)
-        if leader is None or leader.agent_id != agent.id:
-            raise ApiError(409, "not_leader", "only the current leader can hand leadership over")
-        if body.epoch != leader.epoch:
-            raise ApiError(
-                409, "stale_epoch", f"epoch {body.epoch} is not the current epoch {leader.epoch}"
-            )
-        to_id = await member_id(conn, agent.session_id, body.to) if body.to is not None else None
-        request_id = await leadership.insert_request(
-            conn, agent.session_id, "handover", agent.id, to_id, body.reason, body.epoch
-        )
+            await _solo_handoff(conn, agent, body.reason)
+            request_id = None
+        else:
+            assert leader is not None
+            request_id = await _hive_handover(conn, agent, leader, body)
         handled = await session_messaging.mark_handled(conn, agent.session_id, body.handled)
     return schemas.LeadershipRequested(request_id=request_id, handled=handled)
+
+
+async def _extend_countdown(conn: Any, agent: agents_repo.Agent, settings: Any) -> datetime:
+    row = await handoffs.extend(conn, agent.id, settings.handover_extension_seconds)
+    if row is not None:
+        assert row.deadline_at is not None
+        return row.deadline_at
+    open_row = await handoffs.open_row(conn, agent.id)
+    if open_row is not None and open_row.phase == "extended":
+        raise ApiError(409, "extension_used", "the countdown was already extended once")
+    raise ApiError(409, "no_countdown", "no handoff countdown is running that can be extended")
+
+
+async def _solo_handoff(conn: Any, agent: agents_repo.Agent, text: str) -> None:
+    """Open the solo agent's voluntary handoff already `handed`; a countdown or a pending request
+    is replaced (its queued messages cancelled), a row further along refuses."""
+    row = await handoffs.open_row(conn, agent.id)
+    if row is not None:
+        if row.phase not in ("notified", "extended", "requested"):
+            raise ApiError(409, "handoff_open", f"a handoff is already {row.phase}")
+        queued = await handoffs.queued_messages(conn, row.id)
+        if await handoffs.close(conn, row.id, "cancelled", "voluntary"):
+            for message_id in queued:
+                await q.cancel_message(conn, message_id)
+    await handoffs.insert(
+        conn, agent.session_id, agent.id, "voluntary", "handed", handoff_text=text
+    )
+
+
+async def _hive_handover(
+    conn: Any, agent: agents_repo.Agent, leader: Any, body: schemas.HandoverIn
+) -> int:
+    if body.epoch is None:
+        raise ApiError(422, "epoch_required", "a hive leader's handover needs the leader epoch")
+    if body.epoch != leader.epoch:
+        raise ApiError(
+            409, "stale_epoch", f"epoch {body.epoch} is not the current epoch {leader.epoch}"
+        )
+    to_id = await member_id(conn, agent.session_id, body.to) if body.to is not None else None
+    assert body.reason is not None
+    return await leadership.insert_request(
+        conn, agent.session_id, "handover", agent.id, to_id, body.reason, body.epoch
+    )
 
 
 class LockPaths(BaseModel):
