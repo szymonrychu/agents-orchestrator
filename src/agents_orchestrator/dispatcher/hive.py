@@ -52,6 +52,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import time
 import uuid
 from collections.abc import Callable
@@ -537,8 +538,11 @@ async def _push_countdown(
     row_id, phase, minutes = plan.countdown
     if leader is None or state.notice_sent.get(plan.session_id) == (row_id, phase):
         return 0
+    # decided at send time: a hive with no eligible successor follows the solo order (L3)
     text = strong_notice(
-        minutes, round(settings.handover_extension_seconds / 60), hive=not plan.solo
+        minutes,
+        math.ceil(settings.handover_extension_seconds / 60),
+        hive=not plan.solo and bool(plan.candidates),
     )
     client = client_factory(plan.session_id, leader["url"])
     outcome = await _note(client, leader["wrapper_session_id"], text, NOTICE_KEY)

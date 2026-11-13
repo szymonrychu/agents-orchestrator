@@ -27,15 +27,26 @@ session moves at most along its phases and every limit subject (hive leader or s
    message in the same transaction as the move to `returning`, so it is sent exactly once;
    `returning` closes `done returned` once that message is sent. A clear refused with
    `subagents_running` (the wrapper's 409, or its `command_failed` event) is queued again once
-   the agent has no background subagent, MAX_CLEAR_ATTEMPTS times in all; any other failure,
-   or the last attempt, closes the row `cancelled clear_failed` (solo order: after queuing the
-   return anyway); no new row opens for that agent until its context is cleared or compacted.
+   the agent has no background subagent, and an accepted clear with no `session_cleared` after
+   the agent sat idle `clear_timeout_seconds` (a wrapper restart lost it) is queued again,
+   MAX_CLEAR_ATTEMPTS times in all; any other failure, or the last attempt, closes the row
+   `cancelled clear_failed` (solo order: after queuing the return anyway, worded for a kept
+   context); no new row opens for that agent for `clear_failed_block_seconds` unless its
+   context is cleared or compacted first.
 
 Cancellation before `handed`: the session is closing (`session_closing`), the agent is gone or
-stopping (`shutdown`), it is no longer a limit subject (`not_leader`), or its context was
-compacted (a `compacting`/`compacted` event since the row opened, or the gauge fell below the
-weak level: `compacted`). Its queued notice or request message is cancelled with it
-(status-guarded). After `handed` only a closing session or a gone agent cancels a row.
+stopping (`shutdown`), it is no longer a limit subject (`not_leader`), its context was
+compacted (a `compacted` event since the row opened, or the gauge fell below the weak level:
+`compacted`) or cleared by anyone (a `session_cleared` event since the row opened: `cleared`).
+Its queued notice or request message is cancelled with it (status-guarded). After `handed`
+only a closing session or a gone agent cancels a row. Every enqueue happens in a savepoint
+with the guarded row update, so a lost update leaves no orphan message or command.
+
+The claim (`db/queue.py`) guards the same rules at dispatch time, since the message drain can
+run before the next pass: a notice or request whose row moved on, or whose agent's context was
+reset since the row opened, is cancelled instead of sent; and while a row is `requested`, or
+`clearing`/`returning` in the solo order, every other message for that agent waits, so the
+handoff, the clear and the return run with nothing in between.
 
 `shutdown` rows belong to the shutdown path and are left alone here.
 """
@@ -45,6 +56,7 @@ from __future__ import annotations
 import logging
 import math
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -64,7 +76,9 @@ log = logging.getLogger(__name__)
 LIMIT_REASON = "limit"
 MAX_CLEAR_ATTEMPTS = 5
 BEFORE_HANDED = ("notified", "extended", "requested")
-COMPACTION_EVENTS = ("compacting", "compacted")
+# A context reset before `handed` cancels the row, with this close reason. `compacting` alone is
+# not one: a PreCompact whose compaction then fails leaves the context as it was.
+RESET_EVENTS = {"compacted": "compacted", "session_cleared": "cleared"}
 
 
 @dataclass(frozen=True)
@@ -74,6 +88,8 @@ class HandoffPolicy:
     idle_proceed_seconds: int
     quiet_seconds: int
     quiet_cap_seconds: int
+    clear_timeout_seconds: int
+    clear_failed_block_seconds: int
 
     @classmethod
     def from_settings(cls, settings: Settings) -> HandoffPolicy:
@@ -83,6 +99,8 @@ class HandoffPolicy:
             settings.handover_idle_proceed_seconds,
             settings.handover_quiet_seconds,
             settings.handover_quiet_cap_seconds,
+            settings.handover_clear_timeout_seconds,
+            settings.handover_clear_failed_block_seconds,
         )
 
 
@@ -100,18 +118,23 @@ ORDER BY 1
 """
 
 # What the pass needs to know about one agent. `idle_long`: idle, no turn, no background
-# subagent, free for `idle` seconds. `compact_stale`: a compaction event newer than the gauge.
-# `clear_failed`: the agent's last row closed `clear_failed` and its context was neither
-# cleared nor compacted since (a new cycle would only fail the same way).
+# subagent, free for `idle` seconds. `compact_stale`: a compaction event newer than the last
+# `agent_status` write; the ingester writes that row on every event, so in production this
+# rarely holds and no reopen on the pre-compaction gauge relies on the wrapper's null `context`
+# event right after `compacted` (the gauge becomes unknown, which never reaches strong).
+# `clear_failed`: the agent's last row closed `clear_failed` less than `block` seconds ago and
+# its context was neither cleared nor compacted since (a new cycle would likely fail the same
+# way; after the block a later strong crossing starts one).
 _FACTS = f"""
 SELECT a.id, a.gone_at IS NOT NULL AS gone, {HOLDS_SESSION} AS live,
     s.stopping_since IS NOT NULL AS stopping,
     coalesce({BACKGROUND_BUSY}, false) AS background_busy,
     coalesce(s.state = 'idle' AND s.current_turn_id IS NULL AND NOT {BACKGROUND_BUSY}
         AND s.free_since <= now() - make_interval(secs => %(idle)s), false) AS idle_long,
-    EXISTS (SELECT 1 FROM events e WHERE e.agent_id = a.id AND e.type = ANY(%(compaction)s)
+    EXISTS (SELECT 1 FROM events e WHERE e.agent_id = a.id AND e.type = 'compacted'
         AND e.created_at > coalesce(s.updated_at, '-infinity')) AS compact_stale,
-    coalesce((SELECT h.close_reason = 'clear_failed' AND NOT EXISTS (
+    coalesce((SELECT h.close_reason = 'clear_failed'
+        AND h.closed_at > now() - make_interval(secs => %(block)s) AND NOT EXISTS (
             SELECT 1 FROM events e WHERE e.agent_id = a.id AND e.created_at > h.closed_at
             AND e.type = ANY(%(context_reset)s))
         FROM agent_handoffs h WHERE h.agent_id = a.id AND h.closed_at IS NOT NULL
@@ -144,17 +167,29 @@ FROM agent_handoffs h JOIN sessions c ON c.id = h.session_id
 WHERE h.id = %(row)s
 """
 
-_CLEAR_STATE = """
+# `timed_out`: the wrapper accepted the clear (`done`), yet the agent has sat idle, with no turn
+# and no background subagent, for `timeout` seconds since the accept with no `session_cleared`
+# (a wrapper or claude restart lost it). Measured from the later of the accept and the agent's
+# last free mark, since the wrapper runs /clear only after a running turn's Stop.
+_CLEAR_STATE = f"""
 SELECT k.status, k.result,
     EXISTS (SELECT 1 FROM events e WHERE e.agent_id = k.agent_id
         AND e.type = 'session_cleared' AND e.created_at >= k.created_at) AS cleared,
+    coalesce(k.status = 'done' AND s.state = 'idle' AND s.current_turn_id IS NULL
+        AND NOT {BACKGROUND_BUSY}
+        AND GREATEST(k.finished_at, s.free_since) <= now() - make_interval(secs => %(timeout)s),
+        false) AS timed_out,
     (SELECT coalesce(e.data->'record'->>'error', e.data->'record'->>'state', 'failed')
        FROM events e WHERE e.agent_id = k.agent_id AND e.type = 'command_failed'
          AND e.created_at >= k.created_at
          AND e.data->'record'->>'id' = k.result->'response'->>'id'
        ORDER BY e.id DESC LIMIT 1) AS wrapper_error
-FROM commands k WHERE k.id = %s
+FROM commands k LEFT JOIN agent_status s ON s.agent_id = k.agent_id WHERE k.id = %(command)s
 """
+
+
+class _Lost(Exception):
+    """A guarded update lost to a concurrent writer: roll back the savepoint's enqueue."""
 
 
 async def _one(conn: psycopg.AsyncConnection, query: str, params: Any) -> dict | None:
@@ -197,8 +232,8 @@ class _Pass:
             {
                 "agent": agent_id,
                 "idle": self.policy.idle_proceed_seconds,
-                "compaction": list(COMPACTION_EVENTS),
-                "context_reset": [*COMPACTION_EVENTS, "session_cleared"],
+                "block": self.policy.clear_failed_block_seconds,
+                "context_reset": list(RESET_EVENTS),
             },
         )
         return row or {
@@ -214,6 +249,31 @@ class _Pass:
     async def message(self, text: str, agent_id: uuid.UUID, notice: str) -> int:
         return await queue.enqueue_message(
             self.conn, self.session["id"], text, agent_id, lane="regular", notice=notice
+        )
+
+    async def guarded(self, work: Callable[[], Awaitable[bool]]) -> bool:
+        """Run `work` (enqueues plus the guarded row update it returns the outcome of) in a
+        savepoint: when the update loses, the enqueued message or command is rolled back with
+        it, so a lost race never leaves an orphan behind."""
+        try:
+            async with self.conn.transaction():
+                if not await work():
+                    raise _Lost
+        except _Lost:
+            return False
+        return True
+
+    def _pass_policy(self) -> leadership.PassPolicy:
+        return leadership.PassPolicy(
+            self.settings.default_auto_compact_pct,
+            self.settings.rollout_max_defer_seconds,
+            self.settings.handover_max_wait_seconds,
+        )
+
+    async def _has_successor(self, agent_id: uuid.UUID) -> bool:
+        policy = self._pass_policy()
+        return (
+            await leadership._successor(self.conn, self.session["id"], agent_id, policy) is not None
         )
 
     # ------------------------------------------------------------ 1. open
@@ -235,10 +295,13 @@ class _Pass:
             "notified",
             deadline_at=await self._in(self.policy.notify_seconds),
         )
+        # the wording is decided now: a hive whose leader is the only live agent follows the
+        # solo order (L3), so it is not promised a successor
+        moves = not subject["solo"] and await self._has_successor(agent_id)
         text = strong_notice(
             math.ceil(self.policy.notify_seconds / 60),
-            round(self.policy.extension_seconds / 60),
-            hive=not subject["solo"],
+            math.ceil(self.policy.extension_seconds / 60),
+            hive=moves,
         )
         await self.message(text, agent_id, "handoff_notice")
         log.info("handoff %s: agent %s notified (strong limit)", row.id, agent_id)
@@ -260,15 +323,17 @@ class _Pass:
         log.info("handoff %s: agent %s cancelled (%s)", row.id, row.agent_id, reason)
         self.out.append(f"cancelled:{row.agent_id}:{reason}")
 
-    async def _queued_messages(self, row: handoffs.Handoff) -> list[int]:
-        """The row's notice, request and return messages still queued."""
+    async def _queued_messages(
+        self, row: handoffs.Handoff, *, notices_only: bool = False
+    ) -> list[int]:
+        """The row's notice, request and return messages still queued (or its notices only)."""
         async with self.conn.cursor() as cur:
             await cur.execute(
                 "SELECT m.id FROM messages m, agent_handoffs h WHERE h.id = %s"
                 " AND m.status = 'queued' AND m.target_agent_id = h.agent_id"
-                " AND (m.id IN (h.request_message_id, h.return_message_id)"
+                " AND ((NOT %s AND m.id IN (h.request_message_id, h.return_message_id))"
                 "  OR (m.notice = 'handoff_notice' AND m.created_at >= h.created_at))",
-                (row.id,),
+                (row.id, notices_only),
             )
             return [r[0] for r in await cur.fetchall()]
 
@@ -282,15 +347,17 @@ class _Pass:
         )
         return level == "none"
 
-    async def _compacted_since(self, row: handoffs.Handoff) -> bool:
+    async def _reset_since(self, row: handoffs.Handoff) -> str | None:
+        """The close reason of a context reset (compaction or a /clear from anyone) since the
+        row opened, if any. Before `handed` the row has no clear of its own."""
         found = await _one(
             self.conn,
-            "SELECT 1 AS x FROM events e, agent_handoffs h WHERE h.id = %s"
+            "SELECT e.type FROM events e, agent_handoffs h WHERE h.id = %s"
             " AND e.agent_id = h.agent_id AND e.type = ANY(%s) AND e.created_at >= h.created_at"
-            " LIMIT 1",
-            (row.id, list(COMPACTION_EVENTS)),
+            " ORDER BY e.id LIMIT 1",
+            (row.id, list(RESET_EVENTS)),
         )
-        return found is not None
+        return RESET_EVENTS[found["type"]] if found is not None else None
 
     async def cancel_reason(
         self, row: handoffs.Handoff, subject: dict | None, facts: dict
@@ -305,7 +372,10 @@ class _Pass:
             return "shutdown"
         if subject is None:
             return "not_leader"
-        if await self._compacted_since(row) or self._below_weak(subject):
+        reset = await self._reset_since(row)
+        if reset is not None:
+            return reset
+        if self._below_weak(subject):
             return "compacted"
         return None
 
@@ -341,12 +411,21 @@ class _Pass:
             proceed = await self._notice_turn_ended(row)
         if not proceed:
             return
-        message_id = await self.message(STRONG_REQUEST, row.agent_id, "handoff_request")
-        if await handoffs.advance(
-            self.conn, row.id, [row.phase], "requested", request_message_id=message_id
-        ):
-            log.info("handoff %s: agent %s asked for its handoff", row.id, row.agent_id)
-            self.out.append(f"requested:{row.agent_id}")
+
+        async def request() -> bool:
+            message_id = await self.message(STRONG_REQUEST, row.agent_id, "handoff_request")
+            return await handoffs.advance(
+                self.conn, row.id, [row.phase], "requested", request_message_id=message_id
+            )
+
+        if not await self.guarded(request):
+            return
+        # a notice still queued (the agent was busy all countdown) would arrive right before
+        # the request: drop it
+        for message_id in await self._queued_messages(row, notices_only=True):
+            await queue.cancel_message(self.conn, message_id)
+        log.info("handoff %s: agent %s asked for its handoff", row.id, row.agent_id)
+        self.out.append(f"requested:{row.agent_id}")
 
     async def _notice_turn_ended(self, row: handoffs.Handoff) -> bool:
         found = await _one(
@@ -412,12 +491,7 @@ class _Pass:
         if status == "rejected":
             await self.clear(row, ["handed"])  # still the leader: the solo order
             return
-        policy = leadership.PassPolicy(
-            self.settings.default_auto_compact_pct,
-            self.settings.rollout_max_defer_seconds,
-            self.settings.handover_max_wait_seconds,
-        )
-        if await leadership._successor(self.conn, session_id, row.agent_id, policy) is None:
+        if not await self._has_successor(row.agent_id):
             await self.clear(row, ["handed"])  # L3: the only live agent
             return
         await leadership.insert_request(
@@ -427,8 +501,11 @@ class _Pass:
         self.out.append(f"handover_requested:{row.agent_id}")
 
     async def clear(self, row: handoffs.Handoff, from_phases: list[str]) -> None:
-        command_id = await queue.enqueue_command(self.conn, row.agent_id, "clear")
-        if await handoffs.start_clear(self.conn, row.id, from_phases, command_id):
+        async def start() -> bool:
+            command_id = await queue.enqueue_command(self.conn, row.agent_id, "clear")
+            return await handoffs.start_clear(self.conn, row.id, from_phases, command_id)
+
+        if await self.guarded(start):
             log.info("handoff %s: clearing agent %s", row.id, row.agent_id)
             label = "clear_retry" if from_phases == ["clearing"] else "clearing"
             self.out.append(f"{label}:{row.agent_id}")
@@ -447,7 +524,11 @@ class _Pass:
             await self.clear(row, ["discussing"])
 
     async def clearing(self, row: handoffs.Handoff, facts: dict) -> None:
-        state = await _one(self.conn, _CLEAR_STATE, (row.clear_command_id,))
+        state = await _one(
+            self.conn,
+            _CLEAR_STATE,
+            {"command": row.clear_command_id, "timeout": self.policy.clear_timeout_seconds},
+        )
         if state is None:
             error: str | None = "command_missing"
         elif state["cleared"]:
@@ -457,17 +538,20 @@ class _Pass:
             error = str((state["result"] or {}).get("error") or "failed")
         elif state["status"] == "cancelled":
             error = "cancelled"
-        else:
+        elif state["wrapper_error"] is not None:
             error = state["wrapper_error"]
+        else:
+            error = "clear_timeout" if state["timed_out"] else None
         if error is None:
             return
-        if "subagents_running" in error and row.clear_attempts < MAX_CLEAR_ATTEMPTS:
+        retryable = "subagents_running" in error or error == "clear_timeout"
+        if retryable and row.clear_attempts < MAX_CLEAR_ATTEMPTS:
             if not facts["background_busy"]:
                 await self.clear(row, ["clearing"])
             return
         log.info("handoff %s: clear of agent %s failed (%s)", row.id, row.agent_id, error)
         if row.discuss_since is None:
-            await self.send_return(row)  # the solo agent still gets its handoff
+            await self.send_return(row, cleared=False)  # the solo agent still gets its handoff
         await self.cancel(row, "clear_failed", messages=False)
 
     async def cleared(self, row: handoffs.Handoff) -> None:
@@ -481,15 +565,21 @@ class _Pass:
         if await self.send_return(row, cleared=True):
             self.out.append(f"returning:{row.agent_id}")
 
-    async def send_return(self, row: handoffs.Handoff, *, cleared: bool = False) -> bool:
-        """Queue the handoff back to the agent with the move to `returning` (exactly once)."""
-        message_id = await self.message(
-            strong_return(row.handoff_text), row.agent_id, "handoff_return"
-        )
-        fields: dict[str, Any] = {"return_message_id": message_id}
-        if cleared:
-            fields["cleared_at"] = await self._in(0)
-        return await handoffs.advance(self.conn, row.id, ["clearing"], "returning", **fields)
+    async def send_return(self, row: handoffs.Handoff, *, cleared: bool) -> bool:
+        """Queue the handoff back to the agent with the move to `returning` (exactly once).
+
+        `cleared` False: the clear failed and the agent kept its context (other wording)."""
+
+        async def send() -> bool:
+            message_id = await self.message(
+                strong_return(row.handoff_text, cleared=cleared), row.agent_id, "handoff_return"
+            )
+            fields: dict[str, Any] = {"return_message_id": message_id}
+            if cleared:
+                fields["cleared_at"] = await self._in(0)
+            return await handoffs.advance(self.conn, row.id, ["clearing"], "returning", **fields)
+
+        return await self.guarded(send)
 
     async def returning(self, row: handoffs.Handoff) -> None:
         msg = await _one(

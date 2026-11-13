@@ -213,6 +213,12 @@ class Settings(BaseSettings):
     handover_idle_proceed_seconds: int = Field(default=60, ge=0, le=600)
     handover_quiet_seconds: int = Field(default=60, ge=0, le=3600)
     handover_quiet_cap_seconds: int = Field(default=600, ge=60, le=7200)
+    #: A `clear` the wrapper accepted counts as lost (retried, then `clear_failed`) once the
+    #: agent sat idle this long after the accept with no `session_cleared` (the wrapper's own
+    #: command timeout is 60 s); after `clear_failed` no new strong cycle opens for the agent
+    #: for this long unless its context is cleared or compacted first.
+    handover_clear_timeout_seconds: int = Field(default=180, ge=30, le=3600)
+    handover_clear_failed_block_seconds: int = Field(default=1800, ge=0, le=86400)
     #: Rollout: seconds the leader has, once only its pod is outdated, to hand over at a natural
     #: boundary before the reconciler queues the forced `rollout` handover; and the cap after
     #: which background work stops holding a rollout (members since the rollout began, the

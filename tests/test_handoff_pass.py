@@ -10,12 +10,19 @@ import uuid
 
 import psycopg
 import pytest
-from factories import insert_agent, insert_event, insert_session, insert_turn, set_agent_status
+from factories import (
+    insert_agent,
+    insert_event,
+    insert_message,
+    insert_session,
+    insert_turn,
+    set_agent_status,
+)
 from fakes import fake_wrapper
 from fakes.fake_wrapper import FakeWrapper
 from psycopg.rows import dict_row
 
-from agents_orchestrator.db import handoffs, leadership
+from agents_orchestrator.db import handoffs, leadership, queue
 from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE
 from agents_orchestrator.dispatcher import Dispatcher, handoff, hive
 from agents_orchestrator.handoff_texts import RETURN_EMPTY, strong_notice
@@ -755,5 +762,284 @@ async def test_dispatcher_runs_the_pass_after_leadership(env):
         d._handoff_at = None
         await d._drain_leadership()
         assert (await env.row(a["id"])).phase == "requested"
+    finally:
+        await d.aclose()
+
+
+# ---------------------------------------------------------------- fix round 1 (review of step 6)
+
+
+async def _claim(env) -> int | None:
+    async with env.pool.connection() as conn:
+        claim = await queue.claim_and_pick(conn)
+    return claim.message_id if claim is not None else None
+
+
+async def _status(env, message_id: int) -> str:
+    (row,) = await env.rows("SELECT status FROM messages WHERE id = %s", (message_id,))
+    return row["status"]
+
+
+@pytest.mark.parametrize("event", ["compacted", "session_cleared"])
+async def test_claim_never_sends_request_into_reset_context(env, event):
+    # C1: the request is queued, the context is reset, and the message drain runs before any
+    # handoff pass: the claim itself must refuse the request
+    c, a = await env.solo()
+    req = await env.to_requested(c["id"], a["id"])
+    await insert_event(env.pool, c["id"], a["id"], type=event, data={})
+    assert await _claim(env) is None
+    assert await _status(env, req["id"]) == "cancelled"
+
+
+@pytest.mark.parametrize("event", ["compacted", "session_cleared"])
+async def test_claim_never_sends_notice_into_reset_context(env, event):
+    c, a = await env.solo()
+    await env.step(c["id"])
+    (notice,) = await env.messages(a["id"], "handoff_notice")
+    await insert_event(env.pool, c["id"], a["id"], type=event, data={})
+    assert await _claim(env) is None
+    assert await _status(env, notice["id"]) == "cancelled"
+
+
+async def test_claim_cancels_handoff_messages_of_a_moved_row(env):
+    # an orphan request (its row is not requested) and a notice of a closed row never go out
+    c, a = await env.solo()
+    await env.step(c["id"])
+    orphan = await insert_message(
+        env.pool,
+        c["id"],
+        text="orphan",
+        target_agent_id=a["id"],
+        lane="regular",
+        notice="handoff_request",
+    )
+    (notice,) = await env.messages(a["id"], "handoff_notice")
+    await env.run(
+        "UPDATE agent_handoffs SET phase = 'cancelled', close_reason = 'test', closed_at = now()"
+        " WHERE agent_id = %s",
+        (a["id"],),
+    )
+    assert await _claim(env) is None
+    assert await _status(env, orphan["id"]) == "cancelled"
+    assert await _status(env, notice["id"]) == "cancelled"
+
+
+async def test_moving_to_requested_cancels_the_queued_notice(env):
+    # M4: a notice still queued at the deadline is not delivered right before the request
+    c, a = await env.solo()
+    await env.step(c["id"])
+    await env.past_deadline(a["id"])
+    assert await env.step(c["id"]) == [f"requested:{a['id']}"]
+    (notice,) = await env.messages(a["id"], "handoff_notice")
+    assert notice["status"] == "cancelled"
+
+
+async def test_solo_holds_other_messages_from_request_until_return_sent(env):
+    # I1: work queued behind the request waits for the clear and the return
+    c, a = await env.solo()
+    await env.step(c["id"])
+    (notice,) = await env.messages(a["id"], "handoff_notice")
+    await env.turn_ends(notice, a["id"], "ok", ago=1)
+    await env.past_deadline(a["id"])
+    await env.step(c["id"])
+    (req,) = await env.messages(a["id"], "handoff_request")
+    work = await insert_message(env.pool, c["id"], text="user work", lane="regular")
+    targeted = await insert_message(
+        env.pool, c["id"], text="peer work", target_agent_id=a["id"], lane="regular"
+    )
+    assert await _claim(env) == req["id"]
+    assert await _claim(env) is None  # requested: held
+    await env.turn_ends(req, a["id"], "handoff text")
+    assert await env.step(c["id"]) == [f"handed:{a['id']}", f"clearing:{a['id']}"]
+    assert await _claim(env) is None  # clearing: held
+    (cmd,) = await env.commands(a["id"])
+    await env.finish_command(cmd["id"], "done", {"response": {"id": "c1"}})
+    await env.cleared(c["id"], a["id"])
+    assert await env.step(c["id"]) == [f"returning:{a['id']}"]
+    (ret,) = await env.messages(a["id"], "handoff_return")
+    assert await _claim(env) == ret["id"]  # the return goes first
+    assert await _claim(env) is None
+    await env.run("UPDATE messages SET status = 'sent' WHERE id = %s", (ret["id"],))
+    assert await env.step(c["id"]) == [f"done:{a['id']}"]
+    assert {await _claim(env), await _claim(env)} == {work["id"], targeted["id"]}
+
+
+async def test_hive_member_messages_are_not_held(env):
+    # only the subject's own messages wait; a member keeps getting its targeted work
+    c, (a0, a1, _) = await env.hive()
+    await env.to_requested(c["id"], a0["id"])
+    member = await insert_message(
+        env.pool, c["id"], text="member", target_agent_id=a1["id"], lane="regular"
+    )
+    claimed = {await _claim(env), await _claim(env)}
+    assert member["id"] in claimed
+
+
+async def _clearing(env) -> tuple[dict, dict, dict]:
+    c, a = await env.solo()
+    req = await env.to_requested(c["id"], a["id"])
+    await env.turn_ends(req, a["id"], "text")
+    await env.step(c["id"])
+    (cmd,) = await env.commands(a["id"])
+    return c, a, cmd
+
+
+async def test_clearing_without_session_cleared_times_out_and_retries(env):
+    # I2: the wrapper accepted /clear and then restarted: no session_cleared, no command_failed
+    c, a, cmd = await _clearing(env)
+    await env.finish_command(cmd["id"], "done", {"response": {"id": "c1"}})
+    await env.idle_for(a["id"], 600)
+    assert await env.step(c["id"]) == []  # accepted just now: not yet
+    await env.run(
+        "UPDATE commands SET finished_at = now() - make_interval(secs => %s) WHERE id = %s",
+        (env.settings.handover_clear_timeout_seconds + 1, cmd["id"]),
+    )
+    await env.run(
+        "UPDATE agent_status SET state = 'busy', current_turn_id = 't' WHERE agent_id = %s",
+        (a["id"],),
+    )
+    assert await env.step(c["id"]) == []  # a running turn may still be ahead of the clear
+    await env.idle_for(a["id"], env.settings.handover_clear_timeout_seconds + 1)
+    assert await env.step(c["id"]) == [f"clear_retry:{a['id']}"]
+    row = await env.row(a["id"])
+    assert row.clear_attempts == 2
+    # the last attempt times out too: closed clear_failed, the solo agent still gets its return
+    await env.run("UPDATE agent_handoffs SET clear_attempts = 5 WHERE agent_id = %s", (a["id"],))
+    last_cmd = (await env.commands(a["id"]))[-1]
+    await env.run(
+        "UPDATE commands SET status = 'done', finished_at = now() - make_interval(secs => %s)"
+        " WHERE id = %s",
+        (env.settings.handover_clear_timeout_seconds + 1, last_cmd["id"]),
+    )
+    assert await env.step(c["id"]) == [f"cancelled:{a['id']}:clear_failed"]
+    assert len(await env.messages(a["id"], "handoff_return")) == 1
+
+
+async def test_external_clear_during_countdown_cancels_cleared(env):
+    # I3: a /clear by the user or the agent while the notice counts down
+    c, a = await env.solo()
+    await env.step(c["id"])
+    await env.cleared(c["id"], a["id"])
+    assert await env.step(c["id"]) == [f"cancelled:{a['id']}:cleared"]
+    (notice,) = await env.messages(a["id"], "handoff_notice")
+    assert notice["status"] == "cancelled"
+    last = await env.last_row(a["id"])
+    assert (last["phase"], last["close_reason"]) == ("cancelled", "cleared")
+
+
+async def test_compacting_alone_does_not_cancel(env):
+    # M2: a PreCompact whose compaction then fails leaves the context as it was
+    c, a = await env.solo()
+    await env.step(c["id"])
+    await insert_event(env.pool, c["id"], a["id"], type="compacting", data={})
+    await insert_event(env.pool, c["id"], a["id"], type="compact_failed", data={})
+    assert await env.step(c["id"]) == []
+    assert (await env.row(a["id"])).phase == "notified"
+
+
+async def test_clear_failed_block_expires(env):
+    # concern 2: after clear_failed a later strong crossing starts a new cycle once the block ends
+    c, a, cmd = await _clearing(env)
+    await env.finish_command(cmd["id"], "failed", {"error": "agent has no session"})
+    assert await env.step(c["id"]) == [f"cancelled:{a['id']}:clear_failed"]
+    assert await env.step(c["id"]) == []
+    await env.run(
+        "UPDATE agent_handoffs SET closed_at = now() - make_interval(secs => %s)"
+        " WHERE agent_id = %s",
+        (env.settings.handover_clear_failed_block_seconds + 1, a["id"]),
+    )
+    assert await env.step(c["id"]) == [f"notified:{a['id']}"]
+
+
+def test_clear_settings_defaults_and_bounds(dsn):
+    s = Settings(database_url=dsn, master_key=KEY)
+    assert (s.handover_clear_timeout_seconds, s.handover_clear_failed_block_seconds) == (
+        180,
+        1800,
+    )
+    with pytest.raises(ValueError):
+        Settings(database_url=dsn, master_key=KEY, handover_clear_timeout_seconds=5)
+
+
+async def test_clear_failed_return_text_says_not_cleared(env):
+    # M8
+    c, a, cmd = await _clearing(env)
+    await env.finish_command(cmd["id"], "failed", {"error": "agent has no session"})
+    await env.step(c["id"])
+    (ret,) = await env.messages(a["id"], "handoff_return")
+    assert "cleared just now" not in ret["text"]
+    assert ret["text"].endswith("\n\ntext")
+
+
+async def test_single_live_hive_notice_promises_no_successor(env):
+    # concern 3: the wording is decided at send time from whether a successor exists
+    c, (a0, a1) = await env.hive(2)
+    await env.run("UPDATE agents SET ready = false WHERE id = %s", (a1["id"],))
+    await env.step(c["id"])
+    (notice,) = await env.messages(a0["id"], "handoff_notice")
+    assert "successor" not in notice["text"]
+    c2, (b0, _, _) = await env.hive()
+    await env.step(c2["id"])
+    (notice2,) = await env.messages(b0["id"], "handoff_notice")
+    assert "leadership moves to a successor" in notice2["text"]
+
+
+async def test_single_live_hive_note_promises_no_successor(env, fake):
+    clients: list[WrapperClient] = []
+
+    def factory(session_id, url) -> WrapperClient:
+        client = WrapperClient(url, TOKEN)
+        clients.append(client)
+        return client
+
+    creator = WrapperClient(fake.base_url, TOKEN)
+    try:
+        wsid = (await creator.create_session(f"h{uuid.uuid4().hex[:4]}", "/w")).wrapper_session_id
+    finally:
+        await creator.aclose()
+    c, (a0, a1) = await env.hive(2)
+    await env.run(
+        "UPDATE agents SET wrapper_session_id = %s, url = %s WHERE id = %s",
+        (wsid, fake.base_url, a0["id"]),
+    )
+    await env.run("UPDATE agents SET ready = false WHERE id = %s", (a1["id"],))
+    await env.step(c["id"])
+    state = hive.HiveState()
+    try:
+        await hive.push_once(env.pool, env.settings, factory, state, clock=lambda: 1000.0)
+        notes = [n["text"] for n in fake.notes.get(wsid, []) if n["key"] == "handoff_notice"]
+        assert len(notes) == 1
+        assert "successor" not in notes[0]
+    finally:
+        for client in clients:
+            await client.aclose()
+
+
+def test_notice_text_without_extension_and_rounding():
+    # M7: no extension offer when extensions are off; minutes round up like the countdown
+    text = strong_notice(5, 0, hive=False)
+    assert "Need more time" not in text
+    assert text.endswith("update your task and todo.")
+
+
+async def test_notice_extension_minutes_round_up(env, dsn):
+    env.settings = Settings(database_url=dsn, master_key=KEY, handover_extension_seconds=150)
+    env.policy = handoff.HandoffPolicy.from_settings(env.settings)
+    c, a = await env.solo()
+    await env.step(c["id"])
+    (notice,) = await env.messages(a["id"], "handoff_notice")
+    assert "once for 3 more minutes" in notice["text"]
+
+
+async def test_failing_session_list_does_not_stop_message_drain(env, monkeypatch):
+    # M6
+    d = Dispatcher(env.pool, env.settings)
+
+    async def boom(conn):
+        raise RuntimeError("db hiccup")
+
+    monkeypatch.setattr(handoff, "handoff_sessions", boom)
+    try:
+        await d._drain_leadership()  # logged, not raised
     finally:
         await d.aclose()

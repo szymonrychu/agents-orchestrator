@@ -192,8 +192,13 @@ class Dispatcher:
         if self._handoff_at is not None and now - self._handoff_at < HANDOFF_INTERVAL_SECONDS:
             return
         self._handoff_at = now
-        sessions = await handoff.handoff_sessions(conn)
-        await conn.commit()
+        try:
+            sessions = await handoff.handoff_sessions(conn)
+            await conn.commit()
+        except Exception:
+            log.exception("handoff session list failed")  # never holds up the message drain
+            await conn.rollback()
+            return
         for session_id in sessions:
             try:
                 moved = await handoff.handoff_pass(

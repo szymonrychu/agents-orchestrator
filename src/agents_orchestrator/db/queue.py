@@ -471,6 +471,55 @@ async def _claim_notice(conn: psycopg.AsyncConnection, session_id: uuid.UUID) ->
     return await _dispatch(conn, row["id"], pick) if pick is not None else None
 
 
+# The agent's open handoff row (graceful handover, T-256), read at claim time: the dispatcher's
+# handoff pass runs at most every few seconds, so the claim guards the rules it cannot wait for.
+# `reset`: the agent's context was compacted or cleared since the row opened.
+_HANDOFF_ROW = """
+SELECT h.phase, h.request_message_id, h.return_message_id, h.discuss_since IS NULL AS solo,
+    EXISTS (SELECT 1 FROM events e WHERE e.agent_id = h.agent_id
+        AND e.type IN ('compacted', 'session_cleared') AND e.created_at >= h.created_at) AS reset
+FROM agent_handoffs h
+WHERE h.agent_id = %s AND h.trigger <> 'shutdown'
+  AND h.phase IN ('notified', 'extended', 'requested', 'handed', 'discussing', 'clearing',
+                  'returning')
+"""
+_HANDOFF_COUNTDOWN = ("notified", "extended")
+_HANDOFF_SOLO_HOLD = ("clearing", "returning")
+
+
+async def _handoff_gate(
+    conn: psycopg.AsyncConnection,
+    rows: dict[uuid.UUID, dict | None],
+    message_id: int,
+    notice: str | None,
+    agent_id: uuid.UUID,
+) -> str:
+    """`send`, `hold` or `cancel` for a message about to go to `agent_id` (`rows` caches the
+    agent's open handoff row for one scan).
+
+    A `handoff_notice` or `handoff_request` goes out only while its row is still in that phase
+    (the request: it is the row's own) and the context was not reset since the row opened, so
+    neither ever reaches a compacted or cleared context; otherwise it is cancelled. While the
+    row is `requested`, or `clearing`/`returning` in the solo order, every other message for
+    the agent waits, so the handoff, the clear and the return run with nothing in between.
+    """
+    if agent_id not in rows:
+        rows[agent_id] = await _one(conn, _HANDOFF_ROW, (agent_id,))
+    row = rows[agent_id]
+    if notice in ("handoff_notice", "handoff_request"):
+        if row is None or row["reset"]:
+            return "cancel"
+        if notice == "handoff_notice":
+            return "send" if row["phase"] in _HANDOFF_COUNTDOWN else "cancel"
+        own = row["phase"] == "requested" and row["request_message_id"] == message_id
+        return "send" if own else "cancel"
+    if row is None or message_id in (row["request_message_id"], row["return_message_id"]):
+        return "send"
+    if row["phase"] == "requested" or (row["solo"] and row["phase"] in _HANDOFF_SOLO_HOLD):
+        return "hold"
+    return "send"
+
+
 async def _start_prompt_gate(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> dict | None:
     """The session's live start prompt message (queued, dispatching or verifying), if any.
 
@@ -507,11 +556,12 @@ async def _claim_in_session(conn: psycopg.AsyncConnection, session_id: uuid.UUID
     pending = leader_id is not None and await _handover_pending(conn, session_id)
     held = {"idle": pending, "live": pending}
     stalled: set[str] = set()
+    handoff_rows: dict[uuid.UUID, dict | None] = {}
     after = 0
     while True:
         rows = await _all(
             conn,
-            "SELECT id, target_agent_id, lane,"
+            "SELECT id, target_agent_id, lane, notice,"
             " (not_before IS NOT NULL AND not_before > now()) AS waiting"
             " FROM messages WHERE session_id = %s AND status = 'queued' AND id > %s"
             " AND (%s::bigint IS NULL OR id = %s) ORDER BY id LIMIT %s",
@@ -533,6 +583,8 @@ async def _claim_in_session(conn: psycopg.AsyncConnection, session_id: uuid.UUID
                     else:
                         held[cls] = True  # leader routing: hold untargeted, targeted still flow
                     continue
+                if leader_id is None and held[cls]:
+                    continue  # an earlier untargeted message waits on a handoff
                 if leader_id is not None:
                     # Leader-only routing: an untargeted message is the leader's. A gone leader
                     # does not fail it; it waits for the leadership pass to elect a successor.
@@ -551,6 +603,15 @@ async def _claim_in_session(conn: psycopg.AsyncConnection, session_id: uuid.UUID
                         {"id": row["id"]},
                     )
                     continue
+            if target is not None:
+                gate = await _handoff_gate(conn, handoff_rows, row["id"], row["notice"], target)
+                if gate == "cancel":
+                    await cancel_message(conn, row["id"])
+                    continue
+                if gate == "hold":
+                    if row["target_agent_id"] is None:
+                        held[cls] = True  # the leader's handoff holds the untargeted FIFO
+                    continue
             if not await _lock_queued(conn, row["id"]):
                 continue
             pick = await _pick_agent(conn, session_id, target, lane)
@@ -562,6 +623,13 @@ async def _claim_in_session(conn: psycopg.AsyncConnection, session_id: uuid.UUID
                         held[cls] = True  # the leader is busy: the untargeted FIFO holds
                     continue
                 continue  # a busy or booting target does not block later messages (D23 d)
+            if (
+                target is None
+                and await _handoff_gate(conn, handoff_rows, row["id"], row["notice"], pick.agent_id)
+                != "send"
+            ):
+                held[cls] = True  # the picked (solo) agent is mid-handoff: untargeted wait
+                continue
             return await _dispatch(conn, row["id"], pick)
 
 
