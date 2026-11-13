@@ -6,6 +6,7 @@ import asyncio
 import json
 import time
 import uuid
+from dataclasses import dataclass
 
 import psycopg
 import pytest
@@ -509,10 +510,12 @@ async def test_tenure_and_rollout_hold_back_the_weak_note(env):
     await env.push()
     assert env.notes(a0, DUE) == []  # no weak note at the strong limit
     async with env.pool.connection() as conn:
-        subjects = await hive.limit_subjects(conn, env.settings)
-    assert [(x.session_id, x.level) for x in subjects if x.session_id == c["id"]] == [
-        (c["id"], "strong")
-    ]
+        rows = await hive._subject_rows(conn)
+    assert [
+        (r["session_id"], hive._row_level(r, env.settings)[1])
+        for r in rows
+        if r["session_id"] == c["id"]
+    ] == [(c["id"], "strong")]
 
 
 async def test_hive_state_and_due_text_carry_budget_and_rule(env):
@@ -636,9 +639,23 @@ async def test_weak_note_texts(env):
     assert WELCOME not in text and "Candidates" not in text
 
 
+@dataclass(frozen=True)
+class Subject:
+    session_id: uuid.UUID
+    agent_id: uuid.UUID
+    solo: bool
+    level: str
+
+
 async def _subjects(env) -> dict:
     async with env.pool.connection() as conn:
-        return {x.session_id: x for x in await hive.limit_subjects(conn, env.settings)}
+        rows = await hive._subject_rows(conn)
+    return {
+        r["session_id"]: Subject(
+            r["session_id"], r["agent_id"], r["solo"], hive._row_level(r, env.settings)[1]
+        )
+        for r in rows
+    }
 
 
 async def test_solo_agent_gets_weak_note(env):
@@ -672,6 +689,37 @@ async def test_solo_agent_gets_weak_note(env):
     await env.push()
     assert env.notes(s0, DUE) and len(env.notes(s0, DUE)) == 1
     assert (await _subjects(env))[solo["id"]].level == "none"
+
+
+async def test_solo_start_ignores_gauge_older_than_the_clear(env):
+    solo = await insert_session(env.pool, spec={})
+    s0 = await env.agent(solo["id"], 0)
+    gauge = dict(state="idle", context_window_tokens=1000000)
+    await set_agent_status(env.pool, s0["id"], context_used_tokens=50000, context_pct=5, **gauge)
+    await env.push()
+    assert await env.limits_start(s0["id"]) == 50000
+    await set_agent_status(env.pool, s0["id"], context_used_tokens=160000, context_pct=16, **gauge)
+    await insert_event(
+        env.pool, solo["id"], s0["id"], type="session_cleared", data={}, ts=await env.ago(0)
+    )
+    await env.push()  # the gauge still shows the pre-clear context: not a start
+    assert await env.limits_start(s0["id"]) == 50000
+    await set_agent_status(env.pool, s0["id"], context_used_tokens=30000, context_pct=3, **gauge)
+    await env.push()
+    assert await env.limits_start(s0["id"]) == 30000
+
+
+async def test_weak_to_strong_sends_no_second_note(env):
+    c, (a0, a1, a2) = await env.hive(spec={"auto_compact_pct": 72})
+    await set_agent_status(env.pool, a0["id"], state="idle", context_pct=58)
+    await env.push()
+    assert len(env.notes(a0, DUE)) == 1
+    await set_agent_status(env.pool, a0["id"], state="idle", context_pct=70)  # strong
+    await env.push()
+    assert len(env.notes(a0, DUE)) == 1
+    await set_agent_status(env.pool, a0["id"], state="idle", context_pct=58)  # weak again
+    await env.push()
+    assert len(env.notes(a0, DUE)) == 1  # same key: still not resent
 
 
 async def test_member_never_gets_a_note(env):
