@@ -174,11 +174,13 @@ async def close(
     row_id: int,
     phase: Literal["done", "cancelled"],
     reason: str,
+    from_phases: Sequence[str] = OPEN_PHASES,
 ) -> bool:
+    """Close a row still in one of `from_phases` (any open phase by default); True when closed."""
     cur = await conn.execute(
         "UPDATE agent_handoffs SET phase = %s, close_reason = %s, closed_at = now()"
         " WHERE id = %s AND phase = ANY(%s)",
-        (phase, reason, row_id, list(OPEN_PHASES)),
+        (phase, reason, row_id, list(from_phases)),
     )
     return cur.rowcount == 1
 

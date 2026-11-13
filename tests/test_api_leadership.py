@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from dataclasses import replace
 
 import psycopg
 import pytest
@@ -292,3 +293,19 @@ async def test_hive_leader_handover_unchanged(pool, dsn):
     assert r.status_code == 202, r.text
     body = r.json()
     assert isinstance(body["request_id"], int) and body["deadline_at"] is None
+
+
+async def test_solo_voluntary_does_not_cancel_row_that_moved_on(pool, dsn, monkeypatch):
+    c, a0 = await solo_session(pool)
+    row = await open_handoff(pool, c["id"], a0["id"], phase="discussing")
+    real = handoffs.open_row
+
+    async def stale(conn, agent_id):
+        found = await real(conn, agent_id)
+        return replace(found, phase="requested")  # as read just before a concurrent pass
+
+    monkeypatch.setattr(handoffs, "open_row", stale)
+    r = await post_handover(dsn, pool, c, ip=SOLO_IP, reason="x", epoch=None)
+    assert (r.status_code, r.json()["error"]["code"]) == (409, "handoff_open")
+    assert [row_[:2] for row_ in await handoff_rows(pool, a0["id"])] == [("strong", "discussing")]
+    assert row.id

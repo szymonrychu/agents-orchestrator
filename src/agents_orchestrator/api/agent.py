@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 from xml.sax.saxutils import escape
 
+import psycopg.errors
 from fastapi import APIRouter, Depends, Header, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
@@ -375,20 +376,27 @@ async def _extend_countdown(conn: Any, agent: agents_repo.Agent, settings: Any) 
     raise ApiError(409, "no_countdown", "no handoff countdown is running that can be extended")
 
 
+SOLO_REPLACEABLE = ("notified", "extended", "requested")
+
+
 async def _solo_handoff(conn: Any, agent: agents_repo.Agent, text: str) -> None:
     """Open the solo agent's voluntary handoff already `handed`; a countdown or a pending request
     is replaced (its queued messages cancelled), a row further along refuses."""
     row = await handoffs.open_row(conn, agent.id)
     if row is not None:
-        if row.phase not in ("notified", "extended", "requested"):
+        if row.phase not in SOLO_REPLACEABLE:
             raise ApiError(409, "handoff_open", f"a handoff is already {row.phase}")
         queued = await handoffs.queued_messages(conn, row.id)
-        if await handoffs.close(conn, row.id, "cancelled", "voluntary"):
-            for message_id in queued:
-                await q.cancel_message(conn, message_id)
-    await handoffs.insert(
-        conn, agent.session_id, agent.id, "voluntary", "handed", handoff_text=text
-    )
+        if not await handoffs.close(conn, row.id, "cancelled", "voluntary", SOLO_REPLACEABLE):
+            raise ApiError(409, "handoff_open", "a handoff just moved on")
+        for message_id in queued:
+            await q.cancel_message(conn, message_id)
+    try:
+        await handoffs.insert(
+            conn, agent.session_id, agent.id, "voluntary", "handed", handoff_text=text
+        )
+    except psycopg.errors.UniqueViolation:
+        raise ApiError(409, "handoff_open", "a handoff was just opened") from None
 
 
 async def _hive_handover(
