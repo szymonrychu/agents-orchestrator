@@ -472,6 +472,35 @@ async def test_discussing_clears_after_quiet(env):
     assert await env.messages(a0["id"], "handoff_return") == []  # hive order: no return
 
 
+async def test_voluntary_handover_clears_after_quiet_window(env):
+    # m890 end to end: request -> apply (no clear) -> discussing -> quiet 60 s -> clear -> done
+    c, (a0, a1, a2) = await env.hive(used=LOW)
+    async with env.pool.connection() as conn:
+        await leadership.insert_request(
+            conn, c["id"], "handover", a0["id"], a1["id"], "context full", 1
+        )
+        change = await leadership.leadership_pass(conn, c["id"])
+    assert change is not None and change.agent_id == a1["id"]
+    assert await env.commands(a0["id"]) == []  # the apply no longer clears
+    row = await env.row(a0["id"])
+    assert (row.trigger, row.phase, row.handoff_text) == ("voluntary", "discussing", "context full")
+    assert await env.step(c["id"]) == []  # the window is open
+    assert await env.commands(a0["id"]) == []
+    for a in (a0, a1, a2):
+        await env.idle_for(a["id"], 61)
+    await env.run(
+        "UPDATE sessions SET created_at = now() - interval '1 day',"
+        " last_update_at = now() - interval '1 day' WHERE id = %s",
+        (c["id"],),
+    )
+    await env.run("UPDATE agent_handoffs SET discuss_since = now() - interval '61 seconds'")
+    assert await env.step(c["id"]) == [f"clearing:{a0['id']}"]
+    (cmd,) = await env.commands(a0["id"])
+    await env.finish_command(cmd["id"], "done", {"response": {"id": "c1"}})
+    await env.cleared(c["id"], a0["id"])
+    assert await env.step(c["id"]) == [f"done:{a0['id']}"]
+
+
 async def test_discussing_clears_at_cap_while_busy(env):
     c, (a0, a1, a2) = await _discussing(env, quiet_ago=700, since_ago=300)
     await env.run("UPDATE agent_status SET state = 'busy' WHERE agent_id = %s", (a1["id"],))
@@ -524,7 +553,10 @@ async def test_leadership_change_cancels_not_leader(env):
     async with env.pool.connection() as conn:
         await leadership.insert_request(conn, c["id"], "user", None, a1["id"], "test", None)
         await leadership.leadership_pass(conn, c["id"])
-    assert await env.step(c["id"]) == [f"cancelled:{a0['id']}:not_leader"]
+    # the leadership pass closes the row in the move's transaction (handoffs.on_leader_moved)
+    assert await env.step(c["id"]) == []
+    last = await env.last_row(a0["id"])
+    assert (last["phase"], last["close_reason"]) == ("cancelled", "not_leader")
     (notice,) = await env.messages(a0["id"], "handoff_notice")
     assert notice["status"] == "cancelled"
 

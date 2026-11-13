@@ -19,8 +19,11 @@ whichever commits first.
 `session_leaders` and every other request decision belong to the dispatcher, through
 `leadership_pass`, which runs under the per-session claim lock of `db/queue.py` so a leader
 change and a message claim never interleave. A voluntary handover (an agent `handover` other
-than `rollout`) also queues a `clear` command for the ex-leader in the same transaction (Q13);
-forced moves and user overrides never do.
+than `rollout` and `limit`) opens a `discussing` row for the ex-leader in the same transaction
+and a strong row moves to `discussing` (`handoffs.on_leader_moved`); the handoff pass clears the
+ex-leader after the discussion window (m890, Q13), never the apply. The forced `limit` request is
+like `rollout`: never expires, never withdrawn into a clear. Forced moves and user overrides
+close a strong row still before its discussion `not_leader`.
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ from typing import Any
 import psycopg
 from psycopg.rows import dict_row
 
+from agents_orchestrator.db import handoffs
 from agents_orchestrator.db.eligibility import (
     BACKGROUND_BUSY,
     DEAD,
@@ -43,7 +47,7 @@ from agents_orchestrator.db.eligibility import (
     SUCCESSOR_ORDER,
 )
 from agents_orchestrator.db.pool import notify
-from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE, enqueue_command
+from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE
 
 CHANNEL = "leadership_requested"
 LEADER_CHANGED_CHANNEL = "leader_changed"
@@ -366,14 +370,15 @@ def _waits_for_boundary(req: dict, leader: dict | None) -> bool:
 
 def _expired(req: dict) -> bool:
     """A voluntary handover still waiting past its deadline (only the leader's turn can hold it
-    then) is rejected `expired`. The reconciler's `rollout` request never expires: it waits for
-    the turn, which no deadline interrupts."""
+    then) is rejected `expired`. The forced `rollout` and `limit` requests never expire: they wait
+    for the turn, which no deadline interrupts."""
     return _voluntary(req) and req["overdue"]
 
 
 def _voluntary(req: dict) -> bool:
-    """The leader chose to hand over: a `handover` other than the reconciler's `rollout`."""
-    return req["kind"] == "handover" and req["reason"] != "rollout"
+    """The leader chose to hand over: a `handover` other than the forced `rollout` (the
+    reconciler's) and `limit` (the strong-limit handoff's)."""
+    return req["kind"] == "handover" and req["reason"] not in handoffs.FORCED_REASONS
 
 
 async def leadership_pass(
@@ -436,9 +441,9 @@ async def leadership_pass(
                 previous = leader["agent_id"] if leader else None
                 change = await _set_leader(conn, session_id, target, reason, previous)
                 leader = await _leader(conn, session_id)
-                if previous is not None and _voluntary(req):
-                    # Q13: the ex-leader starts clean (`/clear`) at its true boundary.
-                    await enqueue_command(conn, previous, "clear")
+                if previous is not None:
+                    # m890: no clear here; the ex-leader gets a discussion window first.
+                    await handoffs.on_leader_moved(conn, session_id, previous, target, req)
 
         # 3. Scale-down: a leader whose ordinal a scale-down removes moves at once (no turn
         # boundary: a leaving agent is already out of routing), to the successor among the
@@ -450,6 +455,9 @@ async def leadership_pass(
             if picked is not None:
                 change = await _set_leader(
                     conn, session_id, picked, "scale_down", leader["agent_id"]
+                )
+                await handoffs.on_leader_moved(
+                    conn, session_id, leader["agent_id"], picked, {"kind": "scale_down"}
                 )
                 leader = await _leader(conn, session_id)
 
@@ -467,6 +475,9 @@ async def leadership_pass(
                 if picked is not None:
                     change = await _set_leader(
                         conn, session_id, picked, "leader_lost", leader["agent_id"]
+                    )
+                    await handoffs.on_leader_moved(
+                        conn, session_id, leader["agent_id"], picked, {"kind": "leader_lost"}
                     )
                     leader = await _leader(conn, session_id)
             elif leader["unready_since"] is None:

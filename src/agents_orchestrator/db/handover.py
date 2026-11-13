@@ -190,6 +190,20 @@ async def deliver_handover(
             output_chars=output_chars,
         ).encode()
         notice = ht.notice_text(header, budget_bytes)
+        # the predecessor's own handoff (graceful handover) leads the notice; marked delivered in
+        # this transaction so a later change never repeats it
+        taken = await conn.execute(
+            "UPDATE agent_handoffs SET delivered_at = now() WHERE id = ("
+            " SELECT id FROM agent_handoffs WHERE agent_id = %s AND successor_agent_id = %s"
+            " AND handoff_text IS NOT NULL AND delivered_at IS NULL"
+            " ORDER BY id DESC LIMIT 1) AND delivered_at IS NULL RETURNING handoff_text",
+            (row["previous_agent_id"], row["agent_id"]),
+        )
+        handoff = await taken.fetchone()
+        if handoff is not None:
+            notice = (
+                f"Handoff from {header.predecessor_pod} (written by it):\n{handoff[0]}\n\n{notice}"
+            )
         await enqueue_message(
             conn,
             session_id,

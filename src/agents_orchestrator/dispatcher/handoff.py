@@ -329,16 +329,7 @@ class _Pass:
     async def _queued_messages(
         self, row: handoffs.Handoff, *, notices_only: bool = False
     ) -> list[int]:
-        """The row's notice, request and return messages still queued (or its notices only)."""
-        async with self.conn.cursor() as cur:
-            await cur.execute(
-                "SELECT m.id FROM messages m, agent_handoffs h WHERE h.id = %s"
-                " AND m.status = 'queued' AND m.target_agent_id = h.agent_id"
-                " AND ((NOT %s AND m.id IN (h.request_message_id, h.return_message_id))"
-                "  OR (m.notice = 'handoff_notice' AND m.created_at >= h.created_at))",
-                (row.id, notices_only),
-            )
-            return [r[0] for r in await cur.fetchall()]
+        return await handoffs.queued_messages(self.conn, row.id, notices_only=notices_only)
 
     def _below_weak(self, subject: dict) -> bool:
         used, pct = subject["context_used_tokens"], subject["context_pct"]

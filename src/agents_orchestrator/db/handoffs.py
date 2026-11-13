@@ -18,6 +18,8 @@ from typing import Any, Literal
 import psycopg
 from psycopg.rows import dict_row
 
+from agents_orchestrator.db import queue
+
 Phase = Literal[
     "notified",
     "extended",
@@ -223,6 +225,21 @@ async def countdown(
     return (row[0], row[1], row[2]) if row else None
 
 
+async def queued_messages(
+    conn: psycopg.AsyncConnection, row_id: int, *, notices_only: bool = False
+) -> list[int]:
+    """The row's notice, request and return messages still queued (or its notices only)."""
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT m.id FROM messages m, agent_handoffs h WHERE h.id = %s"
+            " AND m.status = 'queued' AND m.target_agent_id = h.agent_id"
+            " AND ((NOT %s AND m.id IN (h.request_message_id, h.return_message_id))"
+            "  OR (m.notice = 'handoff_notice' AND m.created_at >= h.created_at))",
+            (row_id, notices_only),
+        )
+        return [r[0] for r in await cur.fetchall()]
+
+
 async def limits_start(conn: psycopg.AsyncConnection, agent_id: uuid.UUID) -> int | None:
     cur = await conn.execute(
         "SELECT start_context_tokens FROM agent_limits WHERE agent_id = %s", (agent_id,)
@@ -240,3 +257,74 @@ async def set_limits_start(
         " SET start_context_tokens = EXCLUDED.start_context_tokens, since = now()",
         (agent_id, tokens),
     )
+
+
+# Phases before the discussion: a leader that moves while its row is in one of them carries the
+# row on to `discussing`, or closes it when the move was not its own handover.
+_PRE_DISCUSSION = ("notified", "extended", "requested", "handed")
+# Reasons of the forced handover requests (the reconciler's rollout, the strong-limit handoff's
+# limit): no leader's judgment, so no handoff text from them and they never expire.
+FORCED_REASONS = ("rollout", "limit")
+
+
+async def on_leader_moved(
+    conn: psycopg.AsyncConnection,
+    session_id: uuid.UUID,
+    previous: uuid.UUID,
+    successor: uuid.UUID,
+    req: dict[str, Any],
+) -> None:
+    """The leadership pass moved the lead from `previous` to `successor` (same transaction).
+
+    `req` is the applied request (`kind`, `reason`); a move that is not a leader's own
+    `handover` (`user`, `scale_down`, `leader_lost`: pass a dict with that `kind`) closes a row
+    still before its discussion `cancelled not_leader`. A leader's own handover moves such a row
+    to `discussing` (`discuss_since` now, the successor recorded, the agent's own handoff text
+    kept, else the request reason), or, with no row and a voluntary reason (not `rollout` or
+    `limit`), opens a `voluntary` row already in `discussing` with the reason as its text. The
+    ex-leader is cleared by the handoff pass after the discussion, never here (m890). A shutdown
+    row belongs to the shutdown path and is left alone."""
+    row = await open_row(conn, previous)
+    if row is not None and row.trigger == "shutdown":
+        return
+    if req["kind"] != "handover":
+        closed = (
+            row is not None
+            and row.phase in _PRE_DISCUSSION
+            and await close(conn, row.id, "cancelled", "not_leader")
+        )
+        if closed and row is not None:
+            for message_id in await queued_messages(conn, row.id):
+                await queue.cancel_message(conn, message_id)
+        return
+    text = None if req["reason"] in FORCED_REASONS else req["reason"] or None
+    now = (await (await conn.execute("SELECT now()")).fetchone())[0]  # type: ignore[index]
+    if row is None:
+        if text is not None:
+            row = await insert(
+                conn, session_id, previous, "voluntary", "discussing", handoff_text=text
+            )
+            await advance(
+                conn,
+                row.id,
+                ["discussing"],
+                "discussing",
+                discuss_since=now,
+                successor_agent_id=successor,
+            )
+        return
+    if row.phase not in _PRE_DISCUSSION:
+        return
+    if (
+        await advance(
+            conn,
+            row.id,
+            [row.phase],
+            "discussing",
+            discuss_since=now,
+            successor_agent_id=successor,
+            handoff_text=row.handoff_text if row.handoff_text is not None else text,
+        )
+        and row.request_message_id is not None
+    ):
+        await queue.cancel_message(conn, row.request_message_id)  # no-op once it was claimed
