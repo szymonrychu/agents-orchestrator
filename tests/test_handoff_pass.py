@@ -1043,3 +1043,88 @@ async def test_failing_session_list_does_not_stop_message_drain(env, monkeypatch
         await d._drain_leadership()  # logged, not raised
     finally:
         await d.aclose()
+
+
+# ---------------------------------------------------------------- fix round 2
+
+
+@pytest.mark.parametrize("status", ["queued", "running"])
+async def test_clear_command_never_finished_times_out(env, status):
+    # N1: the dispatcher died between claiming the clear and completing it (running), or never
+    # claimed it (queued): the row must not hang in clearing, holding the solo agent's messages
+    c, a, cmd = await _clearing(env)
+    stale = env.settings.handover_clear_timeout_seconds + 1
+    await env.run(
+        "UPDATE commands SET status = %s,"
+        " started_at = CASE WHEN %s = 'running' THEN now() END WHERE id = %s",
+        (status, status, cmd["id"]),
+    )
+    await env.idle_for(a["id"], 600)
+    assert await env.step(c["id"]) == []  # queued or claimed just now: not yet
+    await env.run(
+        "UPDATE commands SET created_at = now() - make_interval(secs => %s),"
+        " started_at = started_at - make_interval(secs => %s) WHERE id = %s",
+        (stale, stale, cmd["id"]),
+    )
+    assert await env.step(c["id"]) == [f"clear_retry:{a['id']}"]
+    first, retry = await env.commands(a["id"])
+    # the lost command is finished, so it can never run after the retry (or after the return)
+    assert first["status"] == ("cancelled" if status == "queued" else "failed")
+    assert retry["status"] == "queued"
+    # the last attempt is lost too: closed clear_failed, the solo agent still gets its return
+    await env.run("UPDATE agent_handoffs SET clear_attempts = 5 WHERE agent_id = %s", (a["id"],))
+    await env.run(
+        "UPDATE commands SET status = %s, created_at = now() - make_interval(secs => %s),"
+        " started_at = CASE WHEN %s = 'running' THEN now() - make_interval(secs => %s) END"
+        " WHERE id = %s",
+        (status, stale, status, stale, retry["id"]),
+    )
+    assert await env.step(c["id"]) == [f"cancelled:{a['id']}:clear_failed"]
+    assert len(await env.messages(a["id"], "handoff_return")) == 1
+
+
+async def _hive_note(env, fake, *, successor_used: int) -> tuple[str, str]:
+    """The strong notice message and keyed note of a two-agent hive whose member is at
+    `successor_used` tokens."""
+    clients: list[WrapperClient] = []
+
+    def factory(session_id, url) -> WrapperClient:
+        client = WrapperClient(url, TOKEN)
+        clients.append(client)
+        return client
+
+    creator = WrapperClient(fake.base_url, TOKEN)
+    try:
+        wsid = (await creator.create_session(f"h{uuid.uuid4().hex[:4]}", "/w")).wrapper_session_id
+    finally:
+        await creator.aclose()
+    c, (a0, a1) = await env.hive(2)
+    await env.run(
+        "UPDATE agents SET wrapper_session_id = %s, url = %s WHERE id = %s",
+        (wsid, fake.base_url, a0["id"]),
+    )
+    await env.gauge(a1["id"], successor_used)
+    await env.step(c["id"])
+    (message,) = await env.messages(a0["id"], "handoff_notice")
+    try:
+        await hive.push_once(env.pool, env.settings, factory, hive.HiveState(), clock=lambda: 1.0)
+        (note,) = [n["text"] for n in fake.notes.get(wsid, []) if n["key"] == "handoff_notice"]
+    finally:
+        for client in clients:
+            await client.aclose()
+    return message["text"], note
+
+
+async def test_hive_note_with_successor_keeps_the_clause(env, fake):
+    # N3: the positive case of the keyed note
+    message, note = await _hive_note(env, fake, successor_used=LOW)
+    assert "successor" in message
+    assert "successor" in note
+
+
+async def test_hive_note_and_message_agree_on_successor_without_headroom(env, fake):
+    # N3: a ready member without headroom is still the successor `handed()` picks, so the note
+    # promises it as the message does
+    message, note = await _hive_note(env, fake, successor_used=STRONG)
+    assert "successor" in message
+    assert "successor" in note

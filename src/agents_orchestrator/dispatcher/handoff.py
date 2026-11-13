@@ -62,6 +62,7 @@ from typing import Any
 
 import psycopg
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 from agents_orchestrator.db import handoffs, leadership, queue
 from agents_orchestrator.db.eligibility import BACKGROUND_BUSY, HOLDS_SESSION, background_busy
@@ -167,17 +168,19 @@ FROM agent_handoffs h JOIN sessions c ON c.id = h.session_id
 WHERE h.id = %(row)s
 """
 
-# `timed_out`: the wrapper accepted the clear (`done`), yet the agent has sat idle, with no turn
-# and no background subagent, for `timeout` seconds since the accept with no `session_cleared`
-# (a wrapper or claude restart lost it). Measured from the later of the accept and the agent's
-# last free mark, since the wrapper runs /clear only after a running turn's Stop.
+# `timed_out`: the agent has sat idle, with no turn and no background subagent, for `timeout`
+# seconds with no `session_cleared` since the clear was accepted (`done`: a wrapper or claude
+# restart lost it), claimed (`running`: the dispatcher died before completing it) or queued (no
+# dispatcher claimed it). Measured from the later of that mark and the agent's last free mark,
+# since the wrapper runs /clear only after a running turn's Stop.
 _CLEAR_STATE = f"""
 SELECT k.status, k.result,
     EXISTS (SELECT 1 FROM events e WHERE e.agent_id = k.agent_id
         AND e.type = 'session_cleared' AND e.created_at >= k.created_at) AS cleared,
-    coalesce(k.status = 'done' AND s.state = 'idle' AND s.current_turn_id IS NULL
-        AND NOT {BACKGROUND_BUSY}
-        AND GREATEST(k.finished_at, s.free_since) <= now() - make_interval(secs => %(timeout)s),
+    coalesce(k.status IN ('queued', 'running', 'done') AND s.state = 'idle'
+        AND s.current_turn_id IS NULL AND NOT {BACKGROUND_BUSY}
+        AND GREATEST(coalesce(k.finished_at, k.started_at, k.created_at), s.free_since)
+            <= now() - make_interval(secs => %(timeout)s),
         false) AS timed_out,
     (SELECT coalesce(e.data->'record'->>'error', e.data->'record'->>'state', 'failed')
        FROM events e WHERE e.agent_id = k.agent_id AND e.type = 'command_failed'
@@ -544,6 +547,8 @@ class _Pass:
             error = "clear_timeout" if state["timed_out"] else None
         if error is None:
             return
+        if error == "clear_timeout":
+            await self.drop_lost_clear(row.clear_command_id)
         retryable = "subagents_running" in error or error == "clear_timeout"
         if retryable and row.clear_attempts < MAX_CLEAR_ATTEMPTS:
             if not facts["background_busy"]:
@@ -553,6 +558,17 @@ class _Pass:
         if row.discuss_since is None:
             await self.send_return(row, cleared=False)  # the solo agent still gets its handoff
         await self.cancel(row, "clear_failed", messages=False)
+
+    async def drop_lost_clear(self, command_id: int | None) -> None:
+        """Finish a clear that timed out still queued (cancelled) or running (failed),
+        status-guarded, so it never runs after its retry or the return; a late completion of a
+        running one then changes nothing."""
+        await self.conn.execute(
+            "UPDATE commands SET finished_at = now(), result = %s,"
+            " status = CASE status WHEN 'queued' THEN 'cancelled' ELSE 'failed' END"
+            " WHERE id = %s AND status IN ('queued', 'running')",
+            (Jsonb({"error": "clear_timeout"}), command_id),
+        )
 
     async def cleared(self, row: handoffs.Handoff) -> None:
         if row.discuss_since is not None:  # hive order: nothing comes back

@@ -351,6 +351,9 @@ class _Plan:
     solo: bool = False
     # the leader's strong row while it counts down: (row id, phase, minutes left)
     countdown: tuple[int, str, int] | None = None
+    # while it counts down: a successor exists (`leadership._successor`, the one the handoff
+    # pass and `handed()` use, so the note promises what the notice message promised)
+    successor: bool = False
 
     @property
     def receivers(self) -> list[dict[str, Any]]:
@@ -429,6 +432,15 @@ async def _read(
         )
         outcomes = await cur.fetchall()
     countdown = await handoffs.countdown(conn, leader["agent_id"])
+    successor = countdown is not None and (
+        await leadership._successor(
+            conn,
+            cid,
+            leader["agent_id"],
+            leadership.PassPolicy(default_auto_compact_pct=settings.default_auto_compact_pct),
+        )
+        is not None
+    )
     typed = SessionSpec.model_validate(spec, context=legacy_context(session.get("secret_versions")))
     return _Plan(
         session_id=cid,
@@ -450,6 +462,7 @@ async def _read(
         candidates=candidates,
         rollout=rollout if rollout.get("leader_since") else None,
         countdown=countdown,
+        successor=successor,
     )
 
 
@@ -542,7 +555,7 @@ async def _push_countdown(
     text = strong_notice(
         minutes,
         math.ceil(settings.handover_extension_seconds / 60),
-        hive=not plan.solo and bool(plan.candidates),
+        hive=not plan.solo and plan.successor,
     )
     client = client_factory(plan.session_id, leader["url"])
     outcome = await _note(client, leader["wrapper_session_id"], text, NOTICE_KEY)
