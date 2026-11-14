@@ -666,6 +666,25 @@ async def test_background_subagent_blocks_fallback(pool):
     assert await _discard(pool) == [s["id"]]
 
 
+async def test_tool_activity_after_ask_releases_inactivity_close(pool):
+    s, a = await _session(pool)
+    await _shift(pool, s["id"], 14405)
+    assert await _close(pool) == [s["id"]]
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE agent_status SET activity_at = now() - interval '1 hour' WHERE agent_id = %s",
+            (a["id"],),
+        )
+    assert await _release(pool) == []
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE agent_status SET activity_at = now() WHERE agent_id = %s", (a["id"],)
+        )
+    assert await _discard(pool, grace=0) == []
+    assert await _release(pool) == [s["id"]]
+    assert (await _row(pool, s["id"]))["close_requested_at"] is None
+
+
 async def test_agent_update_releases_inactivity_close(pool):
     s, _ = await _session(pool)
     await _shift(pool, s["id"], 14405)
