@@ -317,6 +317,18 @@ async def set_background(
     )
 
 
+async def mark_activity(conn: psycopg.AsyncConnection, agent_id: uuid.UUID, at: Timestamp) -> None:
+    """Record tool or subagent activity reported at `at` (the event's wrapper time). The stamp
+    only moves forward, so a late or replayed event never moves it back; the inactivity quiet
+    clock reads it."""
+    await _ensure_row(conn, agent_id)
+    await conn.execute(
+        "UPDATE agent_status SET activity_at=GREATEST(activity_at, %s::timestamptz),"
+        " updated_at=now() WHERE agent_id=%s",
+        (at, agent_id),
+    )
+
+
 async def set_compaction(conn: psycopg.AsyncConnection, agent_id: uuid.UUID, at: Timestamp) -> None:
     """Record a compaction reported at `at` (the event's own wrapper time, never the ingest
     time). compaction_at only moves forward, so a late or replayed event keeps its old time."""

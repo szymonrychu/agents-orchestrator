@@ -594,7 +594,9 @@ async def discard_session(
         target = await _writable_target(conn, slug, caller)
         if target.id == caller.id:
             raise ApiError(422, "own_session", "a session cannot discard itself")
-        return await sessions_api.discard(conn, target.id, settings, force=force)
+        return await sessions_api.discard(
+            conn, target.id, settings, force=force, by=f"session {caller.slug}"
+        )
 
 
 # ---------------------------------------------------------------- restart (O8)
