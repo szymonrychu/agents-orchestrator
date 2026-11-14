@@ -84,6 +84,8 @@ class Session:
     inactivity_reminded_at: datetime | None = None
     close_kind: str | None = None
     close_deadline_at: datetime | None = None
+    # when the autoclose lifetime was last asked; a kept session gets a full lifetime from it
+    autoclose_asked_at: datetime | None = None
     # set by a forced discard (DELETE ...?force=true): owed pre-discard hooks are abandoned
     discard_forced_at: datetime | None = None
     # the project it belongs to (projects.slug); moved by set_project, never by a spec change
@@ -129,6 +131,7 @@ def _from_row(row: dict[str, Any]) -> Session:
         inactivity_reminded_at=row["inactivity_reminded_at"],
         close_kind=row["close_kind"],
         close_deadline_at=row["close_deadline_at"],
+        autoclose_asked_at=row["autoclose_asked_at"],
         discard_forced_at=row["discard_forced_at"],
         project=row["project"],
         extra_projects=tuple(row["extra_projects"]),
@@ -450,7 +453,7 @@ async def lock_active(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> S
     return await _lock_active(conn, session_id)
 
 
-CLOSE_KINDS = ("self", "inactivity")
+CLOSE_KINDS = ("self", "inactivity", "autoclose")
 
 
 async def request_close(

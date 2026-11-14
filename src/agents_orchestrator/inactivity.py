@@ -9,9 +9,11 @@ from agents_orchestrator.spec import SessionSpec
 
 NOTICE_REMINDER = "inactivity_reminder"
 NOTICE_CLOSE = "inactivity_close"
+NOTICE_AUTOCLOSE = "autoclose"
 # The web recognises the notices in the chat log by these prefixes.
 REMINDER_PREFIX = "Orchestrator notice (inactivity reminder):"
 CLOSE_PREFIX = "Orchestrator notice (inactivity limit):"
+AUTOCLOSE_PREFIX = "Orchestrator notice (session lifetime):"
 
 
 @dataclass(frozen=True)
