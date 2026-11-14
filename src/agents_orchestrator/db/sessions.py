@@ -624,7 +624,8 @@ _CLOSE_PREDICATE = f"""
 # signal the quiet clock counts) or by an inbound message that is not a notice and came after it:
 # created after it, or queued behind its close notice (a message whose transaction began before
 # the close and waited on the row lock carries an earlier `created_at`, but a later id than the
-# notice inserted under that lock). An autoclose is a lifetime: only Keep session or a self-close ends it.
+# notice inserted under that lock). An autoclose is a lifetime: only Keep session or a self-close
+# ends it.
 _INACTIVITY_CLOSE_CANCELLED = """
     s.close_kind = 'inactivity' AND (
         s.last_update_at > s.close_requested_at
