@@ -1461,3 +1461,72 @@ async def test_no_handoff_request_dispatched_to_stopping_agent(env):
     assert await _status(env, req["id"]) == "cancelled"
     # no new countdown opens while stopping
     assert await env.step(c2["id"]) == []
+
+
+# ---------------------------------------------------------------- final review fix round
+
+
+async def test_single_live_hive_leader_not_reopened_on_pre_clear_gauge(env):
+    # I1: after an L3 clear the leader's gauge still shows the old context until the wrapper
+    # reports again; it must read as no gauge (no new strong row) and the weak baseline resets
+    c, (a0, a1) = await env.hive(2)
+    await env.run("UPDATE agents SET ready = false WHERE id = %s", (a1["id"],))
+    (before,) = await env.rows(
+        "SELECT start_context_tokens FROM session_leaders WHERE session_id = %s", (c["id"],)
+    )
+    assert before["start_context_tokens"] is not None
+    req = await env.to_requested(c["id"], a0["id"])
+    await env.turn_ends(req, a0["id"], "alone")
+    assert await env.step(c["id"]) == [f"handed:{a0['id']}", f"clearing:{a0['id']}"]
+    (cmd,) = await env.commands(a0["id"])
+    await env.finish_command(cmd["id"], "done", {"response": {"id": "c1"}})
+    await env.cleared(c["id"], a0["id"])
+    assert await env.step(c["id"]) == [f"returning:{a0['id']}"]
+    (ret,) = await env.messages(a0["id"], "handoff_return")
+    await env.run("UPDATE messages SET status = 'sent' WHERE id = %s", (ret["id"],))
+    assert await env.step(c["id"]) == [f"done:{a0['id']}"]
+    assert await env.step(c["id"]) == []  # the strong gauge predates the clear
+    (after,) = await env.rows(
+        "SELECT start_context_tokens FROM session_leaders WHERE session_id = %s", (c["id"],)
+    )
+    assert after["start_context_tokens"] is None
+    (session,) = await env.rows(
+        "SELECT id, slug, spec, status FROM sessions WHERE id = %s", (c["id"],)
+    )
+    async with env.pool.connection() as conn:
+        plan = await hive._read(conn, session, env.settings)
+    assert plan is not None and plan.fill_start is None  # not recorded from the stale gauge
+    await env.gauge(a0["id"], LOW)  # the first reading after the clear
+    async with env.pool.connection() as conn:
+        plan = await hive._read(conn, session, env.settings)
+    assert plan is not None and plan.fill_start == LOW
+
+
+async def test_priority_message_is_not_held_by_a_requested_row(env):
+    # I2: the requested hold lasts as long as the agent's running turn; a priority message (the
+    # user interrupting on purpose) goes through, regular work still waits for the handoff
+    c, a = await env.solo()
+    req = await env.to_requested(c["id"], a["id"])
+    assert await _claim(env) == req["id"]
+    regular = await insert_message(
+        env.pool, c["id"], text="later", target_agent_id=a["id"], lane="regular"
+    )
+    urgent = await insert_message(env.pool, c["id"], text="stop that", lane="priority")
+    assert await _claim(env) == urgent["id"]
+    assert await _claim(env) is None
+    assert await _status(env, regular["id"]) == "queued"
+
+
+async def test_open_lost_to_a_concurrent_row_is_skipped(env, monkeypatch):
+    # m1: a row opened between the pass's read and its insert (the route's solo voluntary
+    # handoff) must not abort the pass
+    c, a = await env.solo()
+    async with env.pool.connection() as conn:
+        await handoffs.insert(conn, c["id"], a["id"], "voluntary", "handed", handoff_text="mine")
+
+    async def no_rows(conn, session_id):
+        return []
+
+    monkeypatch.setattr(handoff.handoffs, "open_rows", no_rows)
+    assert await env.step(c["id"]) == []
+    assert await env.messages(a["id"], "handoff_notice") == []

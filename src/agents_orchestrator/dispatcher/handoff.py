@@ -46,7 +46,8 @@ The claim (`db/queue.py`) guards the same rules at dispatch time, since the mess
 run before the next pass: a notice or request whose row moved on, or whose agent's context was
 reset since the row opened, is cancelled instead of sent; and while a row is `requested`, or
 `clearing`/`returning` in the solo order, every other message for that agent waits, so the
-handoff, the clear and the return run with nothing in between.
+handoff, the clear and the return run with nothing in between (a priority message is not held
+while `requested`, see `queue._handoff_gate`).
 
 `shutdown` rows belong to the shutdown path and are left alone here.
 """
@@ -335,14 +336,18 @@ class _Pass:
             return
         if facts["clear_failed"]:
             return  # its last cycle could not clear: none again until a clear or compaction
-        row = await handoffs.insert(
-            self.conn,
-            self.session["id"],
-            agent_id,
-            "strong",
-            "notified",
-            deadline_at=await self._in(self.policy.notify_seconds),
-        )
+        try:
+            async with self.conn.transaction():
+                row = await handoffs.insert(
+                    self.conn,
+                    self.session["id"],
+                    agent_id,
+                    "strong",
+                    "notified",
+                    deadline_at=await self._in(self.policy.notify_seconds),
+                )
+        except psycopg.errors.UniqueViolation:
+            return  # a row opened since the pass read them (the route's solo voluntary handoff)
         # the wording is decided now: a hive whose leader is the only live agent follows the
         # solo order (L3), so it is not promised a successor
         moves = not subject["solo"] and await self._has_successor(agent_id)
@@ -384,6 +389,8 @@ class _Pass:
         return await handoffs.queued_messages(self.conn, row.id, notices_only=notices_only)
 
     def _below_weak(self, subject: dict) -> bool:
+        """The gauge alone is below the weak level: infinite tenure and no rollout, so `none`
+        means below weak by context (with no start context, by the percent fallback)."""
         used, pct = subject["context_used_tokens"], subject["context_pct"]
         if used is None and pct is None:
             return False  # no reading: nothing to judge by
@@ -655,6 +662,8 @@ class _Pass:
             fields: dict[str, Any] = {"return_message_id": message_id}
             if cleared:
                 fields["cleared_at"] = await self._in(0)
+                # a leader that kept the lead (L3, rejected limit, shutdown) starts afresh
+                await leadership.reset_start_context(self.conn, self.session["id"], row.agent_id)
             return await handoffs.advance(self.conn, row.id, ["clearing"], "returning", **fields)
 
         return await self.guarded(send)

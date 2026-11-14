@@ -116,6 +116,18 @@ async def handover_reason(
     return None if row is None else row[0]
 
 
+async def reset_start_context(
+    conn: psycopg.AsyncConnection, session_id: uuid.UUID, agent_id: uuid.UUID
+) -> None:
+    """The leader's context was cleared while it kept the lead (a handoff's solo order): its
+    weak baseline is unknown again, so the push loop records it from the first fresh gauge."""
+    await conn.execute(
+        "UPDATE session_leaders SET start_context_tokens = NULL"
+        " WHERE session_id = %s AND agent_id = %s",
+        (session_id, agent_id),
+    )
+
+
 async def current_leader(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Leader | None:
     cur = await conn.execute(
         "SELECT l.agent_id, a.pod_name, l.epoch FROM session_leaders l"

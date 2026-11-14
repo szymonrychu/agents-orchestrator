@@ -504,6 +504,7 @@ async def _handoff_gate(
     message_id: int,
     notice: str | None,
     agent_id: uuid.UUID,
+    lane: str,
 ) -> str:
     """`send`, `hold` or `cancel` for a message about to go to `agent_id` (`rows` caches the
     agent's open handoff row for one scan).
@@ -513,6 +514,9 @@ async def _handoff_gate(
     neither ever reaches a compacted or cleared context; otherwise it is cancelled. While the
     row is `requested`, or `clearing`/`returning` in the solo order, every other message for
     the agent waits, so the handoff, the clear and the return run with nothing in between.
+    A priority message is the exception while `requested`: that phase lasts as long as the
+    agent's running turn (Q7: never interrupted by this feature), so holding a user's deliberate
+    interrupt there would have no bound; the later phases are bounded and still hold it.
     """
     if agent_id not in rows:
         rows[agent_id] = await _one(conn, _HANDOFF_ROW, (agent_id,))
@@ -527,7 +531,7 @@ async def _handoff_gate(
     if row is None or message_id in (row["request_message_id"], row["return_message_id"]):
         return "send"
     if (
-        row["phase"] == "requested"
+        (row["phase"] == "requested" and lane != "priority")
         or (row["solo"] and row["phase"] in _HANDOFF_SOLO_HOLD)
         or (row["shutdown"] and row["phase"] in _HANDOFF_SHUTDOWN_HOLD)
     ):
@@ -619,7 +623,9 @@ async def _claim_in_session(conn: psycopg.AsyncConnection, session_id: uuid.UUID
                     )
                     continue
             if target is not None:
-                gate = await _handoff_gate(conn, handoff_rows, row["id"], row["notice"], target)
+                gate = await _handoff_gate(
+                    conn, handoff_rows, row["id"], row["notice"], target, lane
+                )
                 if gate == "cancel":
                     await cancel_message(conn, row["id"])
                     continue
@@ -640,7 +646,9 @@ async def _claim_in_session(conn: psycopg.AsyncConnection, session_id: uuid.UUID
                 continue  # a busy or booting target does not block later messages (D23 d)
             if (
                 target is None
-                and await _handoff_gate(conn, handoff_rows, row["id"], row["notice"], pick.agent_id)
+                and await _handoff_gate(
+                    conn, handoff_rows, row["id"], row["notice"], pick.agent_id, lane
+                )
                 != "send"
             ):
                 held[cls] = True  # the picked (solo) agent is mid-handoff: untargeted wait

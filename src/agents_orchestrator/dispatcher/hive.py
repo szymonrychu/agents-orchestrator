@@ -388,13 +388,16 @@ async def _read(
         await cur.execute(
             "SELECT a.id, a.pod_name, a.url, a.wrapper_session_id, a.ready,"
             " coalesce(s.state, 'unknown') AS state, s.context_pct,"
-            " s.context_used_tokens, s.context_window_tokens"
+            " s.context_used_tokens, s.context_window_tokens,"
+            f" {_GAUGE_STALE} AS gauge_stale"
             " FROM agents a LEFT JOIN agent_status s ON s.agent_id = a.id"
             " WHERE a.session_id = %s AND a.gone_at IS NULL ORDER BY a.ordinal",
             (cid,),
         )
         members = await cur.fetchall()
         lead = next((m for m in members if m["pod_name"] == leader["leader"]), None)
+        if lead is not None and lead["gauge_stale"]:  # predates the last clear: no reading yet
+            lead["context_pct"] = lead["context_used_tokens"] = None
         used = lead["context_used_tokens"] if lead is not None else None
         fill_start = used if leader["start_context_tokens"] is None else None
         lv = levels(
@@ -700,10 +703,14 @@ async def _push_session(
 # ---------------------------------------------------------------- limit subjects
 
 # Gauge rows of the agents the limits apply to. A hive leader keeps its start context and
-# tenure on `session_leaders`. A solo agent (the one live agent of a session that is not a
+# tenure on `session_leaders` (the start is reset when the solo order clears it, see
+# `handoff._Pass.send_return`). A solo agent (the one live agent of a session that is not a
 # hive) keeps them in `agent_limits`; a row older than the agent's last `session_cleared` is
-# stale (the context was cleared since), so its start is unknown again and is recorded afresh;
-# a gauge not updated since the clear still shows the old context and is read as no gauge.
+# stale (the context was cleared since), so its start is unknown again and is recorded afresh.
+# For both, a gauge not updated since the clear still shows the old context and is read as no
+# gauge (`_GAUGE_STALE`, aliases `a` the agent and `s` its agent_status row).
+_GAUGE_STALE = """EXISTS (SELECT 1 FROM events x WHERE x.agent_id = a.id
+        AND x.type = 'session_cleared' AND x.created_at > coalesce(s.updated_at, '-infinity'))"""
 _SUBJECT_COLUMNS = """
     c.id AS session_id, c.slug, c.spec, c.status, a.id AS agent_id, a.ordinal, a.pod_name,
     a.url, a.wrapper_session_id, a.ready,
@@ -711,7 +718,7 @@ _SUBJECT_COLUMNS = """
     s.context_used_tokens, s.context_window_tokens
 """
 _HIVE_SUBJECTS = f"""
-SELECT {_SUBJECT_COLUMNS}, false AS solo, false AS gauge_stale, l.epoch,
+SELECT {_SUBJECT_COLUMNS}, false AS solo, {_GAUGE_STALE} AS gauge_stale, l.epoch,
     l.start_context_tokens AS start_tokens,
     extract(epoch FROM now() - l.since) AS tenure
 FROM sessions c
@@ -721,9 +728,7 @@ LEFT JOIN agent_status s ON s.agent_id = a.id
 WHERE c.desired = 'active' AND {leadership.HIVE}
 """
 _SOLO_SUBJECTS = f"""
-SELECT {_SUBJECT_COLUMNS}, true AS solo, 0 AS epoch,
-    EXISTS (SELECT 1 FROM events x WHERE x.agent_id = a.id AND x.type = 'session_cleared'
-        AND x.created_at > coalesce(s.updated_at, '-infinity')) AS gauge_stale,
+SELECT {_SUBJECT_COLUMNS}, true AS solo, 0 AS epoch, {_GAUGE_STALE} AS gauge_stale,
     CASE WHEN fresh.ok THEN lim.start_context_tokens END AS start_tokens,
     CASE WHEN fresh.ok THEN extract(epoch FROM now() - lim.since) ELSE 0 END AS tenure
 FROM sessions c
