@@ -200,6 +200,27 @@ async def mark_delivered(conn: psycopg.AsyncConnection, row_id: int) -> bool:
     return cur.rowcount == 1
 
 
+async def take_undelivered(
+    conn: psycopg.AsyncConnection,
+    agent_id: uuid.UUID,
+    successor_agent_id: uuid.UUID,
+    since: datetime | None,
+) -> str | None:
+    """Mark the newest undelivered handoff text of `agent_id` for its successor delivered and
+    return it. Only a row written since `since` (the predecessor's tenure start) counts: an
+    older undelivered one is stale."""
+    cur = await conn.execute(
+        "UPDATE agent_handoffs SET delivered_at = now() WHERE id = ("
+        " SELECT id FROM agent_handoffs WHERE agent_id = %s AND successor_agent_id = %s"
+        " AND handoff_text IS NOT NULL AND delivered_at IS NULL"
+        " AND (%s::timestamptz IS NULL OR created_at >= %s)"
+        " ORDER BY id DESC LIMIT 1) AND delivered_at IS NULL RETURNING handoff_text",
+        (agent_id, successor_agent_id, since, since),
+    )
+    row = await cur.fetchone()
+    return None if row is None else row[0]
+
+
 async def extend(
     conn: psycopg.AsyncConnection, agent_id: uuid.UUID, seconds: int
 ) -> Handoff | None:

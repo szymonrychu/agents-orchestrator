@@ -19,7 +19,7 @@ from psycopg.rows import dict_row
 
 from agents_orchestrator import handover_transcript as ht
 from agents_orchestrator.api.scope import scope_of
-from agents_orchestrator.db import leader_state
+from agents_orchestrator.db import handoffs, leader_state
 from agents_orchestrator.db import sessions as sessions_repo
 from agents_orchestrator.db.handoffs import SHUTDOWN_TEXT
 from agents_orchestrator.db.queue import StoredAttachment, enqueue_message
@@ -214,23 +214,12 @@ async def deliver_handover(
         # the predecessor's own handoff (graceful handover) leads the notice; marked delivered in
         # this transaction so a later change never repeats it. Only a row written during the
         # predecessor's own tenure counts: an older undelivered one is stale.
-        taken = await conn.execute(
-            "UPDATE agent_handoffs SET delivered_at = now() WHERE id = ("
-            " SELECT id FROM agent_handoffs WHERE agent_id = %s AND successor_agent_id = %s"
-            " AND handoff_text IS NOT NULL AND delivered_at IS NULL"
-            " AND (%s::timestamptz IS NULL OR created_at >= %s)"
-            " ORDER BY id DESC LIMIT 1) AND delivered_at IS NULL RETURNING handoff_text",
-            (
-                row["previous_agent_id"],
-                row["agent_id"],
-                row["previous_since"],
-                row["previous_since"],
-            ),
+        handoff = await handoffs.take_undelivered(
+            conn, row["previous_agent_id"], row["agent_id"], row["previous_since"]
         )
-        handoff = await taken.fetchone()
         if handoff is not None:
             notice = (
-                f"Handoff from {header.predecessor_pod} (written by it):\n{handoff[0]}\n\n{notice}"
+                f"Handoff from {header.predecessor_pod} (written by it):\n{handoff}\n\n{notice}"
             )
         await enqueue_message(
             conn,
