@@ -19,7 +19,13 @@ from agents_orchestrator.db.pool import notify
 from agents_orchestrator.db.projects import DEFAULT, UnknownProject
 from agents_orchestrator.db.queue import SessionBeingDeleted, enqueue_message
 from agents_orchestrator.db.start_state import start_reason, start_state
-from agents_orchestrator.inactivity import NOTICE_CLOSE, NOTICE_REMINDER, close_reason
+from agents_orchestrator.inactivity import (
+    NOTICE_AUTOCLOSE,
+    NOTICE_CLOSE,
+    NOTICE_REMINDER,
+    autoclose_reason,
+    close_reason,
+)
 from agents_orchestrator.spec import SessionSpec, legacy_context, validate_slug
 
 CHANNEL = "session_changed"
@@ -564,21 +570,6 @@ async def mark_user_message(conn: psycopg.AsyncConnection, session_id: uuid.UUID
     )
 
 
-async def close_expired(conn: psycopg.AsyncConnection) -> list[uuid.UUID]:
-    """Flip active sessions past their autoclose time to deleting (the request_delete write)."""
-    async with conn.transaction():
-        cur = await conn.execute(
-            "UPDATE sessions SET desired = 'deleting', generation = generation + 1"
-            " WHERE desired = 'active' AND spec ? 'autoclose_after_seconds'"
-            " AND created_at + make_interval(secs => (spec->>'autoclose_after_seconds')::int)"
-            " <= now() RETURNING id"
-        )
-        ids = [row[0] for row in await cur.fetchall()]
-        for session_id in ids:
-            await _notify(conn, session_id)
-    return ids
-
-
 def quiet_clock_sql(alias: str) -> str:
     """SQL expression for the last user-visible update of session `alias` (spec 3.2): the
     latest of its creation, the api-written `last_update_at`, the newest inbound message that is
@@ -736,6 +727,46 @@ async def _ask_close(
         return None
     log_close(session_id, close_kind=kind, reason=reason, step="ask")
     return rows[0]
+
+
+# Active, no close pending, and past one full lifetime since creation or the last ask.
+_AUTOCLOSE_PREDICATE = """
+    s.desired = 'active' AND s.close_requested_at IS NULL
+    AND s.spec ? 'autoclose_after_seconds'
+    AND GREATEST(s.created_at, s.autoclose_asked_at)
+        + make_interval(secs => (s.spec->>'autoclose_after_seconds')::int) <= now()
+"""
+
+
+async def ask_autoclose(
+    conn: psycopg.AsyncConnection,
+    handoff_seconds: int,
+    compose: Callable[[Session, datetime], str],
+) -> list[uuid.UUID]:
+    """Ask sessions that reached their autoclose lifetime to close themselves: `close_kind`
+    'autoclose', the reason, a deadline `handoff_seconds` away (the answer window),
+    `autoclose_asked_at` (a kept session gets one more full lifetime from it) and the `autoclose`
+    notice `compose(session, deadline)` to the leader, in one transaction. Nothing is flipped
+    here: `discard_idle` is the fallback once the window passed and the session is idle."""
+
+    async def ask(session_id: uuid.UUID, row: dict[str, Any]) -> str | None:
+        session = await _ask_close(
+            conn,
+            session_id,
+            kind="autoclose",
+            reason=autoclose_reason(row["after"]),
+            handoff_seconds=handoff_seconds,
+            extra_set=", autoclose_asked_at = now()",
+        )
+        if session is None:
+            return None
+        assert session.close_deadline_at is not None
+        text = compose(session, session.close_deadline_at)
+        await enqueue_message(conn, session_id, text, lane="regular", notice=NOTICE_AUTOCLOSE)
+        return ""
+
+    columns = "(s.spec->>'autoclose_after_seconds')::int AS after"
+    return await _sweep_each(conn, "sessions s", _AUTOCLOSE_PREDICATE, {}, columns, ask)
 
 
 async def close_inactive(

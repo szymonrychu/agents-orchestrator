@@ -81,8 +81,12 @@ def _init_edited(session: repo.Session) -> bool:
 
 
 def _closes_at(session: repo.Session) -> datetime | None:
+    """The next autoclose ask: one lifetime after creation or after the last ask."""
     after = session.spec.autoclose_after_seconds
-    return None if after is None else session.created_at + timedelta(seconds=after)
+    if after is None:
+        return None
+    start = max(session.created_at, session.autoclose_asked_at or session.created_at)
+    return start + timedelta(seconds=after)
 
 
 def _inactivity(

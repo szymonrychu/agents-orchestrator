@@ -52,6 +52,8 @@ def test_constants():
     assert inactivity.NOTICE_CLOSE == "inactivity_close"
     assert inactivity.REMINDER_PREFIX == "Orchestrator notice (inactivity reminder):"
     assert inactivity.CLOSE_PREFIX == "Orchestrator notice (inactivity limit):"
+    assert inactivity.NOTICE_AUTOCLOSE == "autoclose"
+    assert inactivity.AUTOCLOSE_PREFIX == "Orchestrator notice (session lifetime):"
 
 
 def test_effective_uses_spec_then_setting():
@@ -188,13 +190,53 @@ def test_close_text_tools():
     assert "If your work is finished, call orchestrator_self_close." in text
 
 
+def _autoclose(**overrides) -> str:
+    kwargs = {
+        "after_seconds": 3600,
+        "deadline": datetime(2026, 11, 2, 14, 5, tzinfo=UTC),
+        "grace_seconds": 30,
+        "chat": True,
+        "taskboard": True,
+        "workdir_saved": True,
+        "can_self_close": True,
+    }
+    kwargs.update(overrides)
+    return inactivity.autoclose_text(**kwargs)
+
+
+def test_autoclose_text():
+    assert _autoclose() == (
+        "Orchestrator notice (session lifetime): this session reached its lifetime of 1 h set by"
+        " its preset, so the orchestrator asks you to wrap up. Finish or checkpoint your work,"
+        " post a final status (orchestrator_chat_send or a task comment) and since this session"
+        " saves its workspace, write handoff notes into the workdir, then call"
+        " orchestrator_self_close. The session is never closed while you work; if it is idle"
+        " after 14:05Z without a self-close, it is discarded 30 s later. Only the user can keep"
+        " it."
+    )
+    plain = _autoclose(chat=False, taskboard=False, workdir_saved=False)
+    assert "Finish or checkpoint your work, then call orchestrator_self_close." in plain
+    text = _autoclose(can_self_close=False)
+    assert "orchestrator_self_close" not in text and "Finish or checkpoint" not in text
+    assert "it is discarded 30 s later" in text
+
+
+def test_autoclose_reason():
+    assert inactivity.autoclose_reason(3600) == (
+        "Lifetime of 1 h reached (autoclose_after_seconds 3600)"
+    )
+
+
 def test_texts_are_ascii():
     texts = [
         _reminder(),
         _reminder(limits=Limits(600, 0), chat=False, taskboard=False, pods=1),
         _close(),
         _close(chat=False, taskboard=False, workdir_saved=False),
+        _autoclose(),
+        _autoclose(can_self_close=False),
         inactivity.close_reason(14400, 14400),
+        inactivity.autoclose_reason(3600),
     ]
     for text in texts:
         assert text.isascii()

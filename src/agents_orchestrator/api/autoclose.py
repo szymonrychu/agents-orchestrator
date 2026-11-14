@@ -22,17 +22,13 @@ AUTOCLOSE_POLL_SECONDS = 10
 
 
 async def sweep(pool: AsyncConnectionPool, settings: Settings) -> None:
-    """Each poll until cancelled, in order: deliver handover notices to new leaders, close due
-    sessions, release inactivity closes an inbound message or an update answered, ask quiet
-    sessions to close, send reminders, discard idle closing sessions once their answer window
-    passed. Each step runs on its own connection
+    """Each poll until cancelled, in order: deliver handover notices to new leaders, ask sessions
+    past their lifetime to close, release inactivity closes an inbound message or an update
+    answered, ask quiet sessions to close, send reminders, discard idle closing sessions once
+    their answer window passed. Each step runs on its own connection
     and a step that fails is logged and skipped: the other steps still run, and the failed one
     is retried next poll. The limits are passed on every poll, so they apply to running
     sessions."""
-
-    async def close_expired(conn: AsyncConnection) -> None:
-        for session_id in await sessions.close_expired(conn):
-            log.info("autoclose: session %s is due, discarding", session_id)
 
     steps: list[tuple[str, Callable[[AsyncConnection], Awaitable[object]]]] = [
         (
@@ -49,7 +45,12 @@ async def sweep(pool: AsyncConnectionPool, settings: Settings) -> None:
                 + SHUTDOWN_MARGIN_SECONDS,
             ),
         ),
-        ("close_expired", close_expired),
+        (
+            "ask_autoclose",
+            lambda conn: sessions.ask_autoclose(
+                conn, settings.inactivity_handoff_seconds, _autoclose_notice(settings)
+            ),
+        ),
         ("release_inactive_close", sessions.release_inactive_close),
         (
             "close_inactive",
@@ -105,6 +106,24 @@ def _close_notice(settings: Settings) -> Callable[[sessions.Session, datetime, d
             chat=settings.chat_available,
             taskboard=settings.taskboard_available,
             workdir_saved=sessions_api.session_backup(session, settings).workdir,
+        )
+
+    return compose
+
+
+def _autoclose_notice(settings: Settings) -> Callable[[sessions.Session, datetime], str]:
+    def compose(session: sessions.Session, deadline: datetime) -> str:
+        after = session.spec.autoclose_after_seconds
+        if after is None:
+            raise ValueError(f"session {session.id} has no autoclose lifetime to compose a notice")
+        return inactivity.autoclose_text(
+            after_seconds=after,
+            deadline=deadline,
+            grace_seconds=settings.close_grace_seconds,
+            chat=settings.chat_available,
+            taskboard=settings.taskboard_available,
+            workdir_saved=sessions_api.session_backup(session, settings).workdir,
+            can_self_close=not session.spec.session_messaging,
         )
 
     return compose

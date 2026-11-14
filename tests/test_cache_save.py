@@ -338,15 +338,12 @@ async def test_cache_miss_then_save(env):
     assert env.saves[-1]["state"] == "saved"
 
 
-async def test_autoclose_saves(env):
+async def test_flipped_session_saves(env):
+    """A session flipped to deleting by the idle fallback (autoclose or inactivity) saves like
+    any discard."""
     c = await env.ready()
     async with env.pool.connection() as conn:
-        await conn.execute(
-            "UPDATE sessions SET spec = spec || '{\"autoclose_after_seconds\": 1}'::jsonb,"
-            " created_at = now() - interval '1 hour' WHERE id = %s",
-            (c.id,),
-        )
-        assert await sessions.close_expired(conn) == [c.id]
+        await sessions.request_delete(conn, c.id)
     await env.tick()
     assert env.kube.has("Job", SAVE)
     env.kube.finish_job(SAVE, exit_code=0, log=line("saved", 7))
