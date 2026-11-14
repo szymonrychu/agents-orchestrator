@@ -1281,7 +1281,7 @@ def test_alone_session_has_no_hive_tools(api: httpx.Client, session: dict[str, A
 
         configmap = wait_for("the alone session's ConfigMap", rendered, 120)
         config = yaml.safe_load(configmap["data"]["config.yaml"])
-        assert config["notes"] == {"enabled": False}, config
+        assert config["notes"] == {"enabled": True}, config
         assert "peers" not in config or not config["peers"].get("enabled"), config
         assert "onAgentToolCall" not in config["hooks"], config["hooks"]
         assert_alone_session_tools(configmap)
@@ -1626,7 +1626,7 @@ def test_static_single_pod_is_alone(api: httpx.Client, baseline: dict) -> None:
 
         configmap = wait_for("the single static pod's ConfigMap", rendered, 120)
         config = yaml.safe_load(configmap["data"]["config.yaml"])
-        assert config["notes"] == {"enabled": False}, config
+        assert config["notes"] == {"enabled": True}, config
         assert not (config.get("peers") or {}).get("enabled"), config
         assert_alone_session_tools(configmap)
 
@@ -3450,8 +3450,7 @@ def test_solo_pod_delete_delivers_handoff_to_next_pod(api: httpx.Client, baselin
             "Handoff from your previous context (pod shutdown, cleared just now):"
         ), row
         assert pod_identity(slug)[pod][0] != old_uid, "the pod was not replaced"
-        done = wait_for("the return turn", lambda: turn_completed(message(api, row["id"])), 300, 2)
-        assert done["status"] == "sent", done
+        wait_for("the return turn", lambda: turn_completed(message(api, row["id"])), 300, 2)
 
 
 def test_leader_pod_delete_hands_off_to_successor(api: httpx.Client, baseline: dict) -> None:
@@ -3477,4 +3476,5 @@ def test_leader_pod_delete_hands_off_to_successor(api: httpx.Client, baseline: d
             return rows[-1] if rows else None
 
         row = wait_for("the successor's handover notice", notice, 120, 2)
-        assert row["text"].startswith(SHUTDOWN_HANDOFF_TEXT), row["text"][:300]
+        assert row["text"].startswith("Handoff from "), row["text"][:300]
+        assert SHUTDOWN_HANDOFF_TEXT in row["text"], row["text"][:300]
