@@ -156,6 +156,14 @@
             "title": "Suffix",
             "type": "string"
           },
+          "then_schedule_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Then Schedule Ids",
+            "type": "array"
+          },
           "type": {
             "title": "Type",
             "type": "string"
@@ -198,7 +206,8 @@
           "hmac_prefix",
           "hmac_timestamp_header",
           "updated_at",
-          "has_secret"
+          "has_secret",
+          "then_schedule_ids"
         ],
         "title": "EndpointCreated",
         "type": "object"
@@ -308,6 +317,15 @@
               }
             ],
             "title": "Suffix"
+          },
+          "then_schedule_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 10,
+            "title": "Then Schedule Ids",
+            "type": "array"
           },
           "type": {
             "title": "Type",
@@ -441,6 +459,22 @@
             ],
             "title": "Suffix"
           },
+          "then_schedule_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                "maxItems": 10,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Then Schedule Ids"
+          },
           "username": {
             "anyOf": [
               {
@@ -559,6 +593,14 @@
             "title": "Suffix",
             "type": "string"
           },
+          "then_schedule_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Then Schedule Ids",
+            "type": "array"
+          },
           "type": {
             "title": "Type",
             "type": "string"
@@ -601,7 +643,8 @@
           "hmac_prefix",
           "hmac_timestamp_header",
           "updated_at",
-          "has_secret"
+          "has_secret",
+          "then_schedule_ids"
         ],
         "title": "EndpointView",
         "type": "object"
@@ -629,6 +672,17 @@
               }
             ],
             "title": "Author"
+          },
+          "chain_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chain Status"
           },
           "dedup_key": {
             "title": "Dedup Key",
@@ -792,6 +846,21 @@
             "title": "Status",
             "type": "string"
           },
+          "then_schedule_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Then Schedule Ids"
+          },
           "title": {
             "anyOf": [
               {
@@ -862,6 +931,8 @@
           "duplicate_of",
           "started_at",
           "finished_at",
+          "then_schedule_ids",
+          "chain_status",
           "payload",
           "labels"
         ],
@@ -891,6 +962,17 @@
               }
             ],
             "title": "Author"
+          },
+          "chain_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chain Status"
           },
           "dedup_key": {
             "title": "Dedup Key",
@@ -1048,6 +1130,21 @@
             "title": "Status",
             "type": "string"
           },
+          "then_schedule_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Then Schedule Ids"
+          },
           "title": {
             "anyOf": [
               {
@@ -1117,7 +1214,9 @@
           "update_of",
           "duplicate_of",
           "started_at",
-          "finished_at"
+          "finished_at",
+          "then_schedule_ids",
+          "chain_status"
         ],
         "title": "EventView",
         "type": "object"

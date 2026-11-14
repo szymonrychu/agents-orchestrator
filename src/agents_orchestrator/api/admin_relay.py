@@ -17,6 +17,15 @@ schedule) on such a preset or on none, is 403 `not_manageable` and never forward
 without `preset_id` passes: the upstream requires it on create and PUT, and the stored check covers
 PATCH and clone. A stored object the upstream does not list is 404.
 
+Chained schedules (`then_schedule_ids`, trigger chain): a schedule or endpoint write that names
+target schedules is checked per target (`_chain_targets_ok`): the target must be listed by the
+schedule upstream (404 otherwise) and sit on a preset the superleader may manage (403
+`not_manageable`, never forwarded), or it could start a human-only preset's session. A body
+without the field or with an empty list passes without a lookup (a PUT replaces the object, so an
+absent field clears the links). An endpoint clone copies the stored endpoint's links, so those are
+checked too (`body_and_stored`). With targets present and no schedule upstream: 503
+`upstream_unconfigured`.
+
 A preset with `kube_cluster_access`, `session_messaging` or `docker` on is a valid target of a
 relayed trigger object (endpoint, schedule, room, rule) as long as the superleader may
 manage it: the superleader starts sessions from such presets, so it may point triggers at them.
@@ -151,15 +160,22 @@ class Guard:
     cursor: bool = False  # a full list page also answers the upstream's next `before_id`
     rule: Literal["body", "stored"] | None = None  # a chat routing rule, see `_rule_room`
     ask_decision: bool = False  # a 201 room request asks the user's yes (`chat_requests`)
+    # every schedule named in `then_schedule_ids` must sit on a manageable preset; a clone also
+    # checks the stored endpoint's links (see `_chain_targets_ok`)
+    chain_targets: Literal["body", "body_and_stored"] | None = None
 
 
 _E, _S = "endpoint", "schedule"
 GUARDS: dict[tuple[str, str, str], Guard] = {
     ("webhook", "GET", "/endpoints"): Guard(),
-    ("webhook", "POST", "/endpoints"): Guard(body_preset=True),
-    ("webhook", "PATCH", "/endpoints/{id}"): Guard(body_preset=True, stored=_E),
+    ("webhook", "POST", "/endpoints"): Guard(body_preset=True, chain_targets="body"),
+    ("webhook", "PATCH", "/endpoints/{id}"): Guard(
+        body_preset=True, stored=_E, chain_targets="body"
+    ),
     ("webhook", "DELETE", "/endpoints/{id}"): Guard(stored=_E),
-    ("webhook", "POST", "/endpoints/{id}/clone"): Guard(body_preset=True, stored=_E),
+    ("webhook", "POST", "/endpoints/{id}/clone"): Guard(
+        body_preset=True, stored=_E, chain_targets="body_and_stored"
+    ),
     ("webhook", "PUT", "/endpoints/{id}/filters"): Guard(stored=_E),
     ("webhook", "POST", "/endpoints/{id}/rotate"): Guard(stored=_E),
     ("webhook", "GET", "/events"): Guard(),
@@ -169,10 +185,12 @@ GUARDS: dict[tuple[str, str, str], Guard] = {
     ("schedule", "GET", "/runs"): Guard(),
     ("schedule", "GET", "/runs/{run_id}"): Guard(),
     ("schedule", "GET", "/schedules"): Guard(),
-    ("schedule", "POST", "/schedules"): Guard(body_preset=True),
+    ("schedule", "POST", "/schedules"): Guard(body_preset=True, chain_targets="body"),
     ("schedule", "POST", "/schedules/preview"): Guard(body_preset=True),
     ("schedule", "GET", "/schedules/{schedule_id}"): Guard(),
-    ("schedule", "PUT", "/schedules/{schedule_id}"): Guard(body_preset=True, stored=_S),
+    ("schedule", "PUT", "/schedules/{schedule_id}"): Guard(
+        body_preset=True, stored=_S, chain_targets="body"
+    ),
     ("schedule", "DELETE", "/schedules/{schedule_id}"): Guard(stored=_S),
     ("schedule", "POST", "/schedules/{schedule_id}/run"): Guard(stored=_S),
     ("schedule", "GET", "/schedules/{schedule_id}/runs"): Guard(),
@@ -318,19 +336,56 @@ def _bare(request: Request) -> Request:
     return Request(scope, request.receive)
 
 
-async def _stored_preset(
+async def _stored_object(
     request: Request, settings: Settings, service: str, guard: Guard
-) -> str | None:
-    """The preset id of the object a route writes (None when it has none); an object the
-    upstream does not list is 404."""
+) -> dict[str, Any]:
+    """The object a route writes, as the upstream lists it; one it does not list is 404."""
     list_path, id_field, param = _STORED[guard.stored]
     wanted = request.path_params[param]
     items = await _upstream_json(_bare(request), settings, service, list_path)
     for item in items:
         if isinstance(item, dict) and str(item.get(id_field)) == wanted:
-            preset = item.get("preset_id")
-            return None if preset is None else str(preset)
+            return item
     raise not_found("object")
+
+
+async def _stored_preset(
+    request: Request, settings: Settings, service: str, guard: Guard
+) -> str | None:
+    """The preset id of the object a route writes (None when it has none); an object the
+    upstream does not list is 404."""
+    preset = (await _stored_object(request, settings, service, guard)).get("preset_id")
+    return None if preset is None else str(preset)
+
+
+def _link_ids(source: dict[str, Any]) -> set[str]:
+    """The `then_schedule_ids` of an object as lower-case strings (absent, null or not a list:
+    none; the upstream validates the shape)."""
+    links = source.get("then_schedule_ids")
+    return {str(i).lower() for i in links} if isinstance(links, list) else set()
+
+
+async def _chain_targets_ok(
+    request: Request, settings: Settings, service: str, guard: Guard, body: bytes | None
+) -> None:
+    """Every schedule the write would chain must be listed (404) on a preset the superleader
+    may manage (403 `not_manageable`). The ids come from the body and, for `body_and_stored`,
+    from the stored endpoint too (a clone copies its links)."""
+    targets = _link_ids(_body_object(body))
+    if guard.chain_targets == "body_and_stored":
+        targets |= _link_ids(await _stored_object(request, settings, service, guard))
+    if not targets:
+        return
+    presets: dict[str, Any] = {}
+    for item in await _upstream_json(_bare(request), settings, "schedule", "/schedules"):
+        if isinstance(item, dict):
+            presets[str(item.get("id")).lower()] = item.get("preset_id")
+    writable = await _writable(request)
+    for target in sorted(targets):
+        if target not in presets:
+            raise not_found("object")
+        if presets[target] is None or str(presets[target]) not in writable:
+            raise not_manageable("object")
 
 
 def human_only_rule() -> ApiError:
@@ -438,6 +493,8 @@ def _handler(service: str, method: str, template: str) -> Callable[..., Awaitabl
                 stored = await _stored_preset(request, settings, service, guard)
                 if stored is None or stored not in await _writable(request):
                     raise not_manageable("object")
+            if guard.chain_targets:
+                await _chain_targets_ok(request, settings, service, guard, body)
         if guard.rule:
             await _rule_room(request, settings, guard, body)
         if guard.ask_decision:
