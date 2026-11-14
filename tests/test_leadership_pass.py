@@ -592,6 +592,42 @@ async def test_unready_since_cleared_when_ready(pool):
     assert (row["agent_id"], row["epoch"]) == (a0["id"], 1)
 
 
+async def stopping(pool, agent_id) -> None:
+    """The wrapper announced its SIGTERM shutdown routine (`shutdown_started`, T-256)."""
+    await run(
+        pool, "UPDATE agent_status SET stopping_since = now() WHERE agent_id = %s", (agent_id,)
+    )
+
+
+async def test_stopping_leader_moves_at_once(pool):
+    # A deleted leader pod stays Ready while its wrapper runs the shutdown routine, and its next
+    # pod can be Ready again inside LEADER_GRACE_SECONDS: the unready grace must not decide the
+    # move. A stopping leader is lost at once, to a successor that is not stopping itself.
+    c, (a0, a1, a2) = await hive(pool)
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
+    await status(pool, a1["id"], "idle", 40)
+    await status(pool, a2["id"], "idle", 10)
+    await stopping(pool, a2["id"])  # the best pick is stopping too: skipped
+    await stopping(pool, a0["id"])
+    async with pool.connection() as conn:
+        assert c["id"] in await leadership.leadership_candidates(conn)
+    change = await lpass(pool, c["id"])
+    assert change is not None
+    assert (change.agent_id, change.epoch, change.reason) == (a1["id"], 4, "leader_lost")
+    assert (await leader_row(pool, c["id"]))["previous_agent_id"] == a0["id"]
+
+
+async def test_stopping_leader_without_successor_keeps_leading(pool):
+    # L3: no other agent can lead, so the stopping leader keeps the lead (solo order)
+    c, (a0, a1) = await hive(pool, 2)
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
+    await stopping(pool, a1["id"])
+    await stopping(pool, a0["id"])
+    assert await lpass(pool, c["id"]) is None
+    row = await leader_row(pool, c["id"])
+    assert (row["agent_id"], row["epoch"], row["unready_since"]) == (a0["id"], 3, None)
+
+
 # ---------------------------------------------------------------- AC7
 
 
