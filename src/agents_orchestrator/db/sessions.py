@@ -621,10 +621,10 @@ _CLOSE_PREDICATE = f"""
 """
 # An inactivity close is cancelled by the agent's own user-visible update after the request
 # (`last_update_at`), by tool or subagent activity after it (`agent_status.activity_at`, the same
-# signal the quiet clock counts) or by an inbound message that is not a notice and came after it: created
-# after it, or queued behind its close notice (a message whose transaction began before the close
-# and waited on the row lock carries an earlier `created_at`, but a later id than the notice
-# inserted under that lock). An autoclose is a lifetime: only Keep session or a self-close ends it.
+# signal the quiet clock counts) or by an inbound message that is not a notice and came after it:
+# created after it, or queued behind its close notice (a message whose transaction began before
+# the close and waited on the row lock carries an earlier `created_at`, but a later id than the
+# notice inserted under that lock). An autoclose is a lifetime: only Keep session or a self-close ends it.
 _INACTIVITY_CLOSE_CANCELLED = """
     s.close_kind = 'inactivity' AND (
         s.last_update_at > s.close_requested_at
