@@ -226,7 +226,7 @@ Hive order: notice, wait, extension if asked, handoff request, leadership move w
 
 Pod shutdown (SIGTERM, every pod on the default agent image): the wrapper runs a notice turn, waits `ORCH_AGENT_SHUTDOWN_NOTICE_SECONDS` (or less once the session stayed idle), asks for the handoff and waits at most `ORCH_AGENT_SHUTDOWN_HANDOFF_SECONDS`, then stops claude. There is no extension. The orchestrator stores the `shutdown_handoff` text on a `shutdown` row: a solo agent's next pod is cleared and gets it as `handoff_return`, a leader's successor gets it at the head of its handover notice, and an agent that is already stopping is never picked for leadership or work.
 
-Members: a member never gets a weak note or a cycle and keeps auto-compact only. Its pod still runs the shutdown routine (the wrapper cannot know the role), but its row closes `done` (`member`) and the next pod resumes as before. `orch handover-stats` counts `agent_handoffs` by trigger and close reason and prints the median seconds from notice to delivered handoff. The agents-web UI shows the new notice kinds as plain notice text.
+Members: a member never gets a weak note or a cycle and keeps auto-compact only. Its pod still runs the shutdown routine (the wrapper cannot know the role), but its row closes `done` (`member`) and the next pod resumes as before. `orch handover-stats` counts `agent_handoffs` by trigger and close reason and prints the median seconds from notice to delivered handoff.
 
 ## Images
 
