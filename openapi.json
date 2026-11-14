@@ -5772,7 +5772,8 @@
               {
                 "enum": [
                   "self",
-                  "inactivity"
+                  "inactivity",
+                  "autoclose"
                 ],
                 "type": "string"
               },

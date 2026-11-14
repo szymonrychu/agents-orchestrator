@@ -28,6 +28,9 @@ class Service(Protocol):
 ServiceFactory = Callable[[AsyncConnectionPool], "Service | Awaitable[Service]"]
 
 
+_RESERVED = frozenset({"ts", "level", "logger", "msg", "exc"})
+
+
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         out: dict[str, Any] = {
@@ -37,6 +40,9 @@ class JsonFormatter(logging.Formatter):
             "logger": record.name,
             "msg": record.getMessage(),
         }
+        fields = getattr(record, "fields", None)
+        if isinstance(fields, dict):
+            out.update({k: v for k, v in fields.items() if k not in _RESERVED})
         if record.exc_info:
             out["exc"] = self.formatException(record.exc_info)
         return json.dumps(out, default=str)

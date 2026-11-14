@@ -29,7 +29,6 @@ def _reminder(**overrides) -> str:
         "pods": 3,
         "chat": True,
         "taskboard": True,
-        "handoff_seconds": 300,
     }
     kwargs.update(overrides)
     return inactivity.reminder_text(**kwargs)
@@ -53,6 +52,8 @@ def test_constants():
     assert inactivity.NOTICE_CLOSE == "inactivity_close"
     assert inactivity.REMINDER_PREFIX == "Orchestrator notice (inactivity reminder):"
     assert inactivity.CLOSE_PREFIX == "Orchestrator notice (inactivity limit):"
+    assert inactivity.NOTICE_AUTOCLOSE == "autoclose"
+    assert inactivity.AUTOCLOSE_PREFIX == "Orchestrator notice (session lifetime):"
 
 
 def test_effective_uses_spec_then_setting():
@@ -106,19 +107,27 @@ def test_stamp_and_clock_are_utc():
 def test_reminder_text_example():
     assert _reminder() == (
         "Orchestrator notice (inactivity reminder): this session has sent no update to the user"
-        " for 1 h (last update 2026-11-02 10:00Z) while holding 3 agent pods and a session slot."
+        " and done no tool work for 1 h (last activity 2026-11-02 10:00Z) while holding 3 agent"
+        " pods and a session slot."
         " If the work is still going, please post a short progress update now with"
         " orchestrator_chat_send or a comment on your task (orchestrator_task_comment), and keep"
-        " posting at least every 1 h. If the work is done or blocked, report it and call"
-        " orchestrator_self_close to free the hive. Without an update the session will be closed"
-        " at about 2026-11-02 14:00Z, with 5 min to hand off. Replying here alone does not count"
-        " as an update."
+        " posting at least every 1 h. If the work is finished, post a final status and call"
+        " orchestrator_self_close to free the hive. Without an update or activity the"
+        " orchestrator will ask this session to close at about 2026-11-02 14:00Z; it is closed"
+        " only once idle, never mid-turn. Replying here alone does not count as an update."
     )
+
+
+def test_reminder_text_invites_self_close_only_when_finished():
+    text = _reminder()
+    assert "If the work is finished" in text
+    assert "done or blocked" not in text
+    assert "never mid-turn" in text
 
 
 def test_reminder_text_without_close_and_tools():
     text = _reminder(limits=Limits(600, 0))
-    assert "will be closed" not in text
+    assert "ask this session to close" not in text
     assert "at least every 10 min." in text
 
     text = _reminder(taskboard=False)
@@ -144,30 +153,78 @@ def test_reminder_text_without_close_and_tools():
 
 def test_close_text_example():
     assert _close() == (
-        "Orchestrator notice (inactivity limit): this session has sent no update to the user for"
-        " 4 h, so the orchestrator is closing it. You may hand off before it closes, you do not"
-        " have to: post a final status (orchestrator_chat_send or a task comment) and, since this"
-        " session saves its workspace, write handoff notes into the workdir. The session is"
-        " discarded 30 s after your turn ends, or at 14:05Z even mid-turn. Only the user can keep"
-        " it."
+        "Orchestrator notice (inactivity limit): this session has sent no update and done no tool"
+        " work for 4 h, so the orchestrator asks you to close it. If your work is finished: post a"
+        " final status (orchestrator_chat_send or a task comment) and since this session saves its"
+        " workspace, write handoff notes into the workdir, then call orchestrator_self_close. If"
+        " you are still working, post a progress update now to keep the session. It is never"
+        " closed while you work; if it is idle after 14:05Z without a self-close or an update, it"
+        " is discarded 30 s later."
     )
     assert "workdir" not in _close(workdir_saved=False)
-    assert "post a final status (orchestrator_chat_send or a task comment). The session" in (
+    assert "post a final status (orchestrator_chat_send or a task comment), then call" in (
         _close(workdir_saved=False)
     )
 
 
+def test_close_text_asks_self_close():
+    text = _close()
+    assert "orchestrator_self_close" in text
+    assert "post a progress update" in text
+    assert "never closed while you work" in text
+    assert "even mid-turn" not in text
+
+
 def test_close_text_tools():
-    assert "post a final status (orchestrator_chat_send) and" in _close(taskboard=False)
-    assert "post a final status (a task comment with orchestrator_task_comment) and" in _close(
-        chat=False
+    assert "post a final status (orchestrator_chat_send), then" in _close(
+        taskboard=False, workdir_saved=False
+    )
+    assert "post a final status (a task comment with orchestrator_task_comment), then" in _close(
+        chat=False, workdir_saved=False
     )
     text = _close(chat=False, taskboard=False)
     assert "post a final status" not in text
-    assert "you do not have to: since this session saves its workspace, write handoff" in text
+    assert "If your work is finished: since this session saves its workspace, write handoff" in text
     text = _close(chat=False, taskboard=False, workdir_saved=False)
-    assert "hand off" not in text
-    assert "closing it. The session is discarded 30 s" in text
+    assert "hand off" not in text and "handoff" not in text
+    assert "If your work is finished, call orchestrator_self_close." in text
+
+
+def _autoclose(**overrides) -> str:
+    kwargs = {
+        "after_seconds": 3600,
+        "deadline": datetime(2026, 11, 2, 14, 5, tzinfo=UTC),
+        "grace_seconds": 30,
+        "chat": True,
+        "taskboard": True,
+        "workdir_saved": True,
+        "can_self_close": True,
+    }
+    kwargs.update(overrides)
+    return inactivity.autoclose_text(**kwargs)
+
+
+def test_autoclose_text():
+    assert _autoclose() == (
+        "Orchestrator notice (session lifetime): this session reached its lifetime of 1 h set by"
+        " its preset, so the orchestrator asks you to wrap up. Finish or checkpoint your work,"
+        " post a final status (orchestrator_chat_send or a task comment) and since this session"
+        " saves its workspace, write handoff notes into the workdir, then call"
+        " orchestrator_self_close. The session is never closed while you work; if it is idle"
+        " after 14:05Z without a self-close, it is discarded 30 s later. Only the user can keep"
+        " it."
+    )
+    plain = _autoclose(chat=False, taskboard=False, workdir_saved=False)
+    assert "Finish or checkpoint your work, then call orchestrator_self_close." in plain
+    text = _autoclose(can_self_close=False)
+    assert "orchestrator_self_close" not in text and "Finish or checkpoint" not in text
+    assert "it is discarded 30 s later" in text
+
+
+def test_autoclose_reason():
+    assert inactivity.autoclose_reason(3600) == (
+        "Lifetime of 1 h reached (autoclose_after_seconds 3600)"
+    )
 
 
 def test_texts_are_ascii():
@@ -176,7 +233,10 @@ def test_texts_are_ascii():
         _reminder(limits=Limits(600, 0), chat=False, taskboard=False, pods=1),
         _close(),
         _close(chat=False, taskboard=False, workdir_saved=False),
+        _autoclose(),
+        _autoclose(can_self_close=False),
         inactivity.close_reason(14400, 14400),
+        inactivity.autoclose_reason(3600),
     ]
     for text in texts:
         assert text.isascii()

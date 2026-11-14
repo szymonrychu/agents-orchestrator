@@ -43,6 +43,9 @@ env:
   ORCH_RECONCILE_POLL_SECONDS: "3"
   # the autoclose e2e uses the smallest accepted window (the production default is higher)
   ORCH_AUTOCLOSE_MIN_SECONDS: "30"
+  # autoclose asks the agent to self-close and discards the idle fake claude only after the
+  # answer window; 0 ends the window at the ask, so the discard follows after the idle grace
+  ORCH_INACTIVITY_HANDOFF_SECONDS: "0"
   # the image-roll e2e pins the forced rollout handover; the fake claude never hands over on
   # its own, so the voluntary window is off (the production default is 1800 s)
   ORCH_ROLLOUT_HANDOVER_SECONDS: "0"

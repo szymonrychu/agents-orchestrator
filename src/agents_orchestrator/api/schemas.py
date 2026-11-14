@@ -358,7 +358,7 @@ class SessionBackup(BaseModel):
     last_transcripts_backup: BackupRun | None
 
 
-CloseKind = Literal["self", "inactivity"]
+CloseKind = Literal["self", "inactivity", "autoclose"]
 
 
 class VaultPinView(BaseModel):

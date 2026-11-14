@@ -185,3 +185,15 @@ async def test_view_last_user_message_at_null_then_set(app, pool):
         listed, detail = await views(http, str(cl["id"]))
     assert datetime.fromisoformat(detail["last_user_message_at"]) == row
     assert datetime.fromisoformat(listed["last_user_message_at"]) == row
+
+
+async def test_closes_at_after_keep(limited_app, pool):
+    sid = await _quiet_since(pool, {"autoclose_after_seconds": 3600})
+    asked = T + timedelta(hours=2)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE sessions SET autoclose_asked_at = %s WHERE id = %s", (asked, sid)
+        )
+    async with main_client(limited_app) as http:
+        for view in await views(http, sid):
+            assert _at(view["closes_at"]) == asked + timedelta(hours=1)

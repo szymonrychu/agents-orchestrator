@@ -60,6 +60,8 @@ _STATE_MAP = {
 }
 _TURN_END = ("turn_completed", "turn_failed")
 _COMPACTION = ("compacting", "compacted")
+# Tool and subagent events are activity: the quiet clock counts them (agent_status.activity_at).
+_ACTIVITY = ("tool_call", "tool_result", "subagent_started", "subagent_stopped")
 
 
 def map_state(wrapper_state: str | None) -> str:
@@ -255,6 +257,8 @@ class _AgentStream:
 
     async def _project(self, conn: Any, env: Envelope) -> _Projected:
         ref, data = self.ref, env.data
+        if env.type in _ACTIVITY:
+            await status.mark_activity(conn, ref.agent_id, env.ts)
         if env.type == "session_state":
             change = await status.set_state(
                 conn, ref.agent_id, map_state(data.get("state")), since=data.get("since")

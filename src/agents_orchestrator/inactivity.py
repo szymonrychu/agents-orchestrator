@@ -9,9 +9,11 @@ from agents_orchestrator.spec import SessionSpec
 
 NOTICE_REMINDER = "inactivity_reminder"
 NOTICE_CLOSE = "inactivity_close"
+NOTICE_AUTOCLOSE = "autoclose"
 # The web recognises the notices in the chat log by these prefixes.
 REMINDER_PREFIX = "Orchestrator notice (inactivity reminder):"
 CLOSE_PREFIX = "Orchestrator notice (inactivity limit):"
+AUTOCLOSE_PREFIX = "Orchestrator notice (session lifetime):"
 
 
 @dataclass(frozen=True)
@@ -63,7 +65,6 @@ def reminder_text(
     pods: int,
     chat: bool,
     taskboard: bool,
-    handoff_seconds: int,
 ) -> str:
     """The reminder notice; the update tools named are only those configured (`chat`,
     `taskboard`), and the close sentence appears only when the close limit is on."""
@@ -86,21 +87,37 @@ def reminder_text(
             "If the work is still going, report progress in your answer to the next user message."
         )
     parts = [
-        f"{REMINDER_PREFIX} this session has sent no update to the user for {humanize(quiet)}"
-        f" (last update {stamp(last_update)}) while holding {pods} agent"
+        f"{REMINDER_PREFIX} this session has sent no update to the user"
+        f" and done no tool work for {humanize(quiet)} (last activity {stamp(last_update)})"
+        f" while holding {pods} agent"
         f" pod{'' if pods == 1 else 's'} and a session slot.",
         going,
-        "If the work is done or blocked, report it and call orchestrator_self_close to free the"
-        " hive.",
+        "If the work is finished, post a final status and call orchestrator_self_close to free"
+        " the hive.",
     ]
     if limits.close_seconds > 0:
         closes_at = last_update + timedelta(seconds=limits.close_seconds)
         parts.append(
-            f"Without an update the session will be closed at about {stamp(closes_at)},"
-            f" with {humanize(handoff_seconds)} to hand off."
+            "Without an update or activity the orchestrator will ask this session to close at"
+            f" about {stamp(closes_at)}; it is closed only once idle, never mid-turn."
         )
     parts.append("Replying here alone does not count as an update.")
     return " ".join(parts)
+
+
+def _handoff_steps(chat: bool, taskboard: bool, workdir_saved: bool) -> list[str]:
+    """What the agent does before it closes: only the configured update tools are named, and the
+    workdir only when the session saves its workspace."""
+    steps: list[str] = []
+    if chat and taskboard:
+        steps.append("post a final status (orchestrator_chat_send or a task comment)")
+    elif chat:
+        steps.append("post a final status (orchestrator_chat_send)")
+    elif taskboard:
+        steps.append("post a final status (a task comment with orchestrator_task_comment)")
+    if workdir_saved:
+        steps.append("since this session saves its workspace, write handoff notes into the workdir")
+    return steps
 
 
 def close_text(
@@ -112,28 +129,23 @@ def close_text(
     taskboard: bool,
     workdir_saved: bool,
 ) -> str:
-    """The hard-limit notice; the hand-off sentence names only the configured update tools and
+    """The inactivity ask; the hand-off sentence names only the configured update tools and
     the workdir only when the session saves its workspace, and is left out when neither applies."""
-    steps = []
-    if chat and taskboard:
-        steps.append("post a final status (orchestrator_chat_send or a task comment)")
-    elif chat:
-        steps.append("post a final status (orchestrator_chat_send)")
-    elif taskboard:
-        steps.append("post a final status (a task comment with orchestrator_task_comment)")
-    if workdir_saved:
-        steps.append("since this session saves its workspace, write handoff notes into the workdir")
+    steps = _handoff_steps(chat, taskboard, workdir_saved)
     parts = [
-        f"{CLOSE_PREFIX} this session has sent no update to the user for"
-        f" {humanize(quiet_seconds)}, so the orchestrator is closing it."
+        f"{CLOSE_PREFIX} this session has sent no update and done no tool work for"
+        f" {humanize(quiet_seconds)}, so the orchestrator asks you to close it."
     ]
     if steps:
         parts.append(
-            f"You may hand off before it closes, you do not have to: {' and, '.join(steps)}."
+            f"If your work is finished: {' and '.join(steps)}, then call orchestrator_self_close."
         )
+    else:
+        parts.append("If your work is finished, call orchestrator_self_close.")
     parts.append(
-        f"The session is discarded {humanize(grace_seconds)} after your turn ends, or at"
-        f" {clock(deadline)} even mid-turn. Only the user can keep it."
+        "If you are still working, post a progress update now to keep the session. It is never"
+        f" closed while you work; if it is idle after {clock(deadline)} without a self-close or"
+        f" an update, it is discarded {humanize(grace_seconds)} later."
     )
     return " ".join(parts)
 
@@ -141,3 +153,43 @@ def close_text(
 def close_reason(quiet_seconds: int, close_seconds: int) -> str:
     """The `close_reason` recorded with an inactivity close."""
     return f"No update for {humanize(quiet_seconds)} (inactivity limit {close_seconds} s)"
+
+
+def autoclose_reason(after_seconds: int) -> str:
+    """The `close_reason` recorded with an autoclose ask."""
+    return (
+        f"Lifetime of {humanize(after_seconds)} reached (autoclose_after_seconds {after_seconds})"
+    )
+
+
+def autoclose_text(
+    *,
+    after_seconds: int,
+    deadline: datetime,
+    grace_seconds: int,
+    chat: bool,
+    taskboard: bool,
+    workdir_saved: bool,
+    can_self_close: bool,
+) -> str:
+    """The lifetime ask. A session that cannot self-close (a superleader) is not asked to; it
+    still learns that it is discarded once idle after the deadline."""
+    parts = [
+        f"{AUTOCLOSE_PREFIX} this session reached its lifetime of {humanize(after_seconds)} set"
+        " by its preset, so the orchestrator asks you to wrap up."
+    ]
+    if can_self_close:
+        steps = _handoff_steps(chat, taskboard, workdir_saved)
+        if steps:
+            parts.append(
+                f"Finish or checkpoint your work, {' and '.join(steps)}, then call"
+                " orchestrator_self_close."
+            )
+        else:
+            parts.append("Finish or checkpoint your work, then call orchestrator_self_close.")
+    parts.append(
+        f"The session is never closed while you work; if it is idle after {clock(deadline)}"
+        f" without a self-close, it is discarded {humanize(grace_seconds)} later. Only the user"
+        " can keep it."
+    )
+    return " ".join(parts)

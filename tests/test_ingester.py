@@ -1473,3 +1473,48 @@ async def test_stopping_mark_older_than_the_pod_grace_is_cleared_on_attach(harne
         return await stopping_since(pool, h.agent_id) is None
 
     await wait_until(cleared)
+
+
+async def activity_at(pool, agent_id: uuid.UUID) -> datetime | None:
+    return (await status_row(pool, agent_id))["activity_at"]
+
+
+async def test_tool_events_stamp_activity(harness, pool, listener) -> None:
+    h = await harness()
+    await h.start()
+    await h.stored_through(h.last_fake_seq())
+    assert await activity_at(pool, h.agent_id) is None
+    listener.got.clear()
+
+    h.emit_at("tool_call", T1, {"tool_name": "Bash", "tool_use_id": "u1"})
+    await h.stored_through(h.last_fake_seq())
+    assert await activity_at(pool, h.agent_id) == datetime.fromisoformat(T1)
+
+    h.emit_at("tool_result", T2, {"tool_name": "Bash", "tool_use_id": "u1"})
+    await h.stored_through(h.last_fake_seq())
+    assert await activity_at(pool, h.agent_id) == datetime.fromisoformat(T2)
+    assert listener.on("status") == []  # nothing reacts to it: no NOTIFY
+
+
+async def test_old_tool_event_keeps_activity(harness, pool) -> None:
+    h = await harness()
+    await h.start()
+    await h.stored_through(h.last_fake_seq())
+    h.emit_at("tool_call", T2, {"tool_name": "Bash", "tool_use_id": "u1"})
+    await h.stored_through(h.last_fake_seq())
+    h.emit_at("tool_result", T1, {"tool_name": "Bash", "tool_use_id": "u1"})
+    await h.stored_through(h.last_fake_seq())
+    assert await activity_at(pool, h.agent_id) == datetime.fromisoformat(T2)
+
+
+async def test_subagent_events_stamp_activity(harness, pool) -> None:
+    h = await harness()
+    await h.start()
+    await h.stored_through(h.last_fake_seq())
+    h.emit_at("subagent_started", T1, {"agent_id": "sa1", "agent_type": "x"})
+    await h.stored_through(h.last_fake_seq())
+    assert await activity_at(pool, h.agent_id) == datetime.fromisoformat(T1)
+    h.emit_at("subagent_stopped", T2, {"agent_id": "sa1", "agent_type": "x"})
+    await h.stored_through(h.last_fake_seq())
+    assert await activity_at(pool, h.agent_id) == datetime.fromisoformat(T2)
+    assert await background(pool, h.agent_id) == {}

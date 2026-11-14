@@ -1939,7 +1939,7 @@ HOOK_FILE = "hook-ran.txt"
 HOOK_TIMEOUT = 120
 COMPACT_TIMEOUT = 180
 COMPACTION_SETTLE_SECONDS = 15  # dispatcher polls (2 s) after the compaction, no move expected
-AUTOCLOSE_TIMEOUT = 240  # 30 s window plus the sweeper interval and the discard
+AUTOCLOSE_TIMEOUT = 240  # 30 s lifetime, sweeper interval, idle grace (no answer window)
 
 
 @contextlib.contextmanager
