@@ -193,6 +193,41 @@ One image, one `orch` entrypoint. Every command reads `ORCH_*` settings (see Con
 
 `orch handover-stats [--days N] [--baseline]` (needs `ORCH_DATABASE_URL`; read-only, default 7 days) prints one JSON object with `days`, `handovers`, `by_kind` (counts by reason: `handover`, `rollout`, `scale_down`, `leader_lost`, `user`), `median_tenure_seconds`, `tenures`, `tenures_under_20_min` and `intake_bytes_by_day` (a list of `[date, bytes]`). It reads `handover_log`, one row per delivered handover notice written by the api sweeper (session, epoch, kind, `tenure_seconds` = how long the predecessor led, `intake_bytes` = notice text plus file). `--baseline` derives the same numbers from the existing `handover` notices instead (tenure = gap between a session's consecutive notices, intake = notice text plus attachment sizes, kind `unknown`), so the numbers before the change can be compared with the ones after. The three queries behind it: the median of the non-null tenures (`percentile_cont(0.5)`), the count of tenures under 1200 s, and the sum of `intake_bytes` per day.
 
+## Context limits and handoff
+
+An agent whose context grows is asked to hand its work over before the context is compacted or lost. Details of each part are under "Strong-limit handoff", "Handover notice and transcript" and "Hive" in Architecture; this is the overview.
+
+Levels (`due_level`, evaluated for hive leaders and the single agent of every non-hive session, trigger-created ones included; members are never evaluated):
+
+- weak: the old soft rule (start context plus `ORCH_HANDOVER_BUDGET_TOKENS`, `ORCH_HANDOVER_MIN_TENURE_SECONDS`, capped at the strong limit). The agent gets a keyed `handover_due` note; nothing follows if it keeps working.
+- strong: the earlier of auto-compact percent minus `ORCH_HANDOVER_STRONG_MARGIN_PCT` and the compact point minus `ORCH_HANDOVER_STRONG_HEADROOM_TOKENS`. It opens a handoff cycle (`agent_handoffs` row).
+
+Settings (env var, default):
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `ORCH_HANDOVER_STRONG_MARGIN_PCT` | 10 | percent points below auto-compact where strong starts |
+| `ORCH_HANDOVER_STRONG_HEADROOM_TOKENS` | 60000 | tokens below the compact point where strong starts |
+| `ORCH_HANDOVER_NOTIFY_SECONDS` | 300 | countdown after the notice |
+| `ORCH_HANDOVER_EXTENSION_SECONDS` | 300 | one extension the agent may ask for (0 turns it off) |
+| `ORCH_HANDOVER_IDLE_PROCEED_SECONDS` | 60 | the countdown ends early once the notice turn ended and the agent stayed idle this long |
+| `ORCH_HANDOVER_QUIET_SECONDS` | 60 | hive quiet window before the ex-leader is cleared |
+| `ORCH_HANDOVER_QUIET_CAP_SECONDS` | 600 | the quiet window ends at the latest this long after the move |
+| `ORCH_HANDOVER_CLEAR_TIMEOUT_SECONDS` | 180 | a clear with no `session_cleared` is retried after this |
+| `ORCH_HANDOVER_CLEAR_FAILED_BLOCK_SECONDS` | 1800 | no new cycle after a failed clear |
+| `ORCH_AGENT_SHUTDOWN_NOTICE_SECONDS` | 120 | pod shutdown: notice wait |
+| `ORCH_AGENT_SHUTDOWN_HANDOFF_SECONDS` | 180 | pod shutdown: longest wait for the handoff turn |
+| `ORCH_AGENT_SHUTDOWN_STOP_SECONDS` | 90 | wrapper stop time (`limits.shutdown_timeout_seconds`) |
+| `ORCH_AGENT_TERMINATION_GRACE_SECONDS` | 420 | pod grace; must cover the three above plus 30 s margin |
+
+Phases of a row: `notified` (notice sent, countdown) then `extended` (once, on `orchestrator_leadership_handover(extend=true)`), `requested` (the handoff request is queued on the regular lane; no running turn is ever interrupted), `handed` (the request's reply is the handoff text), `discussing` (hive: leadership moved, quiet window), `clearing` (`/clear` through the wrapper), `returning` (solo: the handoff goes back to the same agent as a `handoff_return` message), then closed `done` or `cancelled` with a `close_reason`. A compaction or clear by anyone, a lost leadership or a stopping agent cancels the row before `handed`; the next strong crossing starts a new cycle.
+
+Hive order: notice, wait, extension if asked, handoff request, leadership move with reason `limit`, quiet window, clear of the ex-leader; the successor's `handover` notice starts with the handoff text. Solo order (and a leader that is the only live agent): notice, wait, extension, request, clear, handoff back to the same agent.
+
+Pod shutdown (SIGTERM, every pod on the default agent image): the wrapper runs a notice turn, waits `ORCH_AGENT_SHUTDOWN_NOTICE_SECONDS` (or less once the session stayed idle), asks for the handoff and waits at most `ORCH_AGENT_SHUTDOWN_HANDOFF_SECONDS`, then stops claude. There is no extension. The orchestrator stores the `shutdown_handoff` text on a `shutdown` row: a solo agent's next pod is cleared and gets it as `handoff_return`, a leader's successor gets it at the head of its handover notice, and an agent that is already stopping is never picked for leadership or work.
+
+Members: a member never gets a weak note or a cycle and keeps auto-compact only. Its pod still runs the shutdown routine (the wrapper cannot know the role), but its row closes `done` (`member`) and the next pod resumes as before. `orch handover-stats` counts `agent_handoffs` by trigger and close reason and prints the median seconds from notice to delivered handoff. The agents-web UI shows the new notice kinds as plain notice text.
+
 ## Images
 
 CI (`.github/workflows/ci.yaml`, job `images`) builds the orchestrator image from the root `Dockerfile` and smoke-tests it with `docker run --rm <image> --help`, but only after the `lint`, `test` and `e2e` jobs pass; a red build is never pushed. Only a push to `main` logs in to Harbor (secrets `HARBOR_USERNAME`, `HARBOR_PASSWORD`) and pushes it with `regctl`, in 50MB chunks. The `e2e` job builds and loads its own images and does not use the pushed one, so it does not wait for `images`.

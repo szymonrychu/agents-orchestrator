@@ -46,6 +46,11 @@ env:
   # the image-roll e2e pins the forced rollout handover; the fake claude never hands over on
   # its own, so the voluntary window is off (the production default is 1800 s)
   ORCH_ROLLOUT_HANDOVER_SECONDS: "0"
+  # the shutdown-handoff e2e deletes pods by hand: a short notice and handoff window (the fake
+  # claude answers at once, and the notice wait ends early once the session stayed idle)
+  ORCH_AGENT_SHUTDOWN_NOTICE_SECONDS: "30"
+  ORCH_AGENT_SHUTDOWN_HANDOFF_SECONDS: "60"
+  ORCH_HANDOVER_IDLE_PROCEED_SECONDS: "5"
   ORCH_LOG_LEVEL: INFO
 
 # Service port (other microservices): the e2e pod presents the fixed, non-secret token

@@ -13,6 +13,8 @@
       {"text": "Note file written."}
     ]},
     {"match": "marathon", "steps": [{"text": "Working through the marathon."}, {"sleep": 300}, {"text": "Marathon work done."}]},
+    {"match": "This pod is shutting down", "steps": [{"text": "Parked my step for the shutdown."}]},
+    {"match": "Write your handoff now", "steps": [{"text": "E2E-HANDOFF: resume work item 42 at the parser, tests are green."}]},
     {"match": "self-initiated", "steps": [{"text": "Noted the self-restart."}]},
     {"match": "Continue the task where you left off", "steps": [{"text": "Resumed after the restart and finished."}]}
   ]
