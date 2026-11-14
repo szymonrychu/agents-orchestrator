@@ -128,6 +128,55 @@
       },
       "RunView": {
         "properties": {
+          "chain_depth": {
+            "title": "Chain Depth",
+            "type": "integer"
+          },
+          "chain_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chain Ref"
+          },
+          "chain_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chain Source"
+          },
+          "chain_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chain Status"
+          },
+          "chained_from": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chained From"
+          },
           "created_at": {
             "format": "date-time",
             "title": "Created At",
@@ -165,6 +214,28 @@
               }
             ],
             "title": "Message Id"
+          },
+          "previous_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previous Name"
+          },
+          "previous_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previous Status"
           },
           "reason": {
             "anyOf": [
@@ -232,6 +303,21 @@
             "title": "Status",
             "type": "string"
           },
+          "then_schedule_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Then Schedule Ids"
+          },
           "trigger": {
             "title": "Trigger",
             "type": "string"
@@ -256,7 +342,15 @@
           "created_at",
           "updated_at",
           "started_at",
-          "finished_at"
+          "finished_at",
+          "then_schedule_ids",
+          "chain_status",
+          "chained_from",
+          "chain_source",
+          "chain_ref",
+          "chain_depth",
+          "previous_name",
+          "previous_status"
         ],
         "title": "RunView",
         "type": "object"
@@ -289,6 +383,15 @@
             "minLength": 1,
             "title": "Prompt",
             "type": "string"
+          },
+          "then_schedule_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 10,
+            "title": "Then Schedule Ids",
+            "type": "array"
           },
           "timezone": {
             "anyOf": [
@@ -362,6 +465,14 @@
             "title": "Prompt",
             "type": "string"
           },
+          "then_schedule_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Then Schedule Ids",
+            "type": "array"
+          },
           "timezone": {
             "title": "Timezone",
             "type": "string"
@@ -380,6 +491,7 @@
           "preset_id",
           "prompt",
           "enabled",
+          "then_schedule_ids",
           "next_fires",
           "last_run",
           "created_at",
@@ -797,6 +909,7 @@
         "summary": "Get Schedule"
       },
       "put": {
+        "description": "Optional `If-Match: \"<updated_at>\"`: replace only if the schedule is unchanged, else 412.",
         "operationId": "replace_schedule_schedules_api_v1_schedules__schedule_id__put",
         "parameters": [
           {
@@ -806,6 +919,22 @@
             "schema": {
               "title": "Schedule Id",
               "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
             }
           }
         ],
@@ -829,6 +958,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "malformed If-Match header (bad_request)"
           },
           "403": {
             "content": {
@@ -859,6 +998,16 @@
               }
             },
             "description": "a schedule with this name already exists (conflict)"
+          },
+          "412": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "the schedule changed since the If-Match value was read (precondition_failed)"
           },
           "422": {
             "content": {

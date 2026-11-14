@@ -213,8 +213,9 @@ class ProposalIn(BaseModel):
 
 
 class ScheduleIn(BaseModel):
-    """agents-schedule's `ScheduleIn` (v0.6.0): the full body of its `PUT /schedules/{id}`, which
-    a schedule proposal is merged into, validated as and applied with."""
+    """agents-schedule's `ScheduleIn` (trigger-chain release): the full body of its
+    `PUT /schedules/{id}`, which a schedule proposal is merged into, validated as and applied
+    with. `then_schedule_ids` are the schedules chained after a handled run (fan-out, max 10)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -224,6 +225,7 @@ class ScheduleIn(BaseModel):
     preset_id: uuid.UUID
     prompt: str = Field(min_length=1, max_length=16384)
     enabled: bool = True
+    then_schedule_ids: list[uuid.UUID] = Field(default_factory=list, max_length=10)
 
 
 class ProposalRevise(BaseModel):
