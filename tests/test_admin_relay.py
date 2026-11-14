@@ -901,3 +901,136 @@ async def test_admin_relay_sends_all_projects_scope(rig):
     calls = rig.fakes[service].calls
     assert len(calls) >= 2
     assert [c.headers.get("x-orch-projects") for c in calls] == ["*"] * len(calls)
+
+
+# ----------------------------------------------------------------------------- chain targets
+
+
+def _sched(n: int) -> str:
+    return str(ident("schedule", n))
+
+
+def _schedule_lookups(rig) -> list:
+    return [c for c in rig.fakes["schedule"].calls if c.method == "GET"]
+
+
+CHAIN_ROUTES = [
+    ("schedule", "POST", "/schedules"),
+    ("schedule", "PUT", "/schedules/{schedule_id}"),
+    ("webhook", "POST", "/endpoints"),
+    ("webhook", "PATCH", "/endpoints/{id}"),
+    ("webhook", "POST", "/endpoints/{id}/clone"),
+]
+
+
+# the clone body has no `then_schedule_ids` (the clone copies the stored endpoint's links)
+CHAIN_BODY = [r for r in CHAIN_ROUTES if not r[2].endswith("/clone")]
+
+
+def test_chain_guard_table():
+    for route in CHAIN_ROUTES:
+        want = "body_and_stored" if route[2].endswith("/clone") else "body"
+        assert admin_relay.GUARDS[route].chain_targets == want, route
+    assert {r for r, g in admin_relay.GUARDS.items() if g.chain_targets} == set(CHAIN_ROUTES)
+
+
+async def _chain_call(rig, route, targets, n: int = 7):
+    service, method, template = route
+    body = _body_for(rig, *route, rig.vis)
+    if targets is not None:
+        body["then_schedule_ids"] = targets
+    return await rig.call(method, relay_url(service, template, n), json=body)
+
+
+@pytest.mark.parametrize(("service", "method", "template"), CHAIN_BODY)
+async def test_chain_target_on_manageable_preset_forwarded(rig, service, method, template):
+    route = (service, method, template)
+    r = await _chain_call(rig, route, [_sched(7), _sched(10)])  # visible and privileged
+    assert r.status_code == _success(*route), r.text
+    assert _sent(rig, *route)
+
+
+@pytest.mark.parametrize(("service", "method", "template"), CHAIN_BODY)
+async def test_chain_target_on_human_only_preset_403_never_forwarded(
+    rig, service, method, template
+):
+    route = (service, method, template)
+    r = await _chain_call(rig, route, [_sched(7), _sched(8)])
+    assert_error(r, 403, "not_manageable")
+    assert not _sent(rig, *route)
+
+
+@pytest.mark.parametrize(("service", "method", "template"), CHAIN_BODY)
+async def test_chain_unknown_target_404_never_forwarded(rig, service, method, template):
+    route = (service, method, template)
+    r = await _chain_call(rig, route, [_sched(404)])
+    assert_error(r, 404, "not_found")
+    assert not _sent(rig, *route)
+
+
+@pytest.mark.parametrize(("service", "method", "template"), CHAIN_BODY)
+@pytest.mark.parametrize("targets", [[], None])
+async def test_chain_empty_or_absent_forwards_without_target_lookup(
+    rig, service, method, template, targets
+):
+    route = (service, method, template)
+    before = len(_schedule_lookups(rig))
+    body = _body_for(rig, *route, rig.vis)
+    if targets is not None:
+        body["then_schedule_ids"] = targets
+    r = await rig.call(method, relay_url(service, template), json=body)
+    assert r.status_code == _success(*route), r.text
+    assert _sent(rig, *route)
+    stored = 1 if (service, method) == ("schedule", "PUT") else 0  # the stored preset lookup
+    assert len(_schedule_lookups(rig)) - before == stored
+
+
+def _link_endpoint(rig, targets: list[str]) -> None:
+    ends = rig.fakes["webhook"].answers[("GET", "/webhooks/api/v1/endpoints")][1]
+    for e in ends:
+        e["then_schedule_ids"] = list(targets)
+
+
+async def test_clone_checks_the_stored_endpoints_links(rig):
+    route = ("webhook", "POST", "/endpoints/{id}/clone")
+    _link_endpoint(rig, [_sched(8)])  # stored links reach a human-only schedule
+    body = _body_for(rig, *route, rig.vis)  # no then_schedule_ids field in the body
+    r = await rig.call("POST", relay_url("webhook", route[2]), json=body)
+    assert_error(r, 403, "not_manageable")
+    assert not _sent(rig, *route)
+
+
+async def test_clone_with_manageable_stored_links_forwarded(rig):
+    route = ("webhook", "POST", "/endpoints/{id}/clone")
+    _link_endpoint(rig, [_sched(7)])
+    body = _body_for(rig, *route, rig.vis)
+    r = await rig.call("POST", relay_url("webhook", route[2]), json=body)
+    assert r.status_code == _success(*route), r.text
+
+
+async def test_patch_ignores_the_stored_links(rig):
+    # a PATCH without the field leaves the stored links as they are: nothing new is chained
+    route = ("webhook", "PATCH", "/endpoints/{id}")
+    _link_endpoint(rig, [_sched(8)])
+    body = _body_for(rig, *route, rig.vis)
+    r = await rig.call("PATCH", relay_url("webhook", route[2]), json=body)
+    assert r.status_code == _success(*route), r.text
+
+
+async def test_chain_targets_with_schedule_upstream_unconfigured_503(pool, dsn):
+    boss = await alone(pool, "rel-boss-chain", superleader=True)
+    vis = str(await add_preset(pool, True))
+    app, fakes, *_ = make_app(dsn, pool, schedule_url="", schedule_token="")
+    fake = fakes["webhook"]
+    key = ("POST", "/webhooks/api/v1/endpoints")
+    fake.answers[key] = fu.success_sample(fake, key)
+    body = fu.sample(DOCS["webhook"], _body_schema(fake, key))
+    body.update(preset_id=vis, then_schedule_ids=[_sched(7)])
+    async with client_for(app, boss.leader_ip) as http:
+        r = await http.post(
+            ADMIN_PREFIX + RELAY_PREFIX["webhook"] + "/endpoints",
+            headers=headers(boss.id),
+            json=body,
+        )
+    assert_error(r, 503, "upstream_unconfigured")
+    assert not any(c.method == "POST" for c in fake.calls)

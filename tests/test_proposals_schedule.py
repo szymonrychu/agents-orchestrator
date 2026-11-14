@@ -189,6 +189,7 @@ async def test_create_records_one_classified_item_per_field_and_the_updated_at(p
         "preset_id": rig.vis,
         "prompt": "run the nightly checks",
         "enabled": True,
+        "then_schedule_ids": [],
     }
     assert rig.sched.puts() == []
 
@@ -257,6 +258,7 @@ async def test_approve_puts_the_full_object_with_if_match_and_records_applied(po
         "preset_id": rig.vis,
         "prompt": "run the nightly checks twice",
         "enabled": True,
+        "then_schedule_ids": [],
     }
     assert done.status == "applied"
     assert await _state(pool, view.id) == ("applied", {"cron": "approved", "prompt": "approved"})
@@ -493,3 +495,19 @@ async def test_revise_is_404_when_the_schedule_is_deleted_or_its_preset_hidden(p
     with pytest.raises(proposals.ApiError) as exc:
         await revise()
     _error(exc, 404, "not_found")
+
+
+def test_schedule_in_carries_then_schedule_ids():
+    base = {
+        "name": "n",
+        "cron": "0 3 * * *",
+        "preset_id": str(uuid.uuid4()),
+        "prompt": "p",
+    }
+    assert schemas.ScheduleIn.model_validate(base).then_schedule_ids == []
+    ids = [str(uuid.uuid4()), str(uuid.uuid4())]
+    merged = schemas.ScheduleIn.model_validate({**base, "then_schedule_ids": ids})
+    assert [str(i) for i in merged.then_schedule_ids] == ids
+    assert "then_schedule_ids" in proposals.SCHEDULE_FIELDS
+    with pytest.raises(pydantic.ValidationError):
+        schemas.ScheduleIn.model_validate({**base, "then_schedule_ids": [str(uuid.uuid4())] * 11})
