@@ -65,7 +65,6 @@ def reminder_text(
     pods: int,
     chat: bool,
     taskboard: bool,
-    handoff_seconds: int,
 ) -> str:
     """The reminder notice; the update tools named are only those configured (`chat`,
     `taskboard`), and the close sentence appears only when the close limit is on."""
@@ -88,18 +87,19 @@ def reminder_text(
             "If the work is still going, report progress in your answer to the next user message."
         )
     parts = [
-        f"{REMINDER_PREFIX} this session has sent no update to the user for {humanize(quiet)}"
-        f" (last update {stamp(last_update)}) while holding {pods} agent"
+        f"{REMINDER_PREFIX} this session has sent no update to the user"
+        f" and done no tool work for {humanize(quiet)} (last activity {stamp(last_update)})"
+        f" while holding {pods} agent"
         f" pod{'' if pods == 1 else 's'} and a session slot.",
         going,
-        "If the work is done or blocked, report it and call orchestrator_self_close to free the"
-        " hive.",
+        "If the work is finished, post a final status and call orchestrator_self_close to free"
+        " the hive.",
     ]
     if limits.close_seconds > 0:
         closes_at = last_update + timedelta(seconds=limits.close_seconds)
         parts.append(
-            f"Without an update the session will be closed at about {stamp(closes_at)},"
-            f" with {humanize(handoff_seconds)} to hand off."
+            "Without an update or activity the orchestrator will ask this session to close at"
+            f" about {stamp(closes_at)}; it is closed only once idle, never mid-turn."
         )
     parts.append("Replying here alone does not count as an update.")
     return " ".join(parts)

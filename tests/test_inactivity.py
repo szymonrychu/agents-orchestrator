@@ -29,7 +29,6 @@ def _reminder(**overrides) -> str:
         "pods": 3,
         "chat": True,
         "taskboard": True,
-        "handoff_seconds": 300,
     }
     kwargs.update(overrides)
     return inactivity.reminder_text(**kwargs)
@@ -106,19 +105,27 @@ def test_stamp_and_clock_are_utc():
 def test_reminder_text_example():
     assert _reminder() == (
         "Orchestrator notice (inactivity reminder): this session has sent no update to the user"
-        " for 1 h (last update 2026-11-02 10:00Z) while holding 3 agent pods and a session slot."
+        " and done no tool work for 1 h (last activity 2026-11-02 10:00Z) while holding 3 agent"
+        " pods and a session slot."
         " If the work is still going, please post a short progress update now with"
         " orchestrator_chat_send or a comment on your task (orchestrator_task_comment), and keep"
-        " posting at least every 1 h. If the work is done or blocked, report it and call"
-        " orchestrator_self_close to free the hive. Without an update the session will be closed"
-        " at about 2026-11-02 14:00Z, with 5 min to hand off. Replying here alone does not count"
-        " as an update."
+        " posting at least every 1 h. If the work is finished, post a final status and call"
+        " orchestrator_self_close to free the hive. Without an update or activity the"
+        " orchestrator will ask this session to close at about 2026-11-02 14:00Z; it is closed"
+        " only once idle, never mid-turn. Replying here alone does not count as an update."
     )
+
+
+def test_reminder_text_invites_self_close_only_when_finished():
+    text = _reminder()
+    assert "If the work is finished" in text
+    assert "done or blocked" not in text
+    assert "never mid-turn" in text
 
 
 def test_reminder_text_without_close_and_tools():
     text = _reminder(limits=Limits(600, 0))
-    assert "will be closed" not in text
+    assert "ask this session to close" not in text
     assert "at least every 10 min." in text
 
     text = _reminder(taskboard=False)

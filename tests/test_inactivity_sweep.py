@@ -70,7 +70,8 @@ async def _shift(pool, session_id, seconds: int) -> None:
         )
         await conn.execute(
             f"UPDATE agent_status SET free_since = free_since - {iv},"
-            f" waiting_since = waiting_since - {iv}"
+            f" waiting_since = waiting_since - {iv},"
+            f" activity_at = activity_at - {iv}"
             " WHERE agent_id IN (SELECT id FROM agents WHERE session_id = %(id)s)",
             params,
         )
@@ -574,3 +575,40 @@ async def test_two_replicas_close_once(pool):
         assert sorted([first, second], key=len) == [[], [s["id"]]]
         assert await _notices(pool, s["id"]) == [("inactivity_close", "regular", None, "close")]
         assert (await _row(pool, s["id"]))["close_kind"] == "inactivity"
+
+
+async def test_quiet_clock_reads_activity(pool):
+    s, a = await _session(pool)
+    await _shift(pool, s["id"], 7200)
+    before = await _quiet(pool, s["id"])
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE agent_status SET activity_at = now() - interval '5 minutes'"
+            " WHERE agent_id = %s",
+            (a["id"],),
+        )
+    quiet = await _quiet(pool, s["id"])
+    assert quiet > before
+    assert 290 <= (await _now(pool) - quiet).total_seconds() <= 330
+    assert await _remind(pool) == []
+
+
+async def test_background_subagent_holds_quiet_clock(pool):
+    s, a = await _session(pool)
+    await _shift(pool, s["id"], 7200)
+    stale = datetime.now(UTC).timestamp() - 7300
+    await set_agent_status(
+        pool,
+        a["id"],
+        state="idle",
+        background_subagents={"sa1": datetime.fromtimestamp(stale, UTC).isoformat()},
+    )
+    assert (await _now(pool) - await _quiet(pool, s["id"])).total_seconds() > 7000
+    await set_agent_status(
+        pool,
+        a["id"],
+        state="idle",
+        background_subagents={"sa1": datetime.now(UTC).isoformat()},
+    )
+    assert (await _now(pool) - await _quiet(pool, s["id"])).total_seconds() < 5
+    assert await _remind(pool) == []

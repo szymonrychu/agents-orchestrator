@@ -170,9 +170,9 @@ async def test_sweeper_sends_inactivity_notices(dsn, pool, monkeypatch):
     [(kind, text)] = await notices(quiet["id"])
     assert kind == inactivity.NOTICE_REMINDER
     assert text.startswith(inactivity.REMINDER_PREFIX)
-    assert "for 1 h (last update" in text and "holding 0 agent pods" in text
+    assert "for 1 h (last activity" in text and "holding 0 agent pods" in text
     assert "keep posting at least every 1 h" not in text  # no update tool configured
-    assert "with 5 min to hand off" in text
+    assert "never mid-turn" in text
     [(kind, text)] = await notices(silent["id"])
     assert kind == inactivity.NOTICE_CLOSE
     assert text.startswith(inactivity.CLOSE_PREFIX)

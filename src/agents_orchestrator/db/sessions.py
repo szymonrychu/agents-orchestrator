@@ -561,8 +561,10 @@ def quiet_clock_sql(alias: str) -> str:
     """SQL expression for the last user-visible update of session `alias` (spec 3.2): the
     latest of its creation, the api-written `last_update_at`, the newest inbound message that is
     not an orchestrator notice (user, trigger, connector or peer session), the completion of a
-    turn that carried such a message, and the newest message the session sent to another
-    session. Tool activity and turns that carried only a notice do not count."""
+    turn that carried such a message, the newest message the session sent to another session,
+    the newest tool or subagent event of its agents (`agent_status.activity_at`), and now while
+    a live agent has a running background subagent. Turns that carried only a notice do not
+    count."""
     inbound = (
         f"qm.session_id = {alias}.id AND qm.notice IS NULL"
         f" AND qm.sender_session_id IS DISTINCT FROM {alias}.id"
@@ -572,7 +574,12 @@ def quiet_clock_sql(alias: str) -> str:
         f" (SELECT max(qm.created_at) FROM messages qm WHERE {inbound}),"
         " (SELECT max(qt.completed_at) FROM messages qm JOIN turns qt ON qt.turn_id = qm.turn_id"
         f"  WHERE {inbound}),"
-        f" (SELECT max(qm.created_at) FROM messages qm WHERE qm.sender_session_id = {alias}.id))"
+        f" (SELECT max(qm.created_at) FROM messages qm WHERE qm.sender_session_id = {alias}.id),"
+        " (SELECT max(st.activity_at) FROM agents a JOIN agent_status st ON st.agent_id = a.id"
+        f"  WHERE a.session_id = {alias}.id),"
+        " CASE WHEN EXISTS (SELECT 1 FROM agents a JOIN agent_status st ON st.agent_id = a.id"
+        f"  WHERE a.session_id = {alias}.id AND a.gone_at IS NULL AND {background_busy('st')})"
+        " THEN now() END)"
     )
 
 

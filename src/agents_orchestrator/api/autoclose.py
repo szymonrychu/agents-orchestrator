@@ -90,7 +90,6 @@ def _reminder_notice(settings: Settings) -> Callable[[sessions.Session, datetime
             pods=pods,
             chat=settings.chat_available,
             taskboard=settings.taskboard_available,
-            handoff_seconds=settings.inactivity_handoff_seconds,
         )
 
     return compose
