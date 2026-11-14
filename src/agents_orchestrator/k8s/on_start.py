@@ -58,10 +58,12 @@ TASK_TOOLS = [
 PROJECT_TOOLS = ["project_list", "project_summary"]
 # Spec tools (T-116): the spec relay on the agent port; every session gets them, trigger-created
 # ones included. Accept is user-only and has no tool; dismiss and delete are superleader admin
-# tools (ADMIN_TOOLS), the agent relay refuses both.
+# tools (ADMIN_TOOLS), the agent relay refuses both. spec_queue_list reads the start queue (S-51);
+# spec_queue_move is a superleader admin tool; queue removal has no tool and no relay path.
 SPEC_TOOLS = [
     "spec_list", "spec_get", "spec_create", "spec_update", "spec_versions", "spec_comment",
     "spec_comments", "spec_comment_resolve", "spec_pull", "spec_push",
+    "spec_queue_list",
 ]  # fmt: skip
 # Plan tools (T-116 stage 4): the plan, steps, gate and section relay paths; every session.
 PLAN_TOOLS = [
@@ -112,6 +114,7 @@ ADMIN_TOOLS = [
     "archives_cleanup_preview", "usage_history", "usage_sessions",
     "session_labels_update", "session_scale", "session_lock_reassign", "session_message_cancel",
     "project_update", "archives_settings_set", "spec_delete", "spec_suggestion_dismiss",
+    "spec_queue_move",
     *PROPOSAL_TOOLS,
 ]  # fmt: skip
 

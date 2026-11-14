@@ -47,6 +47,7 @@ PROJECT_TOOLS = ["project_list", "project_summary"]
 SPEC_TOOLS = [
     "spec_list", "spec_get", "spec_create", "spec_update", "spec_versions", "spec_comment",
     "spec_comments", "spec_comment_resolve", "spec_pull", "spec_push",
+    "spec_queue_list",
 ]  # fmt: skip
 PLAN_TOOLS = [
     "plan_get", "plan_set", "plan_steps", "plan_step_get", "plan_step_add", "plan_step_edit",
@@ -99,6 +100,7 @@ ADMIN_TOOLS = [
     "archives_cleanup_preview", "usage_history", "usage_sessions",
     "session_labels_update", "session_scale", "session_lock_reassign", "session_message_cancel",
     "project_update", "archives_settings_set", "spec_delete", "spec_suggestion_dismiss",
+    "spec_queue_move",
     *PROPOSAL,
 ]  # fmt: skip
 SECRET = "s3cr3t-token-value"
@@ -593,6 +595,7 @@ def test_alone_session_allow_is_the_literal_e2e_list():
         "project_list", "project_summary",
         "spec_list", "spec_get", "spec_create", "spec_update", "spec_versions", "spec_comment",
         "spec_comments", "spec_comment_resolve", "spec_pull", "spec_push",
+        "spec_queue_list",
         "plan_get", "plan_set", "plan_steps", "plan_step_get", "plan_step_add", "plan_step_edit",
         "plan_step_deps", "plan_steps_order", "plan_step_next", "plan_step_update", "plan_gate",
         "spec_section", "plan_steps_push", "plan_export", "plan_questions_ask",

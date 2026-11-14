@@ -24,6 +24,7 @@ _CASES = (
     ("GET", "/S-1/plan"), ("PUT", "/S-1/plan"), ("GET", "/S-1/steps"), ("PUT", "/S-1/steps"),
     ("POST", "/S-1/steps"), ("PUT", "/S-1/steps/order"), ("POST", "/S-1/steps/next"),
     ("GET", "/S-1/gate"), ("GET", f"/S-1/docs/{P}/section"),
+    ("GET", "/queue"), ("POST", "/queue/12/move"),
 )  # fmt: skip
 ROUTES = tuple(
     (method, "/agent/v1/specs" + tail, "/taskboard/api/v1/specs" + tail) for method, tail in _CASES
@@ -74,6 +75,11 @@ async def test_labels_mine_is_not_expanded(monkeypatch):
         "/agent/v1/specs/S-x",
         "/agent/v1/specs/stream",
         "/agent/v1/specs/S-1/approve",
+        "/agent/v1/specs/queue/x/move",
+        "/agent/v1/specs/queue/12",
+        "/agent/v1/specs/queue/12/remove",
+        "/agent/v1/specs/queue/12/move/x",
+        "/agent/v1/specs/queue/",
     ],
 )
 async def test_unlisted_paths_are_404(monkeypatch, path):
@@ -185,3 +191,31 @@ async def test_empty_non_204_answer_is_still_503(monkeypatch):
     rig.upstream.reply = httpx.Response(200, content=b"")
     r = await rig.call("POST", "/agent/v1/specs/S-1/steps/next", json={})
     assert_error(r, 503, "taskboard_unavailable")
+
+
+async def test_queue_list_is_relayed(monkeypatch):
+    rig = make_rig(monkeypatch)
+    r = await rig.call("GET", "/agent/v1/specs/queue?project=a")
+    assert r.status_code == 200
+    (sent,) = rig.upstream.seen
+    assert sent.method == "GET"
+    assert sent.url.raw_path == b"/taskboard/api/v1/specs/queue?project=a"
+    assert sent.headers["x-orch-projects"] == "default"
+
+
+async def test_queue_move_is_relayed(monkeypatch):
+    rig = make_rig(monkeypatch)
+    body = {"position": 1}
+    r = await rig.call("POST", "/agent/v1/specs/queue/12/move", json=body)
+    assert r.status_code == 200
+    (sent,) = rig.upstream.seen
+    assert sent.method == "POST"
+    assert sent.url.raw_path == b"/taskboard/api/v1/specs/queue/12/move"
+    assert json.loads(sent.content) == body
+
+
+async def test_queue_delete_stays_unrelayed(monkeypatch):
+    rig = make_rig(monkeypatch)
+    r = await rig.call("DELETE", "/agent/v1/specs/queue/12")
+    assert r.status_code in (404, 405)
+    assert rig.upstream.seen == []

@@ -5,9 +5,10 @@ is verified, the upstream is `{ORCH_TASKBOARD_URL}/taskboard/api/v1/specs...`, t
 request carries the taskboard bearer, `X-Orch-Session`, `X-Orch-Slug` and `X-Orch-Projects`, the
 body is capped at 256 KiB (413 `payload_too_large`) and the upstream status and JSON body come back
 unchanged. The allowlist is the spec, its documents, versions and sections, its comments with
-resolve, and its plan, steps (order, next) and gate.
-Accept and dismiss are user-only and are not relayed, DELETE does not exist here, and a path with
-`..`, `.` or empty segments is refused: all are 404
+resolve, its plan, steps (order, next) and gate, and the start queue (`/specs/queue`, and
+`/specs/queue/{id}/move` for superleaders by tool policy).
+Accept, dismiss and queue removal are user-only and are not relayed, DELETE does not exist here,
+and a path with `..`, `.` or empty segments is refused: all are 404
 `not_found` without an upstream call. `labels=mine` is not expanded.
 """
 
@@ -27,7 +28,7 @@ router = APIRouter(prefix="/agent/v1/specs", tags=["agent"])
 _KEY = r"S-[0-9]+"
 _P = r"[a-z0-9][a-z0-9._/-]{0,119}\.md"
 _ALLOWED = re.compile(
-    rf"/specs(?:|/{_KEY}(?:|/docs|/docs/{_P}|/docs/{_P}/versions"
+    rf"/specs(?:|/queue|/queue/[0-9]+/move|/{_KEY}(?:|/docs|/docs/{_P}|/docs/{_P}/versions"
     rf"|/docs/{_P}/section|/comments|/comments/[0-9]+|/comments/[0-9]+/resolve"
     rf"|/plan|/steps|/steps/order|/steps/next|/gate))"
 )

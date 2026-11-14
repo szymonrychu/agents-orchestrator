@@ -333,6 +333,7 @@ ALONE_SESSION_TOOLS = [
     "spec_comment_resolve",
     "spec_pull",
     "spec_push",
+    "spec_queue_list",
     "plan_get",
     "plan_set",
     "plan_steps",
