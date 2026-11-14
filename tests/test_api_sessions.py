@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import gc
+import logging
 import uuid
 import weakref
 from datetime import datetime
@@ -170,6 +171,19 @@ async def test_delete_is_discard_without_purge(http, pool):
         await repo.purge(conn, uuid.UUID(cid))
     assert_error(await http.get(f"/api/v1/sessions/{cid}"), 404, "not_found")
     assert_error(await http.delete(f"/api/v1/sessions/{cid}"), 404, "not_found")
+
+
+async def test_discard_logs_close(http, caplog):
+    cid = (await http.post("/api/v1/sessions", json={"slug": "dl", "spec": {}})).json()["id"]
+    caplog.set_level(logging.INFO, logger="agents_orchestrator.db.sessions")
+    assert (await http.delete(f"/api/v1/sessions/{cid}")).status_code == 202
+    assert (await http.delete(f"/api/v1/sessions/{cid}")).status_code == 202
+    records = [r for r in caplog.records if r.getMessage().startswith("session close: ")]
+    assert len(records) == 1
+    assert records[0].fields["close_kind"] == "discard"
+    assert records[0].fields["close_reason"] == "user"
+    assert records[0].fields["step"] == "discard"
+    assert records[0].fields["session_id"] == cid
 
 
 async def test_agents_view_joins_status(http, pool):

@@ -453,6 +453,26 @@ async def lock_active(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> S
     return await _lock_active(conn, session_id)
 
 
+def log_close(session_id: uuid.UUID, *, close_kind: str, reason: str | None, step: str) -> None:
+    """The one structured line of every close step: `step` is ask, request, cancel or discard."""
+    log.info(
+        "session close: %s close_kind=%s step=%s reason=%s",
+        session_id,
+        close_kind,
+        step,
+        reason,
+        extra={
+            "fields": {
+                "event": "session_close",
+                "session_id": str(session_id),
+                "close_kind": close_kind,
+                "close_reason": reason,
+                "step": step,
+            }
+        },
+    )
+
+
 CLOSE_KINDS = ("self", "inactivity", "autoclose")
 
 

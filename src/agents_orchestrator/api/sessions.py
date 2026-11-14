@@ -759,12 +759,16 @@ async def verify_agent_token(
 
 
 async def discard(
-    conn, session_id: uuid.UUID, settings: Settings, *, force: bool = False
+    conn, session_id: uuid.UUID, settings: Settings, *, by: str, force: bool = False
 ) -> schemas.SessionView:
+    """Flip the session to deleting; `by` ('user' or 'session <slug>') is the logged reason."""
+    before = await repo.get(conn, session_id)
     try:
         session = await repo.request_delete(conn, session_id, force=force)
     except repo.SessionNotFound:
         raise not_found("session") from None
+    if before is not None and before.desired == "active":
+        repo.log_close(session_id, close_kind="discard", reason=by, step="discard")
     return await one_view(conn, session, settings)
 
 
@@ -798,7 +802,7 @@ async def discard_session(
             session = await repo.get(conn, session_id)
             if session is None or session.created_by_service != service:
                 raise not_found("session")
-        return await discard(conn, session_id, settings, force=force)
+        return await discard(conn, session_id, settings, force=force, by="user")
 
 
 def force_flag(request: Request, *, allowed: bool = True) -> bool:
