@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from factories import (
@@ -450,6 +450,21 @@ async def test_running_background_subagent_blocks_discard(pool):
     s, a = await _closing_session(pool)
     started = datetime.now(UTC).isoformat()
     await set_agent_status(pool, a["id"], state="idle", background_subagents={"sa1": started})
+    await _age(pool, s["id"])
+    assert await _run(pool) == []
+    assert await _desired(pool, s["id"]) == "active"
+
+
+async def test_long_running_background_subagent_with_recent_activity_blocks_discard(pool):
+    s, a = await _closing_session(pool)
+    old = (datetime.now(UTC) - timedelta(hours=3)).isoformat()
+    await set_agent_status(pool, a["id"], state="idle", background_subagents={"sa1": old})
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE agent_status SET activity_at = now() - interval '5 minutes'"
+            " WHERE agent_id = %s",
+            (a["id"],),
+        )
     await _age(pool, s["id"])
     assert await _run(pool) == []
     assert await _desired(pool, s["id"]) == "active"

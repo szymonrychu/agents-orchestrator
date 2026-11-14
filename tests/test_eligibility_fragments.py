@@ -83,3 +83,25 @@ async def test_background_entry_stale_after_two_hours(pool) -> None:
     assert await with_map({"a": fresh})
     assert not await with_map({"a": old})
     assert await with_map({"a": old, "b": fresh})
+
+
+async def test_stale_entry_counts_while_activity_is_recent(pool) -> None:
+    session = await insert_session(pool)
+    agent = await insert_agent(pool, session["id"], ready=True)
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT (now() - interval '3 hours')::text")
+        (old,) = await cur.fetchone()
+    await set_agent_status(pool, agent["id"], background_subagents={"a": old})
+    assert not await _busy(pool, agent["id"])
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE agent_status SET activity_at = now() - interval '1 hour' WHERE agent_id = %s",
+            (agent["id"],),
+        )
+    assert await _busy(pool, agent["id"])
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE agent_status SET activity_at = now() - interval '3 hours' WHERE agent_id = %s",
+            (agent["id"],),
+        )
+    assert not await _busy(pool, agent["id"])

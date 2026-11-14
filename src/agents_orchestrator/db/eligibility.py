@@ -58,16 +58,19 @@ NOTICE_PENDING = (
 
 # A running background subagent keeps its leader from being moved.
 # `agent_status.background_subagents` maps subagent id -> start time; an entry older than
-# BACKGROUND_STALE_SECONDS is ignored, so a lost stop event cannot pin a leader forever.
+# BACKGROUND_STALE_SECONDS is ignored, so a lost stop event cannot pin a leader forever, unless
+# the agent's `activity_at` (newest tool or subagent event) is within that same window: a
+# subagent that runs for hours keeps the agent active, a dead entry of a quiet agent expires.
 # Alias `s` is a LEFT JOINed `agent_status` row.
 BACKGROUND_STALE_SECONDS = 7200
 
 
 def background_busy(alias: str) -> str:
     """The background-busy SQL predicate over the `agent_status` row aliased `alias`."""
+    fresh = f"now() - make_interval(secs => {BACKGROUND_STALE_SECONDS})"
     return (
-        f"coalesce((SELECT bool_or(b.value::timestamptz"
-        f" > now() - make_interval(secs => {BACKGROUND_STALE_SECONDS}))"
+        f"coalesce((SELECT bool_or(b.value::timestamptz > {fresh}"
+        f" OR coalesce({alias}.activity_at > {fresh}, false))"
         f" FROM jsonb_each_text({alias}.background_subagents) b), false)"
     )
 
