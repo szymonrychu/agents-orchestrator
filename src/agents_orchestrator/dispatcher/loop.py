@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import dataclasses
 import logging
+import time
 from typing import Any
 
 import httpx
@@ -19,7 +20,7 @@ from agents_orchestrator.api.session_limits import may_message
 from agents_orchestrator.db import leadership, project_posts, queue, session_messaging
 from agents_orchestrator.db import sessions as sessions_repo
 from agents_orchestrator.db.pool import listen
-from agents_orchestrator.dispatcher import hive
+from agents_orchestrator.dispatcher import handoff, hive
 from agents_orchestrator.dispatcher.session_frame import frame, project_post, relay_notice
 from agents_orchestrator.dispatcher.verify import Verifier, session_max_attempts
 from agents_orchestrator.settings import Settings
@@ -41,6 +42,7 @@ log = logging.getLogger(__name__)
 MAX_IN_FLIGHT = 8
 CHANNELS = ("agent_free", "message_queued", leadership.CHANNEL, leadership.LEADER_CHANGED_CHANNEL)
 COMMAND_KINDS = ("interrupt", "compact", "clear")
+HANDOFF_INTERVAL_SECONDS = 5
 
 
 class Dispatcher:
@@ -56,6 +58,8 @@ class Dispatcher:
             settings.rollout_max_defer_seconds,
             settings.handover_max_wait_seconds,
         )
+        self._handoff_policy = handoff.HandoffPolicy.from_settings(settings)
+        self._handoff_at: float | None = None
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -176,6 +180,36 @@ class Dispatcher:
                         change.epoch,
                         change.reason,
                     )
+            await self._drain_handoffs(conn)
+
+    async def _drain_handoffs(self, conn: Any) -> None:
+        """Right after the leadership passes: the strong-limit handoff pass for every session
+        with a limit subject or an open row (`handoff.handoff_sessions`), at most once per
+        HANDOFF_INTERVAL_SECONDS (its timings are minutes). One failing session is logged and
+        never holds up the others; any transition wakes the push loop, so a new countdown note
+        goes out at once."""
+        now = time.monotonic()
+        if self._handoff_at is not None and now - self._handoff_at < HANDOFF_INTERVAL_SECONDS:
+            return
+        self._handoff_at = now
+        try:
+            sessions = await handoff.handoff_sessions(conn)
+            await conn.commit()
+        except Exception:
+            log.exception("handoff session list failed")  # never holds up the message drain
+            await conn.rollback()
+            return
+        for session_id in sessions:
+            try:
+                moved = await handoff.handoff_pass(
+                    conn, session_id, self._handoff_policy, self.settings
+                )
+            except Exception:
+                log.exception("handoff pass for session %s failed", session_id)
+                continue
+            if moved:
+                self._push_wake.set()
+                log.info("session %s handoff: %s", session_id, ", ".join(moved))
 
     async def verify_pending(self) -> int:
         """Check verifying messages against their wrappers, once per wake and poll (D24)."""

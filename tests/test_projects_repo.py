@@ -42,7 +42,7 @@ def test_existing_presets_and_sessions_land_in_default(empty_dsn, tmp_path):
             (json.dumps({"replicas": 1}),),
         )
     assert run_migrations(empty_dsn) == [
-        "0037", "0038", "0039", "0040", "0041", "0042", "0043", "0044", "0045", "0046",
+        "0037", "0038", "0039", "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047",
     ]  # fmt: skip
     with psycopg.connect(empty_dsn) as c:
         assert {r[0] for r in c.execute("SELECT project FROM presets")} == {"default"}

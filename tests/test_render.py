@@ -15,6 +15,7 @@ import pytest
 import yaml
 from claude_code_wrapper.config import load_config
 
+from agents_orchestrator import handoff_texts
 from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.k8s import labels, on_start, render
 from agents_orchestrator.settings import Settings
@@ -485,12 +486,12 @@ def test_system_append_asks_via_decisions_with_taskboard():
 def test_shutdown_below_grace_and_resources():
     objs = render.render_session(
         make_session(resources={"limits": {"cpu": "1"}}),
-        make_settings(agent_termination_grace_seconds=90),
+        make_settings(agent_termination_grace_seconds=480),
         TOKENS,
     )
     pod = sts_of(objs)["spec"]["template"]["spec"]
-    assert pod["terminationGracePeriodSeconds"] == 90
-    assert config_of(objs)["limits"]["shutdown_timeout_seconds"] < 90
+    assert pod["terminationGracePeriodSeconds"] == 480
+    assert config_of(objs)["limits"]["shutdown_timeout_seconds"] < 480
     assert pod["containers"][0]["resources"] == {"limits": {"cpu": "1"}}
     assert pod["securityContext"] == {
         "runAsUser": 1000,
@@ -592,11 +593,15 @@ def test_peer_seeds_from_cap():
 def test_alone_session_no_hive_config():
     cfg = config_of(_render(make_session(replicas=1, static=True)))
     assert not cfg.get("peers", {}).get("enabled")
-    assert cfg["notes"]["enabled"] is False
     assert "onAgentToolCall" not in cfg["hooks"]
     cfg = config_of(_render(make_session(replicas=3, max_replicas=3, peers=False)))
     assert not cfg.get("peers", {}).get("enabled")
     assert cfg["notes"]["enabled"] is True
+
+
+def test_notes_enabled_for_solo_session():
+    cfg = config_of(_render(make_session(replicas=1, static=True)))
+    assert cfg["notes"] == {"enabled": True}
 
 
 def test_hive_session_config():
@@ -1013,3 +1018,66 @@ def test_room_prompt_absent_without_agent_api():
     text = cfg["prompts"]["system_append"]
     assert render.PROJECT_ROOM_PROMPT not in text
     assert render.SUPERLEADER_ROOM_PROMPT not in text
+
+
+def test_pod_grace_420():
+    objs = render.render_session(make_session(), make_settings(), TOKENS)
+    assert sts_of(objs)["spec"]["template"]["spec"]["terminationGracePeriodSeconds"] == 420
+
+
+def test_shutdown_timeout_is_stop_seconds():
+    objs = render.render_session(
+        make_session(), make_settings(agent_shutdown_stop_seconds=90), TOKENS
+    )
+    assert config_of(objs)["limits"]["shutdown_timeout_seconds"] == 90
+    objs = render.render_session(
+        make_session(), make_settings(agent_shutdown_stop_seconds=60), TOKENS
+    )
+    assert config_of(objs)["limits"]["shutdown_timeout_seconds"] == 60
+
+
+def test_shutdown_handoff_block_rendered_and_valid(tmp_path, monkeypatch):
+    for spec in ({}, {"replicas": 3, "peers": True}):
+        objs = render.render_session(make_session(**spec), make_settings(), TOKENS)
+        block = config_of(objs)["shutdown"]["handoff"]
+        assert block == {
+            "enabled": True,
+            "notice_seconds": 120,
+            "handoff_seconds": 180,
+            "idle_proceed_seconds": 60,
+            "notice_prompt": handoff_texts.shutdown_notice(2),
+            "handoff_prompt": handoff_texts.STRONG_REQUEST,
+        }
+        path = tmp_path / "config.yaml"
+        path.write_text(by_kind(objs)["ConfigMap"]["data"]["config.yaml"])
+        monkeypatch.setenv("CCW_AUTH_TOKEN", TOKENS.auth)
+        monkeypatch.setenv("CCW_PEER_TOKEN", TOKENS.peer)
+        monkeypatch.setenv("CCW_PEER_URL", "http://agent-alpha-0.agent-alpha.agents.svc:8080")
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth")
+        monkeypatch.setenv("POD_NAME", "agent-alpha-0")
+        cfg = load_config(path)
+        assert cfg.shutdown.handoff.enabled is True
+
+
+def test_shutdown_handoff_omitted_for_custom_image():
+    objs = render.render_session(make_session(image="other/wrapper:0.8.0"), make_settings(), TOKENS)
+    assert "shutdown" not in config_of(objs)
+
+
+def test_shutdown_notice_text():
+    text = handoff_texts.shutdown_notice(2)
+    assert "in about 2 minutes" in text
+    assert "There is no extension." in text
+
+
+def test_shutdown_notice_minutes_round_up_with_minimum_one():
+    for notice, minutes in ((150, 3), (90, 2), (20, 1), (0, 1), (120, 2)):
+        objs = render.render_session(
+            make_session(),
+            make_settings(
+                agent_shutdown_notice_seconds=notice, agent_termination_grace_seconds=600
+            ),
+            TOKENS,
+        )
+        prompt = config_of(objs)["shutdown"]["handoff"]["notice_prompt"]
+        assert prompt == handoff_texts.shutdown_notice(minutes), notice

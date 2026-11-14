@@ -1924,8 +1924,20 @@
         "additionalProperties": false,
         "properties": {
           "epoch": {
-            "title": "Epoch",
-            "type": "integer"
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Epoch"
+          },
+          "extend": {
+            "default": false,
+            "title": "Extend",
+            "type": "boolean"
           },
           "handled": {
             "items": {
@@ -1936,10 +1948,17 @@
             "type": "array"
           },
           "reason": {
-            "maxLength": 2000,
-            "minLength": 1,
-            "title": "Reason",
-            "type": "string"
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
           },
           "to": {
             "anyOf": [
@@ -1953,10 +1972,6 @@
             "title": "To"
           }
         },
-        "required": [
-          "reason",
-          "epoch"
-        ],
         "title": "HandoverIn",
         "type": "object"
       },
@@ -2172,6 +2187,18 @@
             "title": "Applies",
             "type": "string"
           },
+          "deadline_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deadline At"
+          },
           "handled": {
             "default": [],
             "items": {
@@ -2181,8 +2208,15 @@
             "type": "array"
           },
           "request_id": {
-            "title": "Request Id",
-            "type": "integer"
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Id"
           },
           "status": {
             "const": "pending",
@@ -2191,9 +2225,6 @@
             "type": "string"
           }
         },
-        "required": [
-          "request_id"
-        ],
         "title": "LeadershipRequested",
         "type": "object"
       },
@@ -2818,7 +2849,10 @@
                   "inactivity_close",
                   "handover",
                   "proposal",
-                  "project_grant"
+                  "project_grant",
+                  "handoff_notice",
+                  "handoff_request",
+                  "handoff_return"
                 ],
                 "type": "string"
               },
@@ -14628,7 +14662,7 @@
     },
     "/agent/v1/leadership/handover": {
       "post": {
-        "description": "Queue a handover. The checks here fail fast; the dispatcher re-checks at apply time.",
+        "description": "Queue a handover, extend the strong-limit countdown, or (solo agent) hand off its context.\n\nThe checks here fail fast; the dispatcher re-checks at apply time. A hive member is refused\nin every branch; a solo agent has no leader to change, so its call is the voluntary handoff.",
         "operationId": "handover_agent_v1_leadership_handover_post",
         "parameters": [
           {
@@ -14696,7 +14730,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Hand leadership over (leader only)",
+        "summary": "Hand leadership over, extend the handoff countdown or hand a solo context off",
         "tags": [
           "agent"
         ]

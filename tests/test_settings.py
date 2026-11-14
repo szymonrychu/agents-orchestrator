@@ -40,7 +40,7 @@ def test_defaults():
     assert s.any_mcp_config_file == ""
     assert s.wrapper_port == 8080
     assert s.cluster_domain == "cluster.local"
-    assert s.agent_termination_grace_seconds == 90
+    assert s.agent_termination_grace_seconds == 420
     assert s.http_host == "0.0.0.0"
     assert s.http_port == 8000
     assert s.dispatch_poll_seconds == 2
@@ -862,3 +862,26 @@ def test_settings_mindmap_token_required_with_url(monkeypatch):
         Settings()
     assert "ORCH_MINDMAP_URL" in str(exc.value) and "ORCH_MINDMAP_TOKEN" in str(exc.value)
     assert token not in str(exc.value)
+
+
+def test_grace_default_420():
+    s = Settings()
+    assert s.agent_termination_grace_seconds == 420
+    assert s.agent_shutdown_notice_seconds == 120
+    assert s.agent_shutdown_handoff_seconds == 180
+    assert s.agent_shutdown_stop_seconds == 90
+
+
+def test_shutdown_budget_must_fit_grace(monkeypatch):
+    monkeypatch.setenv("ORCH_AGENT_TERMINATION_GRACE_SECONDS", "300")
+    with pytest.raises(SettingsError) as e:
+        Settings()
+    for name in (
+        "ORCH_AGENT_TERMINATION_GRACE_SECONDS",
+        "ORCH_AGENT_SHUTDOWN_NOTICE_SECONDS",
+        "ORCH_AGENT_SHUTDOWN_HANDOFF_SECONDS",
+        "ORCH_AGENT_SHUTDOWN_STOP_SECONDS",
+    ):
+        assert name in str(e.value)
+    monkeypatch.setenv("ORCH_AGENT_TERMINATION_GRACE_SECONDS", "420")
+    assert Settings().agent_termination_grace_seconds == 420

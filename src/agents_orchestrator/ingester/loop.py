@@ -34,7 +34,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from psycopg_pool import AsyncConnectionPool
@@ -123,7 +123,8 @@ class _AgentStream:
         snap = await client.get_session(ref.wrapper_session_id)
         async with self.ing.pool.connection() as conn:
             self.last_seq = await events.last_seq(conn, ref.agent_id, ref.wrapper_session_id)
-            closed = map_state(snap.state) == "dead" and await self._stored_closed(conn)
+            stored_closed = await self._stored_closed(conn)
+            closed = map_state(snap.state) == "dead" and stored_closed
             state = "dead" if closed else map_state(snap.state)
             change = await status.upsert_status(
                 conn,
@@ -144,6 +145,12 @@ class _AgentStream:
             )
             if change.became_idle:
                 await status.notify_agent_free(conn, ref.session_id, ref.agent_id)
+            if (
+                not closed
+                and await self._next_pod(conn, stored_closed)
+                and await status.clear_stopping(conn, ref.agent_id)
+            ):
+                await notify(conn, leadership.CHANNEL, {"session_id": str(ref.session_id)})
             await status.notify_status(conn, ref.session_id, ref.agent_id)
         if closed:
             return True
@@ -171,6 +178,31 @@ class _AgentStream:
             if change.changed:
                 await status.notify_status(conn, ref.session_id, ref.agent_id)
         return True
+
+    async def _next_pod(self, conn: Any, stored_closed: bool) -> bool:
+        """This live attach is to the agent's next pod, not the one that announced its shutdown:
+        the stored log ends with the close and the session is live again (resumed since; the
+        dying pod never reopens a session), a resume was recorded after the mark, or the mark
+        is older than the pod grace. A re-attach to the dying pod keeps it."""
+        return stored_closed or await status.stopping_over(
+            conn,
+            self.ref.agent_id,
+            self.ref.resumed_at,
+            self.ing.settings.agent_termination_grace_seconds,
+        )
+
+    def _predates_resume(self, env: Envelope) -> bool:
+        """The event was emitted before the recorded resume, so by a previous pod."""
+        resumed_at = self.ref.resumed_at
+        if resumed_at is None:
+            return False
+        try:
+            ts = datetime.fromisoformat(env.ts)
+        except ValueError:
+            return False
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        return ts < resumed_at
 
     async def _stored_closed(self, conn: Any) -> bool:
         """The last stored event, gaps aside, is `session_closed`."""
@@ -263,6 +295,16 @@ class _AgentStream:
             await status.set_background(conn, ref.agent_id, data["agent_id"], None)
             await status.notify_status(conn, ref.session_id, ref.agent_id)
             # a leader that was only waiting on its subagents can now be moved
+            await notify(conn, leadership.CHANNEL, {"session_id": str(ref.session_id)})
+        elif env.type == "shutdown_started" and not self._predates_resume(env):
+            # the pod is stopping: the claim takes nothing more for it, the handoff pass cancels
+            # its open handoff row (pod shutdown, T-256). A replay of an older pod's event after
+            # the attach to the next pod (ingester down across both) must not mark the new one.
+            await status.set_stopping(conn, ref.agent_id)
+            await status.notify_status(conn, ref.session_id, ref.agent_id)
+            await notify(conn, leadership.CHANNEL, {"session_id": str(ref.session_id)})
+        elif env.type == "shutdown_handoff":
+            # stored as an event like any other; the handoff pass reads it
             await notify(conn, leadership.CHANNEL, {"session_id": str(ref.session_id)})
         elif env.type in _COMPACTION:
             # every compaction counts (D2), at the time the wrapper reported it (D3); it is

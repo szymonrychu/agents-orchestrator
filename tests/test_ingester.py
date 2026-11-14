@@ -1337,3 +1337,139 @@ async def test_attach_with_outstanding_keeps_map(harness, pool) -> None:
     row = await status_row(pool, h.agent_id)
     assert row["state"] == "idle"
     assert set(row["background_subagents"]) == {"sa1"}
+
+
+# --------------------------------------------------------------------------- pod shutdown
+
+
+async def stopping_since(pool, agent_id: uuid.UUID) -> datetime | None:
+    row = await status_row(pool, agent_id)
+    return row["stopping_since"] if row is not None else None
+
+
+async def test_shutdown_started_sets_stopping(harness, pool, listener) -> None:
+    h = await harness()
+    await h.start()
+    await h.stored_through(h.last_fake_seq())
+    assert await stopping_since(pool, h.agent_id) is None
+    listener.got.clear()
+
+    h.fake.emit("shutdown_started", {})
+    await h.stored_through(h.last_fake_seq())
+    assert await stopping_since(pool, h.agent_id) is not None
+    want = {"session_id": str(h.session_id)}
+    await wait_until(lambda: want in listener.on(LEADERSHIP_CHANNEL))  # the pass reacts at once
+
+    # the handoff is stored as an event like any other and wakes the pass again
+    listener.got.clear()
+    data = {"turn_id": "t-9", "status": "completed", "final_text": "my handoff"}
+    h.fake.emit("shutdown_handoff", data)
+    await h.stored_through(h.last_fake_seq())
+    rows = await events_rows(pool, h.agent_id)
+    assert (rows[-1]["type"], rows[-1]["data"]) == ("shutdown_handoff", data)
+    await wait_until(lambda: want in listener.on(LEADERSHIP_CHANNEL))
+
+    # a dropped stream re-attaches to the same (dying) pod: still stopping
+    opened = len(h.opened)
+    h.fake.drop_streams()
+    await wait_until(lambda: len(h.opened) > opened)
+    h.fake.emit("assistant_text", {"text": "still the old pod"})
+    await h.stored_through(h.last_fake_seq())
+    assert await stopping_since(pool, h.agent_id) is not None
+
+
+async def test_reattach_clears_stopping(harness, pool, listener) -> None:
+    # the old pod stops its session (session_closed), the next pod resumes it: the attach to the
+    # resumed session clears the mark
+    h = await harness()
+    await h.start()
+    h.fake.emit("shutdown_started", {})
+    await h.stored_through(h.last_fake_seq())
+    first = await stopping_since(pool, h.agent_id)
+    assert first is not None
+    await h.stored_through(h.shut_down())
+    assert await h.state() == "dead"
+    assert await stopping_since(pool, h.agent_id) == first
+    listener.got.clear()
+
+    await h.resume()
+
+    async def cleared() -> bool:
+        return await stopping_since(pool, h.agent_id) is None
+
+    await wait_until(cleared)
+    want = {"session_id": str(h.session_id)}
+    await wait_until(lambda: want in listener.on(LEADERSHIP_CHANNEL))
+
+
+async def test_reattach_to_wrapper_resumed_session_clears_stopping(harness, pool) -> None:
+    # the old task re-attaches by itself to the next pod, whose wrapper resumed the session on
+    # start (nothing recorded): the stored log ends with the close and the snapshot is live
+    h = await harness()
+    await h.start()
+    h.fake.emit("shutdown_started", {})
+    await h.stored_through(h.last_fake_seq())
+    assert await stopping_since(pool, h.agent_id) is not None
+    await h.stop()
+    closed_seq = h.shut_down()
+    # the close was stored, but its snapshot was never read (the old pod was already gone)
+    await insert_event(
+        pool,
+        h.session_id,
+        h.agent_id,
+        wrapper_session_id=h.wrapper_session_id,
+        seq=closed_seq,
+        type="session_closed",
+        data={},
+    )
+    await h.client.resume_session(h.wrapper_session_id)  # the wrapper's own: nothing recorded
+    await h.start()
+
+    async def cleared() -> bool:
+        return await stopping_since(pool, h.agent_id) is None
+
+    await wait_until(cleared)
+
+
+async def test_replayed_shutdown_started_after_resume_does_not_set_stopping(harness, pool) -> None:
+    # the ingester was down across the pod shutdown and the resume: the old pod's
+    # shutdown_started is replayed after the attach to the next pod and must not mark it
+    h = await harness()
+    await h.start()
+    await h.stored_through(h.last_fake_seq())
+    await h.stop()
+    h.emit_at("shutdown_started", "2020-01-01T00:00:00+00:00")
+    h.emit_at("shutdown_handoff", "2020-01-01T00:00:01+00:00", {"final_text": "old"})
+    # the killed pod never got to emit session_closed: the log has no close, the next pod resumes
+    h.fake.set_session_state("stopped", has_transcript=True)
+    await h.resume()
+    await h.start()
+    await h.stored_through(h.last_fake_seq())
+
+    async def idle() -> bool:
+        return await h.state() == "idle"
+
+    await wait_until(idle)
+    types = [r["type"] for r in await events_rows(pool, h.agent_id)]
+    assert "shutdown_started" in types  # replayed and stored
+    assert await stopping_since(pool, h.agent_id) is None
+
+
+async def test_stopping_mark_older_than_the_pod_grace_is_cleared_on_attach(harness, pool) -> None:
+    h = await harness()
+    await h.start()
+    h.fake.emit("shutdown_started", {})
+    await h.stored_through(h.last_fake_seq())
+    await h.stop()
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE agent_status SET stopping_since = now() - interval '421 seconds'"
+            " WHERE agent_id = %s",
+            (h.agent_id,),
+        )
+    await h.start()
+
+    async def cleared() -> bool:
+        return await stopping_since(pool, h.agent_id) is None
+
+    await wait_until(cleared)

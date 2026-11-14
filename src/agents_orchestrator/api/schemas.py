@@ -6,7 +6,15 @@ import uuid
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictBool, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    StrictBool,
+    field_validator,
+    model_validator,
+)
 
 from agents_orchestrator.labels import normalize_labels
 from agents_orchestrator.settings import (
@@ -655,7 +663,16 @@ class Meta(BaseModel):
 Lane = Literal["idle", "regular", "priority"]
 MessageStatus = Literal["queued", "dispatching", "verifying", "sent", "failed", "cancelled"]
 # an orchestrator-written message; null for every other message
-Notice = Literal["inactivity_reminder", "inactivity_close", "handover", "proposal", "project_grant"]
+Notice = Literal[
+    "inactivity_reminder",
+    "inactivity_close",
+    "handover",
+    "proposal",
+    "project_grant",
+    "handoff_notice",
+    "handoff_request",
+    "handoff_return",
+]
 
 
 class MessageAttachment(BaseModel):
@@ -866,10 +883,21 @@ class HandoverIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     to: str | None = None
-    reason: str = Field(min_length=1, max_length=2000)
-    epoch: int
+    #: The reason of a hive handover, or the handoff text of a solo agent's voluntary handoff;
+    #: not needed with `extend`.
+    reason: str | None = Field(default=None, min_length=1, max_length=2000)
+    #: The leader's epoch; required of a hive leader's handover, unused otherwise.
+    epoch: int | None = None
+    #: Push the deadline of the strong-limit countdown out once instead of handing over.
+    extend: bool = False
     #: Ids of incoming session messages the leader answered or that need no answer.
     handled: list[int] = Field(default_factory=list, max_length=50)
+
+    @model_validator(mode="after")
+    def _reason_unless_extend(self) -> HandoverIn:
+        if not self.extend and self.reason is None:
+            raise ValueError("reason is required unless extend is true")
+        return self
 
 
 class MakeLeaderIn(BaseModel):
@@ -892,7 +920,10 @@ class ScaleResult(BaseModel):
 
 
 class LeadershipRequested(BaseModel):
-    request_id: int
+    #: None for an extension and for a solo agent's voluntary handoff (no leadership request).
+    request_id: int | None = None
+    #: The new deadline of the handoff countdown, set for an extension.
+    deadline_at: datetime | None = None
     status: Literal["pending"] = "pending"
     applies: str = "when your turn has ended and your background agents have reported"
     handled: list[int] = []

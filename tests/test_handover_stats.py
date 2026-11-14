@@ -6,7 +6,7 @@ import json
 from datetime import UTC, datetime, timedelta
 
 import psycopg
-from factories import insert_session
+from factories import insert_agent, insert_session
 from test_api_sessions import make_settings
 
 from agents_orchestrator import cli
@@ -101,6 +101,40 @@ async def test_baseline_from_notices(pool):
     assert stats.median_tenure_seconds == (600 + 1800) / 2
     assert stats.tenures_under_20_min == 1
     assert sum(b for _, b in stats.intake_bytes_by_day) == 100 + 50 + 10 + 5 + 6000
+
+
+async def _handoff(pool, session_id, agent_id, *, trigger, close_reason, notified_s=None) -> None:
+    """A closed agent_handoffs row; `notified_s` seconds from notice to delivered handoff."""
+    delivered = NOW if notified_s is not None else None
+    notified = NOW - timedelta(seconds=notified_s) if notified_s is not None else None
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO agent_handoffs (session_id, agent_id, trigger, phase, notified_at,"
+            " delivered_at, closed_at, close_reason)"
+            " VALUES (%s, %s, %s, 'done', %s, %s, now(), %s)",
+            (session_id, agent_id, trigger, notified, delivered, close_reason),
+        )
+
+
+async def test_stats_count_agent_handoffs(pool):
+    s = await insert_session(pool)
+    agents = [await insert_agent(pool, s["id"]) for _ in range(4)]
+    await _handoff(
+        pool, s["id"], agents[0]["id"], trigger="strong", close_reason="cleared", notified_s=100
+    )
+    await _handoff(
+        pool, s["id"], agents[1]["id"], trigger="strong", close_reason="cleared", notified_s=300
+    )
+    await _handoff(pool, s["id"], agents[2]["id"], trigger="shutdown", close_reason="delivered")
+    await _handoff(
+        pool, s["id"], agents[3]["id"], trigger="voluntary", close_reason="timeout", notified_s=900
+    )
+    stats = await _stats(pool)
+    assert stats.handoffs_by_trigger == {"strong": 2, "shutdown": 1, "voluntary": 1}
+    assert stats.handoffs_by_close_reason == {"cleared": 2, "delivered": 1, "timeout": 1}
+    assert stats.median_notified_to_handed_seconds == 300
+    empty = await _stats(pool, days=0)
+    assert empty.handoffs_by_trigger == {} and empty.median_notified_to_handed_seconds is None
 
 
 def test_cli_prints_json(dsn, monkeypatch, capsys):

@@ -5,7 +5,7 @@ before/after comparison."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import date
 
 import psycopg
@@ -37,6 +37,9 @@ class HandoverStats:
     tenures: int
     tenures_under_20_min: int
     intake_bytes_by_day: list[tuple[date, int]]
+    handoffs_by_trigger: dict[str, int] = field(default_factory=dict)
+    handoffs_by_close_reason: dict[str, int] = field(default_factory=dict)
+    median_notified_to_handed_seconds: float | None = None
 
 
 async def _stats(conn: psycopg.AsyncConnection, days: int, source: str) -> HandoverStats:
@@ -67,9 +70,43 @@ async def _stats(conn: psycopg.AsyncConnection, days: int, source: str) -> Hando
     )
 
 
+async def _handoff_stats(
+    conn: psycopg.AsyncConnection, days: int
+) -> tuple[dict[str, int], dict[str, int], float | None]:
+    """Counts of `agent_handoffs` rows created in the window by trigger and by close reason, and
+    the median seconds from the notice to the delivery of the handoff text to the successor."""
+    window = "FROM agent_handoffs WHERE created_at > now() - make_interval(days => %s)"
+    triggers = await conn.execute(f"SELECT trigger, count(*) {window} GROUP BY trigger", (days,))
+    reasons = await conn.execute(
+        f"SELECT close_reason, count(*) {window} AND close_reason IS NOT NULL"
+        " GROUP BY close_reason",
+        (days,),
+    )
+    median = await conn.execute(
+        "SELECT percentile_cont(0.5) WITHIN GROUP"
+        f" (ORDER BY extract(epoch FROM delivered_at - notified_at)) {window}"
+        " AND notified_at IS NOT NULL AND delivered_at IS NOT NULL",
+        (days,),
+    )
+    row = await median.fetchone()
+    return (
+        {name: count for name, count in await triggers.fetchall()},
+        {name: count for name, count in await reasons.fetchall()},
+        row[0] if row else None,
+    )
+
+
 async def handover_stats(conn: psycopg.AsyncConnection, days: int) -> HandoverStats:
-    """Statistics of the handovers delivered in the last `days` days, from `handover_log`."""
-    return await _stats(conn, days, _LOG)
+    """Statistics of the handovers delivered in the last `days` days, from `handover_log`, and
+    of the agent handoffs (`agent_handoffs`) of the same window."""
+    stats = await _stats(conn, days, _LOG)
+    by_trigger, by_reason, median = await _handoff_stats(conn, days)
+    return replace(
+        stats,
+        handoffs_by_trigger=by_trigger,
+        handoffs_by_close_reason=by_reason,
+        median_notified_to_handed_seconds=median,
+    )
 
 
 async def baseline_stats(conn: psycopg.AsyncConnection, days: int) -> HandoverStats:

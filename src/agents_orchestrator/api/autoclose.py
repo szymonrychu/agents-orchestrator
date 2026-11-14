@@ -14,7 +14,7 @@ from psycopg_pool import AsyncConnectionPool
 from agents_orchestrator import inactivity, taskboard_client
 from agents_orchestrator.api import sessions as sessions_api
 from agents_orchestrator.db import handover, sessions
-from agents_orchestrator.settings import Settings
+from agents_orchestrator.settings import SHUTDOWN_MARGIN_SECONDS, Settings
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +44,9 @@ async def sweep(pool: AsyncConnectionPool, settings: Settings) -> None:
                 decisions=lambda session_id, slug, projects: taskboard_client.open_decisions(
                     settings, session_id, slug, projects
                 ),
+                shutdown_hold_seconds=settings.agent_shutdown_notice_seconds
+                + settings.agent_shutdown_handoff_seconds
+                + SHUTDOWN_MARGIN_SECONDS,
             ),
         ),
         ("close_expired", close_expired),

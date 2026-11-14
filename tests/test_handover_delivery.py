@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from factories import insert_agent, insert_event, insert_session, set_agent_status
 from psycopg.rows import dict_row
 
-from agents_orchestrator.db import handover
+from agents_orchestrator.db import handoffs, handover
 from agents_orchestrator.db.queue import message_attachments
 from agents_orchestrator.taskboard_client import OpenDecision
 
@@ -58,7 +58,11 @@ async def _no_decisions(session_id, slug, projects):
 async def _deliver(pool, decisions=_no_decisions) -> list:
     async with pool.connection() as conn:
         return await handover.deliver_handover(
-            conn, budget_bytes=BUDGET, output_chars=OUTPUT, decisions=decisions
+            conn,
+            budget_bytes=BUDGET,
+            output_chars=OUTPUT,
+            decisions=decisions,
+            shutdown_hold_seconds=330,
         )
 
 
@@ -111,6 +115,77 @@ async def test_notice_enqueued_with_attachment(pool, caplog):
     assert f"hive {s['slug']}" in text
     assert await _notice_epoch(pool, s["id"]) == 2
     assert f"handover: session {s['id']} epoch 2 notice queued" in caplog.text
+
+
+async def _handoff(pool, session_id, agent_id, successor, text) -> int:
+    async with pool.connection() as conn:
+        row = await handoffs.insert(
+            conn, session_id, agent_id, "strong", "discussing", handoff_text=text
+        )
+        await handoffs.advance(
+            conn, row.id, ["discussing"], "discussing", successor_agent_id=successor
+        )
+    return row.id
+
+
+async def test_successor_notice_starts_with_agent_handoff(pool):
+    s, (a0, a1, _) = await _hive(pool)
+    await _lead(pool, s["id"], a0["id"], 1, "initial")
+    await _handoff(pool, s["id"], a0["id"], a1["id"], "tests green, parser next")
+    await _lead(pool, s["id"], a1["id"], 2, "handover: limit", previous=a0["id"])
+
+    assert await _deliver(pool) == [s["id"]]
+    [msg] = await _messages(pool, s["id"])
+    head = f"Handoff from {a0['pod_name']} (written by it):\ntests green, parser next\n\n"
+    assert msg["text"].startswith(head)
+    assert msg["text"][len(head) :].startswith("Orchestrator notice (leadership handover):")
+
+
+async def test_delivered_at_set_once(pool):
+    s, (a0, a1, a2) = await _hive(pool)
+    await _lead(pool, s["id"], a0["id"], 1, "initial")
+    row_id = await _handoff(pool, s["id"], a0["id"], a1["id"], "first handoff")
+    await _lead(pool, s["id"], a1["id"], 2, "handover: x", previous=a0["id"])
+    await _deliver(pool)
+    (row,) = await _rows(pool, "SELECT delivered_at FROM agent_handoffs WHERE id = %s", (row_id,))
+    assert row["delivered_at"] is not None
+    # a later move of the same agent back never repeats a delivered handoff
+    await _lead(pool, s["id"], a2["id"], 3, "handover: y", previous=a1["id"])
+    await _deliver(pool)
+    msgs = await _messages(pool, s["id"])
+    assert len(msgs) == 2 and "first handoff" not in msgs[1]["text"]
+    # a handoff for another successor is not delivered to this one, and stays undelivered
+    other = await _handoff(pool, s["id"], a1["id"], a0["id"], "meant for a0")
+    await _lead(pool, s["id"], a2["id"], 4, "handover: z", previous=a1["id"])
+    await _deliver(pool)
+    msgs = await _messages(pool, s["id"])
+    assert "meant for a0" not in msgs[2]["text"]
+    (row,) = await _rows(pool, "SELECT delivered_at FROM agent_handoffs WHERE id = %s", (other,))
+    assert row["delivered_at"] is None
+
+
+async def test_handoff_from_before_the_tenure_is_not_delivered(pool):
+    # M2: an undelivered row older than the predecessor's own leadership is stale
+    s, (a0, a1, _) = await _hive(pool)
+    await _lead(pool, s["id"], a0["id"], 1, "initial")
+    old = await _handoff(pool, s["id"], a0["id"], a1["id"], "stale handoff")
+    await _run(
+        pool,
+        "UPDATE agent_handoffs SET created_at = now() - interval '2 hours' WHERE id = %s",
+        (old,),
+    )
+    await _lead(pool, s["id"], a1["id"], 2, "handover: x", previous=a0["id"])
+    await _run(
+        pool,
+        "UPDATE session_leaders SET previous_since = now() - interval '1 hour'"
+        " WHERE session_id = %s",
+        (s["id"],),
+    )
+    await _deliver(pool)
+    [msg] = await _messages(pool, s["id"])
+    assert "stale handoff" not in msg["text"]
+    (row,) = await _rows(pool, "SELECT delivered_at FROM agent_handoffs WHERE id = %s", (old,))
+    assert row["delivered_at"] is None
 
 
 async def test_forced_move_gets_notice(pool):

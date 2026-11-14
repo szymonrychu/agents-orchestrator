@@ -285,7 +285,6 @@ def on_start_any_mcp(configmap: dict[str, Any]) -> dict[str, Any]:
 
 HIVE_ONLY_TOOLS = {
     "activity",
-    "leadership_handover",
     "leadership_withdraw",
     "lock_claim",
     "lock_release",
@@ -297,6 +296,7 @@ HIVE_ONLY_TOOLS = {
 
 ALONE_SESSION_TOOLS = [
     "me",
+    "leadership_handover",
     "sessions_list",
     "session_send",
     "init_scripts_get",
@@ -1280,7 +1280,7 @@ def test_alone_session_has_no_hive_tools(api: httpx.Client, session: dict[str, A
 
         configmap = wait_for("the alone session's ConfigMap", rendered, 120)
         config = yaml.safe_load(configmap["data"]["config.yaml"])
-        assert config["notes"] == {"enabled": False}, config
+        assert config["notes"] == {"enabled": True}, config
         assert "peers" not in config or not config["peers"].get("enabled"), config
         assert "onAgentToolCall" not in config["hooks"], config["hooks"]
         assert_alone_session_tools(configmap)
@@ -1625,7 +1625,7 @@ def test_static_single_pod_is_alone(api: httpx.Client, baseline: dict) -> None:
 
         configmap = wait_for("the single static pod's ConfigMap", rendered, 120)
         config = yaml.safe_load(configmap["data"]["config.yaml"])
-        assert config["notes"] == {"enabled": False}, config
+        assert config["notes"] == {"enabled": True}, config
         assert not (config.get("peers") or {}).get("enabled"), config
         assert_alone_session_tools(configmap)
 
@@ -3408,3 +3408,72 @@ def test_kube_cluster_access_per_session_sa(api: httpx.Client, baseline: dict) -
         lambda: not rbac_objects("clusterrolebindings", slug),
         DISCARD_TIMEOUT,
     )
+
+
+# ------------------------------------------------------------------ pod shutdown handoff (T-256)
+#
+# Deleting a pod by hand runs the wrapper's shutdown routine (SIGTERM): the fake claude answers
+# the notice turn and the handoff turn (e2e/agent-test.scenario.json), and the orchestrator
+# delivers the handoff text to the next pod (a solo agent) or the successor (a leader). The
+# strong-limit path is not covered here: it needs a context gauge (statusLine context tokens)
+# the fake claude cannot emit, so the DB-level tests cover it (see MEMORY.md, 2026-11-13).
+
+SHUTDOWN_HANDOFF_TEXT = "E2E-HANDOFF: resume work item 42 at the parser, tests are green."
+SHUTDOWN_TIMEOUT = 420  # notice + handoff windows (30 s + 60 s), the pod stop and the new pod
+
+
+def notice_messages(api: httpx.Client, cid: str, notice: str) -> list[dict[str, Any]]:
+    listed = api.get(f"/sessions/{cid}/messages").json()
+    return sorted((m for m in listed if m["notice"] == notice), key=lambda m: m["id"])
+
+
+def test_solo_pod_delete_delivers_handoff_to_next_pod(api: httpx.Client, baseline: dict) -> None:
+    with scale_session(
+        api, "handoff-solo", {"replicas": 1, "max_replicas": 1, "static": True}
+    ) as c:
+        cid, slug = c["id"], c["slug"]
+        (agent,) = ready_agents(api, cid, 1)
+        pod = agent["pod_name"]
+        mid = post_message(api, cid, "say hello")  # the agent has a context to hand off
+        wait_for("the first turn", lambda: turn_completed(message(api, mid)), TURN_TIMEOUT, 1)
+        old_uid = pod_identity(slug)[pod][0]
+        kubectl("delete", "pod", pod, "--wait=false")
+
+        def returned() -> dict[str, Any] | None:
+            rows = notice_messages(api, cid, "handoff_return")
+            return rows[-1] if rows and SHUTDOWN_HANDOFF_TEXT in rows[-1]["text"] else None
+
+        row = wait_for("the handoff_return message", returned, SHUTDOWN_TIMEOUT, 3)
+        # "cleared just now": the next pod got `clear` before the handoff came back
+        assert row["text"].startswith(
+            "Handoff from your previous context (pod shutdown, cleared just now):"
+        ), row
+        assert pod_identity(slug)[pod][0] != old_uid, "the pod was not replaced"
+        wait_for("the return turn", lambda: turn_completed(message(api, row["id"])), 300, 2)
+
+
+def test_leader_pod_delete_hands_off_to_successor(api: httpx.Client, baseline: dict) -> None:
+    with scale_session(api, "handoff-leader", {"replicas": 2, "max_replicas": 2}) as c:
+        cid = c["id"]
+        ready_agents(api, cid, 2)
+        wait_for("the first election", lambda: leader_view(api, cid)[1] is not None, LEADER_TIMEOUT)
+        leader, epoch = leader_view(api, cid)
+        assert leader is not None and epoch is not None
+        mid = post_message(api, cid, "say hello", leader["id"])
+        wait_for("the leader's turn", lambda: turn_completed(message(api, mid)), TURN_TIMEOUT, 1)
+        successor = next(a for a in live_agents(api, cid) if a["id"] != leader["id"])
+        kubectl("delete", "pod", leader["pod_name"], "--wait=false")
+
+        def moved() -> dict[str, Any] | None:
+            now, current = leader_view(api, cid)
+            return now if now and now["id"] == successor["id"] and current > epoch else None
+
+        wait_for("leadership to move to the successor", moved, SHUTDOWN_TIMEOUT, 3)
+
+        def notice() -> dict[str, Any] | None:
+            rows = [m for m in notice_messages(api, cid, "handover") if m["id"] > mid]
+            return rows[-1] if rows else None
+
+        row = wait_for("the successor's handover notice", notice, 120, 2)
+        assert row["text"].startswith("Handoff from "), row["text"][:300]
+        assert SHUTDOWN_HANDOFF_TEXT in row["text"], row["text"][:300]

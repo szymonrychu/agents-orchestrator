@@ -11,7 +11,7 @@ from typing import Any
 
 import yaml
 
-from agents_orchestrator import rendering
+from agents_orchestrator import handoff_texts, rendering
 from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.dispatcher.hive import compact_pct
 from agents_orchestrator.k8s.labels import (
@@ -302,7 +302,14 @@ def forwards_usage(spec: SessionSpec, settings: Settings) -> bool:
     the `usage` section. A pod on another image forwards nothing; usage is account-wide, so the
     other agents still report it.
     """
-    return settings.agent_usage_enabled and (not spec.image or spec.image == settings.agent_image)
+    return settings.agent_usage_enabled and runs_default_image(spec, settings)
+
+
+def runs_default_image(spec: SessionSpec, settings: Settings) -> bool:
+    """Whether the pods run the default agent image: only it is known to accept the newest
+    wrapper config sections (`usage`, `shutdown`); the config is strict, so an older image
+    would refuse them."""
+    return not spec.image or spec.image == settings.agent_image
 
 
 def pod_url(slug: str, pod: str, settings: Settings) -> str:
@@ -311,10 +318,6 @@ def pod_url(slug: str, pod: str, settings: Settings) -> str:
         f"http://{pod}.{prefix(slug)}.{settings.namespace}.svc.{settings.cluster_domain}"
         f":{settings.wrapper_port}"
     )
-
-
-def _shutdown_timeout(grace: int) -> int:
-    return max(grace - 10, grace // 2)
 
 
 def _lock_check_hook() -> dict[str, Any]:
@@ -531,11 +534,9 @@ def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
             },
         },
         "prompts": {"system_append": _system_append(spec, settings)},
-        "limits": {
-            "shutdown_timeout_seconds": _shutdown_timeout(settings.agent_termination_grace_seconds)
-        },
+        "limits": {"shutdown_timeout_seconds": settings.agent_shutdown_stop_seconds},
     }
-    cfg["notes"] = {"enabled": spec.hive}
+    cfg["notes"] = {"enabled": True}
     if spec.hive and settings.agent_api_url:
         cfg["hooks"]["onAgentToolCall"] = [_lock_check_hook()]
     if spec.peers and spec.hive:
@@ -548,6 +549,19 @@ def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
                 pod_url(slug, f"{prefix(slug)}-{i}", settings)
                 for i in range(spec.max_replicas or spec.replicas)
             ],
+        }
+    if runs_default_image(spec, settings):
+        cfg["shutdown"] = {
+            "handoff": {
+                "enabled": True,
+                "notice_seconds": settings.agent_shutdown_notice_seconds,
+                "handoff_seconds": settings.agent_shutdown_handoff_seconds,
+                "idle_proceed_seconds": settings.handover_idle_proceed_seconds,
+                "notice_prompt": handoff_texts.shutdown_notice(
+                    max(1, math.ceil(settings.agent_shutdown_notice_seconds / 60))
+                ),
+                "handoff_prompt": handoff_texts.STRONG_REQUEST,
+            }
         }
     if forwards_usage(spec, settings):
         cfg["usage"] = {

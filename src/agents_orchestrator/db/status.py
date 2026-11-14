@@ -385,6 +385,46 @@ async def set_last_seq(conn: psycopg.AsyncConnection, agent_id: uuid.UUID, seq: 
     )
 
 
+async def set_stopping(conn: psycopg.AsyncConnection, agent_id: uuid.UUID) -> None:
+    """The wrapper started its shutdown routine (`shutdown_started`): `stopping_since` takes the
+    database clock (a later attach compares it with `agents.wrapper_resumed_at`). Each SIGTERM
+    sets it anew. The claim takes nothing for a stopping agent."""
+    await _ensure_row(conn, agent_id)
+    await conn.execute(
+        "UPDATE agent_status SET stopping_since=now(), updated_at=now() WHERE agent_id=%s",
+        (agent_id,),
+    )
+
+
+async def clear_stopping(conn: psycopg.AsyncConnection, agent_id: uuid.UUID) -> bool:
+    """The agent's stream attached to its next pod; True when a mark was cleared."""
+    cur = await conn.execute(
+        "UPDATE agent_status SET stopping_since=NULL, updated_at=now()"
+        " WHERE agent_id=%s AND stopping_since IS NOT NULL",
+        (agent_id,),
+    )
+    return cur.rowcount == 1
+
+
+async def stopping_over(
+    conn: psycopg.AsyncConnection,
+    agent_id: uuid.UUID,
+    resumed_at: datetime | None,
+    grace_seconds: int,
+) -> bool:
+    """The agent is marked stopping but its pod cannot be the one that set the mark: a resume
+    was recorded after it (`resumed_at`, the database clock), or it is older than the pod grace
+    (Kubernetes has killed that pod by then)."""
+    cur = await conn.execute(
+        "SELECT stopping_since < %s::timestamptz"
+        " OR stopping_since <= now() - make_interval(secs => %s)"
+        " FROM agent_status WHERE agent_id=%s AND stopping_since IS NOT NULL",
+        (resumed_at, grace_seconds, agent_id),
+    )
+    row = await cur.fetchone()
+    return bool(row and row[0])
+
+
 async def upsert_turn(
     conn: psycopg.AsyncConnection,
     agent_id: uuid.UUID,

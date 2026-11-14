@@ -19,8 +19,11 @@ whichever commits first.
 `session_leaders` and every other request decision belong to the dispatcher, through
 `leadership_pass`, which runs under the per-session claim lock of `db/queue.py` so a leader
 change and a message claim never interleave. A voluntary handover (an agent `handover` other
-than `rollout`) also queues a `clear` command for the ex-leader in the same transaction (Q13);
-forced moves and user overrides never do.
+than `rollout` and `limit`) opens a `discussing` row for the ex-leader in the same transaction
+and a strong row moves to `discussing` (`handoffs.on_leader_moved`); the handoff pass clears the
+ex-leader after the discussion window (m890, Q13), never the apply. The forced `limit` request is
+like `rollout`: never expires, never withdrawn into a clear. Forced moves and user overrides
+close a strong row still before its discussion `not_leader`.
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ from typing import Any
 import psycopg
 from psycopg.rows import dict_row
 
+from agents_orchestrator.db import handoffs
 from agents_orchestrator.db.eligibility import (
     BACKGROUND_BUSY,
     DEAD,
@@ -43,7 +47,7 @@ from agents_orchestrator.db.eligibility import (
     SUCCESSOR_ORDER,
 )
 from agents_orchestrator.db.pool import notify
-from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE, enqueue_command
+from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE
 
 CHANNEL = "leadership_requested"
 LEADER_CHANGED_CHANNEL = "leader_changed"
@@ -112,6 +116,18 @@ async def handover_reason(
     return None if row is None else row[0]
 
 
+async def reset_start_context(
+    conn: psycopg.AsyncConnection, session_id: uuid.UUID, agent_id: uuid.UUID
+) -> None:
+    """The leader's context was cleared while it kept the lead (a handoff's solo order): its
+    weak baseline is unknown again, so the push loop records it from the first fresh gauge."""
+    await conn.execute(
+        "UPDATE session_leaders SET start_context_tokens = NULL"
+        " WHERE session_id = %s AND agent_id = %s",
+        (session_id, agent_id),
+    )
+
+
 async def current_leader(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Leader | None:
     cur = await conn.execute(
         "SELECT l.agent_id, a.pod_name, l.epoch FROM session_leaders l"
@@ -148,7 +164,9 @@ class PassPolicy:
 DEFAULT_POLICY = PassPolicy()
 
 
-_HIVE = "coalesce(c.spec->>'max_replicas', c.spec->>'replicas')::int > 1"
+HIVE = "coalesce(c.spec->>'max_replicas', c.spec->>'replicas')::int > 1"
+# A session that is not a hive (neither field set counts as one agent).
+SOLO = "coalesce(coalesce(c.spec->>'max_replicas', c.spec->>'replicas')::int, 1) <= 1"
 
 # Hive sessions whose leadership needs a pass: queued requests, no leader row while an agent
 # could lead, a leader that is gone, not ready or dead, an unready mark to clear,
@@ -157,7 +175,7 @@ _CANDIDATES = f"""
 SELECT c.id FROM sessions c
 LEFT JOIN session_leaders l ON l.session_id = c.id
 LEFT JOIN agents a ON a.id = l.agent_id
-WHERE c.desired = 'active' AND {_HIVE} AND (
+WHERE c.desired = 'active' AND {HIVE} AND (
     EXISTS (SELECT 1 FROM leadership_requests r
             WHERE r.session_id = c.id AND r.status = 'queued')
     OR (l.session_id IS NULL AND EXISTS (
@@ -205,7 +223,7 @@ async def hive_sessions(conn: psycopg.AsyncConnection) -> list[dict]:
         conn,
         "SELECT c.id, c.slug, c.spec, c.status, c.secret_versions FROM sessions c"
         " JOIN session_leaders l ON l.session_id = c.id"
-        f" WHERE c.desired = 'active' AND {_HIVE} ORDER BY c.id",
+        f" WHERE c.desired = 'active' AND {HIVE} ORDER BY c.id",
     )
 
 
@@ -231,7 +249,7 @@ async def _leader(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> dict 
     )
 
 
-async def _successor(
+async def successor(
     conn: psycopg.AsyncConnection,
     session_id: uuid.UUID,
     other_than: uuid.UUID,
@@ -339,7 +357,7 @@ async def _judge(
         if target == current or not await _target_ready(conn, session_id, target):
             return "target_not_ready", None, ""
         return None, target, reason
-    picked = await _successor(conn, session_id, current, policy)
+    picked = await successor(conn, session_id, current, policy)
     if picked is None:
         return "no_peers", None, ""
     return None, picked, reason
@@ -364,14 +382,15 @@ def _waits_for_boundary(req: dict, leader: dict | None) -> bool:
 
 def _expired(req: dict) -> bool:
     """A voluntary handover still waiting past its deadline (only the leader's turn can hold it
-    then) is rejected `expired`. The reconciler's `rollout` request never expires: it waits for
-    the turn, which no deadline interrupts."""
+    then) is rejected `expired`. The forced `rollout` and `limit` requests never expire: they wait
+    for the turn, which no deadline interrupts."""
     return _voluntary(req) and req["overdue"]
 
 
 def _voluntary(req: dict) -> bool:
-    """The leader chose to hand over: a `handover` other than the reconciler's `rollout`."""
-    return req["kind"] == "handover" and req["reason"] != "rollout"
+    """The leader chose to hand over: a `handover` other than the forced `rollout` (the
+    reconciler's) and `limit` (the strong-limit handoff's)."""
+    return req["kind"] == "handover" and req["reason"] not in handoffs.FORCED_REASONS
 
 
 async def leadership_pass(
@@ -391,7 +410,7 @@ async def leadership_pass(
         if not (lock and lock["got"]):
             return None
         hive = await _one(
-            conn, f"SELECT {_HIVE} AS hive FROM sessions c WHERE c.id = %s", (session_id,)
+            conn, f"SELECT {HIVE} AS hive FROM sessions c WHERE c.id = %s", (session_id,)
         )
         if not (hive and hive["hive"]):
             return None
@@ -417,11 +436,16 @@ async def leadership_pass(
         for req in await _all(
             conn,
             "SELECT id, kind, from_agent_id, to_agent_id, reason, epoch,"
-            " created_at < now() - make_interval(secs => CASE WHEN reason = 'rollout'"
+            " created_at < now() - make_interval(secs => CASE WHEN reason = ANY(%s)"
             "  THEN %s ELSE %s END) AS overdue"
             " FROM leadership_requests WHERE session_id = %s AND status = 'queued'"
             " ORDER BY id FOR UPDATE",
-            (policy.rollout_max_defer_seconds, policy.handover_max_wait_seconds, session_id),
+            (
+                list(handoffs.FORCED_REASONS),
+                policy.rollout_max_defer_seconds,
+                policy.handover_max_wait_seconds,
+                session_id,
+            ),
         ):
             if _waits_for_boundary(req, leader):
                 if _expired(req):
@@ -434,9 +458,9 @@ async def leadership_pass(
                 previous = leader["agent_id"] if leader else None
                 change = await _set_leader(conn, session_id, target, reason, previous)
                 leader = await _leader(conn, session_id)
-                if previous is not None and _voluntary(req):
-                    # Q13: the ex-leader starts clean (`/clear`) at its true boundary.
-                    await enqueue_command(conn, previous, "clear")
+                if previous is not None:
+                    # m890: no clear here; the ex-leader gets a discussion window first.
+                    await handoffs.on_leader_moved(conn, session_id, previous, target, req)
 
         # 3. Scale-down: a leader whose ordinal a scale-down removes moves at once (no turn
         # boundary: a leaving agent is already out of routing), to the successor among the
@@ -444,10 +468,13 @@ async def leadership_pass(
         # handled here, before step 4 can see it, so its reason is `scale_down`. With no
         # staying agent the leader stays and the next pass retries.
         if leader is not None and leader["leaving"] and not leader["gone"]:
-            picked = await _successor(conn, session_id, leader["agent_id"], policy)
+            picked = await successor(conn, session_id, leader["agent_id"], policy)
             if picked is not None:
                 change = await _set_leader(
                     conn, session_id, picked, "scale_down", leader["agent_id"]
+                )
+                await handoffs.on_leader_moved(
+                    conn, session_id, leader["agent_id"], picked, {"kind": "scale_down"}
                 )
                 leader = await _leader(conn, session_id)
 
@@ -461,10 +488,13 @@ async def leadership_pass(
                         (session_id,),
                     )
             elif leader["gone"] or leader["grace_over"]:
-                picked = await _successor(conn, session_id, leader["agent_id"], policy)
+                picked = await successor(conn, session_id, leader["agent_id"], policy)
                 if picked is not None:
                     change = await _set_leader(
                         conn, session_id, picked, "leader_lost", leader["agent_id"]
+                    )
+                    await handoffs.on_leader_moved(
+                        conn, session_id, leader["agent_id"], picked, {"kind": "leader_lost"}
                     )
                     leader = await _leader(conn, session_id)
             elif leader["unready_since"] is None:

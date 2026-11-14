@@ -27,7 +27,14 @@ STAYS = (
 )
 DEAD = "EXISTS (SELECT 1 FROM agent_status ds WHERE ds.agent_id = a.id AND ds.state = 'dead')"
 READY_STAYS = f"a.ready AND a.gone_at IS NULL AND NOT {DEAD} AND {STAYS}"
-ELIGIBLE = f"{READY_STAYS} AND a.wrapper_session_id IS NOT NULL"
+# Pod shutdown (T-256): the agent's wrapper announced its shutdown routine and its stream has not
+# attached to the next pod yet. A stopping agent is never handed a message (the claim's pick)
+# and never picked as a successor. Alias `a`.
+NOT_STOPPING = (
+    "NOT EXISTS (SELECT 1 FROM agent_status ss WHERE ss.agent_id = a.id"
+    " AND ss.stopping_since IS NOT NULL)"
+)
+ELIGIBLE = f"{READY_STAYS} AND a.wrapper_session_id IS NOT NULL AND {NOT_STOPPING}"
 # The agents the dispatcher can hand a message to now (T-167): ready, not gone, not dead and
 # holding a wrapper session. Not `STAYS`: a leaving agent still holds the message it is given.
 # Behind the summary's `ready_with_session`. Alias `a`.

@@ -120,7 +120,8 @@ def orchestrator_allow(spec: SessionSpec, *, mindmap: bool = False) -> list[str]
     """The orchestrator tools this session's agents may call.
 
     Every session gets the session tools (D11), the init-scripts tools, the chat tools (D13), the
-    task tools and `project_list`, alone sessions included, which also get `me`; the agent API
+    task tools and `project_list`, alone sessions included, which also get `me` and
+    `leadership_handover` (a solo agent's voluntary handoff and countdown extension); the agent API
     decides what each caller may list, send, edit and say in the chat (leader only). The admin
     tools are listed exactly when `session_messaging` is enabled, whoever
     created the session; every other session gets `SESSION_EDIT_TOOLS` (its spec and its
@@ -141,7 +142,7 @@ def orchestrator_allow(spec: SessionSpec, *, mindmap: bool = False) -> list[str]
         *(ADMIN_TOOLS if spec.session_messaging else [*SESSION_EDIT_TOOLS, CLOSE_TOOL]),
     ]
     if not spec.hive:
-        return ["me", *shared]
+        return ["me", "leadership_handover", *shared]
     scale = [SCALE_TOOL] if spec.scalable else []
     return list(dict.fromkeys([*HIVE_TOOLS, *scale, *shared]))
 

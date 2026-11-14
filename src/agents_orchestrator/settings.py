@@ -24,6 +24,7 @@ from agents_orchestrator.spec import (
 
 PREFIX = "ORCH_"
 MIN_MASTER_KEY_BYTES = 32
+SHUTDOWN_MARGIN_SECONDS = 30
 # Upper bounds of the archive sweep policy; also literals in the CHECKs of migration 0025.
 SWEEP_RETENTION_DAYS_MAX = 3650
 SWEEP_KEEP_NEWEST_MAX = 1000
@@ -152,7 +153,13 @@ class Settings(BaseSettings):
     any_mcp_config_file: str = ""
     wrapper_port: int = 8080
     cluster_domain: str = "cluster.local"
-    agent_termination_grace_seconds: int = 90
+    agent_termination_grace_seconds: int = 420
+    #: Pod shutdown handoff (wrapper `shutdown.handoff`): the notice countdown, the handoff
+    #: window and the wrapper's own stop time must fit the pod grace with SHUTDOWN_MARGIN_SECONDS
+    #: to spare.
+    agent_shutdown_notice_seconds: int = Field(default=120, ge=0, le=600)
+    agent_shutdown_handoff_seconds: int = Field(default=180, ge=0, le=600)
+    agent_shutdown_stop_seconds: int = Field(default=90, ge=10, le=600)
 
     http_host: str = "0.0.0.0"
     http_port: int = 8000
@@ -190,17 +197,35 @@ class Settings(BaseSettings):
     #: A session's `spec.inactivity` overrides either one.
     inactivity_reminder_seconds: int = 0
     inactivity_close_seconds: int = 0
-    #: Seconds the leader has to hand off after the hard-limit notice; 0 means no window.
+    #: Seconds the leader has to hand off after the strong-limit notice; 0 means no window.
     inactivity_handoff_seconds: int = Field(default=300, ge=0, le=3600)
     #: Size budget of the predecessor's rendered transcript attached to a handover notice (the
     #: oldest lines are dropped first), and the cap on each tool output in it.
     handover_transcript_bytes: int = Field(default=16384, ge=8192, le=1048576)
     #: Tokens a leader may work on top of its context at the start of its leadership before it
-    #: is due to hand over (the hard limit always wins), and the minimum time as leader before
-    #: a soft handover is requested.
+    #: is due to hand over (the strong limit always wins), and the minimum time as leader before
+    #: a weak handover note is sent.
     handover_budget_tokens: int = Field(default=150000, ge=10000, le=2000000)
     handover_min_tenure_seconds: int = Field(default=1200, ge=0, le=86400)
     handover_output_chars: int = Field(default=500, ge=100, le=4000)
+    #: The strong limit sits at the smaller of: compact minus this many percent points, and
+    #: compact minus this many tokens of headroom (floored at 0).
+    handover_strong_margin_pct: int = Field(default=10, ge=1, le=50)
+    handover_strong_headroom_tokens: int = Field(default=60000, ge=0, le=500000)
+    #: Strong-limit handoff (dispatcher/handoff.py): the notice countdown, the one extension,
+    #: the idle time that ends the countdown early, and the quiet window (capped) a hive gets
+    #: to discuss before the ex-leader is cleared.
+    handover_notify_seconds: int = Field(default=300, ge=30, le=3600)
+    handover_extension_seconds: int = Field(default=300, ge=0, le=3600)
+    handover_idle_proceed_seconds: int = Field(default=60, ge=0, le=600)
+    handover_quiet_seconds: int = Field(default=60, ge=0, le=3600)
+    handover_quiet_cap_seconds: int = Field(default=600, ge=60, le=7200)
+    #: A `clear` the wrapper accepted counts as lost (retried, then `clear_failed`) once the
+    #: agent sat idle this long after the accept with no `session_cleared` (the wrapper's own
+    #: command timeout is 60 s); after `clear_failed` no new strong cycle opens for the agent
+    #: for this long unless its context is cleared or compacted first.
+    handover_clear_timeout_seconds: int = Field(default=180, ge=30, le=3600)
+    handover_clear_failed_block_seconds: int = Field(default=1800, ge=0, le=86400)
     #: Rollout: seconds the leader has, once only its pod is outdated, to hand over at a natural
     #: boundary before the reconciler queues the forced `rollout` handover; and the cap after
     #: which background work stops holding a rollout (members since the rollout began, the
@@ -387,6 +412,14 @@ class Settings(BaseSettings):
     # Checks are field validators (not one mode="after" model validator) so they still run
     # when an unrelated field fails type or required checks; cross-field checks skip
     # silently when a dependency already failed (that failure is reported on its own).
+
+    @field_validator("handover_quiet_cap_seconds")
+    @classmethod
+    def _check_quiet_cap(cls, v: int, info: ValidationInfo) -> int:
+        quiet = info.data.get("handover_quiet_seconds")
+        if quiet is not None and v < quiet:
+            raise ValueError("handover_quiet_cap_seconds must be at least handover_quiet_seconds")
+        return v
 
     @field_validator("service_port")
     @classmethod
@@ -835,6 +868,19 @@ class Settings(BaseSettings):
         if unknown:
             raise _Bad(
                 "ORCH_SERVICE_SCOPES::names a service without a token: " + ", ".join(unknown)
+            )
+        budget = (
+            self.agent_shutdown_notice_seconds
+            + self.agent_shutdown_handoff_seconds
+            + self.agent_shutdown_stop_seconds
+            + SHUTDOWN_MARGIN_SECONDS
+        )
+        if budget > self.agent_termination_grace_seconds:
+            raise _Bad(
+                f"ORCH_AGENT_SHUTDOWN_NOTICE_SECONDS + ORCH_AGENT_SHUTDOWN_HANDOFF_SECONDS"
+                f" + ORCH_AGENT_SHUTDOWN_STOP_SECONDS + {SHUTDOWN_MARGIN_SECONDS} s margin"
+                f" ({budget} s) must not exceed ORCH_AGENT_TERMINATION_GRACE_SECONDS"
+                f" ({self.agent_termination_grace_seconds} s)"
             )
         return self
 

@@ -31,6 +31,7 @@ def test_summary_of():
     assert ht.summary_of("handover: x") == "x"
     assert ht.summary_of("leader_lost") is None
     assert ht.summary_of("handover: rollout") is None  # the reconciler's forced request
+    assert ht.summary_of("handover: limit") is None  # the forced limit request
     assert ht.attachment_name(7) == "handover-7.md"
 
 
@@ -125,7 +126,12 @@ def test_cap_keeps_state_and_judgment():
 
 
 def test_forced_move_judgment_line():
-    for reason, kind in (("handover: rollout", "rollout"), ("leader_lost", "leader_lost")):
+    forced = (
+        ("handover: rollout", "rollout"),
+        ("handover: limit", "limit"),
+        ("leader_lost", "leader_lost"),
+    )
+    for reason, kind in forced:
         header = ht.Header("hive-a", 3, reason, "agent-0", T0, ht.summary_of(reason))
         assert f"none (forced move: {kind})" in render([], header=header)
     assert "none (forced move" not in render([])
@@ -134,6 +140,7 @@ def test_forced_move_judgment_line():
 def test_kind_of():
     assert ht.kind_of("handover: goal X") == "handover"
     assert ht.kind_of("handover: rollout") == "rollout"
+    assert ht.kind_of("handover: limit") == "limit"
     for reason in ("scale_down", "leader_lost", "user", "initial"):
         assert ht.kind_of(reason) == reason
 
