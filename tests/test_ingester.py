@@ -1431,6 +1431,30 @@ async def test_reattach_to_wrapper_resumed_session_clears_stopping(harness, pool
     await wait_until(cleared)
 
 
+async def test_replayed_shutdown_started_after_resume_does_not_set_stopping(harness, pool) -> None:
+    # the ingester was down across the pod shutdown and the resume: the old pod's
+    # shutdown_started is replayed after the attach to the next pod and must not mark it
+    h = await harness()
+    await h.start()
+    await h.stored_through(h.last_fake_seq())
+    await h.stop()
+    h.emit_at("shutdown_started", "2020-01-01T00:00:00+00:00")
+    h.emit_at("shutdown_handoff", "2020-01-01T00:00:01+00:00", {"final_text": "old"})
+    # the killed pod never got to emit session_closed: the log has no close, the next pod resumes
+    h.fake.set_session_state("stopped", has_transcript=True)
+    await h.resume()
+    await h.start()
+    await h.stored_through(h.last_fake_seq())
+
+    async def idle() -> bool:
+        return await h.state() == "idle"
+
+    await wait_until(idle)
+    types = [r["type"] for r in await events_rows(pool, h.agent_id)]
+    assert "shutdown_started" in types  # replayed and stored
+    assert await stopping_since(pool, h.agent_id) is None
+
+
 async def test_stopping_mark_older_than_the_pod_grace_is_cleared_on_attach(harness, pool) -> None:
     h = await harness()
     await h.start()

@@ -34,7 +34,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from psycopg_pool import AsyncConnectionPool
@@ -191,6 +191,19 @@ class _AgentStream:
             self.ing.settings.agent_termination_grace_seconds,
         )
 
+    def _predates_resume(self, env: Envelope) -> bool:
+        """The event was emitted before the recorded resume, so by a previous pod."""
+        resumed_at = self.ref.resumed_at
+        if resumed_at is None:
+            return False
+        try:
+            ts = datetime.fromisoformat(env.ts)
+        except ValueError:
+            return False
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        return ts < resumed_at
+
     async def _stored_closed(self, conn: Any) -> bool:
         """The last stored event, gaps aside, is `session_closed`."""
         cur = await conn.execute(
@@ -283,9 +296,10 @@ class _AgentStream:
             await status.notify_status(conn, ref.session_id, ref.agent_id)
             # a leader that was only waiting on its subagents can now be moved
             await notify(conn, leadership.CHANNEL, {"session_id": str(ref.session_id)})
-        elif env.type == "shutdown_started":
+        elif env.type == "shutdown_started" and not self._predates_resume(env):
             # the pod is stopping: the claim takes nothing more for it, the handoff pass cancels
-            # its open handoff row (pod shutdown, T-256)
+            # its open handoff row (pod shutdown, T-256). A replay of an older pod's event after
+            # the attach to the next pod (ingester down across both) must not mark the new one.
             await status.set_stopping(conn, ref.agent_id)
             await status.notify_status(conn, ref.session_id, ref.agent_id)
             await notify(conn, leadership.CHANNEL, {"session_id": str(ref.session_id)})
