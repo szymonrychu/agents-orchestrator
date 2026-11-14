@@ -114,7 +114,7 @@ def close_text(
     taskboard: bool,
     workdir_saved: bool,
 ) -> str:
-    """The hard-limit notice; the hand-off sentence names only the configured update tools and
+    """The inactivity ask; the hand-off sentence names only the configured update tools and
     the workdir only when the session saves its workspace, and is left out when neither applies."""
     steps = []
     if chat and taskboard:
@@ -126,16 +126,19 @@ def close_text(
     if workdir_saved:
         steps.append("since this session saves its workspace, write handoff notes into the workdir")
     parts = [
-        f"{CLOSE_PREFIX} this session has sent no update to the user for"
-        f" {humanize(quiet_seconds)}, so the orchestrator is closing it."
+        f"{CLOSE_PREFIX} this session has sent no update and done no tool work for"
+        f" {humanize(quiet_seconds)}, so the orchestrator asks you to close it."
     ]
     if steps:
         parts.append(
-            f"You may hand off before it closes, you do not have to: {' and, '.join(steps)}."
+            f"If your work is finished: {' and '.join(steps)}, then call orchestrator_self_close."
         )
+    else:
+        parts.append("If your work is finished, call orchestrator_self_close.")
     parts.append(
-        f"The session is discarded {humanize(grace_seconds)} after your turn ends, or at"
-        f" {clock(deadline)} even mid-turn. Only the user can keep it."
+        "If you are still working, post a progress update now to keep the session. It is never"
+        f" closed while you work; if it is idle after {clock(deadline)} without a self-close or"
+        f" an update, it is discarded {humanize(grace_seconds)} later."
     )
     return " ".join(parts)
 

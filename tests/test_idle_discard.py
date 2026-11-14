@@ -280,7 +280,8 @@ async def test_requested_close_flips_after_grace(pool, caplog):
     with caplog.at_level(logging.INFO, logger="agents_orchestrator.db.sessions"):
         assert await _run(pool, grace=30) == [s["id"]]
     assert await _desired(pool, s["id"]) == "deleting"
-    assert f"self-close: session {s['id']} is idle, discarding" in caplog.messages
+    [line] = [m for m in caplog.messages if m.startswith("session close: ")][-1:]
+    assert line.startswith(f"session close: {s['id']} close_kind=self step=discard reason=")
 
 
 async def test_requested_close_waits_for_grace(pool):

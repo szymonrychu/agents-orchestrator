@@ -4,6 +4,7 @@ handoff deadline, and what cancels an inactivity close (spec 3.2 to 3.4)."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from datetime import UTC, datetime
 
@@ -122,11 +123,6 @@ async def _close(pool, close: int = CLOSE, handoff: int = HANDOFF, compose=None)
 async def _release(pool) -> list:
     async with pool.connection() as conn:
         return await sessions.release_inactive_close(conn)
-
-
-async def _overdue(pool) -> list:
-    async with pool.connection() as conn:
-        return await sessions.close_overdue(conn)
 
 
 async def _discard(pool, grace: int = 30) -> list:
@@ -325,32 +321,6 @@ async def test_hard_limit_requests_close(pool):
     assert len(await _notices(pool, s["id"])) == 1
 
 
-async def test_overdue_discards_mid_turn(pool):
-    s, a = await _session(pool)
-    await set_agent_status(pool, a["id"], state="busy", current_turn_id="t1")
-    await _shift(pool, s["id"], 14405)
-    assert await _close(pool) == [s["id"]]
-    assert await _overdue(pool) == []  # inside the handoff window
-    await _shift(pool, s["id"], HANDOFF + 1)
-    assert await _discard(pool) == []  # busy: the idle path waits
-    assert await _overdue(pool) == [s["id"]]
-    row = await _row(pool, s["id"])
-    assert (row["desired"], row["generation"]) == ("deleting", s["generation"] + 1)
-    assert await _overdue(pool) == []
-
-
-async def test_overdue_logs(pool, caplog):
-    s, _ = await _session(pool)
-    await _shift(pool, s["id"], 14405)
-    with caplog.at_level(logging.INFO, logger="agents_orchestrator.db.sessions"):
-        assert await _close(pool) == [s["id"]]
-        await _shift(pool, s["id"], HANDOFF + 1)
-        assert await _overdue(pool) == [s["id"]]
-    deadline = caplog.messages[0]
-    assert deadline.startswith(f"inactivity: session {s['id']} closing, deadline ")
-    assert f"inactivity: session {s['id']} deadline passed, discarding" in caplog.messages
-
-
 async def test_reminder_logs(pool, caplog):
     s, _ = await _session(pool)
     await _shift(pool, s["id"], 3700)
@@ -366,10 +336,14 @@ async def test_inactivity_close_discards_at_turn_end(pool, caplog):
     assert await _close(pool) == [s["id"]]
     async with pool.connection() as conn:
         await conn.execute("UPDATE messages SET status = 'sent' WHERE session_id = %s", (s["id"],))
-    await _shift(pool, s["id"], 60)
+    await _shift(pool, s["id"], HANDOFF + 60)
     with caplog.at_level(logging.INFO, logger="agents_orchestrator.db.sessions"):
         assert await _discard(pool) == [s["id"]]
-    assert f"inactivity: session {s['id']} is idle, discarding" in caplog.messages
+    assert (
+        f"session close: {s['id']} close_kind=inactivity step=discard reason="
+        + ("No update for 4 h (inactivity limit 14400 s)")
+        in caplog.messages
+    )
     assert not any(m.startswith("self-close:") for m in caplog.messages)
 
 
@@ -381,7 +355,6 @@ async def test_inbound_message_cancels_inactivity_close(pool):
     async with pool.connection() as conn:
         await conn.execute("UPDATE messages SET status = 'sent' WHERE session_id = %s", (s["id"],))
     await _shift(pool, s["id"], HANDOFF + 60)  # past the deadline and idle past the grace
-    assert await _overdue(pool) == []
     assert await _discard(pool) == []
     assert await _release(pool) == [s["id"]]
     row = await _row(pool, s["id"])
@@ -425,17 +398,39 @@ async def test_inbound_message_keeps_self_close(pool):
     assert row["close_requested_at"] is not None
 
 
-async def test_self_close_during_handoff_keeps_first(pool):
+async def test_self_close_converts_orchestrator_close(pool):
     s, _ = await _session(pool)
     await _shift(pool, s["id"], 14405)
     assert await _close(pool) == [s["id"]]
-    before = await _row(pool, s["id"])
     async with pool.connection() as conn:
+        await conn.execute("UPDATE messages SET status = 'sent' WHERE session_id = %s", (s["id"],))
         out = await sessions.request_close(conn, s["id"], "done")
-    assert out.already is True
-    after = await _row(pool, s["id"])
-    assert after["close_kind"] == "inactivity"
-    assert _close_fields(after) == _close_fields(before)
+    assert out.already is False
+    row = await _row(pool, s["id"])
+    assert (row["close_kind"], row["close_reason"], row["close_deadline_at"]) == (
+        "self",
+        "done",
+        None,
+    )
+    assert row["close_requested_at"] is not None
+    # the old deadline is not waited for: only the idle grace counts
+    assert await _discard(pool) == []
+    await _shift(pool, s["id"], 31)
+    assert await _discard(pool) == [s["id"]]
+    again = None
+    async with pool.connection() as conn:
+        with contextlib.suppress(SessionBeingDeleted):
+            again = await sessions.request_close(conn, s["id"], "again")
+    assert again is None
+
+
+async def test_self_close_keeps_first_self_close(pool):
+    s, _ = await _session(pool)
+    async with pool.connection() as conn:
+        first = await sessions.request_close(conn, s["id"], "done")
+        second = await sessions.request_close(conn, s["id"], "again")
+    assert (first.already, second.already) == (False, True)
+    assert (await _row(pool, s["id"]))["close_reason"] == "done"
 
 
 async def test_keep_session_races_deadline_flip(pool):
@@ -443,7 +438,11 @@ async def test_keep_session_races_deadline_flip(pool):
         s, _ = await _session(pool)
         await _shift(pool, s["id"], 14405)
         assert await _close(pool) == [s["id"]]
-        await _shift(pool, s["id"], HANDOFF + 1)
+        async with pool.connection() as conn:
+            await conn.execute(
+                "UPDATE messages SET status = 'sent' WHERE session_id = %s", (s["id"],)
+            )
+        await _shift(pool, s["id"], HANDOFF + 31)
 
         async def keep(session_id=s["id"]) -> str:
             async with pool.connection() as conn:
@@ -453,7 +452,7 @@ async def test_keep_session_races_deadline_flip(pool):
                     return "refused"
             return "kept"
 
-        kept, flipped = await _race(i, keep(), _overdue(pool))
+        kept, flipped = await _race(i, keep(), _discard(pool))
         row = await _row(pool, s["id"])
         if kept == "kept":
             assert flipped == [] and row["desired"] == "active"
@@ -612,3 +611,95 @@ async def test_background_subagent_holds_quiet_clock(pool):
     )
     assert (await _now(pool) - await _quiet(pool, s["id"])).total_seconds() < 5
     assert await _remind(pool) == []
+
+
+async def _answered(pool, session_id) -> None:
+    """The close notice was delivered: nothing is queued any more."""
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE messages SET status = 'sent' WHERE session_id = %s", (session_id,)
+        )
+
+
+async def test_inactivity_close_waits_while_busy(pool):
+    s, a = await _session(pool)
+    await set_agent_status(pool, a["id"], state="busy", current_turn_id="t1")
+    await _shift(pool, s["id"], 14405)
+    assert await _close(pool) == [s["id"]]
+    await _answered(pool, s["id"])
+    await _shift(pool, s["id"], 36000)
+    assert await _discard(pool) == []
+    await set_agent_status(pool, a["id"], state="idle")
+    await _shift(pool, s["id"], 31)
+    assert await _discard(pool) == [s["id"]]
+
+
+async def test_inactivity_close_waits_for_deadline_when_idle(pool):
+    s, _ = await _session(pool)
+    await _shift(pool, s["id"], 14405)
+    assert await _close(pool) == [s["id"]]
+    await _answered(pool, s["id"])
+    await _shift(pool, s["id"], 100)
+    assert await _discard(pool) == []  # idle for long, but inside the answer window
+    await _shift(pool, s["id"], HANDOFF - 100 + 1)
+    assert await _discard(pool) == []  # window passed, the idle grace is counted from it
+    await _shift(pool, s["id"], 31)
+    assert await _discard(pool) == [s["id"]]
+    assert (await _row(pool, s["id"]))["desired"] == "deleting"
+
+
+async def test_background_subagent_blocks_fallback(pool):
+    s, a = await _session(pool)
+    await _shift(pool, s["id"], 14405)
+    assert await _close(pool) == [s["id"]]
+    await _answered(pool, s["id"])
+    await _shift(pool, s["id"], HANDOFF + 60)
+    await set_agent_status(
+        pool,
+        a["id"],
+        state="idle",
+        free_since=None,
+        background_subagents={"sa1": datetime.now(UTC).isoformat()},
+    )
+    assert await _discard(pool) == []
+    await set_agent_status(pool, a["id"], state="idle", free_since=None, background_subagents={})
+    assert await _discard(pool) == [s["id"]]
+
+
+async def test_agent_update_releases_inactivity_close(pool):
+    s, _ = await _session(pool)
+    await _shift(pool, s["id"], 14405)
+    assert await _close(pool) == [s["id"]]
+    assert await _release(pool) == []
+    async with pool.connection() as conn:
+        await sessions.touch_update(conn, s["id"])
+    assert await _release(pool) == [s["id"]]
+    row = await _row(pool, s["id"])
+    assert _close_fields(row) == (None, None, None, None)
+    assert row["desired"] == "active"
+
+
+async def test_two_replicas_fallback_once(pool):
+    for i in range(10):
+        s, _ = await _session(pool)
+        await _shift(pool, s["id"], 14405)
+        assert await _close(pool) == [s["id"]]
+        await _answered(pool, s["id"])
+        await _shift(pool, s["id"], HANDOFF + 31)
+        first, second = await _race(i, _discard(pool), _discard(pool))
+        assert sorted([first, second], key=len) == [[], [s["id"]]]
+
+
+async def test_close_logs_fields(pool, caplog):
+    s, _ = await _session(pool)
+    await _shift(pool, s["id"], 14405)
+    with caplog.at_level(logging.INFO, logger="agents_orchestrator.db.sessions"):
+        assert await _close(pool) == [s["id"]]
+        await _answered(pool, s["id"])
+        await _shift(pool, s["id"], HANDOFF + 31)
+        assert await _discard(pool) == [s["id"]]
+    records = [r for r in caplog.records if r.getMessage().startswith("session close: ")]
+    assert [(r.fields["close_kind"], r.fields["step"]) for r in records] == [
+        ("inactivity", "ask"),
+        ("inactivity", "discard"),
+    ]

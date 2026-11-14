@@ -151,30 +151,41 @@ def test_reminder_text_without_close_and_tools():
 
 def test_close_text_example():
     assert _close() == (
-        "Orchestrator notice (inactivity limit): this session has sent no update to the user for"
-        " 4 h, so the orchestrator is closing it. You may hand off before it closes, you do not"
-        " have to: post a final status (orchestrator_chat_send or a task comment) and, since this"
-        " session saves its workspace, write handoff notes into the workdir. The session is"
-        " discarded 30 s after your turn ends, or at 14:05Z even mid-turn. Only the user can keep"
-        " it."
+        "Orchestrator notice (inactivity limit): this session has sent no update and done no tool"
+        " work for 4 h, so the orchestrator asks you to close it. If your work is finished: post a"
+        " final status (orchestrator_chat_send or a task comment) and since this session saves its"
+        " workspace, write handoff notes into the workdir, then call orchestrator_self_close. If"
+        " you are still working, post a progress update now to keep the session. It is never"
+        " closed while you work; if it is idle after 14:05Z without a self-close or an update, it"
+        " is discarded 30 s later."
     )
     assert "workdir" not in _close(workdir_saved=False)
-    assert "post a final status (orchestrator_chat_send or a task comment). The session" in (
+    assert "post a final status (orchestrator_chat_send or a task comment), then call" in (
         _close(workdir_saved=False)
     )
 
 
+def test_close_text_asks_self_close():
+    text = _close()
+    assert "orchestrator_self_close" in text
+    assert "post a progress update" in text
+    assert "never closed while you work" in text
+    assert "even mid-turn" not in text
+
+
 def test_close_text_tools():
-    assert "post a final status (orchestrator_chat_send) and" in _close(taskboard=False)
-    assert "post a final status (a task comment with orchestrator_task_comment) and" in _close(
-        chat=False
+    assert "post a final status (orchestrator_chat_send), then" in _close(
+        taskboard=False, workdir_saved=False
+    )
+    assert "post a final status (a task comment with orchestrator_task_comment), then" in _close(
+        chat=False, workdir_saved=False
     )
     text = _close(chat=False, taskboard=False)
     assert "post a final status" not in text
-    assert "you do not have to: since this session saves its workspace, write handoff" in text
+    assert "If your work is finished: since this session saves its workspace, write handoff" in text
     text = _close(chat=False, taskboard=False, workdir_saved=False)
-    assert "hand off" not in text
-    assert "closing it. The session is discarded 30 s" in text
+    assert "hand off" not in text and "handoff" not in text
+    assert "If your work is finished, call orchestrator_self_close." in text
 
 
 def test_texts_are_ascii():

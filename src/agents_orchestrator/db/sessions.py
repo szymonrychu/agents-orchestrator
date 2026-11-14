@@ -474,27 +474,43 @@ def log_close(session_id: uuid.UUID, *, close_kind: str, reason: str | None, ste
 
 
 CLOSE_KINDS = ("self", "inactivity", "autoclose")
+# Closes the orchestrator asks for: the agent answers with a self-close, and the fallback discards
+# only once the answer window passed and the session is idle.
+ASKED_CLOSE_KINDS = ("inactivity", "autoclose")
 
 
 async def request_close(
     conn: psycopg.AsyncConnection, session_id: uuid.UUID, reason: str, *, kind: str = "self"
 ) -> CloseOutcome:
     """Record a request to close the session once idle, by its leader (`kind` 'self') or the
-    orchestrator ('inactivity'). The first request wins: a pending one is returned unchanged
-    (`already`) and its clock is not reset. Raises ValueError for any other `kind`."""
+    orchestrator ('inactivity', 'autoclose'). The first request wins: a pending one is returned
+    unchanged (`already`) and its clock is not reset, except that a self-close answers a pending
+    orchestrator ask: it converts it to 'self' (the agent's reason, no deadline) and is not
+    `already`. Raises ValueError for any other `kind`."""
     if kind not in CLOSE_KINDS:
         raise ValueError(f"unknown close kind {kind!r}, expected one of {CLOSE_KINDS}")
     async with conn.transaction():
         existing = await _lock_active(conn, session_id)
         if existing.close_requested_at is not None:
-            return CloseOutcome(existing, True)
-        rows = await _fetch(
-            conn,
-            "UPDATE sessions SET close_requested_at = now(), close_reason = %s, close_kind = %s"
-            " WHERE id = %s AND desired = 'active' AND close_requested_at IS NULL RETURNING *",
-            (reason, kind, session_id),
-        )
+            if kind != "self" or existing.close_kind not in ASKED_CLOSE_KINDS:
+                return CloseOutcome(existing, True)
+            rows = await _fetch(
+                conn,
+                "UPDATE sessions SET close_kind = 'self', close_reason = %s,"
+                " close_deadline_at = NULL WHERE id = %s AND desired = 'active'"
+                " AND close_kind IN ('inactivity', 'autoclose') RETURNING *",
+                (reason, session_id),
+            )
+        else:
+            rows = await _fetch(
+                conn,
+                "UPDATE sessions SET close_requested_at = now(), close_reason = %s,"
+                " close_kind = %s WHERE id = %s AND desired = 'active'"
+                " AND close_requested_at IS NULL RETURNING *",
+                (reason, kind, session_id),
+            )
         await _notify(conn, session_id)
+        log_close(session_id, close_kind=kind, reason=reason, step="request")
         return CloseOutcome(rows[0], False)
 
 
@@ -519,6 +535,12 @@ async def cancel_close(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> 
             (session_id,),
         )
         await _notify(conn, session_id)
+        log_close(
+            session_id,
+            close_kind=existing.close_kind or "self",
+            reason="kept by user",
+            step="cancel",
+        )
         return rows[0]
 
 
@@ -606,24 +628,23 @@ _CLOSE_PREDICATE = f"""
     AND {_CLOSE} > 0
     AND q.quiet + make_interval(secs => {_CLOSE}) <= now()
 """
-# An inactivity close is cancelled by an inbound message that is not a notice and came after the
-# close request: created after it, or queued behind its close notice (a message whose transaction
-# began before the close and waited on the row lock carries an earlier `created_at`, but a later
-# id than the notice inserted under that lock).
+# An inactivity close is cancelled by the agent's own user-visible update after the request
+# (`last_update_at`) or by an inbound message that is not a notice and came after it: created
+# after it, or queued behind its close notice (a message whose transaction began before the close
+# and waited on the row lock carries an earlier `created_at`, but a later id than the notice
+# inserted under that lock). An autoclose is a lifetime: only Keep session or a self-close ends it.
 _INACTIVITY_CLOSE_CANCELLED = """
-    s.close_kind = 'inactivity' AND EXISTS (
-        SELECT 1 FROM messages cm
-        WHERE cm.session_id = s.id AND cm.notice IS NULL
-          AND cm.sender_session_id IS DISTINCT FROM s.id
-          AND (cm.created_at > s.close_requested_at
-               OR cm.id > (SELECT max(n.id) FROM messages n
-                           WHERE n.session_id = s.id AND n.notice = 'inactivity_close')))
+    s.close_kind = 'inactivity' AND (
+        s.last_update_at > s.close_requested_at
+        OR EXISTS (
+            SELECT 1 FROM messages cm
+            WHERE cm.session_id = s.id AND cm.notice IS NULL
+              AND cm.sender_session_id IS DISTINCT FROM s.id
+              AND (cm.created_at > s.close_requested_at
+                   OR cm.id > (SELECT max(n.id) FROM messages n
+                               WHERE n.session_id = s.id AND n.notice = 'inactivity_close'))))
 """
 _RELEASE_PREDICATE = f"s.desired = 'active' AND {_INACTIVITY_CLOSE_CANCELLED}"
-_OVERDUE_PREDICATE = f"""
-    s.desired = 'active' AND s.close_kind = 'inactivity' AND s.close_deadline_at <= now()
-    AND NOT ({_INACTIVITY_CLOSE_CANCELLED})
-"""
 _FLIP = (
     "UPDATE sessions SET desired = 'deleting', generation = generation + 1"
     " WHERE id = %s AND desired = 'active'"
@@ -642,7 +663,8 @@ async def _sweep_each(
 
     Per candidate, in its own transaction: lock the session row first, then re-evaluate the
     predicate in a fresh statement (selecting `columns`) and call `act(id, row)` only when it
-    still holds; `act` writes and returns the line logged after the commit, or None when its
+    still holds; `act` writes and returns the line logged after the commit ("" when it logged
+    the step itself), or None when its
     own status-guarded write matched no row (nothing was done). `enqueue_message`
     takes the same row lock (FOR SHARE) before inserting, so a message committed first is seen
     by the re-check, and one arriving later waits for the commit."""
@@ -665,15 +687,16 @@ async def _sweep_each(
                 if line is not None:
                     await _notify(conn, session_id)
         if line is not None:
-            log.info("%s", line)
+            if line:
+                log.info("%s", line)
             done.append(session_id)
     return done
 
 
 async def release_inactive_close(conn: psycopg.AsyncConnection) -> list[uuid.UUID]:
-    """Cancel inactivity closes that an inbound message answered (spec Q10), like
-    `cancel_close`: the close fields are cleared and the quiet clock restarts. A self-close is
-    never released this way."""
+    """Cancel inactivity closes that an inbound message or the agent's own update answered, like
+    `cancel_close`: the close fields are cleared and the quiet clock restarts. A self-close and
+    an autoclose are never released this way."""
 
     async def release(session_id: uuid.UUID, _: dict[str, Any]) -> str | None:
         cur = await conn.execute(
@@ -683,20 +706,36 @@ async def release_inactive_close(conn: psycopg.AsyncConnection) -> list[uuid.UUI
         )
         if cur.rowcount == 0:
             return None
-        return f"inactivity: session {session_id} got a message, close cancelled"
+        log_close(session_id, close_kind="inactivity", reason="answered", step="cancel")
+        return ""
 
     return await _sweep_each(conn, "sessions s", _RELEASE_PREDICATE, {}, "s.id", release)
 
 
-async def close_overdue(conn: psycopg.AsyncConnection) -> list[uuid.UUID]:
-    """Flip inactivity closes past their handoff deadline to deleting (request_delete write),
-    busy or not, unless an inbound message cancelled them."""
-
-    async def flip(session_id: uuid.UUID, _: dict[str, Any]) -> str:
-        await conn.execute(_FLIP, (session_id,))
-        return f"inactivity: session {session_id} deadline passed, discarding"
-
-    return await _sweep_each(conn, "sessions s", _OVERDUE_PREDICATE, {}, "s.id", flip)
+async def _ask_close(
+    conn: psycopg.AsyncConnection,
+    session_id: uuid.UUID,
+    *,
+    kind: str,
+    reason: str,
+    handoff_seconds: int,
+    extra_set: str = "",
+) -> Session | None:
+    """Status-guarded write of an orchestrator close ask: the request, the kind, the reason and
+    the deadline `handoff_seconds` away (the answer window). None when the session is no longer
+    active or already has a close pending. The caller composes the notice from the returned row
+    and enqueues it in the same transaction."""
+    rows = await _fetch(
+        conn,
+        "UPDATE sessions SET close_requested_at = now(), close_kind = %s, close_reason = %s,"
+        f" close_deadline_at = now() + make_interval(secs => %s){extra_set}"
+        " WHERE id = %s AND desired = 'active' AND close_requested_at IS NULL RETURNING *",
+        (kind, reason, handoff_seconds, session_id),
+    )
+    if not rows:
+        return None
+    log_close(session_id, close_kind=kind, reason=reason, step="ask")
+    return rows[0]
 
 
 async def close_inactive(
@@ -705,27 +744,25 @@ async def close_inactive(
     handoff_seconds: int,
     compose: Callable[[Session, datetime, datetime], str],
 ) -> list[uuid.UUID]:
-    """Request the close of sessions quiet for their close limit (spec 3.4): `close_kind`
-    'inactivity', the reason, a deadline `handoff_seconds` away, and the `inactivity_close`
-    notice `compose(session, last_update, deadline)` to the leader, in one transaction."""
+    """Ask sessions quiet for their close limit to close themselves (spec 3.4): `close_kind`
+    'inactivity', the reason, a deadline `handoff_seconds` away (the answer window), and the
+    `inactivity_close` notice `compose(session, last_update, deadline)` to the leader, in one
+    transaction. `discard_idle` is the fallback once the window passed and the session is idle."""
 
     async def close(session_id: uuid.UUID, row: dict[str, Any]) -> str | None:
-        reason = close_reason(row["quiet_seconds"], row["close_seconds"])
-        rows = await _fetch(
+        session = await _ask_close(
             conn,
-            "UPDATE sessions SET close_requested_at = now(), close_kind = 'inactivity',"
-            " close_reason = %s, close_deadline_at = now() + make_interval(secs => %s)"
-            " WHERE id = %s AND desired = 'active' AND close_requested_at IS NULL RETURNING *",
-            (reason, handoff_seconds, session_id),
+            session_id,
+            kind="inactivity",
+            reason=close_reason(row["quiet_seconds"], row["close_seconds"]),
+            handoff_seconds=handoff_seconds,
         )
-        if not rows:
+        if session is None:
             return None
-        [session] = rows
         assert session.close_deadline_at is not None
         text = compose(session, row["quiet"], session.close_deadline_at)
         await enqueue_message(conn, session_id, text, lane="regular", notice=NOTICE_CLOSE)
-        deadline = session.close_deadline_at.isoformat()
-        return f"inactivity: session {session_id} closing, deadline {deadline}"
+        return ""
 
     columns = (
         "q.quiet, floor(extract(epoch FROM now() - q.quiet))::int AS quiet_seconds,"
@@ -770,9 +807,9 @@ async def remind_inactive(
 # A session is idle when it has at least one live agent, every live agent is idle with no turn
 # and no attention, no message is queued, dispatching or verifying, and its init is not running.
 # `idle_since` is the latest signal: creation, agent free_since and attention, turn start and
-# end, message creation and dispatch, init start and finish, and a close request. The threshold
-# is the `%(grace)s` parameter while a close is requested (self-close or inactivity close); a
-# session with no close request has no threshold and is never discarded.
+# end, message creation and dispatch, init start and finish, a close request and its deadline.
+# The threshold is the `%(grace)s` parameter while a close is requested (self-close, inactivity or
+# autoclose); a session with no close request has no threshold and is never discarded.
 _IDLE_THRESHOLD = "CASE WHEN s.close_requested_at IS NOT NULL THEN %(grace)s::int END"
 _IDLE_PREDICATE = f"""
     s.desired = 'active'
@@ -797,29 +834,36 @@ _IDLE_PREDICATE = f"""
            FROM messages m WHERE m.session_id = s.id),
         NULLIF(s.status->'init'->>'started_at', '')::timestamptz,
         NULLIF(s.status->'init'->>'finished_at', '')::timestamptz,
-        s.close_requested_at
+        s.close_requested_at,
+        s.close_deadline_at
     ) + make_interval(secs => {_IDLE_THRESHOLD}) <= now()
 """
 
 
 async def discard_idle(conn: psycopg.AsyncConnection, close_grace_seconds: int) -> list[uuid.UUID]:
     """Flip idle sessions to deleting (request_delete write): those with a pending close request
-    (self-close or inactivity close) that have been idle for `close_grace_seconds`, unless an
-    inbound message cancelled their inactivity close. Locked and re-checked per candidate
-    (`_sweep_each`): a message or a `cancel_close` committed first fails the re-check, and a
-    message arriving after the flip is refused."""
+    that have been idle for `close_grace_seconds`. The only flip of every close kind. An asked
+    close (inactivity, autoclose) also waits for its answer window (`close_deadline_at`), so a
+    busy session is never flipped, however long it stays busy; a self-close has no deadline. An
+    inactivity close answered by a message or an update is not flipped. Locked and re-checked per
+    candidate (`_sweep_each`): a message or a `cancel_close` committed first fails the re-check,
+    and a message arriving after the flip is refused."""
     predicate = (
-        f"{_IDLE_PREDICATE} AND (s.close_kind IS DISTINCT FROM 'inactivity'"
-        f" OR NOT ({_INACTIVITY_CLOSE_CANCELLED}))"
+        f"{_IDLE_PREDICATE} AND (s.close_deadline_at IS NULL OR s.close_deadline_at <= now())"
+        f" AND (s.close_kind IS DISTINCT FROM 'inactivity' OR NOT ({_INACTIVITY_CLOSE_CANCELLED}))"
     )
 
     async def flip(session_id: uuid.UUID, row: dict[str, Any]) -> str:
         await conn.execute(_FLIP, (session_id,))
-        kind = "inactivity" if row["close_kind"] == "inactivity" else "self-close"
-        return f"{kind}: session {session_id} is idle, discarding"
+        log_close(
+            session_id, close_kind=row["close_kind"], reason=row["close_reason"], step="discard"
+        )
+        return ""
 
     params = {"grace": close_grace_seconds}
-    return await _sweep_each(conn, "sessions s", predicate, params, "s.close_kind", flip)
+    return await _sweep_each(
+        conn, "sessions s", predicate, params, "s.close_kind, s.close_reason", flip
+    )
 
 
 async def set_init_scripts(

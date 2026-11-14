@@ -96,7 +96,7 @@ async def test_sweeper_runs_in_api_lifespan(dsn, pool, monkeypatch):
 
 
 async def test_sweep_step_order(monkeypatch, pool):
-    """One poll runs the steps in this order: handover delivered, expired, released, overdue,
+    """One poll runs the steps in this order: handover delivered, expired, released,
     closed, reminded, discarded idle."""
     monkeypatch.setattr(autoclose, "AUTOCLOSE_POLL_SECONDS", 0.05)
     calls: list[str] = []
@@ -112,7 +112,6 @@ async def test_sweep_step_order(monkeypatch, pool):
         "deliver_handover",
         "close_expired",
         "release_inactive_close",
-        "close_overdue",
         "close_inactive",
         "remind_inactive",
         "discard_idle",
@@ -176,8 +175,9 @@ async def test_sweeper_sends_inactivity_notices(dsn, pool, monkeypatch):
     [(kind, text)] = await notices(silent["id"])
     assert kind == inactivity.NOTICE_CLOSE
     assert text.startswith(inactivity.CLOSE_PREFIX)
-    assert "for 4 h, so the orchestrator is closing it" in text
-    assert "discarded 30 s after your turn ends" in text
+    assert "for 4 h, so the orchestrator asks you to close it" in text
+    assert "orchestrator_self_close" in text
+    assert "it is discarded 30 s later" in text
     row = await _row(pool, silent["id"])
     assert row["close_kind"] == "inactivity" and row["desired"] == "active"
 
@@ -188,7 +188,6 @@ async def test_sweeper_sends_inactivity_notices(dsn, pool, monkeypatch):
         "deliver_handover",
         "close_expired",
         "release_inactive_close",
-        "close_overdue",
         "close_inactive",
         "remind_inactive",
         "discard_idle",
@@ -212,7 +211,6 @@ async def test_failing_step_does_not_skip_the_others(monkeypatch, pool, caplog, 
         "deliver_handover",
         "close_expired",
         "release_inactive_close",
-        "close_overdue",
         "close_inactive",
         "remind_inactive",
         "discard_idle",

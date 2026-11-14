@@ -23,9 +23,9 @@ AUTOCLOSE_POLL_SECONDS = 10
 
 async def sweep(pool: AsyncConnectionPool, settings: Settings) -> None:
     """Each poll until cancelled, in order: deliver handover notices to new leaders, close due
-    sessions, release inactivity closes an inbound message answered, discard inactivity closes
-    past their deadline, request inactivity closes, send reminders, discard idle closing
-    sessions. Each step runs on its own connection
+    sessions, release inactivity closes an inbound message or an update answered, ask quiet
+    sessions to close, send reminders, discard idle closing sessions once their answer window
+    passed. Each step runs on its own connection
     and a step that fails is logged and skipped: the other steps still run, and the failed one
     is retried next poll. The limits are passed on every poll, so they apply to running
     sessions."""
@@ -51,7 +51,6 @@ async def sweep(pool: AsyncConnectionPool, settings: Settings) -> None:
         ),
         ("close_expired", close_expired),
         ("release_inactive_close", sessions.release_inactive_close),
-        ("close_overdue", sessions.close_overdue),
         (
             "close_inactive",
             lambda conn: sessions.close_inactive(
