@@ -1296,10 +1296,11 @@ async def test_shutdown_leader_handoff_goes_to_successor_and_old_agent_is_cleare
     c, (a0, a1, a2) = await env.hive(used=LOW)
     await env.gauge(a2["id"], 60000)  # a1 is the successor (lowest context)
     await env.run("UPDATE agent_status SET stopping_since = now() WHERE agent_id = %s", (a0["id"],))
-    await env.run("UPDATE agents SET ready = false WHERE id = %s", (a0["id"],))
     await insert_event(env.pool, c["id"], a0["id"], type="shutdown_started", data={})
-    # the pod went unready at SIGTERM: leadership moves (leader_lost) before the handoff turn
-    await _leader_lost(env, c["id"])
+    # the pod stays Ready through the routine: the stopping mark alone moves leadership
+    # (leader_lost) on the next pass, before the handoff turn and with no unready grace
+    async with env.pool.connection() as conn:
+        await leadership.leadership_pass(conn, c["id"])
     async with env.pool.connection() as conn:
         leader = await leadership.current_leader(conn, c["id"])
     assert leader.agent_id == a1["id"]

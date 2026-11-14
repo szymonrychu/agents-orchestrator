@@ -43,6 +43,7 @@ from agents_orchestrator.db.eligibility import (
     HANDOVER_TRIGGER,
     HEADROOM,
     LEAVING,
+    NOT_STOPPING,
     READY_STAYS,
     SUCCESSOR_ORDER,
 )
@@ -169,7 +170,7 @@ HIVE = "coalesce(c.spec->>'max_replicas', c.spec->>'replicas')::int > 1"
 SOLO = "coalesce(coalesce(c.spec->>'max_replicas', c.spec->>'replicas')::int, 1) <= 1"
 
 # Hive sessions whose leadership needs a pass: queued requests, no leader row while an agent
-# could lead, a leader that is gone, not ready or dead, an unready mark to clear,
+# could lead, a leader that is gone, not ready, dead or stopping, an unready mark to clear,
 # or a leader whose ordinal a scale-down removes.
 _CANDIDATES = f"""
 SELECT c.id FROM sessions c
@@ -181,6 +182,7 @@ WHERE c.desired = 'active' AND {HIVE} AND (
     OR (l.session_id IS NULL AND EXISTS (
         SELECT 1 FROM agents a WHERE a.session_id = c.id AND {ELIGIBLE}))
     OR a.gone_at IS NOT NULL OR NOT a.ready OR {DEAD} OR l.unready_since IS NOT NULL
+    OR NOT {NOT_STOPPING}
     OR {HANDOVER_TRIGGER}
 )
 ORDER BY c.id
@@ -240,6 +242,7 @@ async def _leader(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> dict 
         "   < now() - make_interval(secs => %s) AS grace_over,"
         " a.ready, a.gone_at IS NOT NULL AS gone,"
         f" {DEAD} AS dead,"
+        f" NOT {NOT_STOPPING} AS stopping,"
         f" {LEAVING} AS leaving"
         " FROM session_leaders l JOIN agents a ON a.id = l.agent_id"
         " JOIN sessions c ON c.id = l.session_id"
@@ -475,6 +478,23 @@ async def leadership_pass(
                 )
                 await handoffs.on_leader_moved(
                     conn, session_id, leader["agent_id"], picked, {"kind": "scale_down"}
+                )
+                leader = await _leader(conn, session_id)
+
+        # 3b. Stopping leader (T-256): its wrapper runs the SIGTERM shutdown routine, so the pod
+        # is going away and the claim no longer hands it anything. It moves at once, like a
+        # scale-down: its pod stays Ready through the routine and the next pod can be Ready
+        # again inside LEADER_GRACE_SECONDS, so waiting for the unready grace would leave the
+        # move to chance. The successor's notice waits for the shutdown handoff text
+        # (handover._SHUTDOWN_HOLD). With no other agent to lead it keeps the lead (L3).
+        if leader is not None and leader["stopping"] and not leader["gone"]:
+            picked = await successor(conn, session_id, leader["agent_id"], policy)
+            if picked is not None:
+                change = await _set_leader(
+                    conn, session_id, picked, "leader_lost", leader["agent_id"]
+                )
+                await handoffs.on_leader_moved(
+                    conn, session_id, leader["agent_id"], picked, {"kind": "leader_lost"}
                 )
                 leader = await _leader(conn, session_id)
 
