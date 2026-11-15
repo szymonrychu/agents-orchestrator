@@ -219,18 +219,19 @@ def due_level(
     tokens = used_tokens is not None and window is not None
     cap = strong_tokens(lv, window) if window is not None else None
     crit = critical_tokens(lv, window) if window is not None else None
-    if pct is not None and pct >= lv.compact_pct - lv.critical_margin_pct:
+    by_pct = not tokens and pct is not None
+    if by_pct and pct >= lv.compact_pct - lv.critical_margin_pct:
         return "l3"
     if tokens and used_tokens is not None and crit is not None and used_tokens >= crit:
         return "l3"
-    if pct is not None and pct >= lv.strong_pct:
+    if by_pct and pct >= lv.strong_pct:
         return "l2"
     if tokens and used_tokens is not None and cap is not None and used_tokens >= cap:
         return "l2"
     if tokens and lv.start_tokens is not None and used_tokens is not None and cap is not None:
         hit = used_tokens >= min(lv.start_tokens + lv.budget_tokens, cap)
     else:
-        hit = pct is not None and pct >= lv.fallback_pct
+        hit = by_pct and pct >= lv.fallback_pct
     if hit and tenure_seconds >= min_tenure_seconds and not rollout_pending:
         return "l1"
     return "none"

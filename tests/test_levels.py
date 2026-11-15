@@ -60,3 +60,9 @@ def test_due_level_pct_fallback():
     assert _due(lv, None, window=None, pct=89.9) == "l2"
     assert _due(lv, None, window=None, pct=90.0) == "l3"
     assert _due(lv, None, window=None, pct=None) == "none"
+
+
+def test_due_level_pct_ignored_when_tokens_and_window_known():
+    lv = _lv()
+    assert _due(lv, 10_000, window=200_000, pct=95.0) == "none"
+    assert _due(lv, 10_000, window=200_000, pct=87.0) == "none"
