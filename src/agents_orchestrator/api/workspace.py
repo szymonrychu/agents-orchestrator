@@ -50,6 +50,7 @@ from agents_orchestrator.db import sessions as sessions_repo
 from agents_orchestrator.settings import Settings, SettingsError
 from agents_orchestrator.tokens import tokens_for
 from agents_orchestrator.wrapper import WrapperClient, WrapperError, WrapperUnreachable
+from agents_orchestrator.wrapper.models import Inflight
 
 log = logging.getLogger(__name__)
 
@@ -259,6 +260,24 @@ async def forward(
         status, body = await client.request_json(method, path, params=params, json=json, **extra)
     log.debug("wrapper answered %s on %s %s", status, method, path)
     return body
+
+
+async def fetch_inflight(
+    app: FastAPI, settings: Settings, agent: agents_repo.Agent
+) -> Inflight | None:
+    """The wrapper's in-flight inventory of an agent's session; None when the wrapper cannot
+    be asked or does not answer (the handoff gate then blocks)."""
+    if not agent.url or not agent.wrapper_session_id:
+        return None
+    client = WrapperClient(
+        agent.url, tokens_for(settings, agent.session_id).auth, http=get_client(app)
+    )
+    try:
+        return await client.get_inflight(
+            agent.wrapper_session_id, timeout=float(settings.handoff_inflight_timeout_seconds)
+        )
+    except (WrapperError, WrapperUnreachable):
+        return None
 
 
 # ------------------------------------------------------------------------------ file routes

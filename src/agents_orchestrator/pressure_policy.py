@@ -41,6 +41,8 @@ class PolicyExtras:
 def waiting_on(row: Handoff | None) -> list[str]:
     if row is None:
         return []
+    if row.inflight and "waiting_on" in row.inflight:  # the gate's own list (abandoned dropped)
+        return [str(i)[:MAX_WAITING_ON_CHARS] for i in row.inflight["waiting_on"]][:MAX_WAITING_ON]
     return [i[:MAX_WAITING_ON_CHARS] for i in blocking_items(row.inflight)][:MAX_WAITING_ON]
 
 

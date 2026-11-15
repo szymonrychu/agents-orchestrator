@@ -246,6 +246,14 @@ class Settings(BaseSettings):
     handover_notify_seconds: int = Field(default=300, ge=30, le=3600)
     handover_extension_seconds: int = Field(default=300, ge=0, le=3600)
     handover_idle_proceed_seconds: int = Field(default=60, ge=0, le=600)
+    #: Handoff submit quality check and in-flight gate (handoff_quality.py, handoff_gate.py):
+    #: the least characters over all fields, the least share of letters, digits and whitespace,
+    #: the rejected submits that count as stuck, and the seconds to wait for the wrapper's
+    #: in-flight answer.
+    handoff_min_chars: int = Field(default=300, ge=1, le=20000)
+    handoff_min_text_ratio: float = Field(default=0.6, ge=0, le=1)
+    handoff_max_rejects: int = Field(default=3, ge=1, le=20)
+    handoff_inflight_timeout_seconds: int = Field(default=15, ge=1, le=120)
     handover_quiet_seconds: int = Field(default=60, ge=0, le=3600)
     handover_quiet_cap_seconds: int = Field(default=600, ge=60, le=7200)
     #: A `clear` the wrapper accepted counts as lost (retried, then `clear_failed`) once the

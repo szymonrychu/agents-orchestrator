@@ -94,6 +94,10 @@ Every process reads `ORCH_*` variables (the contract `agents-orchestrator-settin
 | `ORCH_HANDOVER_NOTIFY_SECONDS` | `300` | dispatcher | strong limit: seconds (30 to 3600) between the `handoff_notice` and the `handoff_request` |
 | `ORCH_HANDOVER_EXTENSION_SECONDS` | `300` | dispatcher | strong limit: seconds (0 to 3600) one `extend` adds to the countdown |
 | `ORCH_HANDOVER_IDLE_PROCEED_SECONDS` | `60` | dispatcher | strong limit: the countdown ends early once the notice turn ended and the agent stayed idle this long (0 to 600) |
+| `ORCH_HANDOFF_MIN_CHARS` | `300` | api | least characters over all fields of a submitted handoff (1 to 20000); a shorter one is rejected `too_short` |
+| `ORCH_HANDOFF_MIN_TEXT_RATIO` | `0.6` | api | least share (0 to 1) of letters, digits and whitespace in a submitted handoff; emoji and punctuation-only text is rejected `not_text` |
+| `ORCH_HANDOFF_MAX_REJECTS` | `3` | api | rejected submits (1 to 20) after which the handoff counts as stuck |
+| `ORCH_HANDOFF_INFLIGHT_TIMEOUT_SECONDS` | `15` | api | seconds (1 to 120) to wait for the wrapper's in-flight answer on a submit; no answer blocks the submit |
 | `ORCH_HANDOVER_QUIET_SECONDS` | `60` | dispatcher | strong limit, hive: seconds (0 to 3600) the hive must stay quiet after the leadership move before the ex-leader is cleared |
 | `ORCH_HANDOVER_QUIET_CAP_SECONDS` | `600` | dispatcher | strong limit, hive: the ex-leader is cleared this long (60 to 7200, at least the quiet window) after the move whatever the activity |
 | `ORCH_HANDOVER_CLEAR_TIMEOUT_SECONDS` | `180` | dispatcher | strong limit: seconds (30 to 3600) an agent may sit idle after its `clear` was queued, claimed or accepted by the wrapper with no `session_cleared` before the clear counts as lost (retried, at most 5 attempts in all, then `clear_failed`) |

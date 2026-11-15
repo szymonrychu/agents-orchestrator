@@ -827,6 +827,49 @@ def _row_level(
     return lv, level, fill
 
 
+@dataclass(frozen=True)
+class PressureSubject:
+    """The live pressure reading of one leader or solo agent (`Me` and the submit route)."""
+
+    levels: Levels
+    level: int
+    used_tokens: int | None
+    window_tokens: int | None
+    context_pct: float | None
+    tenure_seconds: float
+
+
+async def pressure_subject(
+    conn: psycopg.AsyncConnection, session_id: uuid.UUID, agent_id: uuid.UUID, settings: Settings
+) -> PressureSubject | None:
+    """The reading of `agent_id` when it is the leader or solo agent of an active session, else
+    None. The level is computed in tokens (unknown gauge: 0)."""
+    for row in await _subject_rows(conn, session_id=session_id):
+        if row["agent_id"] != agent_id:
+            continue
+        fill = row["context_used_tokens"] if row["start_tokens"] is None else None
+        lv = levels(row["spec"], row["start_tokens"] if fill is None else fill, settings)
+        rollout = (row["status"] or {}).get("rollout") or {}
+        level = due_level(
+            lv,
+            row["context_used_tokens"],
+            row["context_window_tokens"],
+            row["context_pct"],
+            float(row["tenure"]),
+            settings.handover_min_tenure_seconds,
+            row["ordinal"] in (rollout.get("pending") or []),
+        )
+        return PressureSubject(
+            levels=lv,
+            level={"none": 0, "l1": 1, "l2": 2, "l3": 3}[level],
+            used_tokens=row["context_used_tokens"],
+            window_tokens=row["context_window_tokens"],
+            context_pct=row["context_pct"],
+            tenure_seconds=float(row["tenure"]),
+        )
+    return None
+
+
 async def _push_solo_session(
     pool: AsyncConnectionPool,
     session_id: uuid.UUID,

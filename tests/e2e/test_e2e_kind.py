@@ -337,7 +337,7 @@ HIVE_ONLY_TOOLS = {
 
 ALONE_SESSION_TOOLS = [
     "me",
-    "leadership_handover",
+    "handoff_submit",
     "sessions_list",
     "session_send",
     "init_scripts_get",

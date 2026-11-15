@@ -54,6 +54,7 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     # rechecked under the preset row lock (`db.sessions.set_init_scripts`)
     ("PUT", f"{_A}/init-scripts"): "own",
     ("POST", f"{_A}/leadership/handover"): "own",
+    ("POST", f"{_A}/handoff"): "own",
     ("POST", f"{_A}/locks/claim"): "own",
     ("POST", f"{_A}/locks/release"): "own",
     ("GET", f"{_A}/locks"): "own",
