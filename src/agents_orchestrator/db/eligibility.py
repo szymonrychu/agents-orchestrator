@@ -58,11 +58,12 @@ NOTICE_PENDING = (
 
 # A running background subagent keeps its leader from being moved.
 # `agent_status.background_subagents` maps subagent id -> start time; an entry older than
-# BACKGROUND_STALE_SECONDS is ignored, so a lost stop event cannot pin a leader forever, unless
-# the agent's `activity_at` (newest tool or subagent event) is within that same window: a
-# subagent that runs for hours keeps the agent active, a dead entry of a quiet agent expires.
+# BACKGROUND_STALE_SECONDS (24 h) is ignored: a guard against a lost stop event only, so it
+# cannot pin a leader forever, unless the agent's `activity_at` (newest tool or subagent event)
+# is within that same window: a subagent that runs for hours keeps the agent active, a dead
+# entry of a quiet agent expires.
 # Alias `s` is a LEFT JOINed `agent_status` row.
-BACKGROUND_STALE_SECONDS = 7200
+BACKGROUND_STALE_SECONDS = 86400
 
 
 def background_busy(alias: str) -> str:

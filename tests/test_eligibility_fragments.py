@@ -64,8 +64,8 @@ async def _busy(pool, agent_id: uuid.UUID) -> bool:
         return (await cur.fetchone())[0]
 
 
-async def test_background_entry_stale_after_two_hours(pool) -> None:
-    assert eligibility.BACKGROUND_STALE_SECONDS == 7200
+async def test_background_entry_stale_after_24_hours(pool) -> None:
+    assert eligibility.BACKGROUND_STALE_SECONDS == 86400
     session = await insert_session(pool)
     agent = await insert_agent(pool, session["id"], ready=True)
     assert not await _busy(pool, agent["id"])  # no status row
@@ -76,7 +76,8 @@ async def test_background_entry_stale_after_two_hours(pool) -> None:
 
     async with pool.connection() as conn:
         cur = await conn.execute(
-            "SELECT (now() - interval '1 hour')::text, (now() - interval '2 hours 1 second')::text"
+            "SELECT (now() - interval '3 hours')::text,"
+            " (now() - interval '24 hours 1 second')::text"
         )
         fresh, old = await cur.fetchone()
     assert not await with_map({})
@@ -89,19 +90,19 @@ async def test_stale_entry_counts_while_activity_is_recent(pool) -> None:
     session = await insert_session(pool)
     agent = await insert_agent(pool, session["id"], ready=True)
     async with pool.connection() as conn:
-        cur = await conn.execute("SELECT (now() - interval '3 hours')::text")
+        cur = await conn.execute("SELECT (now() - interval '25 hours')::text")
         (old,) = await cur.fetchone()
     await set_agent_status(pool, agent["id"], background_subagents={"a": old})
     assert not await _busy(pool, agent["id"])
     async with pool.connection() as conn:
         await conn.execute(
-            "UPDATE agent_status SET activity_at = now() - interval '1 hour' WHERE agent_id = %s",
+            "UPDATE agent_status SET activity_at = now() - interval '3 hours' WHERE agent_id = %s",
             (agent["id"],),
         )
     assert await _busy(pool, agent["id"])
     async with pool.connection() as conn:
         await conn.execute(
-            "UPDATE agent_status SET activity_at = now() - interval '3 hours' WHERE agent_id = %s",
+            "UPDATE agent_status SET activity_at = now() - interval '25 hours' WHERE agent_id = %s",
             (agent["id"],),
         )
     assert not await _busy(pool, agent["id"])

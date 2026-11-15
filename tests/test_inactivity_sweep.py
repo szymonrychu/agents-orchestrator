@@ -594,15 +594,15 @@ async def test_quiet_clock_reads_activity(pool):
 
 async def test_background_subagent_holds_quiet_clock(pool):
     s, a = await _session(pool)
-    await _shift(pool, s["id"], 7200)
-    stale = datetime.now(UTC).timestamp() - 7300
+    await _shift(pool, s["id"], 86400)
+    stale = datetime.now(UTC).timestamp() - 86500
     await set_agent_status(
         pool,
         a["id"],
         state="idle",
         background_subagents={"sa1": datetime.fromtimestamp(stale, UTC).isoformat()},
     )
-    assert (await _now(pool) - await _quiet(pool, s["id"])).total_seconds() > 7000
+    assert (await _now(pool) - await _quiet(pool, s["id"])).total_seconds() > 86000
     await set_agent_status(
         pool,
         a["id"],
