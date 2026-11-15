@@ -1524,3 +1524,77 @@ async def test_subagent_events_stamp_activity(harness, pool) -> None:
     await h.stored_through(h.last_fake_seq())
     assert await activity_at(pool, h.agent_id) == datetime.fromisoformat(T2)
     assert await background(pool, h.agent_id) == {}
+
+
+# --------------------------------------------------------------------------- auth state (T-225)
+
+
+async def test_snapshot_auth_failed_stored(harness, pool) -> None:
+    h = await harness()
+    h.fake.set_snapshot_auth("failed", "revoked")
+    await h.start()
+    await h.stored_through(h.last_fake_seq())
+    row = await status_row(pool, h.agent_id)
+    assert row["auth_state"] == "failed"
+    assert row["auth_reason"] == "revoked"
+    assert row["auth_failed_at"] is not None
+
+
+async def test_snapshot_unknown_auth_state_is_not_stored(harness, pool) -> None:
+    h = await harness()
+    h.fake.set_snapshot_auth("CANARY-weird", "x" * 100)
+    await h.start()
+    await h.stored_through(h.last_fake_seq())
+    row = await status_row(pool, h.agent_id)
+    assert (row["auth_state"], row["auth_reason"], row["auth_failed_at"]) == (None, None, None)
+
+
+async def test_snapshot_without_auth_clears(harness, pool) -> None:
+    h = await harness()
+    h.fake.set_snapshot_auth("failed", "revoked")
+    await h.start()
+    await h.stored_through(h.last_fake_seq())
+    await h.stop()
+    h.fake.set_snapshot_auth(None)
+    await h.start()
+
+    async def cleared() -> bool:
+        return (await status_row(pool, h.agent_id))["auth_state"] is None
+
+    await wait_until(cleared)
+    row = await status_row(pool, h.agent_id)
+    assert (row["auth_reason"], row["auth_failed_at"]) == (None, None)
+
+
+async def test_auth_failed_event_sets_state_and_notifies(harness, pool, listener) -> None:
+    h = await harness()
+    await h.start()
+    await h.stored_through(h.last_fake_seq())
+    assert (await status_row(pool, h.agent_id))["auth_state"] is None
+    listener.got.clear()
+
+    h.fake.emit("auth_failed", {"reason": "expired", "tail": "x"})
+    await h.stored_through(h.last_fake_seq())
+    row = await status_row(pool, h.agent_id)
+    assert (row["auth_state"], row["auth_reason"]) == ("failed", "expired")
+    assert row["auth_failed_at"] is not None
+    want = {"session_id": str(h.session_id)}
+    await wait_until(lambda: want in listener.on(LEADERSHIP_CHANNEL))
+    assert listener.on(LEADERSHIP_CHANNEL).count(want) == 1
+    # the screen tail is never copied into the status row
+    assert "x" not in {str(v) for k, v in row.items() if k.startswith("auth_") and v}
+
+
+async def test_auth_failed_event_keeps_first_failed_at(harness, pool) -> None:
+    h = await harness()
+    await h.start()
+    await h.stored_through(h.last_fake_seq())
+    h.fake.emit("auth_failed", {"reason": "expired"})
+    await h.stored_through(h.last_fake_seq())
+    first = (await status_row(pool, h.agent_id))["auth_failed_at"]
+    assert first is not None
+    h.fake.emit("auth_failed", {"reason": "expired again"})
+    await h.stored_through(h.last_fake_seq())
+    row = await status_row(pool, h.agent_id)
+    assert row["auth_failed_at"] == first
+    assert row["auth_reason"] == "expired again"

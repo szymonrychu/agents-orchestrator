@@ -21,6 +21,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from agents_orchestrator.db.eligibility import (
+    AUTH_FAILED,
     ELIGIBLE,
     HANDOVER_TRIGGER,
     NOT_STOPPING,
@@ -369,6 +370,7 @@ WHERE a.session_id = %(session_id)s
   AND a.gone_at IS NULL
   AND a.wrapper_session_id IS NOT NULL
   AND {NOT_STOPPING}
+  AND NOT {AUTH_FAILED}
   AND s.state = 'idle'
   AND s.free_since > coalesce(a.last_dispatched_at, '-infinity'::timestamptz)
   AND (%(target)s::uuid IS NULL OR a.id = %(target)s::uuid)
@@ -389,6 +391,7 @@ WHERE a.session_id = %(session_id)s
   AND a.gone_at IS NULL
   AND a.wrapper_session_id IS NOT NULL
   AND {NOT_STOPPING}
+  AND NOT {AUTH_FAILED}
   AND (%(target)s::uuid IS NULL OR a.id = %(target)s::uuid)
 ORDER BY (s.state = 'idle') DESC, s.free_since ASC, a.id
 LIMIT 1

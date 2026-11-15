@@ -54,6 +54,12 @@ def test_eligible_excludes_dead_agents() -> None:
         assert "'dead'" not in inspect.getsource(module)
 
 
+def test_auth_failed_fragment_composed() -> None:
+    assert eligibility.AUTH_FAILED in eligibility.ELIGIBLE
+    assert eligibility.AUTH_FAILED in eligibility.HOLDS_SESSION
+    assert eligibility.AUTH_FAILED in leadership._CANDIDATES
+
+
 async def _busy(pool, agent_id: uuid.UUID) -> bool:
     async with pool.connection() as conn:
         cur = await conn.execute(

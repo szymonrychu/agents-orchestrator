@@ -267,6 +267,29 @@
               }
             ]
           },
+          "auth_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Auth Reason"
+          },
+          "auth_state": {
+            "anyOf": [
+              {
+                "const": "failed",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Auth State"
+          },
           "bootstrap": {
             "anyOf": [
               {
@@ -2959,6 +2982,9 @@
           "caps": {
             "$ref": "#/components/schemas/MetaCaps"
           },
+          "credential": {
+            "$ref": "#/components/schemas/MetaCredential"
+          },
           "defaults": {
             "$ref": "#/components/schemas/MetaDefaults"
           },
@@ -3035,7 +3061,8 @@
           "permission_modes",
           "usage",
           "inactivity",
-          "mindmap"
+          "mindmap",
+          "credential"
         ],
         "title": "Meta",
         "type": "object"
@@ -3079,6 +3106,49 @@
           "max_sessions"
         ],
         "title": "MetaCaps",
+        "type": "object"
+      },
+      "MetaCredential": {
+        "properties": {
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "phase": {
+            "enum": [
+              "unknown",
+              "ok",
+              "warn",
+              "refuse",
+              "expired"
+            ],
+            "title": "Phase",
+            "type": "string"
+          },
+          "refuse_hours": {
+            "title": "Refuse Hours",
+            "type": "integer"
+          },
+          "warn_days": {
+            "title": "Warn Days",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "expires_at",
+          "phase",
+          "warn_days",
+          "refuse_hours"
+        ],
+        "title": "MetaCredential",
         "type": "object"
       },
       "MetaDefaults": {
@@ -5753,6 +5823,11 @@
         "properties": {
           "attention_agents": {
             "title": "Attention Agents",
+            "type": "integer"
+          },
+          "auth_failed_agents": {
+            "default": 0,
+            "title": "Auth Failed Agents",
             "type": "integer"
           },
           "auto_compact_pct": {
@@ -12474,7 +12549,7 @@
     },
     "/agent/v1/admin/sessions/{slug}/scale": {
       "post": {
-        "description": "Set spec.replicas of a manageable session in place; the caller's own session is refused\n(422 `own_session`). A scale-up over the usage quota is 409 `usage_quota`: that check reads\non its own connection and fails open, like the main port's, so it runs between a short\nread of the target and the transaction (never while a connection is held). No kube call.",
+        "description": "Set spec.replicas of a manageable session in place; the caller's own session is refused\n(422 `own_session`). A scale-up inside the credential refuse margin is 409\n`credential_expiring`, over the usage quota 409 `usage_quota`: those checks read\non its own connection and fails open, like the main port's, so it runs between a short\nread of the target and the transaction (never while a connection is held). No kube call.",
         "operationId": "scale_session_agent_v1_admin_sessions__slug__scale_post",
         "parameters": [
           {
@@ -12547,7 +12622,7 @@
             "description": "not_found: no session has that slug"
           },
           "409": {
-            "description": "usage_quota, static_session, leader_would_leave or session_deleting"
+            "description": "credential_expiring, usage_quota, static_session, leader_would_leave or session_deleting"
           },
           "422": {
             "description": "out_of_range: replicas outside 1..max_replicas; own_session: the caller's own session"
@@ -16022,7 +16097,7 @@
     },
     "/agent/v1/scale": {
       "post": {
-        "description": "A scale-up over the usage quota is refused 409 `usage_quota`, but only for the leader:\na non-leader is always answered 403 `not_leader`.",
+        "description": "A scale-up inside the credential refuse margin is refused 409 `credential_expiring`, over\nthe usage quota 409 `usage_quota`, but only for the leader: a non-leader is always answered\n403 `not_leader`.",
         "operationId": "scale_agent_v1_scale_post",
         "parameters": [
           {

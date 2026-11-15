@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
@@ -380,6 +381,15 @@ class Settings(BaseSettings):
     usage_quota_default: int = Field(default=100, ge=1, le=100)
     usage_cache_seconds: float = Field(default=30, ge=1, le=600)
     usage_timeout_seconds: float = Field(default=3, gt=0, le=30)
+
+    # Claude credential expiry watch: the readable end instant of the long-lived token (tz-aware,
+    # chart claude.credentialExpiresAt), the warn and refuse margins, the taskboard project that
+    # receives one notice per threshold ("" is off) and the sweep period.
+    claude_credential_expires_at: datetime | None = None
+    credential_warn_days: int = Field(default=10, ge=1, le=60)
+    credential_refuse_hours: int = Field(default=24, ge=1, le=720)
+    credential_notice_project: str = ""
+    credential_sweep_seconds: int = Field(default=300, ge=30)
 
     # usage forwarding from agent pods (claude-code-wrapper >= 0.8.0 `usage` section): the
     # agents-usage ingest URL and the Secret name (key `token`) holding the shared ingest token.
@@ -800,6 +810,25 @@ class Settings(BaseSettings):
                 raise _Bad("must not carry a query or fragment (the relay appends the path)")
         return v
 
+    @field_validator("claude_credential_expires_at", mode="before")
+    @classmethod
+    def _empty_expiry_is_none(cls, v: Any) -> Any:
+        return None if isinstance(v, str) and not v.strip() else v
+
+    @field_validator("claude_credential_expires_at")
+    @classmethod
+    def _check_expiry_zone(cls, v: datetime | None) -> datetime | None:
+        if v is not None and v.utcoffset() is None:
+            raise _Bad("must carry a time zone (for example 2027-10-23T00:00:00Z)")
+        return v
+
+    @field_validator("credential_notice_project")
+    @classmethod
+    def _check_notice_project(cls, v: str) -> str:
+        if v and not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,39}", v):
+            raise _Bad("must be a project slug ([a-z0-9][a-z0-9-]{0,39}) or empty")
+        return v
+
     @field_validator("agent_usage_url")
     @classmethod
     def _check_agent_usage_url(cls, v: str) -> str:
@@ -896,6 +925,11 @@ class Settings(BaseSettings):
         if unknown:
             raise _Bad(
                 "ORCH_SERVICE_SCOPES::names a service without a token: " + ", ".join(unknown)
+            )
+        if self.credential_refuse_hours >= self.credential_warn_days * 24:
+            raise _Bad(
+                f"ORCH_CREDENTIAL_REFUSE_HOURS ({self.credential_refuse_hours}) must stay below"
+                f" ORCH_CREDENTIAL_WARN_DAYS ({self.credential_warn_days}) * 24 hours"
             )
         budget = (
             self.agent_shutdown_notice_seconds

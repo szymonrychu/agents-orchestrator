@@ -22,6 +22,7 @@ from agents_orchestrator.api import (
     archives,
     autoclose,
     chat,
+    credential_sweep,
     errors,
     forward,
     messages,
@@ -109,10 +110,12 @@ def create_app(
         app.state.proposal_sweep_task = proposal_sweeper
         post_sweeper = asyncio.create_task(project_post_sweep.sweep(app), name="project_post_sweep")
         app.state.project_post_sweep_task = post_sweeper
+        cred_sweeper = asyncio.create_task(credential_sweep.sweep(app), name="credential_sweep")
+        app.state.credential_sweep_task = cred_sweeper
         try:
             yield
         finally:
-            for task in (sweeper, proposal_sweeper, post_sweeper):
+            for task in (sweeper, proposal_sweeper, post_sweeper, cred_sweeper):
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task

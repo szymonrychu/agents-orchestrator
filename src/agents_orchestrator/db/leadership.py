@@ -37,6 +37,7 @@ from psycopg.rows import dict_row
 
 from agents_orchestrator.db import handoffs
 from agents_orchestrator.db.eligibility import (
+    AUTH_FAILED,
     BACKGROUND_BUSY,
     DEAD,
     ELIGIBLE,
@@ -170,8 +171,8 @@ HIVE = "coalesce(c.spec->>'max_replicas', c.spec->>'replicas')::int > 1"
 SOLO = "coalesce(coalesce(c.spec->>'max_replicas', c.spec->>'replicas')::int, 1) <= 1"
 
 # Hive sessions whose leadership needs a pass: queued requests, no leader row while an agent
-# could lead, a leader that is gone, not ready, dead or stopping, an unready mark to clear,
-# or a leader whose ordinal a scale-down removes.
+# could lead, a leader that is gone, not ready, dead, auth-failed or stopping, an unready mark
+# to clear, or a leader whose ordinal a scale-down removes.
 _CANDIDATES = f"""
 SELECT c.id FROM sessions c
 LEFT JOIN session_leaders l ON l.session_id = c.id
@@ -181,7 +182,8 @@ WHERE c.desired = 'active' AND {HIVE} AND (
             WHERE r.session_id = c.id AND r.status = 'queued')
     OR (l.session_id IS NULL AND EXISTS (
         SELECT 1 FROM agents a WHERE a.session_id = c.id AND {ELIGIBLE}))
-    OR a.gone_at IS NOT NULL OR NOT a.ready OR {DEAD} OR l.unready_since IS NOT NULL
+    OR a.gone_at IS NOT NULL OR NOT a.ready OR {DEAD} OR {AUTH_FAILED}
+    OR l.unready_since IS NOT NULL
     OR NOT {NOT_STOPPING}
     OR {HANDOVER_TRIGGER}
 )
@@ -241,7 +243,7 @@ async def _leader(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> dict 
         " l.unready_since IS NOT NULL AND l.unready_since"
         "   < now() - make_interval(secs => %s) AS grace_over,"
         " a.ready, a.gone_at IS NOT NULL AS gone,"
-        f" {DEAD} AS dead,"
+        f" ({DEAD} OR {AUTH_FAILED}) AS dead,"
         f" NOT {NOT_STOPPING} AS stopping,"
         f" {LEAVING} AS leaving"
         " FROM session_leaders l JOIN agents a ON a.id = l.agent_id"
@@ -498,8 +500,8 @@ async def leadership_pass(
                 )
                 leader = await _leader(conn, session_id)
 
-        # 4. Lost leader: gone, or not ready or dead past the grace (unready_since set on first
-        # sight and cleared once live again, so separate short windows never add up).
+        # 4. Lost leader: gone, or not ready, dead or auth-failed past the grace (unready_since
+        # set on first sight and cleared once live again, so separate short windows never add up).
         if leader is not None:
             if leader["ready"] and not leader["gone"] and not leader["dead"]:
                 if leader["unready_since"] is not None:

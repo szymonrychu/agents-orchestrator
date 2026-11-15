@@ -138,6 +138,9 @@ class _AgentStream:
                 last_seq=self.last_seq,
                 waiting=(snap.waiting.reason, snap.waiting.since) if snap.waiting else None,
                 permission_mode=(snap.permission_mode_state, snap.permission_mode_reason),
+                auth=("failed", (snap.auth_reason or None) and snap.auth_reason[:64])
+                if snap.auth_state == "failed"
+                else (None, None),
                 outstanding_subagents=snap.outstanding_subagents,
                 bootstrap=status.bootstrap_from_steps(
                     [st.model_dump(mode="json") for st in snap.bootstrap.steps]
@@ -289,6 +292,13 @@ class _AgentStream:
                 conn, ref.agent_id, None if reason is None else str(reason)
             )
             await status.notify_status(conn, ref.session_id, ref.agent_id)
+        elif env.type == "auth_failed":
+            reason = data.get("reason")
+            await status.set_auth_failed(
+                conn, ref.agent_id, None if reason is None else str(reason)[:64]
+            )
+            await status.notify_status(conn, ref.session_id, ref.agent_id)
+            await notify(conn, leadership.CHANNEL, {"session_id": str(ref.session_id)})
         elif env.type == "bootstrap_step":
             await status.apply_bootstrap_step(conn, ref.agent_id, data)
             await status.notify_status(conn, ref.session_id, ref.agent_id)

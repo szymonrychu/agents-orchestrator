@@ -24,6 +24,10 @@ log = logging.getLogger(__name__)
 # the taskboard path prefix; `api/tasks.py` (the relay) builds its target from it too
 UPSTREAM_PREFIX = "/taskboard/api/v1"
 TIMEOUT_SECONDS = 3.0
+# credential notices: one fixed actor, because a client_key is unique per creator
+NOTICE_SESSION = "orchestrator-credential-watch"
+NOTICE_SLUG = "orchestrator"
+NOTICE_LABEL = "credential"
 
 
 @dataclass(frozen=True)
@@ -95,6 +99,45 @@ async def create_notice_task(
         return False
     if response.status_code not in (200, 201):
         log.warning("taskboard notice task: status %s", response.status_code)
+        return False
+    return True
+
+
+async def post_notice(
+    settings: Settings,
+    client_key: str,
+    title: str,
+    body: str,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> bool:
+    """Create one credential notice task in `credential_notice_project`; `client_key` makes a
+    retry a no-op on the taskboard. True on 200 or 201, never raises; logs carry the status or the
+    exception type only."""
+    project = settings.credential_notice_project
+    url = settings.taskboard_url.rstrip("/") + UPSTREAM_PREFIX + "/tasks"
+    headers = {
+        "Authorization": f"Bearer {settings.taskboard_token}",
+        "X-Orch-Session": NOTICE_SESSION,
+        "X-Orch-Slug": NOTICE_SLUG,
+        PROJECTS_HEADER: project,
+    }
+    payload = {
+        "title": title,
+        "body": body,
+        "kind": "task",
+        "project": project,
+        "labels": [NOTICE_LABEL],
+        "client_key": client_key,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS, transport=transport) as http:
+            response = await http.post(url, json=payload, headers=headers)
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning("taskboard credential notice unavailable: %s", type(exc).__name__)
+        return False
+    if response.status_code not in (200, 201):
+        log.warning("taskboard credential notice: status %s", response.status_code)
         return False
     return True
 

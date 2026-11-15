@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import uuid
 
 import httpx
 import pytest
 
 from agents_orchestrator.settings import Settings
-from agents_orchestrator.taskboard_client import OpenDecision, open_decisions
+from agents_orchestrator.taskboard_client import OpenDecision, open_decisions, post_notice
 
 SESSION = uuid.uuid4()
 TOKEN = "CANARY-taskboard-token"
@@ -101,3 +103,71 @@ async def test_none_on_any_failure(handler, caplog):
     result = await open_decisions(settings(), SESSION, "s", "p", transport=transport(handler))
     assert result is None
     assert TOKEN not in caplog.text
+
+
+def _notice_settings() -> Settings:
+    return settings(taskboard_token="CANARY-tb-0001", credential_notice_project="agents")
+
+
+async def test_post_notice_request_shape():
+    seen: list[httpx.Request] = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(201, json={})
+
+    ok = await post_notice(
+        _notice_settings(),
+        "credential-warn-2027-10-23",
+        "t",
+        "b",
+        transport=transport(handler),
+    )
+    assert ok is True
+    assert len(seen) == 1
+    req = seen[0]
+    assert req.method == "POST"
+    assert req.url.path == "/taskboard/api/v1/tasks"
+    assert req.headers["X-Orch-Session"] == "orchestrator-credential-watch"
+    assert req.headers["X-Orch-Slug"] == "orchestrator"
+    assert req.headers["X-Orch-Projects"] == "agents"
+    assert req.headers["Authorization"] == "Bearer CANARY-tb-0001"
+    assert json.loads(req.content) == {
+        "title": "t",
+        "body": "b",
+        "kind": "task",
+        "project": "agents",
+        "labels": ["credential"],
+        "client_key": "credential-warn-2027-10-23",
+    }
+
+
+@pytest.mark.parametrize("status,expected", [(201, True), (200, True), (500, False)])
+async def test_post_notice_status(status, expected, caplog):
+    caplog.set_level(logging.DEBUG)
+    ok = await post_notice(
+        _notice_settings(),
+        "k",
+        "t",
+        "BODY-TEXT-XYZ",
+        transport=transport(lambda r: httpx.Response(status, json={})),
+    )
+    assert ok is expected
+    if status == 500:
+        assert "status 500" in caplog.text
+    assert "CANARY-tb-0001" not in caplog.text
+    assert "BODY-TEXT-XYZ" not in caplog.text
+
+
+async def test_post_notice_connect_error_is_false(caplog):
+    caplog.set_level(logging.DEBUG)
+
+    def handler(request):
+        raise httpx.ConnectError("boom CANARY-tb-0001")
+
+    ok = await post_notice(
+        _notice_settings(), "k", "t", "BODY-TEXT-XYZ", transport=transport(handler)
+    )
+    assert ok is False
+    assert "ConnectError" in caplog.text
+    assert "CANARY-tb-0001" not in caplog.text

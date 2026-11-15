@@ -245,8 +245,9 @@ _SCALE_STATUS = {**sessions_api.SCALE_STATUS, "not_leader": 403}
 async def scale(
     agent: Caller, body: schemas.ScaleRequest, pool: Pool, settings: Cfg, usage: Usage
 ) -> schemas.ScaleResult:
-    """A scale-up over the usage quota is refused 409 `usage_quota`, but only for the leader:
-    a non-leader is always answered 403 `not_leader`."""
+    """A scale-up inside the credential refuse margin is refused 409 `credential_expiring`, over
+    the usage quota 409 `usage_quota`, but only for the leader: a non-leader is always answered
+    403 `not_leader`."""
     await gate_scale_up(
         pool, usage, settings, agent.session_id, body.replicas, caller_agent_id=agent.id
     )

@@ -180,6 +180,8 @@ def test_settings_configmap():
         "ORCH_AGENT_PORT": "8001",
         "ORCH_SELF_RESTART_COOLDOWN_SECONDS": "600",
         "ORCH_USAGE_QUOTA_DEFAULT": "100",
+        "ORCH_CREDENTIAL_WARN_DAYS": "10",
+        "ORCH_CREDENTIAL_REFUSE_HOURS": "24",
         "ORCH_SERVICE_PORT": "8002",
         "ORCH_AGENT_API_URL": f"http://{FULL}-agents.ns1.svc:8001",
         "ORCH_CLAUDE_SECRET_NAME": f"{FULL}-claude",
@@ -616,3 +618,26 @@ def test_mindmap_absent_by_default():
         for c in items:
             assert "ORCH_MINDMAP_URL" not in _env_names(c)
             assert "ORCH_MINDMAP_TOKEN" not in _env_names(c)
+
+
+def _settings_data(**extra: Any) -> dict[str, str]:
+    docs = render(values(postgres={"url": URL}, **extra))
+    return by_kind(docs, "ConfigMap")[f"{FULL}-settings"]["data"]
+
+
+def test_credential_settings_rendered():
+    data = _settings_data(
+        claude={"token": "tok", "credentialExpiresAt": "2027-10-23T00:00:00Z"},
+        credentialNoticeProject="agents",
+    )
+    assert data["ORCH_CLAUDE_CREDENTIAL_EXPIRES_AT"] == "2027-10-23T00:00:00Z"
+    assert data["ORCH_CREDENTIAL_WARN_DAYS"] == "10"
+    assert data["ORCH_CREDENTIAL_REFUSE_HOURS"] == "24"
+    assert data["ORCH_CREDENTIAL_NOTICE_PROJECT"] == "agents"
+
+
+def test_credential_expiry_absent_by_default():
+    data = _settings_data()
+    assert "ORCH_CLAUDE_CREDENTIAL_EXPIRES_AT" not in data
+    assert "ORCH_CREDENTIAL_NOTICE_PROJECT" not in data
+    assert data["ORCH_CREDENTIAL_WARN_DAYS"] == "10"

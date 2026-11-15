@@ -11,11 +11,13 @@ import contextlib
 import dataclasses
 import logging
 import time
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 from psycopg_pool import AsyncConnectionPool
 
+from agents_orchestrator import credential
 from agents_orchestrator.api.session_limits import may_message
 from agents_orchestrator.db import leadership, project_posts, queue, session_messaging
 from agents_orchestrator.db import sessions as sessions_repo
@@ -49,6 +51,7 @@ class Dispatcher:
     def __init__(self, pool: AsyncConnectionPool, settings: Settings) -> None:
         self.pool = pool
         self.settings = settings
+        self._credential_held = False
         self._http: httpx.AsyncClient | None = None
         self.verifier = Verifier(pool, settings, self._wrapper)
         self.hive = hive.HiveState()
@@ -215,7 +218,31 @@ class Dispatcher:
         """Check verifying messages against their wrappers, once per wake and poll (D24)."""
         return await self.verifier.verify_once()
 
+    def _credential_expired(self) -> bool:
+        """True from the credential end on: claims are held, messages stay queued. One log
+        line per transition; only the ISO end date is logged."""
+        s = self.settings
+        ph = credential.phase(
+            datetime.now(UTC),
+            s.claude_credential_expires_at,
+            s.credential_warn_days,
+            s.credential_refuse_hours,
+        )
+        expired = ph == "expired"
+        if expired != self._credential_held:
+            self._credential_held = expired
+            if expired:
+                log.warning(
+                    "claude credential expired at %s: claims held",
+                    s.claude_credential_expires_at.isoformat(),
+                )
+            else:
+                log.info("claude credential no longer expired: claims resume")
+        return expired
+
     async def _drain_messages(self) -> None:
+        if self._credential_expired():
+            return
         slots = asyncio.Semaphore(MAX_IN_FLIGHT)
         tasks: set[asyncio.Task[None]] = set()
         try:

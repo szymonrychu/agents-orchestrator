@@ -210,6 +210,8 @@ class _Session:
     error: dict[str, Any] | None = None
     permission_mode_state: str | None = None
     permission_mode_reason: str | None = None
+    auth_state: str | None = None
+    auth_reason: str | None = None
     turns: dict[str, _Turn] = field(default_factory=dict)
     events: list[dict[str, Any]] = field(default_factory=list)
     next_seq: int = 1
@@ -240,6 +242,8 @@ class _Session:
             "waiting": self.waiting,
             "permission_mode_state": self.permission_mode_state,
             "permission_mode_reason": self.permission_mode_reason,
+            "auth_state": self.auth_state,
+            "auth_reason": self.auth_reason,
             "bootstrap": {"steps": self.bootstrap_steps},
         }
 
@@ -505,6 +509,13 @@ class FakeWrapper:
         """Set the snapshot `permission_mode_state` and `_reason` (wrapper 0.7.1); None clears."""
         sess = self._session(session_id)
         sess.permission_mode_state, sess.permission_mode_reason = state, reason
+
+    def set_snapshot_auth(
+        self, state: str | None, reason: str | None = None, session_id: str | None = None
+    ) -> None:
+        """Set the snapshot `auth_state` and `auth_reason` (wrapper T-225 release); None clears."""
+        sess = self._session(session_id)
+        sess.auth_state, sess.auth_reason = state, reason
 
     def set_bootstrap_steps(
         self, steps: list[dict[str, Any]], session_id: str | None = None
