@@ -122,15 +122,14 @@ async def test_notify_parked_marks_once_and_retries(pool, monkeypatch):
             super().__init__(**{**kw, "transport": httpx.MockTransport(handler)})
 
     monkeypatch.setattr(taskboard_client.httpx, "AsyncClient", Client)
-    if True:
-        await _notify(pool, cfg)
-        assert (await session_row(pool, s["id"]))["park_notified_at"] is None
-        await _notify(pool, cfg)
-        row = await session_row(pool, s["id"])
-        assert row["park_notified_at"] is not None
-        n = len(requests)
-        await _notify(pool, cfg)
-        assert len(requests) == n == 2
+    await _notify(pool, cfg)
+    assert (await session_row(pool, s["id"]))["park_notified_at"] is None
+    await _notify(pool, cfg)
+    row = await session_row(pool, s["id"])
+    assert row["park_notified_at"] is not None
+    n = len(requests)
+    await _notify(pool, cfg)
+    assert len(requests) == n == 2
     body = requests[1].content.decode()
     assert "runaway-guard" in body and str(s["id"]) in body
     assert requests[1].headers[PROJECTS_HEADER] == "default"
@@ -142,3 +141,31 @@ async def test_no_taskboard_no_call(pool):
     await _notify(pool, settings(taskboard_url="", taskboard_token=""))
     assert (await session_row(pool, s["id"]))["park_notified_at"] is None
     assert await rows(pool, "SELECT 1 FROM sessions WHERE id = %s", (s["id"],))
+
+
+async def test_unreadable_detail_gets_generic_notice_once(pool, monkeypatch):
+    s = await _parked(pool)
+    async with pool.connection() as conn:
+        await conn.execute(
+            'UPDATE sessions SET parked_detail = \'{"junk": "RAW-INPUT"}\'::jsonb WHERE id = %s',
+            (s["id"],),
+        )
+    requests: list[httpx.Request] = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(201, json={})
+
+    real = httpx.AsyncClient
+
+    class Client(real):
+        def __init__(self, **kw):
+            super().__init__(**{**kw, "transport": httpx.MockTransport(handler)})
+
+    monkeypatch.setattr(taskboard_client.httpx, "AsyncClient", Client)
+    cfg = settings()
+    await _notify(pool, cfg)
+    await _notify(pool, cfg)
+    assert len(requests) == 1
+    assert "RAW-INPUT" not in requests[0].content.decode()
+    assert (await session_row(pool, s["id"]))["park_notified_at"] is not None

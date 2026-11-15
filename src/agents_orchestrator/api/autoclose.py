@@ -172,23 +172,32 @@ async def _notify_parked(conn: AsyncConnection, settings: Settings) -> None:
     async with conn.transaction():
         pending = await sessions.unnotified_parks(conn)
     for session in pending:
-        b = _stored_breach(session)
-        if b is None or session.parked_at is None:
-            log.warning("parked session %s has no readable park detail", session.id)
+        if session.parked_at is None:
             continue
-        ok = await taskboard_client.create_notice_task(
-            settings,
-            session.id,
-            session.slug,
-            scope_of(session),
-            title=runaway.task_title(session.slug, b),
-            body=runaway.task_body(
+        b = _stored_breach(session)
+        if b is None:
+            log.warning("parked session %s has no readable park detail; generic notice", session.id)
+            title = f"Session {session.slug} parked by the runaway guard"
+            body = (
+                f"- Session: {session.id} ({session.slug})\n"
+                "- Park detail unreadable; see the session."
+            )
+        else:
+            title = runaway.task_title(session.slug, b)
+            body = runaway.task_body(
                 session_id=session.id,
                 slug=session.slug,
                 preset_name=session.preset_name,
                 b=b,
                 limits=runaway.effective(session.spec, settings),
-            ),
+            )
+        ok = await taskboard_client.create_notice_task(
+            settings,
+            session.id,
+            session.slug,
+            scope_of(session),
+            title=title,
+            body=body,
             client_key=runaway.client_key(session.id, session.parked_at),
         )
         if not ok:
@@ -196,4 +205,4 @@ async def _notify_parked(conn: AsyncConnection, settings: Settings) -> None:
             continue
         async with conn.transaction():
             await sessions.mark_park_notified(conn, session.id, session.parked_at)
-        log.info("owner notice posted for parked session %s (%s)", session.id, b.reason)
+        log.info("owner notice posted for parked session %s", session.id)

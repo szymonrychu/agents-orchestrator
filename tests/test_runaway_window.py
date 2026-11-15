@@ -203,3 +203,16 @@ def test_runaway_parked_notice_kind_allowed(empty_dsn) -> None:
         c.execute(insert, (session, "runaway_parked"))
         with pytest.raises(psycopg.errors.CheckViolation):
             c.execute(insert, (session, "bogus"))
+
+
+async def test_pre_reset_event_after_resume_counts_in_new_window(pool, harness) -> None:  # noqa: F811
+    """Accepted trade-off: a late-ingested pre-resume event cannot be told from clock skew, so it
+    counts in the fresh window at the reset time (the guard errs toward parking)."""
+    h = await harness()
+    await h.start()
+    await set_reset(pool, h, ts(5))
+    await turn(h, 1, "client")
+    await turn(h, 2, "agent")
+    got_turns, _, window, _ = await guard(pool, h)
+    assert got_turns == 2
+    assert window == datetime.fromisoformat(ts(5))
