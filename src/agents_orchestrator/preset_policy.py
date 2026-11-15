@@ -74,6 +74,7 @@ NON_SECURITY: frozenset[str] = frozenset(
         "reuse_running_agent",
         "usage_quota",
         "inactivity",
+        "runaway",
         *DOCKER_SIZES,
         "wrapper.turn_stall_seconds",
         "wrapper.max_restarts",

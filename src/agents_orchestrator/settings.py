@@ -19,7 +19,9 @@ from agents_orchestrator.spec import (
     INACTIVITY_MIN_SECONDS,
     KUBE_CUSTOM_ROLE_TIERS,
     KUBE_TIERS,
+    RUNAWAY_BOUNDS,
     parse_quantity,
+    runaway_bound_error,
 )
 
 PREFIX = "ORCH_"
@@ -71,6 +73,17 @@ def _csv(value: object) -> object:
 
 
 _SUBDOMAIN = re.compile(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*")
+
+
+_RUNAWAY_SETTINGS = frozenset(
+    {
+        "max_turns_per_task",
+        "max_tokens_per_task",
+        "max_stop_continuations",
+        "max_agent_spawns",
+        "tool_failure_repeats",
+    }
+)
 
 
 class _Bad(ValueError):
@@ -199,6 +212,13 @@ class Settings(BaseSettings):
     inactivity_close_seconds: int = 0
     #: Seconds the leader has to hand off after the strong-limit notice; 0 means no window.
     inactivity_handoff_seconds: int = Field(default=300, ge=0, le=3600)
+    #: Runaway guard: limits per task (since the last delivered message); 0 turns one off. A
+    #: session's `spec.runaway` overrides each.
+    runaway_max_turns_per_task: int = 300
+    runaway_max_tokens_per_task: int = 60000000
+    runaway_max_stop_continuations: int = 25
+    runaway_max_agent_spawns: int = 300
+    runaway_tool_failure_repeats: int = 3
     #: Size budget of the predecessor's rendered transcript attached to a handover notice (the
     #: oldest lines are dropped first), and the cap on each tool output in it.
     handover_transcript_bytes: int = Field(default=16384, ge=8192, le=1048576)
@@ -656,6 +676,14 @@ class Settings(BaseSettings):
             raise _Bad(
                 "ORCH_INACTIVITY_REMINDER_SECONDS::must be below ORCH_INACTIVITY_CLOSE_SECONDS"
             )
+        return v
+
+    @field_validator(*(f"runaway_{k}" for k in RUNAWAY_BOUNDS if k in _RUNAWAY_SETTINGS))
+    @classmethod
+    def _check_runaway(cls, v: int, info: ValidationInfo) -> int:
+        msg = runaway_bound_error((info.field_name or "").removeprefix("runaway_"), v)
+        if msg:
+            raise _Bad(msg)
         return v
 
     @field_validator("dispatching_stale_seconds")

@@ -675,6 +675,48 @@ class InactivityLimits(_Strict):
         return v
 
 
+# Bounds of the runaway-guard limits (0 = off, or the Claude default for the two subagent caps);
+# shared by the ORCH_RUNAWAY_* settings and `spec.runaway`.
+RUNAWAY_BOUNDS: dict[str, tuple[int, int]] = {
+    "max_turns_per_task": (10, 100000),
+    "max_tokens_per_task": (1000000, 100000000000),
+    "max_stop_continuations": (1, 1000),
+    "max_agent_spawns": (1, 100000),
+    "tool_failure_repeats": (2, 100),
+    "max_concurrent_subagents": (1, 100),
+    "max_subagent_spawn_depth": (1, 10),
+}
+
+
+def runaway_bound_error(name: str, v: int | None) -> str | None:
+    """The error text when `v` is outside the bounds of runaway limit `name`, else None."""
+    lo, hi = RUNAWAY_BOUNDS[name]
+    if v is not None and v != 0 and not lo <= v <= hi:
+        return f"must be 0 (off) or {lo} to {hi}"
+    return None
+
+
+class RunawayLimits(_Strict):
+    """Per-preset runaway-guard limits overriding the `ORCH_RUNAWAY_*` settings: unset uses the
+    setting, 0 turns the limit off (for the two subagent caps, 0 means the Claude default)."""
+
+    max_turns_per_task: int | None = None
+    max_tokens_per_task: int | None = None
+    max_stop_continuations: int | None = None
+    max_agent_spawns: int | None = None
+    tool_failure_repeats: int | None = None
+    max_concurrent_subagents: int | None = None
+    max_subagent_spawn_depth: int | None = None
+
+    @field_validator(*RUNAWAY_BOUNDS)
+    @classmethod
+    def _check_limit(cls, v: int | None, info: ValidationInfo) -> int | None:
+        msg = runaway_bound_error(info.field_name or "", v)
+        if msg:
+            raise ValueError(msg)
+        return v
+
+
 class SessionSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -720,6 +762,8 @@ class SessionSpec(BaseModel):
     # Inactivity reminder and close limits overriding the ORCH_INACTIVITY_* settings. Sparse:
     # unset is not stored or dumped in a preset.
     inactivity: InactivityLimits | None = None
+    #: Runaway-guard limits overriding the ORCH_RUNAWAY_* settings. Sparse like `inactivity`.
+    runaway: RunawayLimits | None = None
     # Privileged Docker-in-Docker sidecar (docker build/run, kind); refused until ORCH_DOCKER_IMAGE
     # is set. The three sizes tune the sidecar and need docker: true. Sparse like
     # kube_cluster_access.
