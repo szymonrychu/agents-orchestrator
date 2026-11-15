@@ -281,6 +281,9 @@ claude:
   existingSecret: ""
   existingSecretKey: CLAUDE_CODE_OAUTH_TOKEN
   token: ""
+  # Readable end instant of the token, ISO 8601 UTC (for example 2027-10-23T00:00:00Z), written by
+  # agents-helmfile bootstrap-secrets.sh. Becomes ORCH_CLAUDE_CREDENTIAL_EXPIRES_AT when set.
+  credentialExpiresAt: ""
 
 # Chat upstream of the agent chat relay (/agent/v1/chat on the agent port). url becomes
 # ORCH_CHAT_URL; ORCH_CHAT_TOKEN, the bearer the orchestrator sends upstream, comes from
@@ -346,6 +349,14 @@ vault:
 # Default usage quota percent (1..100) of a session without its own usage_quota
 # (ORCH_USAGE_QUOTA_DEFAULT). A metric gates when its percent reaches the limit.
 usageQuotaDefault: 100
+
+# Credential expiry watch: warn this many days (ORCH_CREDENTIAL_WARN_DAYS) and refuse new sessions
+# this many hours (ORCH_CREDENTIAL_REFUSE_HOURS) before claude.credentialExpiresAt; the notice
+# project is the taskboard project slug that receives one task per threshold
+# (ORCH_CREDENTIAL_NOTICE_PROJECT, empty is off).
+credentialWarnDays: 10
+credentialRefuseHours: 24
+credentialNoticeProject: ""
 
 # Seconds between two restarts an agent asks for on its own session (ORCH_SELF_RESTART_COOLDOWN_SECONDS).
 selfRestartCooldownSeconds: 600

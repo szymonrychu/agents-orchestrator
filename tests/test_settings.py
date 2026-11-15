@@ -885,3 +885,47 @@ def test_shutdown_budget_must_fit_grace(monkeypatch):
         assert name in str(e.value)
     monkeypatch.setenv("ORCH_AGENT_TERMINATION_GRACE_SECONDS", "420")
     assert Settings().agent_termination_grace_seconds == 420
+
+
+def test_credential_settings_defaults():
+    s = Settings()
+    assert s.claude_credential_expires_at is None
+    assert s.credential_warn_days == 10
+    assert s.credential_refuse_hours == 24
+    assert s.credential_notice_project == ""
+    assert s.credential_sweep_seconds == 300
+
+
+def test_credential_expires_at_parses_utc(monkeypatch):
+    from datetime import UTC, datetime
+
+    monkeypatch.setenv("ORCH_CLAUDE_CREDENTIAL_EXPIRES_AT", "2027-10-23T00:00:00Z")
+    assert Settings().claude_credential_expires_at == datetime(2027, 10, 23, tzinfo=UTC)
+
+
+def test_credential_expires_at_empty_is_none(monkeypatch):
+    monkeypatch.setenv("ORCH_CLAUDE_CREDENTIAL_EXPIRES_AT", "")
+    assert Settings().claude_credential_expires_at is None
+
+
+def test_credential_expires_at_naive_refused(monkeypatch):
+    monkeypatch.setenv("ORCH_CLAUDE_CREDENTIAL_EXPIRES_AT", "2027-10-23T00:00:00")
+    with pytest.raises(SettingsError, match="time zone"):
+        Settings()
+
+
+def test_credential_refuse_must_be_below_warn(monkeypatch):
+    monkeypatch.setenv("ORCH_CREDENTIAL_WARN_DAYS", "1")
+    monkeypatch.setenv("ORCH_CREDENTIAL_REFUSE_HOURS", "24")
+    with pytest.raises(SettingsError) as exc:
+        Settings()
+    assert "ORCH_CREDENTIAL_REFUSE_HOURS" in str(exc.value)
+    assert "ORCH_CREDENTIAL_WARN_DAYS" in str(exc.value)
+
+
+def test_credential_notice_project_slug(monkeypatch):
+    monkeypatch.setenv("ORCH_CREDENTIAL_NOTICE_PROJECT", "Bad_Slug")
+    with pytest.raises(SettingsError):
+        Settings()
+    monkeypatch.setenv("ORCH_CREDENTIAL_NOTICE_PROJECT", "agents")
+    assert Settings().credential_notice_project == "agents"
