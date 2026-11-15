@@ -236,6 +236,10 @@ class Settings(BaseSettings):
     #: compact minus this many tokens of headroom (floored at 0).
     handover_strong_margin_pct: int = Field(default=10, ge=1, le=50)
     handover_strong_headroom_tokens: int = Field(default=60000, ge=0, le=500000)
+    # L3 (critical): compact point minus this many points, or minus this many tokens, whichever
+    # is earlier; never below the strong point.
+    handover_critical_margin_pct: int = Field(default=5, ge=1, le=50)
+    handover_critical_headroom_tokens: int = Field(default=25000, ge=0, le=500000)
     #: Strong-limit handoff (dispatcher/handoff.py): the notice countdown, the one extension,
     #: the idle time that ends the countdown early, and the quiet window (capped) a hive gets
     #: to discuss before the ex-leader is cleared.

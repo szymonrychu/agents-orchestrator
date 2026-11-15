@@ -5249,6 +5249,21 @@
             "title": "Env",
             "type": "object"
           },
+          "handoff_profile": {
+            "anyOf": [
+              {
+                "enum": [
+                  "work",
+                  "chat"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Handoff Profile"
+          },
           "image": {
             "anyOf": [
               {
@@ -5597,6 +5612,21 @@
             "default": {},
             "title": "Env",
             "type": "object"
+          },
+          "handoff_profile": {
+            "anyOf": [
+              {
+                "enum": [
+                  "work",
+                  "chat"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Handoff Profile"
           },
           "image": {
             "anyOf": [

@@ -746,6 +746,9 @@ class SessionSpec(BaseModel):
     # the session still running for it. The orchestrator never acts on it, so a session a
     # user creates ignores it. Sparse: unset is not stored or dumped in a preset.
     reuse_running_agent: bool | None = Field(default=None, strict=True)
+    # Overrides the handoff profile auto-detected from chat traffic (handoff_profile.detect).
+    # Sparse: unset is not stored or dumped in a preset.
+    handoff_profile: Literal["work", "chat"] | None = None
     # Superleader: the leader may message the leaders of all sessions, and every other
     # session's leader may message it. Sparse: unset is not stored or dumped in a preset.
     session_messaging: bool | None = Field(default=None, strict=True)

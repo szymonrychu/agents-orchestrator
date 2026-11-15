@@ -312,8 +312,8 @@ def forwards_usage(spec: SessionSpec, settings: Settings) -> bool:
 
 def runs_default_image(spec: SessionSpec, settings: Settings) -> bool:
     """Whether the pods run the default agent image: only it is known to accept the newest
-    wrapper config sections (`usage`, `shutdown`, `guard`); the config is strict, so an older
-    image would refuse them."""
+    wrapper config sections (`usage`, `shutdown`, `guard`, `pressure`); the config is strict, so
+    an older image would refuse them."""
     return not spec.image or spec.image == settings.agent_image
 
 
@@ -572,12 +572,11 @@ def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
                 "notice_seconds": settings.agent_shutdown_notice_seconds,
                 "handoff_seconds": settings.agent_shutdown_handoff_seconds,
                 "idle_proceed_seconds": settings.handover_idle_proceed_seconds,
-                "notice_prompt": handoff_texts.shutdown_notice(
-                    max(1, math.ceil(settings.agent_shutdown_notice_seconds / 60))
-                ),
-                "handoff_prompt": handoff_texts.STRONG_REQUEST,
+                "notice_prompt": handoff_texts.SHUTDOWN_NOTICE,
+                "handoff_prompt": handoff_texts.SHUTDOWN_REQUEST,
             }
         }
+        cfg["pressure"] = {"enabled": True}
     if forwards_usage(spec, settings):
         cfg["usage"] = {
             "url": settings.agent_usage_url,

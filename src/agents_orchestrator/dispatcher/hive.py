@@ -72,7 +72,7 @@ from agents_orchestrator.db.eligibility import (
 )
 from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE
 from agents_orchestrator.dispatcher import feed
-from agents_orchestrator.handoff_texts import (
+from agents_orchestrator.dispatcher.legacy_texts import (
     WEAK_LEADER_CANDIDATES,
     WEAK_LEADER_NONE,
     WEAK_SOLO,
@@ -155,6 +155,8 @@ class Levels:
     fallback_pct: int  # weak, for an unknown token gauge: max(compact - HANDOVER_MARGIN_PCT, 1)
     start_tokens: int | None
     budget_tokens: int
+    critical_margin_pct: float = 5  # L3: compact - critical_margin_pct (the percent fallback)
+    critical_headroom_tokens: int = 25000
 
 
 def levels(spec: dict[str, Any], start_tokens: int | None, settings: Settings) -> Levels:
@@ -167,6 +169,8 @@ def levels(spec: dict[str, Any], start_tokens: int | None, settings: Settings) -
         fallback_pct=max(compact - HANDOVER_MARGIN_PCT, 1),
         start_tokens=start_tokens,
         budget_tokens=settings.handover_budget_tokens,
+        critical_margin_pct=settings.handover_critical_margin_pct,
+        critical_headroom_tokens=settings.handover_critical_headroom_tokens,
     )
 
 
@@ -184,6 +188,20 @@ def strong_tokens(lv: Levels, window_tokens: int) -> int:
     )
 
 
+def critical_tokens(lv: Levels, window_tokens: int) -> int:
+    """The context size from which level 3 (critical) applies: the smaller of the percent margin
+    and the token headroom below compaction, never below the level 2 point."""
+    return max(
+        strong_tokens(lv, window_tokens),
+        int(
+            min(
+                (lv.compact_pct - lv.critical_margin_pct) / 100 * window_tokens,
+                lv.compact_pct / 100 * window_tokens - lv.critical_headroom_tokens,
+            )
+        ),
+    )
+
+
 def due_level(
     lv: Levels,
     used_tokens: int | None,
@@ -192,24 +210,35 @@ def due_level(
     tenure_seconds: float,
     min_tenure_seconds: int,
     rollout_pending: bool,
-) -> Literal["none", "weak", "strong"]:
-    """The limit an agent is at: `strong` at the strong limit whatever else holds, `weak` past
-    its token budget (or the percent fallback) once the minimum tenure is over and its pod does
-    not await a rollout, else `none`."""
+) -> Literal["none", "l1", "l2", "l3"]:
+    """The pressure level of an agent. `l3` at the critical point and `l2` at the strong point,
+    whatever else holds; `l1` past its token budget (or the percent fallback) once the minimum
+    tenure is over and its pod does not await a rollout; else `none`. Tokens decide when the
+    window is known; the percentages only when it is not."""
     window = window_tokens if window_tokens is not None and window_tokens > 0 else None
     tokens = used_tokens is not None and window is not None
     cap = strong_tokens(lv, window) if window is not None else None
+    crit = critical_tokens(lv, window) if window is not None else None
+    if pct is not None and pct >= lv.compact_pct - lv.critical_margin_pct:
+        return "l3"
+    if tokens and used_tokens is not None and crit is not None and used_tokens >= crit:
+        return "l3"
     if pct is not None and pct >= lv.strong_pct:
-        return "strong"
+        return "l2"
     if tokens and used_tokens is not None and cap is not None and used_tokens >= cap:
-        return "strong"
+        return "l2"
     if tokens and lv.start_tokens is not None and used_tokens is not None and cap is not None:
         hit = used_tokens >= min(lv.start_tokens + lv.budget_tokens, cap)
     else:
         hit = pct is not None and pct >= lv.fallback_pct
     if hit and tenure_seconds >= min_tenure_seconds and not rollout_pending:
-        return "weak"
+        return "l1"
     return "none"
+
+
+def legacy_level(level: str) -> Literal["none", "weak", "strong"]:
+    """The pre-pressure two-level name (the hive push and handoff pass until step 11)."""
+    return {"none": "none", "l1": "weak", "l2": "strong", "l3": "strong"}[level]  # type: ignore[return-value]
 
 
 def hive_state_payload(
@@ -406,14 +435,16 @@ async def _read(
         rollout = (session.get("status") or {}).get("rollout") or {}
         level = "none"
         if lead is not None:
-            level = due_level(
-                lv,
-                used,
-                lead["context_window_tokens"],
-                lead["context_pct"],
-                float(leader["tenure"]),
-                settings.handover_min_tenure_seconds,
-                leader["ordinal"] in (rollout.get("pending") or []),
+            level = legacy_level(
+                due_level(
+                    lv,
+                    used,
+                    lead["context_window_tokens"],
+                    lead["context_pct"],
+                    float(leader["tenure"]),
+                    settings.handover_min_tenure_seconds,
+                    leader["ordinal"] in (rollout.get("pending") or []),
+                )
             )
         candidates = None
         if level != "none":
@@ -773,14 +804,16 @@ def _row_level(
     fill = row["context_used_tokens"] if row["start_tokens"] is None else None
     lv = levels(row["spec"], row["start_tokens"] if fill is None else fill, settings)
     rollout = (row["status"] or {}).get("rollout") or {}
-    level = due_level(
-        lv,
-        row["context_used_tokens"],
-        row["context_window_tokens"],
-        row["context_pct"],
-        float(row["tenure"]),
-        settings.handover_min_tenure_seconds,
-        row["ordinal"] in (rollout.get("pending") or []),
+    level = legacy_level(
+        due_level(
+            lv,
+            row["context_used_tokens"],
+            row["context_window_tokens"],
+            row["context_pct"],
+            float(row["tenure"]),
+            settings.handover_min_tenure_seconds,
+            row["ordinal"] in (rollout.get("pending") or []),
+        )
     )
     return lv, level, fill
 

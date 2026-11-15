@@ -70,12 +70,12 @@ from agents_orchestrator.db.eligibility import BACKGROUND_BUSY, HOLDS_SESSION, b
 from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE
 from agents_orchestrator.db.sessions import quiet_clock_sql
 from agents_orchestrator.dispatcher import hive
-from agents_orchestrator.handoff_texts import (
+from agents_orchestrator.dispatcher.legacy_texts import (
     STRONG_REQUEST,
-    shutdown_successor,
     strong_notice,
     strong_return,
 )
+from agents_orchestrator.handoff_texts import shutdown_successor
 from agents_orchestrator.settings import Settings
 
 log = logging.getLogger(__name__)

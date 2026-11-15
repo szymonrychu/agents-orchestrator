@@ -563,3 +563,45 @@ async def test_pending_priority_answer_is_ambiguous():
     c = client(lambda r: httpx.Response(202, json={"turn_id": "t", "state": "pending"}))
     out = await c.submit_turn("s", "x", {}, "priority", "orch-1")
     assert isinstance(out, Ambiguous) and "pending" in out.reason
+
+
+async def test_pressure_and_inflight_against_the_fake():
+    from fakes.fake_wrapper import FakeWrapper
+
+    async with FakeWrapper() as fake:
+        client = WrapperClient(fake.base_url, "test-token")
+        snap = await client.create_session("p", "p")
+        sid = snap.wrapper_session_id
+        body = {"version": 2, "profile": "work", "handoff_state": "none"}
+        assert (await client.put_pressure(sid, body))["result"] == "set"
+        assert (await client.put_pressure(sid, body))["result"] == "unchanged"
+        view = await client.get_pressure(sid)
+        assert (view.version, view.handoff_state) == (2, "none")
+        with pytest.raises(WrapperError) as exc:
+            await client.put_pressure(sid, {**body, "version": 1})
+        assert (exc.value.status, exc.value.code) == (409, "stale_version")
+        fake.disable_pressure()
+        with pytest.raises(WrapperError) as exc:
+            await client.put_pressure(sid, body)
+        assert exc.value.code == "pressure_disabled"
+        fake.disable_pressure(False)
+        with pytest.raises(WrapperError) as exc:
+            await client.put_pressure("ses_missing", body)
+        assert exc.value.status == 404
+        assert (await client.get_inflight(sid)).blocking_items() == []
+        fake.set_inflight(
+            sid,
+            subagents=1,
+            background_tasks=[{"id": "bf3a", "description": "CI watch"}],
+            worktrees=[{"path": "code/web", "dirty": True}, {"path": "code/ok"}],
+            scratch=[{"path": "/tmp/claude-1/x"}],
+            crons=[{"schedule": "*/5 * * * *"}],
+        )
+        inflight = await client.get_inflight(sid, timeout=5)
+        assert inflight.blocking_items() == [
+            "1 subagent(s)",
+            "background task bf3a CI watch",
+            "worktree code/web dirty",
+            "scratch /tmp/claude-1/x",
+        ]
+        await client.aclose()
