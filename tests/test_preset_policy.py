@@ -384,6 +384,7 @@ SECURITY = frozenset(
         "wrapper.system_append",
         "wrapper.restart_continue_prompt",
         "wrapper.auto_compact",
+        "wrapper.managed_settings",
     }
 )
 
