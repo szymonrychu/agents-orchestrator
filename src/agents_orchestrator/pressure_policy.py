@@ -15,7 +15,7 @@ from typing import Any, Literal
 
 from agents_orchestrator import handoff_texts
 from agents_orchestrator.db.handoffs import Handoff
-from agents_orchestrator.dispatcher.hive import Levels, critical_tokens, strong_tokens
+from agents_orchestrator.dispatcher.hive import Levels, critical_tokens, l1_tokens, strong_tokens
 from agents_orchestrator.wrapper.models import blocking_items
 
 # The window the token thresholds are computed for when the gauge has none yet: the percent
@@ -53,12 +53,6 @@ def handoff_state(row: Handoff | None) -> HandoffState:
     return "accepted"
 
 
-def _l1_tokens(lv: Levels, window: int, l2: int) -> int:
-    if lv.start_tokens is not None:
-        return min(lv.start_tokens + lv.budget_tokens, l2)
-    return min(int(lv.fallback_pct / 100 * window), l2)
-
-
 def build(
     lv: Levels,
     window_tokens: int | None,
@@ -74,7 +68,7 @@ def build(
     l2 = strong_tokens(lv, window)
     l3 = critical_tokens(lv, window)
     thresholds: dict[str, Any] = {
-        "l1_tokens": _l1_tokens(lv, window, l2) if l1_on else None,
+        "l1_tokens": l1_tokens(lv, window, l2) if l1_on else None,
         "l2_tokens": l2,
         "l3_tokens": l3,
         "compact_tokens": int(lv.compact_pct / 100 * window),

@@ -202,6 +202,14 @@ def critical_tokens(lv: Levels, window_tokens: int) -> int:
     )
 
 
+def l1_tokens(lv: Levels, window_tokens: int, l2_tokens: int) -> int:
+    """The context size from which L1 applies: the start-plus-budget point, or the percent
+    fallback of the window when the tenure start is unknown, never above the L2 point."""
+    if lv.start_tokens is not None:
+        return min(lv.start_tokens + lv.budget_tokens, l2_tokens)
+    return min(int(lv.fallback_pct / 100 * window_tokens), l2_tokens)
+
+
 def due_level(
     lv: Levels,
     used_tokens: int | None,
@@ -228,8 +236,8 @@ def due_level(
         return "l2"
     if tokens and used_tokens is not None and cap is not None and used_tokens >= cap:
         return "l2"
-    if tokens and lv.start_tokens is not None and used_tokens is not None and cap is not None:
-        hit = used_tokens >= min(lv.start_tokens + lv.budget_tokens, cap)
+    if tokens and used_tokens is not None and window is not None and cap is not None:
+        hit = used_tokens >= l1_tokens(lv, window, cap)
     else:
         hit = by_pct and pct >= lv.fallback_pct
     if hit and tenure_seconds >= min_tenure_seconds and not rollout_pending:

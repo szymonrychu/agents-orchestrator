@@ -103,3 +103,14 @@ def test_policy_body_validates_against_the_wrapper_schema(profile, state):
     assert model.handoff_state == body["handoff_state"]
     unknown = _build(window=None)
     PressurePolicy.model_validate(unknown)
+
+
+def test_l1_threshold_shared_with_due_level():
+    lv = hive.levels({}, None, Settings(database_url="postgresql://u:p@db/o"))
+    body = pp.build(
+        lv, 1_000_000, True, "work", None, hive=False, version=1, extras=pp.PolicyExtras()
+    )
+    l1 = body["thresholds"]["l1_tokens"]
+    assert l1 == 800_000
+    assert hive.due_level(lv, l1, 1_000_000, None, 9e9, 0, False) == "l1"
+    assert hive.due_level(lv, l1 - 1, 1_000_000, None, 9e9, 0, False) == "none"

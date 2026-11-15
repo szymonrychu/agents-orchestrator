@@ -66,3 +66,10 @@ def test_due_level_pct_ignored_when_tokens_and_window_known():
     lv = _lv()
     assert _due(lv, 10_000, window=200_000, pct=95.0) == "none"
     assert _due(lv, 10_000, window=200_000, pct=87.0) == "none"
+
+
+def test_due_level_l1_pct_threshold_when_start_unknown():
+    lv = _lv()  # fallback 80% of 1M = 800k, below L2 at 850k
+    assert hive.l1_tokens(lv, 1_000_000, hive.strong_tokens(lv, 1_000_000)) == 800_000
+    assert _due(lv, 800_000, window=1_000_000, pct=10.0) == "l1"
+    assert _due(lv, 799_999, window=1_000_000, pct=99.0) == "none"
