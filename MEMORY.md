@@ -492,3 +492,8 @@ in the namespace, so an attached vault value is exposed to it. Decision: attach 
 
 ## 2026-11-15 background subagent staleness guard raised to 24 h (T-371)
 - `BACKGROUND_STALE_SECONDS` (db/eligibility.py) 7200 -> 86400. User decision: "Raise to 24h (86400s) as a lost-event guard only". Why: a background subagent can legitimately run longer than 2 h, and a 2 h cut-off let a leader be moved or a pod discarded while it still worked; the bound now only protects against a lost `subagent_stopped` event. This supersedes the 7200 s figure in the 2026-11-07 and 2026-11-08 entries above. Tests: `test_background_entry_stale_after_24_hours` and `test_stale_entry_counts_while_activity_is_recent` (3 h old counts, over 24 h does not). README updated. No migration.
+
+## 2026-11-15 runaway guard park sweep (T-224, step 9)
+- A parked session is still subject to the inactivity discard as the backstop (spec plan.md 4.3), and close-ask/autoclose notices are held with the queue while parked (db/queue.py claim hold), so a parked session can reach its discard deadline without having received the ask; the owner taskboard notice task (`notify_parked`, label runaway-guard) is the human signal.
+- Sweep order in `api/autoclose.py`: `park_runaway`, `interrupt_parked` (catches a message claimed but not yet running when `park` ran), `notify_parked` (HTTP outside any transaction, marked only on 200/201; the `client_key` makes a retry idempotent), then `discard_idle`.
+- Clock skew: a guard window (re)starts at max(event ts, `guard_reset_at`) so a wrapper clock behind the api clock cannot leave the window stale forever; `guard_windows` therefore accepts a Stop-loop trip at `>= guard_reset_at` (a clamped trip equals the reset).

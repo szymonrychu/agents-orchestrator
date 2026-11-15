@@ -26,7 +26,7 @@ from agents_orchestrator.inactivity import (
     autoclose_reason,
     close_reason,
 )
-from agents_orchestrator.runaway import NOTICE_PARKED
+from agents_orchestrator.runaway import NOTICE_PARKED, AgentWindow, Breach
 from agents_orchestrator.spec import SessionSpec, legacy_context, validate_slug
 
 CHANNEL = "session_changed"
@@ -650,6 +650,65 @@ async def interrupt_parked(conn: psycopg.AsyncConnection) -> list[uuid.UUID]:
         for agent_id in agents:
             await enqueue_command(conn, agent_id, "interrupt")
         return agents
+
+
+_GUARD_WINDOWS = """
+SELECT a.id, a.pod_name,
+  CASE WHEN {valid} THEN st.guard_window_at END AS window_at,
+  CASE WHEN {valid} THEN st.guard_turns ELSE 0 END AS turns,
+  CASE WHEN {valid} THEN st.guard_tokens ELSE 0 END AS tokens,
+  CASE WHEN {valid} AND st.guard_stop_loop_at >= coalesce(s.guard_reset_at, '-infinity')
+       THEN st.guard_stop_loop_at END AS stop_loop_at
+FROM agents a JOIN sessions s ON s.id = a.session_id
+LEFT JOIN agent_status st ON st.agent_id = a.id
+WHERE a.session_id = %s AND a.gone_at IS NULL
+ORDER BY a.pod_name, a.id
+""".format(
+    valid="(st.guard_window_at IS NOT NULL"
+    " AND st.guard_window_at >= coalesce(s.guard_reset_at, '-infinity'))"
+)
+
+
+async def guard_windows(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> list[AgentWindow]:
+    """The task window of every live agent, by pod name. A window older than the session's last
+    resume reads as empty (the ingester restarts it lazily); a Stop-loop trip counts only inside
+    the live window."""
+    async with conn.cursor() as cur:
+        await cur.execute(_GUARD_WINDOWS, (session_id,))
+        return [AgentWindow(*row) for row in await cur.fetchall()]
+
+
+async def park_breaching(
+    conn: psycopg.AsyncConnection,
+    decide: Callable[[Session, list[AgentWindow]], tuple[Breach, str] | None],
+) -> list[uuid.UUID]:
+    """Park every active, unparked session `decide` flags. Each candidate is decided in its own
+    transaction under a row lock, so a concurrent sweep re-reads it parked and skips it."""
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT id FROM sessions WHERE desired = 'active' AND parked_at IS NULL"
+            " ORDER BY created_at, id"
+        )
+        candidates = [r[0] for r in await cur.fetchall()]
+    parked: list[uuid.UUID] = []
+    for session_id in candidates:
+        async with conn.transaction():
+            found = await _fetch(
+                conn,
+                "SELECT * FROM sessions WHERE id = %s AND desired = 'active'"
+                " AND parked_at IS NULL FOR UPDATE",
+                (session_id,),
+            )
+            if not found:
+                continue
+            decision = decide(found[0], await guard_windows(conn, session_id))
+            if decision is None:
+                continue
+            b, notice = decision
+            outcome = await park(conn, session_id, b.reason, b.detail(), notice)
+            if outcome.parked:
+                parked.append(session_id)
+    return parked
 
 
 async def mark_park_notified(

@@ -16,6 +16,7 @@ from typing import Any
 import httpx
 
 from agents_orchestrator.api.scope import PROJECTS_HEADER
+from agents_orchestrator.runaway import TASK_LABEL
 from agents_orchestrator.settings import Settings
 
 log = logging.getLogger(__name__)
@@ -61,6 +62,41 @@ async def open_decisions(
     except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError) as exc:
         log.warning("taskboard open decisions unavailable: %s", type(exc).__name__)
         return None
+
+
+async def create_notice_task(
+    settings: Settings,
+    session_id: uuid.UUID,
+    slug: str,
+    projects: str,
+    *,
+    title: str,
+    body: str,
+    client_key: str,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> bool:
+    """Create the owner notice task of a runaway park; `client_key` makes a retry a no-op on the
+    taskboard. True when the task exists (201 or 200), False when it could not be created."""
+    if not settings.taskboard_available:
+        return False
+    url = settings.taskboard_url.rstrip("/") + UPSTREAM_PREFIX + "/tasks"
+    headers = {
+        "Authorization": f"Bearer {settings.taskboard_token}",
+        "X-Orch-Session": str(session_id),
+        "X-Orch-Slug": slug,
+        PROJECTS_HEADER: projects,
+    }
+    payload = {"title": title, "body": body, "labels": [TASK_LABEL], "client_key": client_key}
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS, transport=transport) as http:
+            response = await http.post(url, json=payload, headers=headers)
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning("taskboard notice task unavailable: %s", type(exc).__name__)
+        return False
+    if response.status_code not in (200, 201):
+        log.warning("taskboard notice task: status %s", response.status_code)
+        return False
+    return True
 
 
 def _open_decisions(body: dict[str, Any], session: str) -> list[OpenDecision]:

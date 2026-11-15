@@ -114,12 +114,70 @@ async def test_window_reset_after_resume_is_lazy(pool, harness) -> None:  # noqa
             (h.agent_id,),
         )
         await conn.execute(
-            "UPDATE sessions SET guard_reset_at = now() WHERE id = %s", (h.session_id,)
+            "UPDATE sessions SET guard_reset_at = %s::timestamptz WHERE id = %s",
+            ("2026-01-01T00:00:01.5+00:00", h.session_id),
         )
     await turn(h, 2, "agent")
     got_turns, got_tokens, window, _ = await guard(pool, h)
     assert (got_turns, got_tokens) == (1, 0)
     assert window == datetime.fromisoformat(ts(2))
+
+
+async def set_reset(pool, h, stamp: str) -> None:
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE sessions SET guard_reset_at = %s::timestamptz WHERE id = %s",
+            (stamp, h.session_id),
+        )
+
+
+async def test_event_earlier_than_reset_is_clamped_and_accumulates(pool, harness) -> None:  # noqa: F811
+    """A wrapper clock behind the api clock must not keep the window stale forever."""
+    h = await harness()
+    await h.start()
+    await set_reset(pool, h, "2026-01-01T00:10:00+00:00")
+    await turn(h, 1, "client")
+    await turn(h, 2, "agent")
+    await turn(h, 3, "agent")
+    got_turns, _, window, _ = await guard(pool, h)
+    assert got_turns == 3
+    assert window == datetime.fromisoformat("2026-01-01T00:10:00+00:00")
+
+
+async def test_usage_restarts_stale_window(pool, harness) -> None:  # noqa: F811
+    h = await harness()
+    await h.start()
+    await turn(h, 1, "client")
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE agent_status SET guard_turns = 301, guard_tokens = 7,"
+            " guard_stop_loop_at = %s::timestamptz WHERE agent_id = %s",
+            (ts(1), h.agent_id),
+        )
+    await set_reset(pool, h, ts(5))
+    h.emit_at("usage", ts(10), dict(USAGE))
+    await h.stored_through(h.last_fake_seq())
+    got_turns, got_tokens, window, stop = await guard(pool, h)
+    assert (got_turns, got_tokens, stop) == (0, 175, None)
+    assert window == datetime.fromisoformat(ts(10))
+
+
+async def test_stop_loop_on_stale_window_restarts_empty(pool, harness) -> None:  # noqa: F811
+    h = await harness()
+    await h.start()
+    await turn(h, 1, "client")
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE agent_status SET guard_turns = 301, guard_tokens = 7 WHERE agent_id = %s",
+            (h.agent_id,),
+        )
+    await set_reset(pool, h, ts(5))
+    h.emit_at("guard_tripped", ts(10), {"kind": "stop_loop"})
+    await h.stored_through(h.last_fake_seq())
+    got_turns, got_tokens, window, stop = await guard(pool, h)
+    assert (got_turns, got_tokens) == (0, 0)
+    assert window == datetime.fromisoformat(ts(10))
+    assert stop == datetime.fromisoformat(ts(10))
 
 
 async def test_stop_loop_trip_marks_agent(pool, harness) -> None:  # noqa: F811

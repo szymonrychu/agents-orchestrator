@@ -511,6 +511,11 @@ _STALE = (
 )
 
 
+# The event time a window (re)starts at: never before the session's reset, so a wrapper clock
+# behind the api clock cannot leave the window stale forever.
+_AT = "greatest(%(at)s::timestamptz, coalesce(s.guard_reset_at, %(at)s::timestamptz))"
+
+
 def _when(cond: str, column: str, restart: str) -> str:
     """SET fragment: `column` takes `restart` when `cond` holds, else keeps its value."""
     return f"{column} = CASE WHEN {cond} THEN {restart} ELSE st.{column} END"
@@ -541,7 +546,7 @@ async def guard_turn_started(
             f"guard_turns = CASE WHEN {restart} THEN 1 ELSE st.guard_turns + 1 END",
             _when(restart, "guard_tokens", "0"),
             _when(restart, "guard_stop_loop_at", "NULL"),
-            _when(restart, "guard_window_at", "%(at)s::timestamptz"),
+            _when(restart, "guard_window_at", _AT),
         ],
         {"delivered": origin in DELIVERED_ORIGINS, "at": at},
     )
@@ -558,7 +563,7 @@ async def guard_add_tokens(
             _when(_STALE, "guard_turns", "0"),
             f"guard_tokens = CASE WHEN {_STALE} THEN %(n)s ELSE st.guard_tokens + %(n)s END",
             _when(_STALE, "guard_stop_loop_at", "NULL"),
-            _when(_STALE, "guard_window_at", "%(at)s::timestamptz"),
+            _when(_STALE, "guard_window_at", _AT),
         ],
         {"n": tokens, "at": at},
     )
@@ -574,8 +579,8 @@ async def guard_mark_stop_loop(
         [
             _when(_STALE, "guard_turns", "0"),
             _when(_STALE, "guard_tokens", "0"),
-            _when(_STALE, "guard_window_at", "%(at)s::timestamptz"),
-            "guard_stop_loop_at = %(at)s::timestamptz",
+            _when(_STALE, "guard_window_at", _AT),
+            f"guard_stop_loop_at = {_AT}",
         ],
         {"at": at},
     )
