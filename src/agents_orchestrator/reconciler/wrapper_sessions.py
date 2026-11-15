@@ -127,6 +127,17 @@ class WrapperSessionBootstrapper:
                     await aclose()
 
     async def _bootstrap(self, client: Any, agent: Agent, spec: SessionSpec) -> str | None:
+        if spec.wrapper is not None and spec.wrapper.managed_settings is not None:
+            try:  # every bootstrap: the wrapper keeps no overlay across restarts
+                await client.put_managed_settings(spec.wrapper.managed_settings)
+            except WrapperError as exc:
+                if exc.status >= 500 or exc.status == 429:
+                    raise
+                message = f"managed settings refused: {exc.code}"
+                await self._record_failure(
+                    agent, {"step": "managed_settings", "message": message, "log_tail": None}
+                )
+                return message
         listed = await client.list_sessions()
         if agent.wrapper_session_id is not None:
             stored = next(
