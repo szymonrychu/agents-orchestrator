@@ -499,3 +499,12 @@ in the namespace, so an attached vault value is exposed to it. Decision: attach 
 - Clock skew: a guard window (re)starts at max(event ts, `guard_reset_at`) so a wrapper clock behind the api clock cannot leave the window stale forever; `guard_windows` therefore accepts a Stop-loop trip at `>= guard_reset_at` (a clamped trip equals the reset).
 - 2026-11-15 clamp trade-off (accepted knowingly): an event with ts before `guard_reset_at` counts in the fresh window at the reset time. A pre-resume event ingested late (lag after park then resume) can therefore re-park, but without the clamp a wrapper clock behind the api silently disables the guard; skew and lag cannot be told apart by timestamp, and a re-park only costs a human resuming again. Pinned by test_pre_reset_event_after_resume_counts_in_new_window.
 - 2026-11-15 a parked session whose `parked_detail` is unreadable gets a generic owner notice (no raw detail) once, then is marked, instead of a warning on every poll.
+
+## 2026-11-15 runaway guard design record (T-224, step 12)
+- Migration number: 0049_runaway_guard.sql, because 0048 was taken by close_asks (the plan said 0048); its notice CHECK is the 0048 kinds plus `runaway_parked`.
+- Window reset is lazy through `sessions.guard_reset_at` (written only by the api resume route) while the per-agent window counters are written only by the ingester: one writer per column group, no cross-process update at resume.
+- Why an interrupt sweep: peer and agent turns bypass the claim, so holding the claim alone does not stop a running turn; `park` interrupts at once and the autoclose sweep repeats it until the agents are idle.
+- Precedence and semantics: stop_loop, tokens, turns within an agent, first agent wins; a breach is strictly greater than the limit (the Stop-loop trip equals its cap); tokens are input + output + cache creation, no cache reads. 0 = unlimited.
+- Runaway limits are tighten-only for a regular leader on all seven `spec.runaway` keys (like inactivity and docker limits, 0 counts as the loosest value).
+- The `runaway_parked` notice is delivered after resume (the claim holds the whole queue while parked), worded as an instruction to check the working tree before continuing.
+- claude-code-wrapper 0.17.0 is pinned (pyproject, uv.lock, e2e agent-test image) because its strict `guard` config section is rejected by older wrappers; the Stop-loop cap counts per Stop chain there. The `guard` section is rendered on the default image only.
