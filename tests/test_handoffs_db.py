@@ -1,6 +1,6 @@
 """db.handoffs: the agent_handoffs rows and the agent_limits start-context record (Postgres)."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import psycopg.errors
 import pytest
@@ -18,55 +18,38 @@ async def _agent(pool):
 async def test_one_open_row_per_agent(pool):
     session_id, agent_id = await _agent(pool)
     async with pool.connection() as conn:
-        first = await handoffs.insert(conn, session_id, agent_id, "strong", "notified")
+        first = await handoffs.insert(conn, session_id, agent_id, "strong", "pressuring")
     async with pool.connection() as conn:
         assert (await handoffs.open_row(conn, agent_id)) == first
         with pytest.raises(psycopg.errors.UniqueViolation):
-            await handoffs.insert(conn, session_id, agent_id, "voluntary", "requested")
+            await handoffs.insert(conn, session_id, agent_id, "voluntary", "submitted")
     async with pool.connection() as conn:
         assert await handoffs.close(conn, first.id, "done", "x")
         assert await handoffs.open_row(conn, agent_id) is None
-        second = await handoffs.insert(conn, session_id, agent_id, "voluntary", "requested")
+        second = await handoffs.insert(conn, session_id, agent_id, "voluntary", "submitted")
     assert second.id != first.id
-    assert second.phase == "requested"
+    assert second.phase == "submitted"
 
 
 async def test_advance_is_status_guarded(pool):
     session_id, agent_id = await _agent(pool)
     async with pool.connection() as conn:
-        row = await handoffs.insert(conn, session_id, agent_id, "strong", "notified")
-        assert not await handoffs.advance(conn, row.id, ["requested"], "handed", handoff_text="t")
+        row = await handoffs.insert(conn, session_id, agent_id, "strong", "pressuring")
+        assert not await handoffs.advance(conn, row.id, ["submitted"], "moving", handoff_text="t")
         after = await handoffs.open_row(conn, agent_id)
         assert after == row
         assert await handoffs.advance(
-            conn, row.id, ["notified", "extended"], "requested", request_message_id=7
+            conn, row.id, ["pressuring", "submitted"], "moving", leadership_request_id=7
         )
         after = await handoffs.open_row(conn, agent_id)
-    assert after.phase == "requested"
-    assert after.request_message_id == 7
-
-
-async def test_extend_once(pool):
-    session_id, agent_id = await _agent(pool)
-    deadline = datetime.now(UTC) + timedelta(minutes=10)
-    async with pool.connection() as conn:
-        await handoffs.insert(
-            conn, session_id, agent_id, "strong", "notified", deadline_at=deadline
-        )
-        row = await handoffs.extend(conn, agent_id, 300)
-        assert row is not None
-        assert row.phase == "extended"
-        assert row.extended_at is not None
-        assert row.deadline_at - deadline == timedelta(seconds=300)
-        assert await handoffs.extend(conn, agent_id, 300) is None
-        again = await handoffs.open_row(conn, agent_id)
-    assert again.deadline_at == row.deadline_at
+    assert after.phase == "moving"
+    assert after.leadership_request_id == 7
 
 
 async def test_close_sets_reason_and_time(pool):
     session_id, agent_id = await _agent(pool)
     async with pool.connection() as conn:
-        row = await handoffs.insert(conn, session_id, agent_id, "shutdown", "notified")
+        row = await handoffs.insert(conn, session_id, agent_id, "shutdown", "handed")
         assert await handoffs.close(conn, row.id, "cancelled", "agent_gone")
         assert not await handoffs.close(conn, row.id, "done", "again")
         cur = await conn.execute(
@@ -92,12 +75,12 @@ async def test_limits_start_upsert(pool):
 async def test_advance_never_closes_or_reopens(pool):
     session_id, agent_id = await _agent(pool)
     async with pool.connection() as conn:
-        row = await handoffs.insert(conn, session_id, agent_id, "strong", "notified")
+        row = await handoffs.insert(conn, session_id, agent_id, "strong", "pressuring")
         with pytest.raises(ValueError):
-            await handoffs.advance(conn, row.id, ["notified"], "done")
+            await handoffs.advance(conn, row.id, ["pressuring"], "done")
         assert await handoffs.close(conn, row.id, "cancelled", "compacted")
         with pytest.raises(ValueError):
-            await handoffs.advance(conn, row.id, ["cancelled"], "notified")
+            await handoffs.advance(conn, row.id, ["cancelled"], "pressuring")
         cur = await conn.execute("SELECT phase FROM agent_handoffs WHERE id = %s", (row.id,))
         assert (await cur.fetchone())[0] == "cancelled"
 
@@ -113,20 +96,168 @@ async def test_start_clear_counts_attempts_in_the_update(pool):
     assert (after.phase, after.clear_command_id, after.clear_attempts) == ("clearing", 13, 2)
 
 
-async def test_insert_sets_notified_at_only_for_a_notice(pool):
+async def test_open_pressure_one_open_row(pool):
     session_id, agent_id = await _agent(pool)
     async with pool.connection() as conn:
-        row = await handoffs.insert(conn, session_id, agent_id, "voluntary", "handed")
-        assert row.notified_at is None
+        row = await handoffs.open_pressure(conn, session_id, agent_id, 1, "work")
+    assert (row.trigger, row.phase, row.level, row.profile) == (
+        "pressure",
+        "pressuring",
+        1,
+        "work",
+    )
+    assert (row.rejects, row.reject_reasons, row.gate_blocks) == (0, [], 0)
+    async with pool.connection() as conn:
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            await handoffs.open_pressure(conn, session_id, agent_id, 1, "chat")
+    async with pool.connection() as conn:
         assert await handoffs.close(conn, row.id, "done", "x")
-        row = await handoffs.insert(conn, session_id, agent_id, "strong", "notified")
-    assert row.notified_at is not None
+        again = await handoffs.open_pressure(conn, session_id, agent_id, 2, "chat", "voluntary")
+    assert (again.trigger, again.profile) == ("voluntary", "chat")
 
 
-async def test_extend_refused_after_the_deadline(pool):
+async def test_set_level_only_rises_and_records_l2_tokens(pool):
     session_id, agent_id = await _agent(pool)
-    past = datetime.now(UTC) - timedelta(seconds=1)
     async with pool.connection() as conn:
-        await handoffs.insert(conn, session_id, agent_id, "strong", "notified", deadline_at=past)
-        assert await handoffs.extend(conn, agent_id, 300) is None
-        assert (await handoffs.open_row(conn, agent_id)).phase == "notified"
+        row = await handoffs.open_pressure(conn, session_id, agent_id, 1, "work")
+        assert await handoffs.set_level(conn, row.id, 2, 150_000)
+        after = await handoffs.open_row(conn, agent_id)
+        assert (after.level, after.l2_tokens_at) == (2, 150_000)
+        assert not await handoffs.set_level(conn, row.id, 2, 160_000)
+        assert not await handoffs.set_level(conn, row.id, 1, 100)
+        assert await handoffs.set_level(conn, row.id, 3, 170_000)
+        after = await handoffs.open_row(conn, agent_id)
+    assert (after.level, after.l2_tokens_at) == (3, 150_000)
+
+
+async def test_set_level_below_two_leaves_l2_tokens_empty(pool):
+    session_id, agent_id = await _agent(pool)
+    async with pool.connection() as conn:
+        row = await handoffs.open_pressure(conn, session_id, agent_id, 0, "work")
+        assert await handoffs.set_level(conn, row.id, 1, 90_000)
+        assert (await handoffs.open_row(conn, agent_id)).l2_tokens_at is None
+
+
+async def test_submit_status_guarded(pool):
+    session_id, agent_id = await _agent(pool)
+    async with pool.connection() as conn:
+        row = await handoffs.open_pressure(conn, session_id, agent_id, 2, "work")
+        assert await handoffs.submit(conn, row.id, {"goal": "g"}, {"bg": []}, 123_000)
+        after = await handoffs.open_row(conn, agent_id)
+        assert (after.phase, after.handoff, after.inflight, after.submit_tokens) == (
+            "submitted",
+            {"goal": "g"},
+            {"bg": []},
+            123_000,
+        )
+        assert after.submitted_at is not None
+        # a resubmit while submitted replaces it; a row past that is refused
+        assert await handoffs.submit(conn, row.id, {"goal": "g2"}, {}, None)
+        assert await handoffs.advance(conn, row.id, ["submitted"], "moving")
+        assert not await handoffs.submit(conn, row.id, {"goal": "g3"}, {}, None)
+        assert (await handoffs.open_row(conn, agent_id)).handoff == {"goal": "g2"}
+        with pytest.raises(ValueError):
+            await handoffs.submit(conn, row.id, {}, {}, None, from_phases=("done",))
+
+
+async def test_record_reject_counts_and_reasons(pool):
+    session_id, agent_id = await _agent(pool)
+    async with pool.connection() as conn:
+        row = await handoffs.open_pressure(conn, session_id, agent_id, 1, "chat")
+        assert await handoffs.record_reject(conn, row.id, ["too_short"]) == 1
+        assert await handoffs.record_reject(conn, row.id, ["no_goal", "no_next"]) == 2
+        after = await handoffs.open_row(conn, agent_id)
+        assert await handoffs.close(conn, row.id, "cancelled", "x")
+        assert await handoffs.record_reject(conn, row.id, ["late"]) == 0
+    assert (after.rejects, after.reject_reasons) == (2, ["too_short", "no_goal", "no_next"])
+
+
+async def test_record_gate_block(pool):
+    session_id, agent_id = await _agent(pool)
+    async with pool.connection() as conn:
+        row = await handoffs.open_pressure(conn, session_id, agent_id, 3, "work")
+        await handoffs.record_gate_block(conn, row.id, {"subagents": 1})
+        await handoffs.record_gate_block(conn, row.id, {"subagents": 2})
+        after = await handoffs.open_row(conn, agent_id)
+    assert (after.gate_blocks, after.inflight) == (2, {"subagents": 2})
+
+
+async def test_mark_escalated_once(pool):
+    session_id, agent_id = await _agent(pool)
+    async with pool.connection() as conn:
+        row = await handoffs.open_pressure(conn, session_id, agent_id, 3, "work")
+        assert await handoffs.mark_escalated(conn, row.id)
+        assert not await handoffs.mark_escalated(conn, row.id)
+        assert (await handoffs.open_row(conn, agent_id)).escalated_at is not None
+        assert await handoffs.mark_stuck_reported(conn, row.id)
+        assert not await handoffs.mark_stuck_reported(conn, row.id)
+
+
+async def test_mark_nudged_per_level(pool):
+    session_id, agent_id = await _agent(pool)
+    async with pool.connection() as conn:
+        row = await handoffs.open_pressure(conn, session_id, agent_id, 1, "work")
+        assert await handoffs.mark_nudged(conn, row.id, 1)
+        assert not await handoffs.mark_nudged(conn, row.id, 1)
+        assert not await handoffs.mark_nudged(conn, row.id, 0)
+        assert await handoffs.mark_nudged(conn, row.id, 3)
+        assert (await handoffs.open_row(conn, agent_id)).nudged_level == 3
+
+
+async def _progress(conn, row_id):
+    cur = await conn.execute("SELECT progress_at FROM agent_handoffs WHERE id = %s", (row_id,))
+    return (await cur.fetchone())[0]
+
+
+async def test_progress_at_touched_on_update(pool):
+    session_id, agent_id = await _agent(pool)
+    async with pool.connection() as conn:
+        row = await handoffs.open_pressure(conn, session_id, agent_id, 1, "work")
+        steps = [
+            lambda: handoffs.set_level(conn, row.id, 2, 1),
+            lambda: handoffs.record_reject(conn, row.id, ["r"]),
+            lambda: handoffs.record_gate_block(conn, row.id, {}),
+            lambda: handoffs.mark_nudged(conn, row.id, 1),
+            lambda: handoffs.mark_escalated(conn, row.id),
+            lambda: handoffs.submit(conn, row.id, {}, {}, None),
+            lambda: handoffs.advance(conn, row.id, ["submitted"], "moving"),
+            lambda: handoffs.start_clear(conn, row.id, ["moving"], 5),
+        ]
+        old = datetime(2000, 1, 1, tzinfo=UTC)
+        for step in steps:
+            await conn.execute("UPDATE agent_handoffs SET progress_at = %s", (old,))
+            await step()
+            assert await _progress(conn, row.id) > old
+        assert await handoffs.mark_stuck_reported(conn, row.id)
+        stamped = await _progress(conn, row.id)
+        assert await handoffs.close(conn, row.id, "done", "x")
+        assert await _progress(conn, row.id) >= stamped
+
+
+async def test_mark_stuck_reported_leaves_progress_alone(pool):
+    session_id, agent_id = await _agent(pool)
+    async with pool.connection() as conn:
+        row = await handoffs.open_pressure(conn, session_id, agent_id, 3, "work")
+        old = datetime(2000, 1, 1, tzinfo=UTC)
+        await conn.execute("UPDATE agent_handoffs SET progress_at = %s", (old,))
+        assert await handoffs.mark_stuck_reported(conn, row.id)
+        assert await _progress(conn, row.id) == old
+
+
+async def test_take_undelivered_returns_handoff_and_text_of_newest(pool):
+    session_id, agent_id = await _agent(pool)
+    async with pool.connection() as conn:
+        successor = await insert_agent(pool, session_id)
+        row = await handoffs.open_pressure(conn, session_id, agent_id, 2, "work")
+        assert await handoffs.submit(conn, row.id, {"goal": "g"}, {}, None)
+        assert await handoffs.advance(
+            conn, row.id, ["submitted"], "discussing", successor_agent_id=successor["id"]
+        )
+        assert await handoffs.take_undelivered(conn, agent_id, successor["id"], None) == (
+            {"goal": "g"},
+            None,
+        )
+        assert await handoffs.take_undelivered(conn, agent_id, successor["id"], None) == (
+            None,
+            None,
+        )

@@ -22,6 +22,7 @@ carry the method, path and status only, never a token or a body.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 from urllib.parse import quote
 
@@ -34,8 +35,10 @@ from agents_orchestrator.api import forward as forward_core
 from agents_orchestrator.api.agent import Caller, _leads, _session
 from agents_orchestrator.api.errors import ApiError
 from agents_orchestrator.api.sessions import Cfg, Pool
+from agents_orchestrator.db import chat_activity
 from agents_orchestrator.settings import Settings
 
+log = logging.getLogger(__name__)
 router = APIRouter(prefix="/agent/v1/chat", tags=["agent"])
 
 MAX_BODY_BYTES = forward_core.MAX_BODY_BYTES
@@ -146,6 +149,7 @@ async def _relay(
     *,
     counts_as_update: bool = False,
     relay_bound: bool = False,
+    records_activity: bool = False,
 ) -> Response:
     async with pool.connection() as conn:
         own = await _session(conn, agent)
@@ -177,7 +181,21 @@ async def _relay(
         )
     if counts_as_update:
         await forward_core.touch_on_success(pool, own.id, response.status_code)
+    if records_activity:
+        await _record_out(pool, own.id, agent.id, response.status_code)
     return response
+
+
+async def _record_out(pool: Pool, session_id: Any, agent_id: Any, status: int) -> None:
+    """Record an outbound chat activity of the caller after a 2xx. Best effort like
+    `touch_on_success`: the post already happened, so a failed write is only logged."""
+    if not 200 <= status < 300:
+        return
+    try:
+        async with pool.connection() as conn:
+            await chat_activity.record(conn, session_id, agent_id, "out")
+    except Exception:
+        log.exception("chat relay: could not record activity of session %s", session_id)
 
 
 @router.get(
@@ -209,7 +227,15 @@ async def rooms(request: Request, agent: Caller, pool: Pool, settings: Cfg) -> R
 )
 async def send_message(request: Request, agent: Caller, pool: Pool, settings: Cfg) -> Response:
     return await _relay(
-        request, agent, pool, settings, "POST", "/messages", counts_as_update=True, relay_bound=True
+        request,
+        agent,
+        pool,
+        settings,
+        "POST",
+        "/messages",
+        counts_as_update=True,
+        relay_bound=True,
+        records_activity=True,
     )
 
 
@@ -221,7 +247,7 @@ async def send_message(request: Request, agent: Caller, pool: Pool, settings: Cf
     openapi_extra=_json_body(ChatReactionIn),
 )
 async def send_reaction(request: Request, agent: Caller, pool: Pool, settings: Cfg) -> Response:
-    return await _relay(request, agent, pool, settings, "POST", "/reactions")
+    return await _relay(request, agent, pool, settings, "POST", "/reactions", records_activity=True)
 
 
 @router.get(

@@ -11,7 +11,7 @@ from agents_orchestrator.api import attachments as attachments_mod
 from agents_orchestrator.api import schemas, service_auth
 from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.sessions import Cfg, Pool
-from agents_orchestrator.db import queue, views
+from agents_orchestrator.db import chat_activity, queue, views
 from agents_orchestrator.db import sessions as repo
 from agents_orchestrator.spec import SessionSpec
 
@@ -71,11 +71,8 @@ async def _require_open_session(conn, session_id: uuid.UUID) -> repo.Session:
 async def post_message(
     session_id: uuid.UUID, body: schemas.PostMessage, request: Request, pool: Pool, settings: Cfg
 ) -> schemas.MessageAccepted:
-    from_user = (
-        body.from_user
-        if body.from_user is not None
-        else service_auth.calling_service(request) is None
-    )
+    service = service_auth.calling_service(request)
+    from_user = body.from_user if body.from_user is not None else service is None
     stored = attachments_mod.decode(body.attachments, settings)
     async with pool.connection() as conn, conn.transaction():
         await _require_open_session(conn, session_id)
@@ -97,7 +94,10 @@ async def post_message(
                 body.target_agent_id,
                 lane=body.lane,
                 attachments=stored,
+                origin_service=service,
             )
+            if service is not None and service in settings.handoff_chat_services:
+                await chat_activity.record(conn, session_id, None, "in")
         except repo.SessionBeingDeleted as exc:
             raise ApiError(409, "session_deleting", "session is being discarded") from exc
     return schemas.MessageAccepted(message_id=mid)

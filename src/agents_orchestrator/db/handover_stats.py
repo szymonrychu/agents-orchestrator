@@ -74,7 +74,7 @@ async def _handoff_stats(
     conn: psycopg.AsyncConnection, days: int
 ) -> tuple[dict[str, int], dict[str, int], float | None]:
     """Counts of `agent_handoffs` rows created in the window by trigger and by close reason, and
-    the median seconds from the notice to the delivery of the handoff text to the successor."""
+    the median seconds from the row's opening to the delivery of its handoff to the successor."""
     window = "FROM agent_handoffs WHERE created_at > now() - make_interval(days => %s)"
     triggers = await conn.execute(f"SELECT trigger, count(*) {window} GROUP BY trigger", (days,))
     reasons = await conn.execute(
@@ -84,8 +84,8 @@ async def _handoff_stats(
     )
     median = await conn.execute(
         "SELECT percentile_cont(0.5) WITHIN GROUP"
-        f" (ORDER BY extract(epoch FROM delivered_at - notified_at)) {window}"
-        " AND notified_at IS NOT NULL AND delivered_at IS NOT NULL",
+        f" (ORDER BY extract(epoch FROM delivered_at - created_at)) {window}"
+        " AND delivered_at IS NOT NULL",
         (days,),
     )
     row = await median.fetchone()

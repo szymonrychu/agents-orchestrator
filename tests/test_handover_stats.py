@@ -109,9 +109,9 @@ async def _handoff(pool, session_id, agent_id, *, trigger, close_reason, notifie
     notified = NOW - timedelta(seconds=notified_s) if notified_s is not None else None
     async with pool.connection() as conn:
         await conn.execute(
-            "INSERT INTO agent_handoffs (session_id, agent_id, trigger, phase, notified_at,"
+            "INSERT INTO agent_handoffs (session_id, agent_id, trigger, phase, created_at,"
             " delivered_at, closed_at, close_reason)"
-            " VALUES (%s, %s, %s, 'done', %s, %s, now(), %s)",
+            " VALUES (%s, %s, %s, 'done', coalesce(%s, now()), %s, now(), %s)",
             (session_id, agent_id, trigger, notified, delivered, close_reason),
         )
 

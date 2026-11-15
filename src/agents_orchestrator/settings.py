@@ -184,6 +184,9 @@ class Settings(BaseSettings):
     # JSON object: service name to the route names ("<METHOD> <path template>") it may call on
     # the service port; a service without an entry may call every route of the service list
     service_scopes: dict[str, list[str]] = {}
+    #: Services whose messages count as inbound chat activity (the matrix connector's name in
+    #: `service_tokens`); read by the handoff profile.
+    handoff_chat_services: CsvList = ["agents-matrix-connector"]
     agent_api_url: str | None = None
     dispatch_poll_seconds: float = 2
     reconcile_poll_seconds: float = 10

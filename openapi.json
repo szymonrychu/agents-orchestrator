@@ -2877,7 +2877,9 @@
                   "handoff_request",
                   "handoff_return",
                   "autoclose",
-                  "runaway_parked"
+                  "runaway_parked",
+                  "handoff_nudge",
+                  "handoff_escalation"
                 ],
                 "type": "string"
               },

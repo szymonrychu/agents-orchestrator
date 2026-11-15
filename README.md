@@ -88,6 +88,7 @@ Every process reads `ORCH_*` variables (the contract `agents-orchestrator-settin
 | `ORCH_HANDOVER_MIN_TENURE_SECONDS` | `1200` | dispatcher | seconds (0 to 86400) a leader must have led before a weak `handover_due` is sent; the strong limit, a rollout or a pod stop override it |
 | `ORCH_HANDOVER_STRONG_MARGIN_PCT` | `10` | dispatcher | percent points (1 to 50) below the compaction point where the strong limit sits (with the token headroom, the smaller of the two applies) |
 | `ORCH_HANDOVER_STRONG_HEADROOM_TOKENS` | `60000` | dispatcher | tokens (0 to 500000) below the compaction point where the strong limit sits (floored at 0) |
+| `ORCH_HANDOFF_CHAT_SERVICES` | `agents-matrix-connector` | api | comma-separated service names (the names in `ORCH_SERVICE_TOKENS`) whose messages on the service port count as inbound chat activity of the session; with the outbound chat posts of the relay it tells a chat agent from a work agent for the context-pressure handoff |
 | `ORCH_HANDOVER_NOTIFY_SECONDS` | `300` | dispatcher | strong limit: seconds (30 to 3600) between the `handoff_notice` and the `handoff_request` |
 | `ORCH_HANDOVER_EXTENSION_SECONDS` | `300` | dispatcher | strong limit: seconds (0 to 3600) one `extend` adds to the countdown |
 | `ORCH_HANDOVER_IDLE_PROCEED_SECONDS` | `60` | dispatcher | strong limit: the countdown ends early once the notice turn ended and the agent stayed idle this long (0 to 600) |

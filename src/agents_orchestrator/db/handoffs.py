@@ -1,10 +1,12 @@
-"""agent_handoffs and agent_limits: graceful handover of an agent's context (Postgres).
+"""agent_handoffs and agent_limits: cooperative handoff of an agent's context (Postgres).
 
-Writer of both tables: this module. The dispatcher decides every phase change and the agent
-route inserts rows and extends a deadline, both through the functions below (the same split as
-`leadership_requests`: the route inserts, the dispatcher decides). Every change is a
-status-guarded update, so a row moves exactly once whichever caller commits first. At most one
-open row exists per agent (partial unique index `agent_handoffs_one_open`).
+Writer of both tables: this module. A row follows an agent under context pressure: it is opened
+`pressuring`, the agent submits its own handoff (`submitted`), the successor takes over
+(`moving`, `discussing`) and the ex-leader is cleared after an accepted submit only. Shutdown
+rows (the pod-shutdown path) open at `handed` and keep their own flow. Every change is a
+status-guarded update, so a row moves exactly once whichever caller commits first, and every
+update stamps `progress_at` (except `mark_stuck_reported`). At most one open row exists per agent
+(partial unique index `agent_handoffs_one_open`).
 """
 
 from __future__ import annotations
@@ -17,46 +19,47 @@ from typing import Any, Literal
 
 import psycopg
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 from agents_orchestrator.db import queue
 
 Phase = Literal[
-    "notified",
-    "extended",
-    "requested",
-    "handed",
-    "discussing",
+    "pressuring",
+    "submitted",
+    "moving",
     "clearing",
+    "discussing",
     "returning",
+    "handed",
     "done",
     "cancelled",
 ]
 OPEN_PHASES: tuple[str, ...] = (
-    "notified",
-    "extended",
-    "requested",
-    "handed",
-    "discussing",
+    "pressuring",
+    "submitted",
+    "moving",
     "clearing",
+    "discussing",
     "returning",
+    "handed",
 )
 
 _COLUMNS = (
-    "id, session_id, agent_id, trigger, phase, notified_at, deadline_at, extended_at,"
-    " request_message_id, handoff_text, successor_agent_id, delivered_at, discuss_since,"
-    " clear_command_id, clear_attempts, cleared_at, return_message_id, created_at, closed_at,"
-    " close_reason"
+    "id, session_id, agent_id, trigger, phase, level, profile, handoff, handoff_text, rejects,"
+    " reject_reasons, inflight, gate_blocks, submitted_at, escalated_at, nudged_level,"
+    " l2_tokens_at, submit_tokens, progress_at, stuck_reported_at, leadership_request_id,"
+    " successor_agent_id, delivered_at, discuss_since, clear_command_id, clear_attempts,"
+    " cleared_at, return_message_id, created_at, closed_at, close_reason"
 )
 # A `shutdown_handoff` event (alias `e`) that carries a handoff: the routine's turn completed
 # with a non-blank reply. Anything else leaves today's resume and transcript notice alone.
 SHUTDOWN_TEXT = "(e.data->>'status' = 'completed' AND coalesce(e.data->>'final_text', '') ~ '\\S')"
 _SETTABLE = frozenset(
     {
-        "notified_at",
-        "deadline_at",
-        "extended_at",
-        "request_message_id",
+        "handoff",
         "handoff_text",
+        "inflight",
+        "leadership_request_id",
         "successor_agent_id",
         "delivered_at",
         "discuss_since",
@@ -66,6 +69,7 @@ _SETTABLE = frozenset(
         "return_message_id",
     }
 )
+_JSON_FIELDS = frozenset({"handoff", "inflight"})
 
 
 @dataclass(frozen=True)
@@ -75,11 +79,22 @@ class Handoff:
     agent_id: uuid.UUID
     trigger: str
     phase: str
-    notified_at: datetime | None
-    deadline_at: datetime | None
-    extended_at: datetime | None
-    request_message_id: int | None
+    level: int
+    profile: str | None
+    handoff: dict[str, Any] | None
     handoff_text: str | None
+    rejects: int
+    reject_reasons: list[str]
+    inflight: dict[str, Any] | None
+    gate_blocks: int
+    submitted_at: datetime | None
+    escalated_at: datetime | None
+    nudged_level: int
+    l2_tokens_at: int | None
+    submit_tokens: int | None
+    progress_at: datetime
+    stuck_reported_at: datetime | None
+    leadership_request_id: int | None
     successor_agent_id: uuid.UUID | None
     delivered_at: datetime | None
     discuss_since: datetime | None
@@ -116,22 +131,128 @@ async def insert(
     trigger: str,
     phase: str,
     *,
-    deadline_at: datetime | None = None,
     handoff_text: str | None = None,
 ) -> Handoff:
-    """Open a row; raises UniqueViolation while the agent already has an open one.
-
-    `notified_at` is set only for a row that opens with a notice (phase `notified`)."""
+    """Open a row in any phase (the shutdown and voluntary-move paths); raises UniqueViolation
+    while the agent already has an open one. Context pressure opens through `open_pressure`."""
     row = await _fetch(
         conn,
-        "INSERT INTO agent_handoffs (session_id, agent_id, trigger, phase, notified_at,"
-        " deadline_at, handoff_text)"
-        " VALUES (%s, %s, %s, %s, CASE WHEN %s THEN now() END, %s, %s)"
-        f" RETURNING {_COLUMNS}",
-        (session_id, agent_id, trigger, phase, phase == "notified", deadline_at, handoff_text),
+        "INSERT INTO agent_handoffs (session_id, agent_id, trigger, phase, handoff_text)"
+        f" VALUES (%s, %s, %s, %s, %s) RETURNING {_COLUMNS}",
+        (session_id, agent_id, trigger, phase, handoff_text),
     )
     assert row is not None
     return row
+
+
+async def open_pressure(
+    conn: psycopg.AsyncConnection,
+    session_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    level: int,
+    profile: str,
+    trigger: Literal["pressure", "voluntary"] = "pressure",
+) -> Handoff:
+    """Open a `pressuring` row at `level` for a `work` or `chat` agent; raises UniqueViolation
+    while the agent already has an open row."""
+    row = await _fetch(
+        conn,
+        "INSERT INTO agent_handoffs (session_id, agent_id, trigger, phase, level, profile)"
+        f" VALUES (%s, %s, %s, 'pressuring', %s, %s) RETURNING {_COLUMNS}",
+        (session_id, agent_id, trigger, level, profile),
+    )
+    assert row is not None
+    return row
+
+
+async def set_level(
+    conn: psycopg.AsyncConnection, row_id: int, level: int, used_tokens: int | None
+) -> bool:
+    """Raise the row's pressure level (never lowers it); the first time it reaches 2 or more the
+    token count is kept in `l2_tokens_at`. True when the level rose."""
+    cur = await conn.execute(
+        "UPDATE agent_handoffs SET level = %(level)s, progress_at = now(),"
+        " l2_tokens_at = CASE WHEN %(level)s >= 2 AND l2_tokens_at IS NULL"
+        " THEN %(tokens)s::int ELSE l2_tokens_at END"
+        " WHERE id = %(id)s AND level < %(level)s AND phase = ANY(%(open)s)",
+        {"level": level, "tokens": used_tokens, "id": row_id, "open": list(OPEN_PHASES)},
+    )
+    return cur.rowcount == 1
+
+
+async def record_reject(conn: psycopg.AsyncConnection, row_id: int, reasons: list[str]) -> int:
+    """Count a rejected submit and keep its reasons; returns the new `rejects` (0 when the row
+    is no longer open)."""
+    cur = await conn.execute(
+        "UPDATE agent_handoffs SET rejects = rejects + 1, progress_at = now(),"
+        " reject_reasons = reject_reasons || %s WHERE id = %s AND phase = ANY(%s)"
+        " RETURNING rejects",
+        (Jsonb(reasons), row_id, list(OPEN_PHASES)),
+    )
+    row = await cur.fetchone()
+    return 0 if row is None else row[0]
+
+
+async def submit(
+    conn: psycopg.AsyncConnection,
+    row_id: int,
+    handoff: dict[str, Any],
+    inflight: dict[str, Any],
+    submit_tokens: int | None,
+    from_phases: Sequence[str] = ("pressuring", "submitted"),
+) -> bool:
+    """Store an accepted handoff and move the row to `submitted` from one of `from_phases`
+    (a resubmit while `submitted` replaces it); True when a row changed."""
+    if not set(from_phases) <= set(OPEN_PHASES):
+        raise ValueError("submit moves from open phases only")
+    cur = await conn.execute(
+        "UPDATE agent_handoffs SET phase = 'submitted', handoff = %s, inflight = %s,"
+        " submit_tokens = %s, submitted_at = now(), progress_at = now()"
+        " WHERE id = %s AND phase = ANY(%s)",
+        (Jsonb(handoff), Jsonb(inflight), submit_tokens, row_id, list(from_phases)),
+    )
+    return cur.rowcount == 1
+
+
+async def record_gate_block(
+    conn: psycopg.AsyncConnection, row_id: int, inflight: dict[str, Any]
+) -> None:
+    """Count a Stop-gate block and keep the in-flight work it saw."""
+    await conn.execute(
+        "UPDATE agent_handoffs SET gate_blocks = gate_blocks + 1, inflight = %s,"
+        " progress_at = now() WHERE id = %s AND phase = ANY(%s)",
+        (Jsonb(inflight), row_id, list(OPEN_PHASES)),
+    )
+
+
+async def mark_escalated(conn: psycopg.AsyncConnection, row_id: int) -> bool:
+    """Stamp the escalation once; True only for the first caller."""
+    cur = await conn.execute(
+        "UPDATE agent_handoffs SET escalated_at = now(), progress_at = now()"
+        " WHERE id = %s AND escalated_at IS NULL AND phase = ANY(%s)",
+        (row_id, list(OPEN_PHASES)),
+    )
+    return cur.rowcount == 1
+
+
+async def mark_nudged(conn: psycopg.AsyncConnection, row_id: int, level: int) -> bool:
+    """Record a nudge sent at `level`; True only while a lower level was nudged before."""
+    cur = await conn.execute(
+        "UPDATE agent_handoffs SET nudged_level = %s, progress_at = now()"
+        " WHERE id = %s AND nudged_level < %s AND phase = ANY(%s)",
+        (level, row_id, level, list(OPEN_PHASES)),
+    )
+    return cur.rowcount == 1
+
+
+async def mark_stuck_reported(conn: psycopg.AsyncConnection, row_id: int) -> bool:
+    """Stamp the stuck report once (leaves `progress_at` alone: a report is no progress)."""
+    cur = await conn.execute(
+        "UPDATE agent_handoffs SET stuck_reported_at = now()"
+        " WHERE id = %s AND stuck_reported_at IS NULL AND phase = ANY(%s)",
+        (row_id, list(OPEN_PHASES)),
+    )
+    return cur.rowcount == 1
 
 
 async def advance(
@@ -149,12 +270,12 @@ async def advance(
     unknown = set(fields) - _SETTABLE
     if unknown:
         raise ValueError(f"unknown agent_handoffs fields: {sorted(unknown)}")
-    sets = ", ".join(f"{name} = %s" for name in fields)
+    sets = "".join(f", {name} = %s" for name in fields)
+    values = [Jsonb(v) if k in _JSON_FIELDS and v is not None else v for k, v in fields.items()]
     cur = await conn.execute(
-        "UPDATE agent_handoffs SET phase = %s"
-        + (f", {sets}" if sets else "")
-        + " WHERE id = %s AND phase = ANY(%s)",
-        (to_phase, *fields.values(), row_id, list(from_phases)),
+        f"UPDATE agent_handoffs SET phase = %s, progress_at = now(){sets}"
+        " WHERE id = %s AND phase = ANY(%s)",
+        (to_phase, *values, row_id, list(from_phases)),
     )
     return cur.rowcount == 1
 
@@ -168,7 +289,8 @@ async def start_clear(
         raise ValueError("start_clear moves from open phases only")
     cur = await conn.execute(
         "UPDATE agent_handoffs SET phase = 'clearing', clear_command_id = %s,"
-        " clear_attempts = clear_attempts + 1 WHERE id = %s AND phase = ANY(%s)",
+        " clear_attempts = clear_attempts + 1, progress_at = now()"
+        " WHERE id = %s AND phase = ANY(%s)",
         (command_id, row_id, list(from_phases)),
     )
     return cur.rowcount == 1
@@ -183,8 +305,8 @@ async def close(
 ) -> bool:
     """Close a row still in one of `from_phases` (any open phase by default); True when closed."""
     cur = await conn.execute(
-        "UPDATE agent_handoffs SET phase = %s, close_reason = %s, closed_at = now()"
-        " WHERE id = %s AND phase = ANY(%s)",
+        "UPDATE agent_handoffs SET phase = %s, close_reason = %s, closed_at = now(),"
+        " progress_at = now() WHERE id = %s AND phase = ANY(%s)",
         (phase, reason, row_id, list(from_phases)),
     )
     return cur.rowcount == 1
@@ -194,7 +316,8 @@ async def mark_delivered(conn: psycopg.AsyncConnection, row_id: int) -> bool:
     """Record that the row's handoff text reached its successor; True only for the first caller,
     so the text goes out once whoever sends it (the notice sweeper or the handoff pass)."""
     cur = await conn.execute(
-        "UPDATE agent_handoffs SET delivered_at = now() WHERE id = %s AND delivered_at IS NULL",
+        "UPDATE agent_handoffs SET delivered_at = now(), progress_at = now()"
+        " WHERE id = %s AND delivered_at IS NULL",
         (row_id,),
     )
     return cur.rowcount == 1
@@ -205,35 +328,20 @@ async def take_undelivered(
     agent_id: uuid.UUID,
     successor_agent_id: uuid.UUID,
     since: datetime | None,
-) -> str | None:
-    """Mark the newest undelivered handoff text of `agent_id` for its successor delivered and
-    return it. Only a row written since `since` (the predecessor's tenure start) counts: an
-    older undelivered one is stale."""
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Mark the newest undelivered handoff of `agent_id` for its successor delivered and return
+    `(handoff, handoff_text)` (either may be None). Only a row written since `since` (the
+    predecessor's tenure start) counts: an older undelivered one is stale."""
     cur = await conn.execute(
-        "UPDATE agent_handoffs SET delivered_at = now() WHERE id = ("
+        "UPDATE agent_handoffs SET delivered_at = now(), progress_at = now() WHERE id = ("
         " SELECT id FROM agent_handoffs WHERE agent_id = %s AND successor_agent_id = %s"
-        " AND handoff_text IS NOT NULL AND delivered_at IS NULL"
+        " AND (handoff IS NOT NULL OR handoff_text IS NOT NULL) AND delivered_at IS NULL"
         " AND (%s::timestamptz IS NULL OR created_at >= %s)"
-        " ORDER BY id DESC LIMIT 1) AND delivered_at IS NULL RETURNING handoff_text",
+        " ORDER BY id DESC LIMIT 1) AND delivered_at IS NULL RETURNING handoff, handoff_text",
         (agent_id, successor_agent_id, since, since),
     )
     row = await cur.fetchone()
-    return None if row is None else row[0]
-
-
-async def extend(
-    conn: psycopg.AsyncConnection, agent_id: uuid.UUID, seconds: int
-) -> Handoff | None:
-    """Push the deadline of the agent's `notified` row out once; None when it is not notified
-    or its deadline already passed (the request may be on its way)."""
-    return await _fetch(
-        conn,
-        "UPDATE agent_handoffs SET phase = 'extended', extended_at = now(),"
-        " deadline_at = deadline_at + make_interval(secs => %s)"
-        " WHERE agent_id = %s AND phase = 'notified' AND deadline_at > now()"
-        f" RETURNING {_COLUMNS}",
-        (seconds, agent_id),
-    )
+    return (None, None) if row is None else (row[0], row[1])
 
 
 async def open_rows(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> list[Handoff]:
@@ -247,32 +355,18 @@ async def open_rows(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> lis
         return [Handoff(**row) for row in await cur.fetchall()]
 
 
-async def countdown(
-    conn: psycopg.AsyncConnection, agent_id: uuid.UUID
-) -> tuple[int, str, int] | None:
-    """The agent's strong row while it counts down (notified or extended): its id, phase and the
-    minutes left until the handoff request (rounded up, at least 1); None otherwise."""
-    cur = await conn.execute(
-        "SELECT id, phase,"
-        " greatest(1, ceil(extract(epoch FROM deadline_at - now()) / 60))::int"
-        " FROM agent_handoffs WHERE agent_id = %s AND trigger = 'strong'"
-        " AND phase IN ('notified', 'extended')",
-        (agent_id,),
-    )
-    row = await cur.fetchone()
-    return (row[0], row[1], row[2]) if row else None
-
-
 async def queued_messages(
     conn: psycopg.AsyncConnection, row_id: int, *, notices_only: bool = False
 ) -> list[int]:
-    """The row's notice, request and return messages still queued (or its notices only)."""
+    """The row's notice, nudge, escalation and return messages still queued (or its notices,
+    nudges and escalations only), written since the row opened."""
     async with conn.cursor() as cur:
         await cur.execute(
             "SELECT m.id FROM messages m, agent_handoffs h WHERE h.id = %s"
             " AND m.status = 'queued' AND m.target_agent_id = h.agent_id"
-            " AND ((NOT %s AND m.id IN (h.request_message_id, h.return_message_id))"
-            "  OR (m.notice = 'handoff_notice' AND m.created_at >= h.created_at))",
+            " AND ((NOT %s AND m.id = h.return_message_id)"
+            "  OR (m.notice IN ('handoff_notice', 'handoff_nudge', 'handoff_escalation')"
+            "      AND m.created_at >= h.created_at))",
             (row_id, notices_only),
         )
         return [r[0] for r in await cur.fetchall()]
@@ -299,7 +393,7 @@ async def set_limits_start(
 
 # Phases before the discussion: a leader that moves while its row is in one of them carries the
 # row on to `discussing`, or closes it when the move was not its own handover.
-_PRE_DISCUSSION = ("notified", "extended", "requested", "handed")
+_PRE_DISCUSSION = ("pressuring", "submitted", "moving", "handed")
 # Reasons of the forced handover requests (the reconciler's rollout, the strong-limit handoff's
 # limit): no leader's judgment, so no handoff text from them and they never expire.
 FORCED_REASONS = ("rollout", "limit")
@@ -353,16 +447,12 @@ async def on_leader_moved(
         return
     if row.phase not in _PRE_DISCUSSION:
         return
-    if (
-        await advance(
-            conn,
-            row.id,
-            [row.phase],
-            "discussing",
-            discuss_since=now,
-            successor_agent_id=successor,
-            handoff_text=row.handoff_text if row.handoff_text is not None else text,
-        )
-        and row.request_message_id is not None
-    ):
-        await queue.cancel_message(conn, row.request_message_id)  # no-op once it was claimed
+    await advance(
+        conn,
+        row.id,
+        [row.phase],
+        "discussing",
+        discuss_since=now,
+        successor_agent_id=successor,
+        handoff_text=row.handoff_text if row.handoff_text is not None else text,
+    )

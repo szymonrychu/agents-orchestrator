@@ -214,7 +214,8 @@ async def deliver_handover(
         # the predecessor's own handoff (graceful handover) leads the notice; marked delivered in
         # this transaction so a later change never repeats it. Only a row written during the
         # predecessor's own tenure counts: an older undelivered one is stale.
-        handoff = await handoffs.take_undelivered(
+        # (the structured handoff dict is rendered by the successor package, step 15)
+        _, handoff = await handoffs.take_undelivered(
             conn, row["previous_agent_id"], row["agent_id"], row["previous_since"]
         )
         if handoff is not None:
