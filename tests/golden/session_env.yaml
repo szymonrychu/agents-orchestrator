@@ -28,8 +28,9 @@
       \ questions, and after each question give\n    your recommended answer, worded\
       \ so that replying \"yes\" accepts it. Then stop and\n    wait for the reply.\
       \ Never wait on an interactive question tool.'\nlimits:\n  shutdown_timeout_seconds:\
-      \ 90\nnotes:\n  enabled: true\nshutdown:\n  handoff:\n    enabled: true\n  \
-      \  notice_seconds: 120\n    handoff_seconds: 180\n    idle_proceed_seconds:\
+      \ 90\nnotes:\n  enabled: true\nguard:\n  max_stop_continuations: 25\n  max_agent_spawns:\
+      \ 300\n  tool_failure_repeats: 3\nshutdown:\n  handoff:\n    enabled: true\n\
+      \    notice_seconds: 120\n    handoff_seconds: 180\n    idle_proceed_seconds:\
       \ 60\n    notice_prompt: 'This pod is shutting down: in about 2 minutes you\
       \ will be asked\n      for a handoff, then the agent stops. Finish or park your\
       \ current step now: commit\n      and push, update your task and todo. There\
@@ -72,7 +73,7 @@
           agents.szymonrichert.pl/session: alpha
           app.kubernetes.io/managed-by: agents-orchestrator
         annotations:
-          agents.szymonrichert.pl/config-hash: 69d0bdebc86e7d2ef083fa236a84d208d948fe404e00ecc49bd59bd47391fbbc
+          agents.szymonrichert.pl/config-hash: 5c2ebe2a03a0a34d005aec7591a59631fb98c6eaf7c0faa2b4de37f627be3db9
       spec:
         imagePullSecrets:
         - name: regcred

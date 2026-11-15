@@ -117,6 +117,13 @@ async def patch(
                 docker_cpu_default=settings.docker_cpu_limit,
                 docker_memory_default=settings.docker_memory_limit,
                 docker_storage_default=settings.docker_storage,
+                runaway_defaults={
+                    "max_turns_per_task": settings.runaway_max_turns_per_task,
+                    "max_tokens_per_task": settings.runaway_max_tokens_per_task,
+                    "max_stop_continuations": settings.runaway_max_stop_continuations,
+                    "max_agent_spawns": settings.runaway_max_agent_spawns,
+                    "tool_failure_repeats": settings.runaway_tool_failure_repeats,
+                },
             )
         ):
             note_fields(request, looser)

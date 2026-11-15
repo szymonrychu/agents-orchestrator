@@ -1531,3 +1531,25 @@ async def test_open_lost_to_a_concurrent_row_is_skipped(env, monkeypatch):
     monkeypatch.setattr(handoff.handoffs, "open_rows", no_rows)
     assert await env.step(c["id"]) == []
     assert await env.messages(a["id"], "handoff_notice") == []
+
+
+# ---------------------------------------------------------------- runaway park (T-224)
+
+
+async def test_handoff_pass_skips_parked_session(env):
+    c, a = await env.solo()
+    parked, b = await env.solo()
+    await env.run(
+        "UPDATE sessions SET parked_at = now(), parked_reason = 'turns' WHERE id = %s",
+        (parked["id"],),
+    )
+    async with env.pool.connection() as conn:
+        got = await handoff.handoff_sessions(conn)
+    assert c["id"] in got and parked["id"] not in got
+    d = Dispatcher(env.pool, env.settings)
+    try:
+        await d._drain_leadership()
+    finally:
+        await d.aclose()
+    assert (await env.row(a["id"])).phase == "notified"
+    assert await env.rows("SELECT id FROM agent_handoffs WHERE agent_id = %s", (b["id"],)) == []

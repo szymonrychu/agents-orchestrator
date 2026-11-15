@@ -66,6 +66,12 @@ FAKE_TURN_ENV = {
         "value": "/opt/agent-test/scenario.json",
         "expand": False,
     },
+    # wrapper >= 0.16.0 puts the PreToolUse relay (tool_call events) in the managed-settings
+    # file; the fake reads that file only when told where it is
+    "FAKE_CLAUDE_MANAGED_SETTINGS": {
+        "value": "/etc/claude-code/managed-settings.json",
+        "expand": False,
+    },
 }
 SLOW_PROMPT = "slow task {n}: report when done"
 DISPATCH_STAGGER = 1.5  # seconds between dispatching message 1 and sending message 2
@@ -2053,6 +2059,57 @@ def test_wrapper_hook_and_idle_compact(api: httpx.Client) -> None:
 
         events = wait_for("a compacted event after 5 s idle", compacted, COMPACT_TIMEOUT)
         assert all(e["type"] == "compacted" for e in events), events
+
+
+STOP_BLOCK = 'printf \'%s\' \'{"decision": "block", "reason": "keep going"}\''
+
+
+def events_of(api: httpx.Client, cid: str, etype: str) -> list[dict[str, Any]]:
+    r = api.get(f"/sessions/{cid}/events", params={"types": etype, "limit": 500})
+    r.raise_for_status()
+    return r.json()["events"]
+
+
+def test_stop_loop_parks_session(api: httpx.Client) -> None:
+    """A looping Stop hook ends the turn at the wrapper cap and the session is parked (T-224)."""
+    spec = {
+        "replicas": 1,
+        "wrapper": {
+            "hooks": {"onStop": [{"type": "command", "run": STOP_BLOCK, "blocking": True}]}
+        },
+        "runaway": {"max_stop_continuations": 3},
+    }
+    with config_session(api, "runaway", spec) as created:
+        cid = created["id"]
+        ready_agents(api, cid, 1)
+        assert api.post(f"/sessions/{cid}/messages", json={"text": "say hello"}).status_code == 202
+
+        def parked() -> dict[str, Any] | None:
+            v = api.get(f"/sessions/{cid}").json()
+            return v if v["parked_at"] else None
+
+        view = wait_for("session parked", parked, TURN_TIMEOUT)
+        assert view["parked_reason"] == "stop_loop" and view["parked_detail"]["limit"] == 3, view
+        trips = events_of(api, cid, "guard_tripped")
+        assert [e["data"]["kind"] for e in trips] == ["stop_loop"], trips
+        assert (trips[0]["data"]["count"], trips[0]["data"]["limit"]) == (3, 3)
+        assert len(events_of(api, cid, "turn_continued")) == 3
+        notices = notice_messages(api, cid, "runaway_parked")
+        assert len(notices) == 1 and notices[0]["status"] == "queued", notices
+        notice_id = notices[0]["id"]
+        r = api.delete(f"/sessions/{cid}/park")
+        assert r.status_code == 200 and r.json()["parked_at"] is None, r.text
+        wait_for(
+            "notice sent after resume",
+            lambda: message(api, notice_id)["status"] == "sent",
+            TURN_TIMEOUT,
+        )
+
+        # the hook still blocks: the notice turn loops again and the session parks a second time
+        def parked_again() -> bool:
+            return (api.get(f"/sessions/{cid}").json()["parked_at"] or "") > view["parked_at"]
+
+        wait_for("parked again", parked_again, TURN_TIMEOUT)
 
 
 COMPACT_PROMPT = "compact mid turn: report when done"

@@ -289,6 +289,7 @@ DEFAULTS = {
     "docker_cpu_default": "4",
     "docker_memory_default": "8Gi",
     "docker_storage_default": "30Gi",
+    "runaway_defaults": {},
 }
 
 
@@ -349,6 +350,43 @@ def test_tighten_inactivity_keys_are_independent():
     stored = {"inactivity": {"reminder_seconds": 600, "close_seconds": 3600}}
     new = {"inactivity": {"reminder_seconds": 300, "close_seconds": 0}}
     assert tighten(stored, new) == ["inactivity.close_seconds"]
+
+
+RUNAWAY_KEYS = [
+    "max_turns_per_task",
+    "max_tokens_per_task",
+    "max_stop_continuations",
+    "max_agent_spawns",
+    "tool_failure_repeats",
+    "max_concurrent_subagents",
+    "max_subagent_spawn_depth",
+]
+
+
+@pytest.mark.parametrize("key", RUNAWAY_KEYS)
+def test_tighten_runaway(key):
+    path = f"runaway.{key}"
+
+    def r(v):
+        return {"runaway": {key: v}}
+
+    assert tighten(r(100), r(0)) == [path]  # 0 is off, infinite: looser
+    assert tighten(r(0), r(100)) == []  # on from off: tighter
+    assert tighten(r(100), r(200)) == [path]  # raising is looser
+    assert tighten(r(200), r(100)) == []  # lowering is tighter
+    assert tighten(r(100), r(100)) == []
+    assert tighten(r(100), {}) == [path]  # unset with default 0 is off
+    assert tighten({}, r(100)) == []
+    assert tighten({}, {}) == []
+    assert tighten(r(0), {}) == []
+    assert tighten(r(100), {}, runaway_defaults={key: 50}) == []
+    assert tighten(r(40), {}, runaway_defaults={key: 50}) == [path]
+
+
+def test_tighten_runaway_keys_are_independent():
+    stored = {"runaway": {"max_turns_per_task": 100, "max_tokens_per_task": 1000}}
+    new = {"runaway": {"max_turns_per_task": 50, "max_tokens_per_task": 0}}
+    assert tighten(stored, new) == ["runaway.max_tokens_per_task"]
 
 
 def test_tighten_ignores_other_fields_and_null_blocks():

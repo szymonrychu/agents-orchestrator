@@ -5,14 +5,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from agents_orchestrator import inactivity, taskboard_client
+from agents_orchestrator import inactivity, runaway, taskboard_client
 from agents_orchestrator.api import sessions as sessions_api
+from agents_orchestrator.api.scope import scope_of
 from agents_orchestrator.db import handover, sessions
 from agents_orchestrator.settings import SHUTDOWN_MARGIN_SECONDS, Settings
 
@@ -67,6 +69,9 @@ async def sweep(pool: AsyncConnectionPool, settings: Settings) -> None:
                 conn, settings.inactivity_reminder_seconds, _reminder_notice(settings)
             ),
         ),
+        ("park_runaway", lambda conn: sessions.park_breaching(conn, _decide(settings))),
+        ("interrupt_parked", sessions.interrupt_parked),
+        ("notify_parked", lambda conn: _notify_parked(conn, settings)),
         ("discard_idle", lambda conn: sessions.discard_idle(conn, settings.close_grace_seconds)),
     ]
     while True:
@@ -127,3 +132,77 @@ def _autoclose_notice(settings: Settings) -> Callable[[sessions.Session, datetim
         )
 
     return compose
+
+
+def _decide(
+    settings: Settings,
+) -> Callable[[sessions.Session, list[runaway.AgentWindow]], tuple[runaway.Breach, str] | None]:
+    def decide(
+        session: sessions.Session, windows: list[runaway.AgentWindow]
+    ) -> tuple[runaway.Breach, str] | None:
+        b = runaway.breach(runaway.effective(session.spec, settings), windows)
+        return None if b is None else (b, runaway.parked_notice(b))
+
+    return decide
+
+
+def _stored_breach(session: sessions.Session) -> runaway.Breach | None:
+    detail = session.parked_detail
+    if not detail or session.parked_reason not in ("stop_loop", "tokens", "turns"):
+        return None
+    try:
+        at = detail["window_at"]
+        return runaway.Breach(
+            session.parked_reason,  # type: ignore[arg-type]
+            uuid.UUID(detail["agent_id"]),
+            str(detail["pod"]),
+            int(detail["value"]),
+            int(detail["limit"]),
+            datetime.fromisoformat(at) if at else None,
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+async def _notify_parked(conn: AsyncConnection, settings: Settings) -> None:
+    """Post the owner notice task of each park not yet announced. No transaction is held across
+    the HTTP call; a failed post is retried next poll."""
+    if not settings.taskboard_available:
+        return
+    async with conn.transaction():
+        pending = await sessions.unnotified_parks(conn)
+    for session in pending:
+        if session.parked_at is None:
+            continue
+        b = _stored_breach(session)
+        if b is None:
+            log.warning("parked session %s has no readable park detail; generic notice", session.id)
+            title = f"Session {session.slug} parked by the runaway guard"
+            body = (
+                f"- Session: {session.id} ({session.slug})\n"
+                "- Park detail unreadable; see the session."
+            )
+        else:
+            title = runaway.task_title(session.slug, b)
+            body = runaway.task_body(
+                session_id=session.id,
+                slug=session.slug,
+                preset_name=session.preset_name,
+                b=b,
+                limits=runaway.effective(session.spec, settings),
+            )
+        ok = await taskboard_client.create_notice_task(
+            settings,
+            session.id,
+            session.slug,
+            scope_of(session),
+            title=title,
+            body=body,
+            client_key=runaway.client_key(session.id, session.parked_at),
+        )
+        if not ok:
+            log.warning("owner notice for parked session %s not posted; retrying", session.id)
+            continue
+        async with conn.transaction():
+            await sessions.mark_park_notified(conn, session.id, session.parked_at)
+        log.info("owner notice posted for parked session %s", session.id)

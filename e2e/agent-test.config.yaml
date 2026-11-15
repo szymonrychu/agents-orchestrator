@@ -17,6 +17,7 @@ claude:
   env:
     extra:
       FAKE_CLAUDE_SCENARIO: /opt/agent-test/scenario.json
+      FAKE_CLAUDE_MANAGED_SETTINGS: /etc/claude-code/managed-settings.json  # the PreToolUse relay lives there
   boot:
     timeout_seconds: 60
     min_boot_seconds: 0.5

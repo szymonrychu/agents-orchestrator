@@ -2852,7 +2852,9 @@
                   "project_grant",
                   "handoff_notice",
                   "handoff_request",
-                  "handoff_return"
+                  "handoff_return",
+                  "autoclose",
+                  "runaway_parked"
                 ],
                 "type": "string"
               },
@@ -4688,6 +4690,91 @@
         "title": "ReviewItemIn",
         "type": "object"
       },
+      "RunawayLimits": {
+        "additionalProperties": false,
+        "description": "Per-preset runaway-guard limits overriding the `ORCH_RUNAWAY_*` settings: unset uses the\nsetting, 0 turns the limit off (for the two subagent caps, 0 means the Claude default).",
+        "properties": {
+          "max_agent_spawns": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Agent Spawns"
+          },
+          "max_concurrent_subagents": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Concurrent Subagents"
+          },
+          "max_stop_continuations": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Stop Continuations"
+          },
+          "max_subagent_spawn_depth": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Subagent Spawn Depth"
+          },
+          "max_tokens_per_task": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Tokens Per Task"
+          },
+          "max_turns_per_task": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Turns Per Task"
+          },
+          "tool_failure_repeats": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Failure Repeats"
+          }
+        },
+        "title": "RunawayLimits",
+        "type": "object"
+      },
       "ScaleRequest": {
         "additionalProperties": false,
         "properties": {
@@ -5230,6 +5317,16 @@
             ],
             "title": "Reuse Running Agent"
           },
+          "runaway": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunawayLimits"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "session_messaging": {
             "anyOf": [
               {
@@ -5568,6 +5665,16 @@
               }
             ],
             "title": "Reuse Running Agent"
+          },
+          "runaway": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunawayLimits"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "session_messaging": {
             "anyOf": [
@@ -5988,6 +6095,46 @@
           "observed_generation": {
             "title": "Observed Generation",
             "type": "integer"
+          },
+          "parked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parked At"
+          },
+          "parked_detail": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parked Detail"
+          },
+          "parked_reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "turns",
+                  "tokens",
+                  "stop_loop"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parked Reason"
           },
           "preset_id": {
             "anyOf": [
@@ -20245,6 +20392,47 @@
           }
         },
         "summary": "Post Message"
+      }
+    },
+    "/api/v1/sessions/{session_id}/park": {
+      "delete": {
+        "description": "Resume a session parked by the runaway guard: its queue flows again and the guard windows\nrestart; 200 even when it is not parked, 409 once the session is flipped to deleting.",
+        "operationId": "resume_parked_session_api_v1_sessions__session_id__park_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Resume Parked Session"
       }
     },
     "/api/v1/sessions/{session_id}/permission-mode": {

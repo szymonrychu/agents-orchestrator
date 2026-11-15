@@ -11,7 +11,7 @@ from typing import Any
 
 import yaml
 
-from agents_orchestrator import handoff_texts, rendering
+from agents_orchestrator import handoff_texts, rendering, runaway
 from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.dispatcher.hive import compact_pct
 from agents_orchestrator.k8s.labels import (
@@ -307,8 +307,8 @@ def forwards_usage(spec: SessionSpec, settings: Settings) -> bool:
 
 def runs_default_image(spec: SessionSpec, settings: Settings) -> bool:
     """Whether the pods run the default agent image: only it is known to accept the newest
-    wrapper config sections (`usage`, `shutdown`); the config is strict, so an older image
-    would refuse them."""
+    wrapper config sections (`usage`, `shutdown`, `guard`); the config is strict, so an older
+    image would refuse them."""
     return not spec.image or spec.image == settings.agent_image
 
 
@@ -550,7 +550,17 @@ def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
                 for i in range(spec.max_replicas or spec.replicas)
             ],
         }
+    lim = runaway.effective(spec, settings)
+    if lim.max_concurrent_subagents:
+        claude["env"]["claude_code_max_concurrent_subagents"] = lim.max_concurrent_subagents
+    if lim.max_subagent_spawn_depth:
+        claude["env"]["claude_code_max_subagent_spawn_depth"] = lim.max_subagent_spawn_depth
     if runs_default_image(spec, settings):
+        cfg["guard"] = {
+            "max_stop_continuations": lim.max_stop_continuations,
+            "max_agent_spawns": lim.max_agent_spawns,
+            "tool_failure_repeats": lim.tool_failure_repeats,
+        }
         cfg["shutdown"] = {
             "handoff": {
                 "enabled": True,

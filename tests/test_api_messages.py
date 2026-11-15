@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -351,6 +352,28 @@ async def test_message_view_notice(http, pool):
         notice["id"]: "inactivity_reminder",
         plain["id"]: None,
     }
+
+
+async def test_message_view_renders_every_stored_notice_kind(http, pool):
+    """Every kind messages_notice_check admits renders on both message routes (a kind missing
+    from schemas.Notice made the list a 500 that dropped the connection, T-224)."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = %s",
+            ("messages_notice_check",),
+        )
+        (definition,) = await cur.fetchone()
+    kinds = re.findall(r"'([a-z_]+)'::text", definition)
+    assert {"autoclose", "runaway_parked"} <= set(kinds), definition
+    cl = await insert_session(pool)
+    ids = {
+        kind: (await insert_message(pool, cl["id"], text=kind, notice=kind))["id"] for kind in kinds
+    }
+    listed = await http.get(f"/api/v1/sessions/{cl['id']}/messages")
+    assert listed.status_code == 200, listed.text
+    assert {m["id"]: m["notice"] for m in listed.json()} == {v: k for k, v in ids.items()}
+    for kind, mid in ids.items():
+        assert (await http.get(f"/api/v1/messages/{mid}")).json()["notice"] == kind
 
 
 # ---- attachments ----

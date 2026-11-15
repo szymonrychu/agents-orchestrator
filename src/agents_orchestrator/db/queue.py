@@ -351,11 +351,12 @@ async def retry_message(conn: psycopg.AsyncConnection, id: int) -> bool:
 # ---------------------------------------------------------------- messages: the claim
 
 # A deleting session is excluded: its history is being exported and its pods torn down (D15),
-# so a turn started now would miss the discard-hook export. Its messages stay queued.
+# so a turn started now would miss the discard-hook export. Its messages stay queued. A session
+# parked by the runaway guard (T-224) is held the same way until resume, its notice included.
 _CANDIDATES = """
 SELECT m.session_id, min(m.id) AS head
 FROM messages m JOIN sessions c ON c.id = m.session_id
-WHERE m.status = 'queued' AND c.desired = 'active'
+WHERE m.status = 'queued' AND c.desired = 'active' AND c.parked_at IS NULL
 GROUP BY m.session_id
 ORDER BY head
 """
