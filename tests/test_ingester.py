@@ -1484,6 +1484,12 @@ async def test_tool_events_stamp_activity(harness, pool, listener) -> None:
     await h.start()
     await h.stored_through(h.last_fake_seq())
     assert await activity_at(pool, h.agent_id) is None
+    # the attach and the idle transition each refresh the peers view and NOTIFY after the events
+    # are stored: let those land before counting, or one arrives after the clear
+    seen = -1
+    while seen != len(listener.got):
+        seen = len(listener.got)
+        await asyncio.sleep(0.3)
     listener.got.clear()
 
     h.emit_at("tool_call", T1, {"tool_name": "Bash", "tool_use_id": "u1"})
