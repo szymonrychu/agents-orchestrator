@@ -14,8 +14,8 @@ from fastapi.concurrency import run_in_threadpool
 from psycopg_pool import AsyncConnectionPool
 from pydantic import ValidationError
 
-from agents_orchestrator import inactivity, rendering
-from agents_orchestrator.api import schemas, usage_gate, vault_client, vault_refs
+from agents_orchestrator import credential, inactivity, rendering
+from agents_orchestrator.api import credential_gate, schemas, usage_gate, vault_client, vault_refs
 from agents_orchestrator.api.errors import ApiError, not_found, not_manageable, project_error
 from agents_orchestrator.api.service_auth import calling_service
 from agents_orchestrator.api.usage_gate import UsageSource
@@ -341,6 +341,17 @@ async def meta(settings: Cfg) -> schemas.Meta:
             close_seconds=settings.inactivity_close_seconds,
             handoff_seconds=settings.inactivity_handoff_seconds,
         ),
+        credential=schemas.MetaCredential(
+            expires_at=settings.claude_credential_expires_at,
+            phase=credential.phase(
+                datetime.now(UTC),
+                settings.claude_credential_expires_at,
+                settings.credential_warn_days,
+                settings.credential_refuse_hours,
+            ),
+            warn_days=settings.credential_warn_days,
+            refuse_hours=settings.credential_refuse_hours,
+        ),
         mindmap=settings.mindmap_available,
     )
 
@@ -415,6 +426,7 @@ async def create(
     the create lock): the session id is generated here and given to the row, the pins land in
     `secret_versions`, and any failure after the pin releases them again. A spec body may not
     carry refs (422 `vault_ref_not_allowed`)."""
+    credential_gate.check(settings, datetime.now(UTC))
     if (body.spec is None) == (body.preset_id is None):
         raise ApiError(422, "invalid_request", "exactly one of spec or preset_id")
     if created_by_session is not None and body.spec is not None:
@@ -1033,15 +1045,15 @@ async def gate_scale_up(
     *,
     caller_agent_id: uuid.UUID | None = None,
 ) -> None:
-    """Refuse a scale-up over the usage quota (409 `usage_quota`), from the session's own
-    snapshotted quota. Scale-down, an unchanged count and a gate that is off are never gated;
+    """Refuse a scale-up inside the credential refuse margin (409 `credential_expiring`), then
+    over the usage quota (409 `usage_quota`), from the session's own snapshotted quota. The
+    credential check runs with the usage gate off too. Scale-down and an unchanged count are
+    never gated, nor is the usage check run when the gate is off;
     nor is a count `set_replicas` refuses on its own (missing, deleting, static, out of range),
     so its error stays the answer; that includes `not_leader` for a `caller_agent_id` that is
     not the session's leader, so a non-leader never sees `usage_quota`. Check-then-act: a
     concurrent scale between this read and `set_replicas` is not re-judged (fail-open, like
     missing data)."""
-    if usage is None:
-        return
     async with pool.connection() as conn:
         session = await repo.get(conn, session_id)
         if session is None or session.desired != "active" or session.spec.static:
@@ -1053,7 +1065,9 @@ async def gate_scale_up(
             leader = await agents_repo.leader_of(conn, session_id)
             if leader is None or leader[0] != caller_agent_id:
                 return
-    await usage_gate.enforce(usage, spec.usage_quota, settings.usage_quota_default)
+    credential_gate.check(settings, datetime.now(UTC))
+    if usage is not None:
+        await usage_gate.enforce(usage, spec.usage_quota, settings.usage_quota_default)
 
 
 async def scale(conn, session_id: uuid.UUID, replicas: int) -> schemas.ScaleResult:

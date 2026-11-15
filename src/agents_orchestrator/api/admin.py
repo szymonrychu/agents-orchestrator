@@ -821,7 +821,10 @@ async def set_session_labels(
     responses={
         403: WRITE_FORBIDDEN,
         404: SESSION_NOT_FOUND,
-        409: {"description": "usage_quota, static_session, leader_would_leave or session_deleting"},
+        409: {
+            "description": "credential_expiring, usage_quota, static_session, leader_would_leave"
+            " or session_deleting"
+        },
         422: {
             "description": "out_of_range: replicas outside 1..max_replicas; "
             "own_session: the caller's own session"
@@ -837,7 +840,8 @@ async def scale_session(
     usage: Usage,
 ) -> schemas.ScaleResult:
     """Set spec.replicas of a manageable session in place; the caller's own session is refused
-    (422 `own_session`). A scale-up over the usage quota is 409 `usage_quota`: that check reads
+    (422 `own_session`). A scale-up inside the credential refuse margin is 409
+    `credential_expiring`, over the usage quota 409 `usage_quota`: those checks read
     on its own connection and fails open, like the main port's, so it runs between a short
     read of the target and the transaction (never while a connection is held). No kube call."""
     _, caller = caller_of(request)

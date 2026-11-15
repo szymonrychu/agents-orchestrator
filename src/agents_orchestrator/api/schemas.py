@@ -647,6 +647,13 @@ class UsageView(BaseModel):
     seven_day: UsageWindowView | None
 
 
+class MetaCredential(BaseModel):
+    expires_at: datetime | None
+    phase: Literal["unknown", "ok", "warn", "refuse", "expired"]
+    warn_days: int
+    refuse_hours: int
+
+
 class MetaInactivity(BaseModel):
     reminder_seconds: int
     close_seconds: int
@@ -670,6 +677,7 @@ class Meta(BaseModel):
     usage: MetaUsage
     inactivity: MetaInactivity
     mindmap: bool
+    credential: MetaCredential
 
 
 Lane = Literal["idle", "regular", "priority"]
