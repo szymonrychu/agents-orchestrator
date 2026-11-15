@@ -224,6 +224,8 @@ def agent_view(r: dict) -> schemas.AgentView:
         or _start_failure_view(r["start_failure"]),
         permission_mode_state=r["permission_mode_state"],
         permission_mode_reason=r["permission_mode_reason"],
+        auth_state=r["auth_state"],
+        auth_reason=r["auth_reason"],
     )
 
 

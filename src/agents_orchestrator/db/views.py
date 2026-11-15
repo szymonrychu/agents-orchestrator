@@ -32,6 +32,9 @@ SELECT c.id AS session_id,
        count(s.agent_id) FILTER (
            WHERE a.gone_at IS NULL AND s.permission_mode_state IS NOT NULL
        ) AS permission_unavailable_agents,
+       count(s.agent_id) FILTER (
+           WHERE a.gone_at IS NULL AND s.auth_state = 'failed'
+       ) AS auth_failed_agents,
        max(s.context_pct) FILTER (WHERE a.gone_at IS NULL) AS context_pct_max,
        (SELECT count(*) FROM messages m
          WHERE m.session_id = c.id AND m.status = 'queued') AS queued,
@@ -56,6 +59,7 @@ SELECT a.id, a.ordinal, a.pod_name, a.ready, a.gone_at,
        s.context_window_tokens, s.context_pct, s.peers,
        s.waiting_reason, s.waiting_since, s.bootstrap_step, s.bootstrap_failure,
        a.start_failure, s.permission_mode_state, s.permission_mode_reason,
+       s.auth_state, s.auth_reason,
        (l.agent_id IS NOT NULL) AS leader
 FROM agents a
 LEFT JOIN session_leaders l ON l.agent_id = a.id
@@ -102,6 +106,7 @@ def summarize(session: Session, agg: dict[str, Any] | None, settings: Settings) 
         "attention_agents": agg.get("attention_agents", 0),
         "bootstrap_failed_agents": agg.get("bootstrap_failed_agents", 0),
         "permission_unavailable_agents": agg.get("permission_unavailable_agents", 0),
+        "auth_failed_agents": agg.get("auth_failed_agents", 0),
         "oldest_queued_at": agg.get("oldest_queued_at"),
     }
 

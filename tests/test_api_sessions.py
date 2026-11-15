@@ -284,6 +284,7 @@ async def test_session_summary_state_and_gauge_max(http, pool):
         "attention_agents": 0,
         "bootstrap_failed_agents": 0,
         "permission_unavailable_agents": 0,
+        "auth_failed_agents": 0,
     }
     await set_agent_status(pool, a1["id"], state="busy", context_pct=62.5)
     summary = (await http.get("/api/v1/sessions")).json()[0]["summary"]

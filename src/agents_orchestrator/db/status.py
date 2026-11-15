@@ -114,13 +114,14 @@ async def upsert_status(
     waiting: tuple[str, Timestamp] | None = None,
     bootstrap: tuple[dict[str, Any] | None, dict[str, Any] | None] = (None, None),
     permission_mode: tuple[str | None, str | None] = (None, None),
+    auth: tuple[str | None, str | None] = (None, None),
     outstanding_subagents: int = 0,
 ) -> StateChange:
     """Seed the row from a wrapper snapshot on attach.
 
     Every column comes from the snapshot (a null context clears the gauge; `waiting` is
     (reason, since) or None; `bootstrap` is (latest step, failed step);
-    `permission_mode` is (state, reason)) except free_since,
+    `permission_mode` and `auth` are (state, reason)) except free_since,
     which moves to now() only when the snapshot is idle and the stored state was not.
     A snapshot with no outstanding subagents empties `background_subagents` (a lost stop event
     cannot leave a stale entry); with some, the stored map is kept.
@@ -137,6 +138,9 @@ async def upsert_status(
         " last_seq=%s, waiting_reason=%s, waiting_since=%s::timestamptz,"
         " bootstrap_step=%s, bootstrap_failure=%s,"
         " permission_mode_state=%s, permission_mode_reason=%s,"
+        " auth_state=%s, auth_reason=%s,"
+        " auth_failed_at = CASE WHEN %s::text IS NULL THEN NULL"
+        " ELSE coalesce(auth_failed_at, now()) END,"
         " background_subagents = CASE WHEN %s THEN '{}'::jsonb ELSE background_subagents END,"
         " updated_at=now() WHERE agent_id=%s",
         (
@@ -154,6 +158,9 @@ async def upsert_status(
             _jsonb(bootstrap[1]),
             permission_mode[0],
             permission_mode[1],
+            auth[0],
+            auth[1],
+            auth[0],
             outstanding_subagents == 0,
             agent_id,
         ),
@@ -227,6 +234,28 @@ async def set_permission_mode_unavailable(
         " updated_at=now() WHERE agent_id=%s",
         (reason, agent_id),
     )
+
+
+async def set_auth_failed(
+    conn: psycopg.AsyncConnection, agent_id: uuid.UUID, reason: str | None
+) -> None:
+    """The wrapper reported `auth_failed`: claude shows a re-login screen. The first time stays."""
+    await _ensure_row(conn, agent_id)
+    await conn.execute(
+        "UPDATE agent_status SET auth_state='failed', auth_reason=%s,"
+        " auth_failed_at=coalesce(auth_failed_at, now()), updated_at=now() WHERE agent_id=%s",
+        (reason, agent_id),
+    )
+
+
+async def any_auth_failed(conn: psycopg.AsyncConnection) -> bool:
+    """Whether any live (not gone) agent reports a failed auth."""
+    cur = await conn.execute(
+        "SELECT EXISTS (SELECT 1 FROM agent_status s JOIN agents a ON a.id = s.agent_id"
+        " WHERE a.gone_at IS NULL AND s.auth_state = 'failed')"
+    )
+    row = await cur.fetchone()
+    return bool(row and row[0])
 
 
 async def clear_waiting(

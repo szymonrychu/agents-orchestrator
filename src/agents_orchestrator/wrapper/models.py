@@ -68,6 +68,9 @@ class Snapshot(_Model):
     # wrapper 0.7.1, additive: "unavailable" while the requested permission mode cannot be used
     permission_mode_state: str | None = None
     permission_mode_reason: str | None = None
+    # wrapper T-225 release, additive: "failed" while claude shows a re-login screen
+    auth_state: str | None = None
+    auth_reason: str | None = None
     bootstrap: Bootstrap | None = None
     # The wrapper reports no transcript field (its resume check tests the file on disk). A
     # completed turn proves a transcript exists (True); zero completed turns proves nothing,

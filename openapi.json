@@ -267,6 +267,29 @@
               }
             ]
           },
+          "auth_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Auth Reason"
+          },
+          "auth_state": {
+            "anyOf": [
+              {
+                "const": "failed",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Auth State"
+          },
           "bootstrap": {
             "anyOf": [
               {
@@ -5753,6 +5776,11 @@
         "properties": {
           "attention_agents": {
             "title": "Attention Agents",
+            "type": "integer"
+          },
+          "auth_failed_agents": {
+            "default": 0,
+            "title": "Auth Failed Agents",
             "type": "integer"
           },
           "auto_compact_pct": {

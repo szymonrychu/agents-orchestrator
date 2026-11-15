@@ -336,6 +336,8 @@ class SessionSummary(BaseModel):
     bootstrap_failed_agents: int
     # agents whose wrapper reported the requested permission mode (auto) unavailable
     permission_unavailable_agents: int
+    # live agents whose claude shows a re-login screen
+    auth_failed_agents: int = 0
 
 
 class BackupRun(BaseModel):
@@ -554,6 +556,9 @@ class AgentView(BaseModel):
     # "unavailable" when the wrapper could not use the requested permission mode, else null
     permission_mode_state: Literal["unavailable"] | None = None
     permission_mode_reason: str | None = None
+    # "failed" while claude shows a re-login screen (wrapper auth_failed), else null
+    auth_state: Literal["failed"] | None = None
+    auth_reason: str | None = None
 
 
 class MetaResources(BaseModel):
