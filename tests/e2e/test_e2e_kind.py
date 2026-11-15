@@ -125,6 +125,41 @@ def wait_for(what: str, probe: Callable[[], Any], timeout: float, interval: floa
         time.sleep(interval)
 
 
+def session_row_diagnostics(api: httpx.Client, cid: str, slug: str) -> str:
+    """Best-effort status.message and pod phase/deletionTimestamp of a session, for timeouts."""
+    parts: list[str] = []
+    try:
+        resp = api.get(f"/sessions/{cid}")
+        status = resp.json().get("status", {}) if resp.status_code == 200 else {}
+        parts.append(f"row http {resp.status_code}, status.phase={status.get('phase')!r}")
+        parts.append(f"status.message={status.get('message')!r}")
+    except Exception as exc:  # diagnostics must never mask the timeout
+        parts.append(f"session read failed: {exc!r}")
+    try:
+        items = kube_json("get", "pods", "-l", f"{SESSION_LABEL}={slug}")["items"]
+        pods = [
+            f"{p['metadata']['name']}: phase={p.get('status', {}).get('phase')!r} "
+            f"deletionTimestamp={p['metadata'].get('deletionTimestamp')!r}"
+            for p in items
+        ]
+        parts.append(f"pods=[{'; '.join(pods)}]")
+    except Exception as exc:
+        parts.append(f"pod read failed: {exc!r}")
+    return "; ".join(parts)
+
+
+def wait_session_row_gone(api: httpx.Client, cid: str, slug: str) -> None:
+    """Wait until the session row answers 404; on timeout add the status message and pod state."""
+    try:
+        wait_for(
+            f"session {slug} row to be gone",
+            lambda: api.get(f"/sessions/{cid}").status_code == 404,
+            DISCARD_TIMEOUT,
+        )
+    except AssertionError as exc:
+        raise AssertionError(f"{exc}; {session_row_diagnostics(api, cid, slug)}") from exc
+
+
 def labelled_objects(slug: str) -> list[str]:
     out = kubectl(
         "get",
@@ -1412,11 +1447,7 @@ def test_schedule_default_preset_generated_slug(api: httpx.Client) -> None:
         assert created["preset_name"] == "Default", created
     finally:  # the session costs a reconcile for nothing: discard it at once
         api.delete(f"/sessions/{cid}")
-    wait_for(
-        f"session {created['slug']} row to be gone",
-        lambda: api.get(f"/sessions/{cid}").status_code == 404,
-        DISCARD_TIMEOUT,
-    )
+    wait_session_row_gone(api, cid, created["slug"])
 
 
 def test_patch_session_retired(api: httpx.Client, session: dict[str, Any]) -> None:
@@ -1740,11 +1771,7 @@ def init_session(api: httpx.Client, body: dict[str, Any]) -> Iterator[dict[str, 
         yield created
     finally:
         api.delete(f"/sessions/{cid}")
-        wait_for(
-            f"session {created['slug']} row to be gone",
-            lambda: api.get(f"/sessions/{cid}").status_code == 404,
-            DISCARD_TIMEOUT,
-        )
+        wait_session_row_gone(api, cid, created["slug"])
 
 
 def wait_init_state(api: httpx.Client, cid: str, states: tuple[str, ...]) -> dict[str, Any]:
@@ -1758,10 +1785,14 @@ def wait_init_state(api: httpx.Client, cid: str, states: tuple[str, ...]) -> dic
     return wait_for(f"status.init.state in {states}", probe, INIT_TIMEOUT)
 
 
+def wait_sessions_probe(api: httpx.Client, cid: str) -> list[dict[str, Any]]:
+    agents = [a for a in agents_of(api, cid) if not a["gone"]]
+    return [a for a in agents if a["ready"] and a["free_since"]]
+
+
 def wait_sessions(api: httpx.Client, cid: str, count: int) -> list[dict[str, Any]]:
     def probe() -> list[dict[str, Any]] | None:
-        agents = [a for a in agents_of(api, cid) if not a["gone"]]
-        ready = [a for a in agents if a["ready"] and a["free_since"]]
+        ready = wait_sessions_probe(api, cid)
         return ready if len(ready) == count else None
 
     return wait_for(f"{count} agents with sessions", probe, READY_TIMEOUT)
@@ -1900,6 +1931,16 @@ def test_permission_mode_preset_value_and_session_edit_reach_the_pod_config(
                 return bool(hashes) and hashes.isdisjoint({h for _, h in before.values()})
 
             wait_for("the config hash to move", hash_moved, 120)
+            # teardown must not delete while the rolled pod still starts: the wrapper ignores
+            # SIGTERM until startup finishes, so the pod and the row would outlive the discard wait
+            old_uids = {uid for uid, _ in before.values()}
+
+            def rolled_ready() -> bool:
+                ready = wait_sessions_probe(api, cid)
+                uids = {name: uid for name, (uid, _) in pod_identity(slug).items()}
+                return len(ready) == 1 and uids.get(ready[0]["pod_name"], "") not in old_uids | {""}
+
+            wait_for("the rolled pod to be ready again", rolled_ready, READY_TIMEOUT)
     finally:
         api.delete(f"/presets/{preset['id']}")
 
@@ -1956,11 +1997,7 @@ def config_session(
         yield created
     finally:
         api.delete(f"/sessions/{cid}")
-        wait_for(
-            f"session {slug} row to be gone",
-            lambda: api.get(f"/sessions/{cid}").status_code == 404,
-            DISCARD_TIMEOUT,
-        )
+        wait_session_row_gone(api, cid, slug)
 
 
 def ready_agents(api: httpx.Client, cid: str, count: int) -> list[dict[str, Any]]:
@@ -2880,11 +2917,7 @@ def superleader(api: httpx.Client) -> Iterator[dict[str, Any]]:
     finally:
         if created:
             api.delete(f"/sessions/{created['id']}")
-            wait_for(
-                f"session {SUPERLEADER_SLUG} row to be gone",
-                lambda: api.get(f"/sessions/{created['id']}").status_code == 404,
-                DISCARD_TIMEOUT,
-            )
+            wait_session_row_gone(api, created["id"], SUPERLEADER_SLUG)
         api.delete(f"/presets/{preset_id}")
 
 
@@ -3118,11 +3151,7 @@ def test_start_prompt_is_turn_one_before_a_message_sent_right_after_create(
     finally:
         if cid:
             api.delete(f"/sessions/{cid}")
-            wait_for(
-                f"session {START_ORDER_SLUG} row to be gone",
-                lambda: api.get(f"/sessions/{cid}").status_code == 404,
-                DISCARD_TIMEOUT,
-            )
+            wait_session_row_gone(api, cid, START_ORDER_SLUG)
         api.delete(f"/presets/{preset_id}")
 
 
