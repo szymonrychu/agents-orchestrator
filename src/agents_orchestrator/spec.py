@@ -272,6 +272,10 @@ PERMISSION_MODES: tuple[dict[str, str], ...] = (
 HOOK_EVENTS: tuple[str, ...] = tuple(s.name for s in HOOK_EVENT_SPECS)
 TOOL_EVENTS: tuple[str, ...] = tuple(s.name for s in HOOK_EVENT_SPECS if s.supports_matcher)
 HOOK_ACTIONS_MAX = 20
+# Cap on the serialized PUT body `{"overlay": ...}` (compact JSON), so an edge-size overlay fails
+# at validation, not with a 413 at session start.
+MANAGED_SETTINGS_MAX = 64 * 1024
+_MANAGED_ENV_SECRET_RE = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|AUTH|CREDENTIAL", re.IGNORECASE)
 HOOK_RUN_MAX_CHARS = 16384
 INSTRUCTIONS_MAX = 2000
 SYSTEM_APPEND_MAX = 16384
@@ -494,6 +498,9 @@ class Plugins(_Strict):
 class WrapperSettings(_Strict):
     """Typed claude-code-wrapper settings a session may carry (create-time only)."""
 
+    # an error text must not echo the overlay (an env name or value the validator refused)
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
     hooks: dict[str, list[HookAction]] | None = None
     auto_compact: AutoCompact | None = None
     system_append: str | None = Field(default=None, max_length=SYSTEM_APPEND_MAX)
@@ -508,6 +515,22 @@ class WrapperSettings(_Strict):
     agent_commands: (
         list[Literal["compact", "context", "mcp", "reload-plugins", "reload-skills"]] | None
     ) = None
+    managed_settings: dict[str, Any] | None = None
+
+    @field_validator("managed_settings")
+    @classmethod
+    def _managed_settings(cls, v: dict[str, Any] | None):
+        if v is None:
+            return v
+        size = len(json.dumps({"overlay": v}, separators=(",", ":")))
+        if size > MANAGED_SETTINGS_MAX:
+            raise ValueError(
+                f"wrapper.managed_settings is too large: at most {MANAGED_SETTINGS_MAX} bytes"
+            )
+        env = v.get("env")
+        if isinstance(env, dict) and any(_MANAGED_ENV_SECRET_RE.search(str(n)) for n in env):
+            raise ValueError("wrapper.managed_settings.env may not carry credentials")
+        return v
 
     @field_validator("hooks")
     @classmethod

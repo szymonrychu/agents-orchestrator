@@ -6969,6 +6969,18 @@
             ],
             "title": "Hooks"
           },
+          "managed_settings": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Managed Settings"
+          },
           "max_restarts": {
             "anyOf": [
               {

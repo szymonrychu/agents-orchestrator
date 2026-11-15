@@ -136,6 +136,11 @@ class WrapperClient:
         except ValueError:
             return resp.status_code, resp.text
 
+    async def put_managed_settings(self, overlay: dict[str, Any]) -> dict[str, Any]:
+        """Replace the wrapper's managed-settings overlay (claude-code-wrapper >= 0.16.0)."""
+        _, body = await self.request_json("PUT", "/managed-settings", json={"overlay": overlay})
+        return body if isinstance(body, dict) else {}
+
     # sessions
 
     async def list_sessions(self, timeout: float = DEFAULT_TIMEOUT) -> list[Snapshot]:
