@@ -27,6 +27,11 @@ _BOOTSTRAP_KEYS = ("step", "status", "message", "started_at", "finished_at")
 
 Timestamp = datetime | str | None
 
+# turn origins that start a new task window (a delivered message); every other origin
+# (agent, hook, ...) continues the running window
+DELIVERED_ORIGINS = frozenset({"client", "initial", "peer"})
+_BILLABLE_KEYS = ("input_tokens", "output_tokens", "cache_creation_input_tokens")
+
 
 @dataclass(frozen=True)
 class StateChange:
@@ -487,4 +492,90 @@ async def notify_agent_free(
 ) -> None:
     await notify(
         conn, AGENT_FREE_CHANNEL, {"session_id": str(session_id), "agent_id": str(agent_id)}
+    )
+
+
+def billable_tokens(data: Mapping[str, Any]) -> int:
+    """Input, output and cache-creation tokens of a usage event; cache reads never count and a
+    non-int or negative value counts 0."""
+    total = 0
+    for key in _BILLABLE_KEYS:
+        value = data.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            total += value
+    return total
+
+
+_STALE = (
+    "(st.guard_window_at IS NULL OR st.guard_window_at < coalesce(s.guard_reset_at, '-infinity'))"
+)
+
+
+def _when(cond: str, column: str, restart: str) -> str:
+    """SET fragment: `column` takes `restart` when `cond` holds, else keeps its value."""
+    return f"{column} = CASE WHEN {cond} THEN {restart} ELSE st.{column} END"
+
+
+async def _guard_update(
+    conn: psycopg.AsyncConnection, agent_id: uuid.UUID, sets: list[str], params: dict[str, Any]
+) -> None:
+    await _ensure_row(conn, agent_id)
+    await conn.execute(
+        f"UPDATE agent_status st SET {', '.join(sets)}, updated_at = now()"  # noqa: S608
+        " FROM agents a JOIN sessions s ON s.id = a.session_id"
+        " WHERE st.agent_id = a.id AND a.id = %(agent)s",
+        {**params, "agent": agent_id},
+    )
+
+
+async def guard_turn_started(
+    conn: psycopg.AsyncConnection, agent_id: uuid.UUID, origin: str | None, at: Timestamp
+) -> None:
+    """Count a started turn in the agent's task window. A delivered message (or a window cleared
+    by a resume) restarts the window at `at`."""
+    restart = f"(%(delivered)s OR {_STALE})"
+    await _guard_update(
+        conn,
+        agent_id,
+        [
+            f"guard_turns = CASE WHEN {restart} THEN 1 ELSE st.guard_turns + 1 END",
+            _when(restart, "guard_tokens", "0"),
+            _when(restart, "guard_stop_loop_at", "NULL"),
+            _when(restart, "guard_window_at", "%(at)s::timestamptz"),
+        ],
+        {"delivered": origin in DELIVERED_ORIGINS, "at": at},
+    )
+
+
+async def guard_add_tokens(
+    conn: psycopg.AsyncConnection, agent_id: uuid.UUID, tokens: int, at: Timestamp
+) -> None:
+    """Add billable tokens to the window; a window cleared by a resume restarts at `at`."""
+    await _guard_update(
+        conn,
+        agent_id,
+        [
+            _when(_STALE, "guard_turns", "0"),
+            f"guard_tokens = CASE WHEN {_STALE} THEN %(n)s ELSE st.guard_tokens + %(n)s END",
+            _when(_STALE, "guard_stop_loop_at", "NULL"),
+            _when(_STALE, "guard_window_at", "%(at)s::timestamptz"),
+        ],
+        {"n": tokens, "at": at},
+    )
+
+
+async def guard_mark_stop_loop(
+    conn: psycopg.AsyncConnection, agent_id: uuid.UUID, at: Timestamp
+) -> None:
+    """Record the wrapper's stop_loop trip; a stale window restarts empty at `at` first."""
+    await _guard_update(
+        conn,
+        agent_id,
+        [
+            _when(_STALE, "guard_turns", "0"),
+            _when(_STALE, "guard_tokens", "0"),
+            _when(_STALE, "guard_window_at", "%(at)s::timestamptz"),
+            "guard_stop_loop_at = %(at)s::timestamptz",
+        ],
+        {"at": at},
     )

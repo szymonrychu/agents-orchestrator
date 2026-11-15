@@ -326,7 +326,14 @@ class _AgentStream:
                 status="running",
             )
             await status.set_current_turn(conn, ref.agent_id, turn_id)
+            await status.guard_turn_started(conn, ref.agent_id, data.get("origin"), env.ts)
             await status.notify_status(conn, ref.session_id, ref.agent_id)
+        elif env.type == "usage":
+            tokens = status.billable_tokens(data)
+            if tokens > 0:
+                await status.guard_add_tokens(conn, ref.agent_id, tokens, env.ts)
+        elif env.type == "guard_tripped" and data.get("kind") == "stop_loop":
+            await status.guard_mark_stop_loop(conn, ref.agent_id, env.ts)
         elif env.type in _TURN_END:
             record = data.get("record") if isinstance(data.get("record"), dict) else data
             if record.get("turn_id"):
