@@ -70,6 +70,8 @@ _SETTABLE = frozenset(
     }
 )
 _JSON_FIELDS = frozenset({"handoff", "inflight"})
+# The submit a transition was judged on is still the row's latest (`seen_submit`).
+_SUBMIT_GUARD = " AND submitted_at = %s"
 
 
 @dataclass(frozen=True)
@@ -264,11 +266,15 @@ async def advance(
     row_id: int,
     from_phases: Sequence[str],
     to_phase: str,
+    *,
+    seen_submit: datetime | None = None,
     **fields: Any,
 ) -> bool:
     """Move a row to `to_phase` when it is in one of `from_phases`; True when a row changed.
 
-    Open phases only, on both sides: a row is closed through `close` and never reopened."""
+    Open phases only, on both sides: a row is closed through `close` and never reopened. With
+    `seen_submit` the row must still carry that `submitted_at`: a submit that landed since the
+    caller read the row makes the update lose (the submit route takes no lock)."""
     if to_phase not in OPEN_PHASES or not set(from_phases) <= set(OPEN_PHASES):
         raise ValueError("advance moves between open phases only")
     unknown = set(fields) - _SETTABLE
@@ -278,24 +284,30 @@ async def advance(
     values = [Jsonb(v) if k in _JSON_FIELDS and v is not None else v for k, v in fields.items()]
     cur = await conn.execute(
         f"UPDATE agent_handoffs SET phase = %s, progress_at = now(){sets}"
-        " WHERE id = %s AND phase = ANY(%s)",
-        (to_phase, *values, row_id, list(from_phases)),
+        f" WHERE id = %s AND phase = ANY(%s){_SUBMIT_GUARD if seen_submit else ''}",
+        (to_phase, *values, row_id, list(from_phases), *([seen_submit] if seen_submit else [])),
     )
     return cur.rowcount == 1
 
 
 async def start_clear(
-    conn: psycopg.AsyncConnection, row_id: int, from_phases: Sequence[str], command_id: int
+    conn: psycopg.AsyncConnection,
+    row_id: int,
+    from_phases: Sequence[str],
+    command_id: int,
+    *,
+    seen_submit: datetime | None = None,
 ) -> bool:
     """Move a row to `clearing` for the clear command `command_id`, counting the attempt in the
-    same guarded UPDATE (`clear_attempts + 1`); True when a row changed."""
+    same guarded UPDATE (`clear_attempts + 1`); True when a row changed. `seen_submit` as in
+    `advance`."""
     if not set(from_phases) <= set(OPEN_PHASES):
         raise ValueError("start_clear moves from open phases only")
     cur = await conn.execute(
         "UPDATE agent_handoffs SET phase = 'clearing', clear_command_id = %s,"
         " clear_attempts = clear_attempts + 1, progress_at = now()"
-        " WHERE id = %s AND phase = ANY(%s)",
-        (command_id, row_id, list(from_phases)),
+        f" WHERE id = %s AND phase = ANY(%s){_SUBMIT_GUARD if seen_submit else ''}",
+        (command_id, row_id, list(from_phases), *([seen_submit] if seen_submit else [])),
     )
     return cur.rowcount == 1
 
@@ -422,18 +434,24 @@ async def on_leader_moved(
 ) -> None:
     """The leadership pass moved the lead from `previous` to `successor` (same transaction).
 
-    `req` is the applied request (`kind`, `reason`); a move that is not a leader's own
-    `handover` (`user`, `scale_down`, `leader_lost`: pass a dict with that `kind`) closes a row
-    still before its discussion `cancelled not_leader`. A leader's own handover moves such a row
-    to `discussing` (`discuss_since` now, the successor recorded, the agent's own handoff text
-    kept, else the request reason), or, with no row and a voluntary reason (not `rollout` or
-    `limit`), opens a `voluntary` row already in `discussing` with the reason as its text. The
-    ex-leader is cleared by the handoff pass after the discussion, never here (m890). A shutdown
-    row belongs to the shutdown path and is left alone."""
+    `req` is the applied request (`kind`, `reason`). A move that neither the row's own `limit`
+    request (row `moving`) nor the leader's voluntary `handover` caused (`user`, `rollout`,
+    `scale_down`, `leader_lost`: pass a dict with that `kind`) closes a row still before its
+    discussion `cancelled not_leader` and the ex-leader keeps its context (decision 716). A
+    leader's own handover moves such a row to `discussing` (`discuss_since` now, the successor
+    recorded, the agent's own handoff text kept, else the voluntary reason), or, with no row and
+    a voluntary reason, opens a `voluntary` row already in `discussing` with the reason as its
+    text. The ex-leader is cleared by the handoff pass after the discussion, never here (m890).
+    A shutdown row belongs to the shutdown path and is left alone."""
     row = await open_row(conn, previous)
     if row is not None and row.trigger == "shutdown":
         return
-    if req["kind"] != "handover":
+    # decision 716: only the row's own `limit` request (queued for its accepted, gate-clear
+    # submit, phase `moving`) or the leader's own voluntary handover leads to a discussion and
+    # a clear; any other move (user, rollout, scale-down, lost leader) leaves the context alone
+    own_limit = row is not None and row.phase == "moving" and req.get("reason") == "limit"
+    voluntary = req["kind"] == "handover" and req["reason"] not in FORCED_REASONS
+    if not (own_limit or voluntary):
         closed = (
             row is not None
             and row.phase in _PRE_DISCUSSION
@@ -443,7 +461,7 @@ async def on_leader_moved(
             for message_id in await queued_messages(conn, row.id):
                 await queue.cancel_message(conn, message_id)
         return
-    text = None if req["reason"] in FORCED_REASONS else req["reason"] or None
+    text = (req["reason"] or None) if voluntary else None
     now = (await (await conn.execute("SELECT now()")).fetchone())[0]  # type: ignore[index]
     if row is None:
         if text is not None:

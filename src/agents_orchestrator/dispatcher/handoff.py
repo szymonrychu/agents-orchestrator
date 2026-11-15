@@ -34,8 +34,11 @@ The pressure itself is the policy the push loop puts to the wrapper (`hive._push
    once idle and the gate clear); one rejected after leadership moved closes the row
    `cancelled not_leader`.
 5. discussing (hive ex-leader): cleared only when the session is quiet (`_QUIET`;
-   `quiet_cap_seconds` after the move only drops the session-quiet requirement) AND its own
-   in-flight gate is clear; until then it keeps its policy (`accepted`, with `waiting_on`).
+   `quiet_cap_seconds` after the move only drops the session-quiet requirement, never the
+   ex-leader's own: past the cap it is still cleared only once idle) AND its own in-flight gate
+   is clear; until then it keeps its policy (`accepted`, with `waiting_on`). Only the row's own
+   `limit` move or the leader's voluntary handover reaches this phase: a rollout or user move
+   closes the row before it (`handoffs.on_leader_moved`), so it is never cleared.
 6. clearing: a `session_cleared` after the clear closes the row `done cleared` (hive order) or,
    solo, queues the accepted handoff back (`handoff_texts.return_text`) with the move to
    `returning`, exactly once. A clear refused with `subagents_running` or lost (no
@@ -45,6 +48,10 @@ The pressure itself is the policy the push loop puts to the wrapper (`hive._push
    worded for a kept context); no new row opens for that agent for
    `clear_failed_block_seconds` unless its context is cleared or compacted first.
 7. returning: closed `done returned` once the message is sent.
+
+A transition of a `submitted` row is guarded on the `submitted_at` the pass read
+(`seen_submit`): a resubmit committed since, blocked or accepted, makes it lose, so neither a
+move nor a clear follows a refused submit, and a fresh accepted submit is never overwritten.
 
 Before `moving`: a `compacted` event since the row opened, or the gauge back below L1, closes
 the row `done compacted` (a voluntary row is not judged by the gauge); a `session_cleared` by
@@ -394,11 +401,24 @@ class _Pass:
         got = self.inflight.get(agent_id)
         return got is None or bool(got.background_tasks)
 
+    @staticmethod
+    def seen_submit(row: handoffs.Handoff) -> datetime | None:
+        """The submit a `submitted` row's transition is judged on: the update loses when the
+        agent submitted again since this pass read the row (the route takes no lock)."""
+        return row.submitted_at if row.phase == "submitted" else None
+
     async def store_inflight(self, row: handoffs.Handoff, snap: dict[str, Any]) -> bool:
         """Keep the latest inventory on the row (only when it changed: `progress_at` moves)."""
         if snap == (row.inflight or {}):
             return False
-        return await handoffs.advance(self.conn, row.id, [row.phase], row.phase, inflight=snap)
+        return await handoffs.advance(
+            self.conn,
+            row.id,
+            [row.phase],
+            row.phase,
+            seen_submit=self.seen_submit(row),
+            inflight=snap,
+        )
 
     # ------------------------------------------------------------ 1. open
 
@@ -544,7 +564,7 @@ class _Pass:
         elif row.phase == "moving":
             await self.moving(row, facts)
         elif row.phase == "discussing":
-            await self.discussing(row)
+            await self.discussing(row, facts)
         elif row.phase == "clearing":
             await self.clearing(row, facts)
         elif row.phase == "returning":
@@ -596,7 +616,12 @@ class _Pass:
                 self.conn, session_id, "handover", row.agent_id, target, LIMIT_REASON, leader.epoch
             )
             return await handoffs.advance(
-                self.conn, row.id, ["submitted"], "moving", leadership_request_id=request_id
+                self.conn,
+                row.id,
+                ["submitted"],
+                "moving",
+                seen_submit=self.seen_submit(row),
+                leadership_request_id=request_id,
             )
 
         if await self.guarded(move):
@@ -634,14 +659,16 @@ class _Pass:
     async def clear(self, row: handoffs.Handoff, from_phases: list[str]) -> None:
         async def start() -> bool:
             command_id = await queue.enqueue_command(self.conn, row.agent_id, "clear")
-            return await handoffs.start_clear(self.conn, row.id, from_phases, command_id)
+            return await handoffs.start_clear(
+                self.conn, row.id, from_phases, command_id, seen_submit=self.seen_submit(row)
+            )
 
         if await self.guarded(start):
             log.info("handoff %s: clearing agent %s", row.id, row.agent_id)
             label = "clear_retry" if from_phases == ["clearing"] else "clearing"
             self.out.append(f"{label}:{row.agent_id}")
 
-    async def discussing(self, row: handoffs.Handoff) -> None:
+    async def discussing(self, row: handoffs.Handoff, facts: dict) -> None:
         gate = self.gate(row)
         snap = _snapshot(self.inflight.get(row.agent_id), gate)
         if not gate.clear:
@@ -657,7 +684,10 @@ class _Pass:
                 "cap": self.policy.quiet_cap_seconds,
             },
         )
-        if got is not None and (got["quiet"] or got["capped"]):
+        # the cap drops only the session-quiet requirement: the ex-leader's own turn boundary
+        # always holds, with no cap (no clear lands on a working agent, decision 716)
+        idle = facts["idle"] and not self.background_tasks(row.agent_id)
+        if got is not None and (got["quiet"] or got["capped"]) and idle:
             await self.clear(row, ["discussing"])
         elif (row.inflight or {}).get("waiting_on"):
             await self.store_inflight(row, snap)  # its blockers are done: the policy says so

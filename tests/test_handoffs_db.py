@@ -261,3 +261,21 @@ async def test_take_undelivered_returns_handoff_and_text_of_newest(pool):
             None,
             None,
         )
+
+
+async def test_seen_submit_guards_advance_and_start_clear(pool):
+    session_id, agent_id = await _agent(pool)
+    async with pool.connection() as conn:
+        row = await handoffs.open_pressure(conn, session_id, agent_id, 1, "work")
+        assert await handoffs.submit(conn, row.id, {"doing": "x"}, {"waiting_on": []}, None)
+        seen = (await handoffs.open_row(conn, agent_id)).submitted_at
+    async with pool.connection() as conn:  # a resubmit lands in its own transaction
+        assert await handoffs.submit(conn, row.id, {"doing": "y"}, {"waiting_on": ["t"]}, None)
+    async with pool.connection() as conn:
+        assert not await handoffs.advance(
+            conn, row.id, ["submitted"], "moving", seen_submit=seen, leadership_request_id=1
+        )
+        assert not await handoffs.start_clear(conn, row.id, ["submitted"], 1, seen_submit=seen)
+        latest = (await handoffs.open_row(conn, agent_id)).submitted_at
+        assert latest != seen
+        assert await handoffs.start_clear(conn, row.id, ["submitted"], 1, seen_submit=latest)

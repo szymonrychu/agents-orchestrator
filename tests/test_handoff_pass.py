@@ -1546,3 +1546,132 @@ async def test_returning_row_survives_sigterm_and_keeps_its_return(env):
     )[0]
     assert (closed["phase"], closed["close_reason"]) == ("cancelled", "shutdown")
     assert await _status(env, ret["id"]) == "queued"  # still delivered, after the new return
+
+
+# ---------------------------------------------------------------- fix round 1 (decision 716)
+
+
+async def _quiet_hive(env, c, agents) -> None:
+    """Every agent idle and the session quiet long past the discussion cap."""
+    await env.run(
+        "UPDATE sessions SET created_at = now() - interval '1 day',"
+        " last_update_at = now() - interval '1 day' WHERE id = %s",
+        (c["id"],),
+    )
+    for a in agents:
+        await env.idle_for(a["id"], 700)
+
+
+@pytest.mark.parametrize("before", ["pressuring", "refused", "accepted"])
+async def test_rollout_move_never_clears_the_ex_leader(env, before):
+    # a rollout move is not the row's own limit request: the row closes, no clear ever follows
+    c, (a0, a1, a2) = await env.hive()
+    assert await env.step(c["id"]) == [f"pressuring:{a0['id']}"]
+    if before == "refused":
+        env.inflight(a0, background_tasks=[TASK])
+        assert not await env.submit(a0)
+    elif before == "accepted":
+        assert await env.submit(a0)  # the pass has not moved it yet
+    async with env.pool.connection() as conn:
+        await leadership.insert_request(conn, c["id"], "handover", a0["id"], a1["id"], "rollout", 1)
+    assert (await env.lpass(c["id"])).agent_id == a1["id"]
+    last = await env.last_row(a0["id"])
+    assert (last["phase"], last["close_reason"]) == ("cancelled", "not_leader")
+    env.inflight(a0)
+    await _quiet_hive(env, c, (a0, a1, a2))
+    for _ in range(3):
+        await env.step(c["id"])
+    assert await env.commands(a0["id"]) == []
+    assert await env.row(a0["id"]) is None
+
+
+def _interleave(monkeypatch, between) -> None:
+    """Run `between` (committed on its own connection) right after the pass read its rows."""
+    real = handoffs.open_rows
+    done = []
+
+    async def open_rows(conn, session_id):
+        rows = await real(conn, session_id)
+        if not done:
+            done.append(True)
+            await between()
+        return rows
+
+    monkeypatch.setattr(handoffs, "open_rows", open_rows)
+
+
+async def test_blocked_resubmit_after_the_read_stops_the_limit_request(env, monkeypatch):
+    c, (a0, a1, a2) = await env.hive()
+    await env.step(c["id"])
+    assert await env.submit(a0)  # accepted, gate clear
+
+    async def resubmit() -> None:
+        env.inflight(a0, background_tasks=[TASK])
+        assert not await env.submit(a0)  # 409 in_flight to the agent
+
+    _interleave(monkeypatch, resubmit)
+    assert await env.step(c["id"]) == []
+    assert await env.requests(c["id"]) == []
+    row = await env.row(a0["id"])
+    assert row.phase == "submitted"
+    assert row.inflight["waiting_on"] == ["task:bf3a (CI watch)"]
+
+
+async def test_blocked_resubmit_after_the_read_stops_the_solo_clear(env, monkeypatch):
+    c, a = await env.solo()
+    await env.step(c["id"])
+    assert await env.submit(a)
+
+    async def resubmit() -> None:
+        env.inflight(a, background_tasks=[TASK])
+        assert not await env.submit(a)
+
+    _interleave(monkeypatch, resubmit)
+    assert await env.step(c["id"]) == []
+    assert await env.commands(a["id"]) == []
+    row = await env.row(a["id"])
+    assert (row.phase, row.inflight["waiting_on"]) == ("submitted", ["task:bf3a (CI watch)"])
+
+
+async def test_accepted_submit_after_the_read_is_not_overwritten_by_resubmit(env, monkeypatch):
+    c, a = await env.solo()
+    await env.step(c["id"])
+    env.inflight(a, background_tasks=[TASK])
+    assert not await env.submit(a)
+    await env.step(c["id"])
+    env.inflight(a)  # the task reported: the pass would ask for a resubmit
+
+    async def fresh() -> None:
+        assert await env.submit(a)  # the agent re-submitted first, accepted clear
+
+    _interleave(monkeypatch, fresh)
+    assert await env.step(c["id"]) == []
+    row = await env.row(a["id"])
+    assert row.phase == "submitted"
+    assert "resubmit" not in row.inflight and row.inflight["waiting_on"] == []
+    monkeypatch.undo()
+    assert await env.step(c["id"]) == [f"clearing:{a['id']}"]
+
+
+async def test_submit_after_the_move_is_refused(env):
+    # the other order: the pass moved first, a later submit no longer changes the row
+    c, (a0, a1, a2) = await env.hive()
+    await env.step(c["id"])
+    assert await env.submit(a0)
+    assert await env.step(c["id"]) == [f"moving:{a0['id']}"]
+    row = await env.row(a0["id"])
+    async with env.pool.connection() as conn:
+        assert not await handoffs.submit(conn, row.id, HANDOFF, {"waiting_on": []}, None)
+    assert (await env.row(a0["id"])).phase == "moving"
+
+
+async def test_ex_leader_mid_turn_not_cleared_after_quiet_cap(env):
+    # the cap drops the session-quiet requirement, never the ex-leader's own turn boundary
+    c, (a0, a1, a2) = await _discussing(env, quiet_ago=700, since_ago=601)
+    await env.busy(a0["id"])
+    for _ in range(2):
+        assert await env.step(c["id"]) == []
+    assert await env.commands(a0["id"]) == []
+    assert (await env.row(a0["id"])).phase == "discussing"
+    await env.idle_for(a0["id"], 1)
+    assert await env.step(c["id"]) == [f"clearing:{a0['id']}"]

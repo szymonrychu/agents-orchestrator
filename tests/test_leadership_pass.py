@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 
 import psycopg
+import pytest
 from factories import (
     insert_agent,
     insert_message,
@@ -1197,6 +1198,26 @@ async def test_user_make_leader_cancels_pressure_row_not_leader(pool):
     assert (await lpass(pool, c["id"])).reason == "leader_lost"
     (row,) = await handoff_rows(pool, a1["id"])
     assert row["phase"] == "discussing"
+
+
+@pytest.mark.parametrize("phase", ["pressuring", "submitted", "moving"])
+async def test_rollout_move_closes_a_row_it_did_not_cause(pool, phase):
+    # decision 716: a rollout move was not caused by the row's accepted submit (its own limit
+    # request), so the row closes and the ex-leader keeps its context: no discussion, no clear
+    c, (a0, a1, a2) = await hive(pool)
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
+    row_id = await open_pressure_row(pool, c["id"], a0["id"], phase)
+    nudge = await insert_message(
+        pool, c["id"], text="nudge", target_agent_id=a0["id"], notice="handoff_nudge"
+    )
+    await request(pool, c["id"], "handover", a0["id"], a1["id"], "rollout", 3)
+    assert (await lpass(pool, c["id"])).agent_id == a1["id"]
+    (row,) = await handoff_rows(pool)
+    assert (row["id"], row["phase"], row["close_reason"]) == (row_id, "cancelled", "not_leader")
+    assert row["discuss_since"] is None
+    got = await rows(pool, "SELECT status FROM messages WHERE id = %s", (nudge["id"],))
+    assert got[0]["status"] == "cancelled"
+    assert await commands_of(pool, a0["id"]) == []
 
 
 async def test_forced_and_user_moves_do_not_reset(pool):

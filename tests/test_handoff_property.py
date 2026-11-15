@@ -1,7 +1,9 @@
 """Property test of the cooperative handoff (decision 716): over seeded random event orders, no
 `clear` command and no `limit` leadership request for an agent ever exists without a gate-clear
-accepted submit of the same cycle; no row stays open past a compaction before `moving`; at most
-one open row per agent; no handoff notice or request message is ever queued.
+accepted submit of the same cycle, and an ex-leader only after a move made by that submit's own
+`limit` request (a rollout or user move never leads to a clear); no row stays open past a
+compaction before `moving`; at most one open row per agent; no handoff notice or request
+message is ever queued.
 
 The pass runs after every event against Postgres; the wrapper's in-flight inventory is a stub
 the events drive, and submits are written the way the submit route writes them.
@@ -44,7 +46,9 @@ EVENTS = (
     "idle",
     "busy",
     "leader_moved",
+    "rollout_moved",
     "request_rejected",
+    "time_passes",
 )
 
 
@@ -188,6 +192,34 @@ class Run:
                     await leadership.insert_request(conn, sid, "user", None, other, "test", None)
             async with self.pool.connection() as conn:
                 await leadership.leadership_pass(conn, sid)
+        elif name == "rollout_moved" and self.hive:
+            # the reconciler's forced rollout move: never the row's own accepted submit
+            other = next(a["id"] for a in self.agents if a["id"] != agent_id)
+            async with self.pool.connection() as conn:
+                leader = await leadership.current_leader(conn, sid)
+                if leader is not None:
+                    await leadership.insert_request(
+                        conn, sid, "handover", leader.agent_id, other, "rollout", leader.epoch
+                    )
+            async with self.pool.connection() as conn:
+                await leadership.leadership_pass(conn, sid)
+        elif name == "time_passes":
+            # past the discussion's quiet window and cap: a discussing ex-leader may be cleared
+            await self.q(
+                "UPDATE agent_handoffs SET discuss_since = discuss_since - interval '700 seconds'"
+                " WHERE session_id = %s AND discuss_since IS NOT NULL",
+                (sid,),
+            )
+            await self.q(
+                "UPDATE sessions SET created_at = now() - interval '1 day',"
+                " last_update_at = now() - interval '1 day' WHERE id = %s",
+                (sid,),
+            )
+            await self.q(
+                "UPDATE agent_status SET free_since = now() - interval '700 seconds'"
+                " WHERE agent_id IN (SELECT id FROM agents WHERE session_id = %s)",
+                (sid,),
+            )
         elif name == "request_rejected":
             await self.q(
                 "UPDATE leadership_requests SET status = 'rejected', reject_reason = 'test',"
@@ -217,9 +249,15 @@ class Run:
                 continue
             self.seen_commands.add(cmd["id"])
             (row,) = await self.q(
-                "SELECT id FROM agent_handoffs WHERE clear_command_id = %s", (cmd["id"],)
+                "SELECT h.id, h.discuss_since, r.status AS moved FROM agent_handoffs h"
+                " LEFT JOIN leadership_requests r ON r.id = h.leadership_request_id"
+                " WHERE h.clear_command_id = %s",
+                (cmd["id"],),
             )
             assert self.clear_submit.get(row["id"]) is True, self.fail(f"clear {cmd}")
+            if row["discuss_since"] is not None:
+                # an ex-leader is cleared only after a move by its own limit request
+                assert row["moved"] == "applied", self.fail(f"clear after a foreign move {cmd}")
             assert not self.bg[cmd["agent_id"]], self.fail(f"clear with work in flight {cmd}")
         for req in await self.q(
             "SELECT id, from_agent_id FROM leadership_requests"
