@@ -129,11 +129,12 @@ _STOPPING = (
     "s.stopping_since IS NOT NULL AND s.stopping_since > now() - make_interval(secs => %(window)s)"
 )
 
-# Sessions a pass can do something for: active hive sessions with a leader, active solo sessions
-# with a live agent, any session with an open row (closing ones included, to cancel it) and any
-# session with a shutdown handoff to store.
+# Sessions a pass can do something for: active unparked hive sessions with a leader, active
+# unparked solo sessions with a live agent, any session with an open row (closing ones included,
+# to cancel it) and any session with a shutdown handoff to store. A parked session (T-224) opens
+# no new handoff: its queue is held, so a notice could never be delivered.
 _SESSIONS = f"""
-SELECT c.id FROM sessions c WHERE c.desired = 'active' AND (
+SELECT c.id FROM sessions c WHERE c.desired = 'active' AND c.parked_at IS NULL AND (
     ({leadership.HIVE} AND EXISTS (SELECT 1 FROM session_leaders l WHERE l.session_id = c.id))
     OR ({leadership.SOLO} AND EXISTS (
         SELECT 1 FROM agents a WHERE a.session_id = c.id AND a.gone_at IS NULL)))

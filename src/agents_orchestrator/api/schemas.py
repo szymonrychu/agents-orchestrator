@@ -359,6 +359,8 @@ class SessionBackup(BaseModel):
 
 
 CloseKind = Literal["self", "inactivity", "autoclose"]
+# why the runaway guard parked a session (T-224)
+ParkedReason = Literal["turns", "tokens", "stop_loop"]
 
 
 class VaultPinView(BaseModel):
@@ -417,6 +419,11 @@ class SessionView(BaseModel):
     # the other projects it fully belongs to (T-120); set by PUT /sessions/{id}/extra-projects
     # or a reviewed grant proposal
     extra_projects: list[str] = []
+    # the runaway guard's park (T-224): set while the session's queue is held; null otherwise.
+    # `parked_detail` is {agent_id, pod, value, limit, window_at}
+    parked_at: datetime | None = None
+    parked_reason: ParkedReason | None = None
+    parked_detail: dict[str, Any] | None = None
 
 
 class InitScriptsIn(BaseModel):

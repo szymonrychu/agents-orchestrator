@@ -1106,6 +1106,10 @@ Discards the session: after the optional history-export hook, deletes every Kube
 
 Cancels a pending close request, a self-close, an inactivity close or an autoclose ask (the "Keep session" button; see Self-close and Inactivity limits under Autoclose): clears `close_requested_at`, `close_reason`, `close_kind` and `close_deadline_at` and restarts the quiet clock (`last_update_at` becomes now), so the inactivity limits count again from now. Takes no body. Response 200 with the session view (the four fields null); a session without a pending request answers 200 unchanged. A cancelled session can be asked to close again. Errors: 404 `not_found`, 409 `session_deleting` (the session is already being discarded; the request is kept as history). Not served on the agent or the service port.
 
+### `DELETE /api/v1/sessions/{session_id}/park`
+
+Resumes a session parked by the runaway guard (the "Resume" button): clears `parked_at`, `parked_reason`, `parked_detail` and `park_notified_at` and sets `guard_reset_at` to now, so the guard windows restart and the held queue (the `runaway_parked` notice first) is claimed again. While parked, the claim skips the session, the strong-limit handoff pass opens no new handoff for it and every running turn of a live agent is interrupted. Takes no body. Response 200 with the session view (the three `parked_*` fields null); a session that is not parked answers 200 unchanged. Errors: 404 `not_found`, 409 `session_deleting`. Not served on the agent or the service port.
+
 ### `POST /api/v1/sessions/{session_id}/leader`
 
 Queues a user leadership override (the UI "Make leader"): body `{agent_id}`, any agent of the session. A user request overrides the handover-only rule; the dispatcher applies it and bumps the epoch. Response 202 `{request_id}`. Errors: 404 `not_found` (unknown session, or an agent that is not in this session), 409 `alone` (a single-agent session has no leader).

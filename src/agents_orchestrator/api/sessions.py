@@ -189,6 +189,9 @@ def _view(session: repo.Session, agg: dict | None, settings: Settings) -> schema
         labels=session.labels,
         project=session.project,
         extra_projects=list(session.extra_projects),
+        parked_at=session.parked_at,
+        parked_reason=session.parked_reason,
+        parked_detail=session.parked_detail,
     )
 
 
@@ -839,6 +842,26 @@ async def cancel_session_close(
     async with pool.connection() as conn:
         try:
             session = await repo.cancel_close(conn, session_id)
+        except repo.SessionNotFound:
+            raise not_found("session") from None
+        except repo.SessionBeingDeleted:
+            raise ApiError(
+                409, "session_deleting", "the session is already being discarded"
+            ) from None
+        return await one_view(conn, session, settings)
+
+
+@router.delete("/sessions/{session_id}/park", response_model=schemas.SessionView)
+async def resume_parked_session(
+    session_id: uuid.UUID,
+    pool: Pool,
+    settings: Cfg,
+) -> schemas.SessionView:
+    """Resume a session parked by the runaway guard: its queue flows again and the guard windows
+    restart; 200 even when it is not parked, 409 once the session is flipped to deleting."""
+    async with pool.connection() as conn:
+        try:
+            session = await repo.resume(conn, session_id)
         except repo.SessionNotFound:
             raise not_found("session") from None
         except repo.SessionBeingDeleted:

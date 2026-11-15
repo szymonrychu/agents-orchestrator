@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -17,7 +17,7 @@ from agents_orchestrator.db import leadership
 from agents_orchestrator.db.eligibility import ELIGIBLE, background_busy
 from agents_orchestrator.db.pool import notify
 from agents_orchestrator.db.projects import DEFAULT, UnknownProject
-from agents_orchestrator.db.queue import SessionBeingDeleted, enqueue_message
+from agents_orchestrator.db.queue import SessionBeingDeleted, enqueue_command, enqueue_message
 from agents_orchestrator.db.start_state import start_reason, start_state
 from agents_orchestrator.inactivity import (
     NOTICE_AUTOCLOSE,
@@ -26,6 +26,7 @@ from agents_orchestrator.inactivity import (
     autoclose_reason,
     close_reason,
 )
+from agents_orchestrator.runaway import NOTICE_PARKED
 from agents_orchestrator.spec import SessionSpec, legacy_context, validate_slug
 
 CHANNEL = "session_changed"
@@ -99,6 +100,13 @@ class Session:
     # the other projects it fully belongs to (T-120), sorted; set by set_extra_projects, read
     # live per request like `project`
     extra_projects: tuple[str, ...] = ()
+    # the runaway guard's park (T-224): when and why the session was parked, whether the owner
+    # notice task was posted for this park, and when a resume last reset the guard windows
+    parked_at: datetime | None = None
+    parked_reason: str | None = None
+    parked_detail: dict[str, Any] | None = None
+    park_notified_at: datetime | None = None
+    guard_reset_at: datetime | None = None
 
     @property
     def projects(self) -> tuple[str, ...]:
@@ -141,6 +149,11 @@ def _from_row(row: dict[str, Any]) -> Session:
         discard_forced_at=row["discard_forced_at"],
         project=row["project"],
         extra_projects=tuple(row["extra_projects"]),
+        parked_at=row["parked_at"],
+        parked_reason=row["parked_reason"],
+        parked_detail=row["parked_detail"],
+        park_notified_at=row["park_notified_at"],
+        guard_reset_at=row["guard_reset_at"],
     )
 
 
@@ -548,6 +561,118 @@ async def cancel_close(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> 
             step="cancel",
         )
         return rows[0]
+
+
+# ---------------------------------------------------------------- runaway park (T-224)
+
+
+@dataclass(frozen=True)
+class ParkOutcome:
+    parked: bool
+    interrupts: int
+    message_id: int | None
+
+
+# Live agents of the session with a turn running: the park interrupts each of them.
+_BUSY_AGENTS = """
+SELECT a.id FROM agents a JOIN agent_status s ON s.agent_id = a.id
+WHERE a.session_id = %s AND a.gone_at IS NULL AND s.current_turn_id IS NOT NULL
+ORDER BY a.id
+"""
+
+
+async def park(
+    conn: psycopg.AsyncConnection,
+    session_id: uuid.UUID,
+    reason: str,
+    detail: Mapping[str, Any],
+    notice: str,
+) -> ParkOutcome:
+    """Park an active, unparked session: set the park columns (status-guarded, so a second park
+    is a no-op), queue the `runaway_parked` notice (held by the claim until resume) and an
+    `interrupt` for every live agent with a running turn."""
+    async with conn.transaction():
+        rows = await _fetch(
+            conn,
+            "UPDATE sessions SET parked_at = now(), parked_reason = %s, parked_detail = %s,"
+            " park_notified_at = NULL"
+            " WHERE id = %s AND desired = 'active' AND parked_at IS NULL RETURNING *",
+            (reason, Jsonb(dict(detail)), session_id),
+        )
+        if not rows:
+            return ParkOutcome(False, 0, None)
+        message_id = await enqueue_message(
+            conn, session_id, notice, lane="regular", notice=NOTICE_PARKED
+        )
+        async with conn.cursor() as cur:
+            await cur.execute(_BUSY_AGENTS, (session_id,))
+            agents = [r[0] for r in await cur.fetchall()]
+        for agent_id in agents:
+            await enqueue_command(conn, agent_id, "interrupt")
+        await _notify(conn, session_id)
+        return ParkOutcome(True, len(agents), message_id)
+
+
+async def resume(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Session:
+    """Clear the park and stamp `guard_reset_at` (the guard windows restart from it); idempotent
+    when the session is not parked (no write). Raises SessionNotFound, SessionBeingDeleted."""
+    async with conn.transaction():
+        existing = await _lock_active(conn, session_id)
+        if existing.parked_at is None:
+            return existing
+        rows = await _fetch(
+            conn,
+            "UPDATE sessions SET parked_at = NULL, parked_reason = NULL, parked_detail = NULL,"
+            " park_notified_at = NULL, guard_reset_at = now()"
+            " WHERE id = %s AND desired = 'active' RETURNING *",
+            (session_id,),
+        )
+        await _notify(conn, session_id)
+        return rows[0]
+
+
+async def interrupt_parked(conn: psycopg.AsyncConnection) -> list[uuid.UUID]:
+    """Queue an `interrupt` for every live agent of a parked active session that runs a turn and
+    has none queued or running: `peer` and `agent` origin turns never pass the claim."""
+    async with conn.transaction():
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT a.id FROM agents a"
+                " JOIN agent_status s ON s.agent_id = a.id"
+                " JOIN sessions c ON c.id = a.session_id"
+                " WHERE c.parked_at IS NOT NULL AND c.desired = 'active'"
+                " AND a.gone_at IS NULL AND s.current_turn_id IS NOT NULL"
+                " AND NOT EXISTS (SELECT 1 FROM commands m WHERE m.agent_id = a.id"
+                "  AND m.kind = 'interrupt' AND m.status IN ('queued', 'running'))"
+                " ORDER BY a.id"
+            )
+            agents = [r[0] for r in await cur.fetchall()]
+        for agent_id in agents:
+            await enqueue_command(conn, agent_id, "interrupt")
+        return agents
+
+
+async def mark_park_notified(
+    conn: psycopg.AsyncConnection, session_id: uuid.UUID, parked_at: datetime
+) -> bool:
+    """Record that the owner notice for this park went out; guarded by `parked_at`, so a notice
+    for an older park never marks a newer one."""
+    cur = await conn.execute(
+        "UPDATE sessions SET park_notified_at = now()"
+        " WHERE id = %s AND parked_at = %s AND park_notified_at IS NULL",
+        (session_id, parked_at),
+    )
+    return cur.rowcount == 1
+
+
+async def unnotified_parks(conn: psycopg.AsyncConnection) -> list[Session]:
+    """Parked active sessions whose owner notice has not gone out yet, oldest park first."""
+    return await _fetch(
+        conn,
+        "SELECT * FROM sessions WHERE desired = 'active' AND parked_at IS NOT NULL"
+        " AND park_notified_at IS NULL ORDER BY parked_at, id",
+        (),
+    )
 
 
 async def touch_update(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> None:
