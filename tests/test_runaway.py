@@ -72,7 +72,9 @@ def test_settings_defaults():
 
 def test_settings_bounds(monkeypatch):
     monkeypatch.setenv("ORCH_RUNAWAY_MAX_TURNS_PER_TASK", "5")
-    with pytest.raises((SettingsError, ValidationError)):
+    with pytest.raises(
+        (SettingsError, ValidationError), match="ORCH_RUNAWAY_MAX_TURNS_PER_TASK|max_turns_per_task"
+    ):
         Settings()
     monkeypatch.setenv("ORCH_RUNAWAY_MAX_TURNS_PER_TASK", "0")
     assert Settings().runaway_max_turns_per_task == 0

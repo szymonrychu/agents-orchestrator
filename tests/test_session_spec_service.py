@@ -406,6 +406,7 @@ LIMITS = {
     "usage_quota": {"five_hour_pct": 50},
     "inactivity": {"reminder_seconds": 1800, "close_seconds": 7200},
     "autoclose_after_seconds": 3600,
+    "runaway": {"max_turns_per_task": 200, "max_concurrent_subagents": 4},
     "resources": {
         # Below the setting defaults (500m, 1Gi), so a removed request (refilled from the
         # defaults on write) is a real raise for a superleader too.
@@ -425,6 +426,9 @@ LOOSER = [
     (["inactivity.close_seconds"], {"inactivity": {"close_seconds": 14400}}),
     (["inactivity.close_seconds"], {"inactivity": {"close_seconds": 0}}),
     (["inactivity.reminder_seconds"], {"inactivity": {"reminder_seconds": 0}}),
+    (["runaway.max_turns_per_task"], {"runaway": {"max_turns_per_task": 0}}),
+    (["runaway.max_turns_per_task"], {"runaway": {"max_turns_per_task": 400}}),
+    (["runaway.max_concurrent_subagents"], {"runaway": {"max_concurrent_subagents": 0}}),
     (["autoclose_after_seconds"], {"autoclose_after_seconds": 7200}),
     (["autoclose_after_seconds"], {"autoclose_after_seconds": None}),
     (["resources.limits.cpu"], {"resources": {"limits": {"cpu": "3"}}}),
@@ -439,6 +443,8 @@ TIGHTER = [
     {"inactivity": {"close_seconds": 3600}},
     {"inactivity": {"reminder_seconds": 600}},
     {"autoclose_after_seconds": 1800},
+    {"runaway": {"max_turns_per_task": 100}},
+    {"runaway": {"max_concurrent_subagents": 2}},
     {"resources": {"limits": {"cpu": "1500m", "memory": "4096Mi"}}},  # lower, and equal
     {"resources": {"requests": {"cpu": "0.25", "memory": "256Mi"}}},  # equal, and lower
 ]

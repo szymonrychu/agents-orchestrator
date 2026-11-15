@@ -25,7 +25,7 @@ them: only the agent-facing admin routes do.
 """
 
 import copy
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from decimal import Decimal
 from typing import Any
 
@@ -102,6 +102,16 @@ _INACTIVITY_PATHS: tuple[tuple[str, str], ...] = (
     ("inactivity", "reminder_seconds"),
     ("inactivity", "close_seconds"),
 )
+_RUNAWAY_KEYS: tuple[str, ...] = (
+    "max_turns_per_task",
+    "max_tokens_per_task",
+    "max_stop_continuations",
+    "max_agent_spawns",
+    "tool_failure_repeats",
+    "max_concurrent_subagents",
+    "max_subagent_spawn_depth",
+)
+_RUNAWAY_PATHS: tuple[tuple[str, str], ...] = tuple(("runaway", k) for k in _RUNAWAY_KEYS)
 
 _DEFAULT_PERMISSION_MODE = "bypassPermissions"
 _SAFE_PERMISSION_MODE = "auto"
@@ -225,7 +235,7 @@ def _effective(
     value = _dict(spec.get(block)).get(key)
     if value is None:
         value = default
-    # Inactivity: 0 is off, which is the loosest limit; a quota has no such value.
+    # Inactivity and runaway: 0 is off, which is the loosest limit; a quota has no such value.
     return float("inf") if off_is_zero and value == 0 else value
 
 
@@ -286,6 +296,7 @@ def tighten_changes(
     docker_cpu_default: str,
     docker_memory_default: str,
     docker_storage_default: str,
+    runaway_defaults: Mapping[str, int],
 ) -> list[str]:
     """The limit paths whose effective value got looser from `stored` to `new` (sorted):
     `usage_quota.five_hour_pct` and `.seven_day_pct` (unset is `quota_default`, higher is
@@ -293,7 +304,9 @@ def tighten_changes(
     off and so infinite, longer is looser), `autoclose_after_seconds` (unset is never, so
     clearing or raising is looser) and `resources.requests.*` / `resources.limits.*` (see
     `_resource_changes`) and `docker_cpu` / `docker_memory` / `docker_storage` (unset is the
-    deploy default, higher is looser; see `_docker_changes`). Lowering, or keeping, a limit is
+    deploy default, higher is looser; see `_docker_changes`) and `runaway.<key>` (unset is the
+    `runaway_defaults` value, else 0; 0 is off, or the Claude default for the two subagent caps,
+    and so infinite; higher is looser). Lowering, or keeping, a limit is
     never reported."""
     defaults = {
         "five_hour_pct": quota_default,
@@ -301,9 +314,10 @@ def tighten_changes(
         "reminder_seconds": reminder_default,
         "close_seconds": close_default,
     }
+    defaults.update({k: runaway_defaults.get(k, 0) for k in _RUNAWAY_KEYS})
     out: list[str] = []
-    for block, key in (*_QUOTA_PATHS, *_INACTIVITY_PATHS):
-        off_is_zero = block == "inactivity"
+    for block, key in (*_QUOTA_PATHS, *_INACTIVITY_PATHS, *_RUNAWAY_PATHS):
+        off_is_zero = block != "usage_quota"
         old_v = _effective(stored, block, key, defaults[key], off_is_zero=off_is_zero)
         new_v = _effective(new, block, key, defaults[key], off_is_zero=off_is_zero)
         if new_v > old_v:
