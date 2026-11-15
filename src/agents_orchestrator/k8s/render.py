@@ -307,8 +307,8 @@ def forwards_usage(spec: SessionSpec, settings: Settings) -> bool:
 
 def runs_default_image(spec: SessionSpec, settings: Settings) -> bool:
     """Whether the pods run the default agent image: only it is known to accept the newest
-    wrapper config sections (`usage`, `shutdown`); the config is strict, so an older image
-    would refuse them."""
+    wrapper config sections (`usage`, `shutdown`, `guard`); the config is strict, so an older
+    image would refuse them."""
     return not spec.image or spec.image == settings.agent_image
 
 
