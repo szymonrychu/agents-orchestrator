@@ -66,6 +66,12 @@ FAKE_TURN_ENV = {
         "value": "/opt/agent-test/scenario.json",
         "expand": False,
     },
+    # wrapper >= 0.16.0 puts the PreToolUse relay (tool_call events) in the managed-settings
+    # file; the fake reads that file only when told where it is
+    "FAKE_CLAUDE_MANAGED_SETTINGS": {
+        "value": "/etc/claude-code/managed-settings.json",
+        "expand": False,
+    },
 }
 SLOW_PROMPT = "slow task {n}: report when done"
 DISPATCH_STAGGER = 1.5  # seconds between dispatching message 1 and sending message 2

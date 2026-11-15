@@ -2852,7 +2852,9 @@
                   "project_grant",
                   "handoff_notice",
                   "handoff_request",
-                  "handoff_return"
+                  "handoff_return",
+                  "autoclose",
+                  "runaway_parked"
                 ],
                 "type": "string"
               },

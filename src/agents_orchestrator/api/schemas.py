@@ -679,6 +679,8 @@ Notice = Literal[
     "handoff_notice",
     "handoff_request",
     "handoff_return",
+    "autoclose",
+    "runaway_parked",
 ]
 
 
