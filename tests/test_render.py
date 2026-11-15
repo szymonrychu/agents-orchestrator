@@ -1081,3 +1081,61 @@ def test_shutdown_notice_minutes_round_up_with_minimum_one():
         )
         prompt = config_of(objs)["shutdown"]["handoff"]["notice_prompt"]
         assert prompt == handoff_texts.shutdown_notice(minutes), notice
+
+
+def _guard_cfg(**spec) -> dict:
+    return config_of(render.render_session(make_session(**spec), make_settings(), TOKENS))
+
+
+def test_guard_section_rendered_on_default_image():
+    assert _guard_cfg()["guard"] == {
+        "max_stop_continuations": 25,
+        "max_agent_spawns": 300,
+        "tool_failure_repeats": 3,
+    }
+
+
+def test_guard_section_from_preset():
+    cfg = _guard_cfg(runaway={"max_stop_continuations": 3, "max_agent_spawns": 0})
+    assert cfg["guard"] == {
+        "max_stop_continuations": 3,
+        "max_agent_spawns": 0,
+        "tool_failure_repeats": 3,
+    }
+
+
+def test_no_guard_section_on_custom_image():
+    cfg = _guard_cfg(image="harbor.szymonrichert.pl/containers/claude-code-wrapper:0.14.0")
+    assert "guard" not in cfg
+
+
+def test_subagent_env_only_when_set():
+    env = _guard_cfg()["claude"]["env"]
+    assert "claude_code_max_concurrent_subagents" not in env
+    assert "claude_code_max_subagent_spawn_depth" not in env
+    env = _guard_cfg(runaway={"max_concurrent_subagents": 8, "max_subagent_spawn_depth": 1})[
+        "claude"
+    ]["env"]
+    assert env["claude_code_max_concurrent_subagents"] == 8
+    assert env["claude_code_max_subagent_spawn_depth"] == 1
+    env = _guard_cfg(runaway={"max_concurrent_subagents": 0})["claude"]["env"]
+    assert "claude_code_max_concurrent_subagents" not in env
+
+
+def test_rendered_guard_config_loads_in_wrapper(tmp_path, monkeypatch):
+    objs = render.render_session(
+        make_session(runaway={"max_concurrent_subagents": 8, "max_subagent_spawn_depth": 1}),
+        make_settings(),
+        TOKENS,
+    )
+    for k, v in {
+        "CCW_AUTH_TOKEN": TOKENS.auth,
+        "CLAUDE_CODE_OAUTH_TOKEN": "oauth",
+        "POD_NAME": "agent-alpha-0",
+    }.items():
+        monkeypatch.setenv(k, v)
+    path = tmp_path / "config.yaml"
+    path.write_text(by_kind(objs)["ConfigMap"]["data"]["config.yaml"])
+    cfg = load_config(path)
+    assert cfg.guard.max_stop_continuations == 25
+    assert cfg.claude.env.claude_code_max_subagent_spawn_depth == 1
