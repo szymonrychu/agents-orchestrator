@@ -450,6 +450,17 @@ def _reason_words(reason: str) -> str:
     return _REJECT_WORDS.get(reason, reason)
 
 
+def _rejected(reasons: list[str], rejects: int) -> ApiError:
+    return ApiError(
+        422,
+        "handoff_rejected",
+        "the handoff was not accepted: "
+        + "; ".join(_reason_words(r) for r in reasons)
+        + ". Fix it and call orchestrator_handoff_submit again.",
+        extra={"missing": reasons, "rejects": rejects},
+    )
+
+
 @router.post(
     "/handoff",
     status_code=202,
@@ -459,10 +470,11 @@ def _reason_words(reason: str) -> str:
 async def handoff_submit(
     body: schemas.HandoffSubmitIn, request: Request, agent: Caller, pool: Pool, settings: Cfg
 ) -> schemas.HandoffAccepted:
-    """Check order: hive leader and epoch, an open row (reused, or a voluntary one opened), the
-    quality of the text (422 `handoff_rejected`), then the in-flight gate (409 `in_flight`, the
-    handoff stored). A gate-clear submit is accepted 202; the dispatcher then moves leadership
-    (hive) or clears the context and returns the handoff (solo) once the agent is idle."""
+    """Check order: hive leader and epoch, an open row (reused; a voluntary one is opened only
+    once the text passes), the quality of the text (422 `handoff_rejected`), then the in-flight
+    gate (409 `in_flight`, the handoff stored). A gate-clear submit is accepted 202; the
+    dispatcher then moves leadership (hive) or clears the context and returns the handoff (solo)
+    once the agent is idle."""
     async with pool.connection() as conn:
         session = await _session(conn, agent)
         if not session.spec.alone:
@@ -473,8 +485,11 @@ async def handoff_submit(
             if body.to is not None:
                 await member_id(conn, agent.session_id, body.to)
         row = await handoffs.open_row(conn, agent.id)
+        if row is not None and row.phase not in _REUSABLE:
+            raise ApiError(409, "handoff_open", f"a handoff is already {row.phase}")
         subject = await hive_push.pressure_subject(conn, session.id, agent.id, settings)
-        if row is None:
+        profile = row.profile if row is not None else None
+        if profile is None:
             profile = await handoff_profile.detect(
                 conn,
                 {"id": session.id, "spec": {"handoff_profile": session.spec.handoff_profile}},
@@ -483,17 +498,6 @@ async def handoff_submit(
                 if subject is None
                 else datetime.now(UTC) - timedelta(seconds=subject.tenure_seconds),
             )
-            try:
-                async with conn.transaction():  # savepoint: a concurrent open is no failure
-                    row = await handoffs.open_pressure(
-                        conn, session.id, agent.id, 0, profile, "voluntary"
-                    )
-            except psycopg.errors.UniqueViolation:
-                row = await handoffs.open_row(conn, agent.id)
-        if row is None or row.phase not in _REUSABLE:
-            phase = row.phase if row else "open"
-            raise ApiError(409, "handoff_open", f"a handoff is already {phase}")
-        profile = row.profile or "work"
         used = None if subject is None else subject.used_tokens
     inflight = await workspace.fetch_inflight(request.app, settings, agent)
     reasons = handoff_quality.check(body, profile, inflight, body.abandon, settings)
@@ -505,19 +509,25 @@ async def handoff_submit(
     refusal: ApiError | None = None
     handled: list[int] = []
     async with pool.connection() as conn:
+        if reasons and row is None:  # a voluntary submit that fails the check opens no row
+            raise _rejected(reasons, 0)
+        if row is None:
+            try:
+                async with conn.transaction():  # savepoint: a concurrent open is no failure
+                    row = await handoffs.open_pressure(
+                        conn, session.id, agent.id, 0, profile, "voluntary"
+                    )
+            except psycopg.errors.UniqueViolation:
+                row = await handoffs.open_row(conn, agent.id)
+            if row is None or row.phase not in _REUSABLE:
+                phase = row.phase if row else "open"
+                raise ApiError(409, "handoff_open", f"a handoff is already {phase}")
         if reasons:
             rejects = await handoffs.record_reject(conn, row.id, reasons)
             if rejects == 0:
                 refusal = ApiError(409, "handoff_open", "the handoff was just closed")
             else:
-                refusal = ApiError(
-                    422,
-                    "handoff_rejected",
-                    "the handoff was not accepted: "
-                    + "; ".join(_reason_words(r) for r in reasons)
-                    + ". Fix it and call orchestrator_handoff_submit again.",
-                    extra={"missing": reasons, "rejects": rejects},
-                )
+                refusal = _rejected(reasons, rejects)
         elif not await handoffs.submit(conn, row.id, stored, snapshot, used):
             refusal = ApiError(409, "handoff_open", "the handoff just moved on")
         else:

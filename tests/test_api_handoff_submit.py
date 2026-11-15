@@ -244,3 +244,36 @@ async def test_inflight_none_without_wrapper_session_and_on_errors(pool, dsn, mo
 
     monkeypatch.setattr(WrapperClient, "get_inflight", ok)
     assert (await workspace.fetch_inflight(app, settings, agent)).subagents == 1
+
+
+async def test_rejected_voluntary_submit_leaves_no_open_row(pool, dsn, inflight):
+    c, a0 = await solo_session(pool)
+    r = await submit(dsn, pool, c, doing="x", done=[], next=[])
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "handoff_rejected"
+    assert await rows(pool, a0["id"]) == []
+    async with pool.connection() as conn:
+        assert await handoffs.open_row(conn, a0["id"]) is None
+    r = await submit(dsn, pool, c)
+    assert r.status_code == 202, r.text
+    assert await rows(pool, a0["id"]) == [("voluntary", "submitted", 0, 0, "work", True)]
+
+
+async def test_existing_row_without_profile_runs_the_detector(pool, dsn, inflight, monkeypatch):
+    from agents_orchestrator import handoff_profile
+
+    calls = []
+
+    async def fake(conn, session, agent_id, since):
+        calls.append(agent_id)
+        return "chat"
+
+    monkeypatch.setattr(handoff_profile, "detect", fake)
+    c, a0 = await solo_session(pool)
+    row = await open_row(pool, c, a0)
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE agent_handoffs SET profile = NULL WHERE id = %s", (row.id,))
+    r = await submit(dsn, pool, c)  # the detected chat profile asks for chat fields
+    assert r.status_code == 422, r.text
+    assert {"missing:open_requests", "missing:results"} <= set(r.json()["error"]["missing"])
+    assert calls == [a0["id"]]
