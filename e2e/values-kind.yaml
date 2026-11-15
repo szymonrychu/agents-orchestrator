@@ -53,7 +53,7 @@ env:
   # claude answers at once, and the notice wait ends early once the session stayed idle)
   ORCH_AGENT_SHUTDOWN_NOTICE_SECONDS: "30"
   ORCH_AGENT_SHUTDOWN_HANDOFF_SECONDS: "60"
-  ORCH_HANDOVER_IDLE_PROCEED_SECONDS: "5"
+  ORCH_AGENT_SHUTDOWN_IDLE_PROCEED_SECONDS: "5"
   ORCH_LOG_LEVEL: INFO
 
 # Service port (other microservices): the e2e pod presents the fixed, non-secret token

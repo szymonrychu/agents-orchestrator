@@ -571,7 +571,7 @@ def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
                 "enabled": True,
                 "notice_seconds": settings.agent_shutdown_notice_seconds,
                 "handoff_seconds": settings.agent_shutdown_handoff_seconds,
-                "idle_proceed_seconds": settings.handover_idle_proceed_seconds,
+                "idle_proceed_seconds": settings.agent_shutdown_idle_proceed_seconds,
                 "notice_prompt": handoff_texts.SHUTDOWN_NOTICE,
                 "handoff_prompt": handoff_texts.SHUTDOWN_REQUEST,
             }

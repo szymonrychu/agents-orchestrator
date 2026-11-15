@@ -47,10 +47,14 @@ def waiting_on(row: Handoff | None) -> list[str]:
 
 
 def handoff_state(row: Handoff | None) -> HandoffState:
-    """none while pressuring, blocked when a submit waits on in-flight work, else accepted."""
+    """none while pressuring, blocked when a submit waits on in-flight work, submitted when its
+    blockers cleared and the agent is asked to re-submit (`resubmit` in the stored inventory,
+    set by the handoff pass), else accepted."""
     if row is None or row.phase == "pressuring":
         return "none"
     if row.phase == "submitted":
+        if (row.inflight or {}).get("resubmit"):
+            return "submitted"
         return "blocked" if waiting_on(row) else "accepted"
     return "accepted"
 

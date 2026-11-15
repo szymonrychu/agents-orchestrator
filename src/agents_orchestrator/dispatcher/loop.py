@@ -63,6 +63,9 @@ class Dispatcher:
         )
         self._handoff_policy = handoff.HandoffPolicy.from_settings(settings)
         self._handoff_at: float | None = None
+        self._inflight = handoff.inflight_fetcher(
+            self._client, float(settings.handoff_inflight_timeout_seconds)
+        )
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -186,11 +189,10 @@ class Dispatcher:
             await self._drain_handoffs(conn)
 
     async def _drain_handoffs(self, conn: Any) -> None:
-        """Right after the leadership passes: the strong-limit handoff pass for every session
+        """Right after the leadership passes: the context-pressure handoff pass for every session
         with a limit subject or an open row (`handoff.handoff_sessions`), at most once per
-        HANDOFF_INTERVAL_SECONDS (its timings are minutes). One failing session is logged and
-        never holds up the others; any transition wakes the push loop, so a new countdown note
-        goes out at once."""
+        HANDOFF_INTERVAL_SECONDS. One failing session is logged and never holds up the others;
+        any transition wakes the push loop, so the changed pressure policy goes out at once."""
         now = time.monotonic()
         if self._handoff_at is not None and now - self._handoff_at < HANDOFF_INTERVAL_SECONDS:
             return
@@ -205,7 +207,7 @@ class Dispatcher:
         for session_id in sessions:
             try:
                 moved = await handoff.handoff_pass(
-                    conn, session_id, self._handoff_policy, self.settings
+                    conn, session_id, self._handoff_policy, self.settings, self._inflight
                 )
             except Exception:
                 log.exception("handoff pass for session %s failed", session_id)

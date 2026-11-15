@@ -15437,7 +15437,7 @@
     },
     "/agent/v1/handoff": {
       "post": {
-        "description": "Check order: hive leader and epoch, an open row (reused, or a voluntary one opened), the\nquality of the text (422 `handoff_rejected`), then the in-flight gate (409 `in_flight`, the\nhandoff stored). A gate-clear submit is accepted 202; the dispatcher then moves leadership\n(hive) or clears the context and returns the handoff (solo) once the agent is idle.",
+        "description": "Check order: hive leader and epoch, an open row (reused; a voluntary one is opened only\nonce the text passes), the quality of the text (422 `handoff_rejected`), then the in-flight\ngate (409 `in_flight`, the handoff stored). A gate-clear submit is accepted 202; the\ndispatcher then moves leadership (hive) or clears the context and returns the handoff (solo)\nonce the agent is idle.",
         "operationId": "handoff_submit_agent_v1_handoff_post",
         "parameters": [
           {

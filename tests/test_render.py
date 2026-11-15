@@ -1059,6 +1059,14 @@ def test_shutdown_handoff_block_rendered_and_valid(tmp_path, monkeypatch):
         assert cfg.shutdown.handoff.enabled is True
 
 
+def test_shutdown_idle_proceed_rendered_from_new_setting():
+    objs = render.render_session(
+        make_session(), make_settings(agent_shutdown_idle_proceed_seconds=7), TOKENS
+    )
+    assert config_of(objs)["shutdown"]["handoff"]["idle_proceed_seconds"] == 7
+    assert "handover_idle_proceed_seconds" not in type(make_settings()).model_fields
+
+
 def test_shutdown_handoff_omitted_for_custom_image():
     objs = render.render_session(make_session(image="other/wrapper:0.8.0"), make_settings(), TOKENS)
     assert "shutdown" not in config_of(objs)

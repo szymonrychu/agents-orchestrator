@@ -308,6 +308,10 @@ class WrapperClient:
         resp = await self._request("GET", f"/sessions/{session_id}/pressure")
         return PressureView.model_validate(resp.json())
 
+    async def delete_pressure(self, session_id: str) -> None:
+        """Remove the session's pressure policy (the agent is no longer under pressure)."""
+        await self._request("DELETE", f"/sessions/{session_id}/pressure")
+
     async def get_inflight(self, session_id: str, timeout: float = 15.0) -> Inflight:
         """The in-flight inventory the gate reads before any clear or move."""
         resp = await self._request("GET", f"/sessions/{session_id}/inflight", timeout=timeout)

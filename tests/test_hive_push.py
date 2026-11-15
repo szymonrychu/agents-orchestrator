@@ -137,6 +137,10 @@ class Env:
             await self.rows("SELECT * FROM session_leaders WHERE session_id = %s", (session_id,))
         )[0]
 
+    def policy(self, agent: dict) -> dict | None:
+        """The pressure policy the fake wrapper holds for the agent's session."""
+        return self.fake.pressure.get(agent["wrapper_session_id"])
+
     def notes(self, agent: dict, key: str | None = "hive_state") -> list[str]:
         """Texts pushed to the agent's session: the keyed hive_state ones, or the appended."""
         pushed = self.fake.notes.get(agent["wrapper_session_id"], [])
@@ -323,70 +327,7 @@ async def test_no_feed_note(env):
         assert "wrote" not in pushed[0]["text"] and "make test" not in pushed[0]["text"]
 
 
-# ---------------------------------------------------------------- handover_due
-
-DUE = "handover_due"
-
-
-async def test_handover_due_sent_to_leader_at_threshold(env):
-    c, (a0, a1, a2) = await env.hive()  # default compaction 95, so the threshold is 80
-    await set_agent_status(env.pool, a0["id"], state="idle", context_pct=79)
-    await set_agent_status(env.pool, a1["id"], state="idle", context_pct=95)
-    await env.push()
-    assert all(env.notes(a, DUE) == [] for a in (a0, a1, a2))  # below the threshold, or a member
-
-    await set_agent_status(env.pool, a0["id"], state="idle", context_pct=80)
-    assert await env.push() == 1  # hive_state is unchanged: only the due note goes out
-    (text,) = env.notes(a0, DUE)
-    assert text.startswith("<handover-due>") and "Context limit (weak): wrap up." in text
-    assert env.notes(a1, DUE) == [] and env.notes(a2, DUE) == []  # members get none
-    sent = [n for n in env.fake.notes[a0["wrapper_session_id"]] if n["key"] == DUE]
-    assert sent[0]["source"] == "orchestrator"
-    assert await env.push() == 0  # one note, not one per tick
-    assert len(env.notes(a0, DUE)) == 1
-
-
-async def test_handover_due_candidates_ranked(env):
-    spec = {"replicas": 7, "max_replicas": 8}
-    c, agents = await env.hive(7, spec=spec)
-    a0, a1, a2, a3, a4, a5, a6 = agents
-    await env.run(  # a6 is leaving: its ordinal is not below spec.replicas
-        "UPDATE sessions SET spec = jsonb_set(spec, '{replicas}', '6') WHERE id = %s", (c["id"],)
-    )
-    await env.run("UPDATE agents SET ready = false WHERE id = %s", (a5["id"],))
-    await set_agent_status(env.pool, a0["id"], state="busy", context_pct=82)
-    await set_agent_status(env.pool, a1["id"], state="busy", context_pct=10)
-    await set_agent_status(env.pool, a2["id"], state="idle", context_pct=40)
-    await set_agent_status(env.pool, a3["id"], state="idle", context_pct=20.4)
-    await set_agent_status(env.pool, a4["id"], state="idle", context_pct=85)  # itself due
-    await set_agent_status(env.pool, a5["id"], state="idle", context_pct=5)
-    await set_agent_status(env.pool, a6["id"], state="idle", context_pct=1)
-    await env.push()
-    (text,) = env.notes(a0, DUE)
-    lines = [a["pod_name"] for a in (a3, a2, a1)]
-    assert "Candidates, best first: " + ", ".join(lines) + "." in text
-    for left_out in (a0, a4, a5, a6):  # the leader, an agent itself due, unready, leaving
-        assert left_out["pod_name"] not in text.split("Candidates", 1)[1]
-
-
-async def test_candidates_exclude_no_headroom_and_rank_pending_last(env):
-    c, (a0, a1, a2) = await env.hive()
-    await env.run(
-        "UPDATE sessions SET spec = spec || jsonb_build_object('auto_compact_pct', 25),"
-        " status = %s WHERE id = %s",
-        (json.dumps({"rollout": {"pending": [1]}}), c["id"]),
-    )
-    await set_agent_status(env.pool, a0["id"], state="idle", context_pct=12)  # weak: 10..14
-    await set_agent_status(env.pool, a1["id"], state="idle", context_pct=2)  # pending: last
-    await set_agent_status(env.pool, a2["id"], state="idle", context_pct=8)
-    await env.push()
-    (text,) = env.notes(a0, DUE)
-    assert "Candidates, best first: " + ", ".join(a["pod_name"] for a in (a2, a1)) + "." in text
-
-    await set_agent_status(env.pool, a2["id"], state="idle", context_pct=15)  # no headroom
-    await env.push()  # the candidate list changed, so a new note goes out
-    text = env.notes(a0, DUE)[-1]
-    assert a2["pod_name"] not in text.split("Candidates", 1)[1]
+# ---------------------------------------------------------------- levels and pressure
 
 
 def _levels(start=40000, c=50, budget=150000):
@@ -405,51 +346,51 @@ def test_strong_tokens_rule():
     assert strong(95, 50000) == 0  # min(42500, -12500) floored
 
 
-def test_levels_weak_from_start_plus_budget():
+def test_levels_l1_from_start_plus_budget():
     lv = _levels()  # C 50: strong 40%, weak fallback 35%, weak = 40000 + 150000
     assert (lv.strong_pct, lv.fallback_pct) == (40, 35)
     assert hive.due_level(lv, 189999, 1000000, 19.0, 1200, 1200, False) == "none"
-    assert hive.due_level(lv, 190000, 1000000, 19.0, 1200, 1200, False) == "weak"
+    assert hive.due_level(lv, 190000, 1000000, 19.0, 1200, 1200, False) == "l1"
 
 
-def test_due_level_weak_is_todays_soft_rule():
+def test_due_level_l1_is_todays_soft_rule():
     lv = _levels()
     assert hive.due_level(lv, 190000, 1000000, 19.0, 1199, 1200, False) == "none"  # tenure
     assert hive.due_level(lv, 190000, 1000000, 19.0, 1200, 1200, True) == "none"  # rollout
-    assert hive.due_level(lv, 190000, 1000000, 19.0, 1200, 1200, False) == "weak"
+    assert hive.due_level(lv, 190000, 1000000, 19.0, 1200, 1200, False) == "l1"
 
 
-def test_weak_clamped_to_strong():
+def test_l1_clamped_to_l2():
     lv = _levels(start=30000)  # window 200000: start + budget 180000, strong tokens 40000
     assert hive.due_level(lv, 39999, 200000, 19.99, 1200, 1200, False) == "none"
-    assert hive.due_level(lv, 40000, 200000, 20.0, 1200, 1200, False) == "strong"
+    assert hive.due_level(lv, 40000, 200000, 20.0, 1200, 1200, False) == "l2"
 
 
-def test_due_level_strong_ignores_tenure_and_rollout():
+def test_due_level_l2_ignores_tenure_and_rollout():
     lv = _levels()
-    assert hive.due_level(lv, 400000, 1000000, 40.0, 0, 1200, False) == "strong"
-    assert hive.due_level(lv, 400000, 1000000, 40.0, 0, 1200, True) == "strong"
+    assert hive.due_level(lv, 400000, 1000000, 40.0, 0, 1200, False) == "l2"
+    assert hive.due_level(lv, 400000, 1000000, 40.0, 0, 1200, True) == "l2"
     assert hive.due_level(lv, 399999, 1000000, 39.9, 0, 1200, True) == "none"
 
 
 def test_null_start_falls_back_to_percent():
     lv = hive.levels({}, None, Settings(database_url=DB0, master_key=KEY))  # C 95: fallback 80
-    assert hive.due_level(lv, None, None, 80.0, 1200, 1200, False) == "weak"
+    assert hive.due_level(lv, None, None, 80.0, 1200, 1200, False) == "l1"
     assert hive.due_level(lv, None, None, 79.0, 1200, 1200, False) == "none"
     # tokens known but no start: still the percent rule
     assert hive.due_level(lv, 790000, 1000000, 79.0, 1200, 1200, False) == "none"
 
 
-def test_due_level_pct_fallback_strong():
+def test_due_level_pct_fallback_l2():
     lv = hive.levels({}, None, Settings(database_url=DB0, master_key=KEY))  # C 95: strong 85
-    assert hive.due_level(lv, None, None, 85.0, 0, 1200, False) == "strong"
+    assert hive.due_level(lv, None, None, 85.0, 0, 1200, False) == "l2"
     assert hive.due_level(lv, None, None, 84.9, 0, 1200, False) == "none"
 
 
-def test_rollout_pending_suppresses_weak_not_strong():
+def test_rollout_pending_suppresses_l1_not_l2():
     lv = hive.levels({}, None, Settings(database_url=DB0, master_key=KEY))
     assert hive.due_level(lv, None, None, 82.0, 1200, 1200, True) == "none"
-    assert hive.due_level(lv, None, None, 85.0, 1200, 1200, True) == "strong"
+    assert hive.due_level(lv, None, None, 85.0, 1200, 1200, True) == "l2"
 
 
 async def test_start_tokens_filled_once(env):
@@ -478,7 +419,7 @@ async def test_start_tokens_filled_once(env):
     assert row["start_context_tokens"] == 50000
 
 
-async def test_budget_drives_due_note(env):
+async def test_budget_drives_the_pressure_policy(env):
     c, (a0, a1, a2) = await env.hive(spec={"auto_compact_pct": 50})
     await env.run(
         "UPDATE session_leaders SET start_context_tokens = 40000 WHERE session_id = %s", (c["id"],)
@@ -486,36 +427,39 @@ async def test_budget_drives_due_note(env):
     gauge = dict(state="idle", context_window_tokens=1000000)
     await set_agent_status(env.pool, a0["id"], context_used_tokens=150000, context_pct=15, **gauge)
     await env.push()
-    assert env.notes(a0, DUE) == []  # under start + budget
+    assert env.policy(a0) is None  # under start + budget
     await set_agent_status(env.pool, a0["id"], context_used_tokens=190000, context_pct=19, **gauge)
     await env.push()
-    (text,) = env.notes(a0, DUE)
-    assert "Context limit (weak): wrap up." in text and "orchestrator_leadership_handover" in text
+    policy = env.policy(a0)
+    assert policy["thresholds"]["l1_tokens"] == 190000
+    assert "orchestrator_handoff_submit" in policy["texts"]["l1"]["full"]
+    assert all(env.policy(a) is None for a in (a1, a2))  # members get none
 
 
-async def test_tenure_and_rollout_hold_back_the_weak_note(env):
+async def test_tenure_and_rollout_hold_back_l1_not_l2(env):
     c, (a0, a1, a2) = await env.hive()
     await set_agent_status(env.pool, a0["id"], state="idle", context_pct=82)
     await env.age_leader(c["id"], 600)  # under 20 minutes
     await env.push()
-    assert env.notes(a0, DUE) == []
+    assert env.policy(a0) is None
     await env.age_leader(c["id"], 1300)
     await env.run(
         "UPDATE sessions SET status = %s WHERE id = %s",
         (json.dumps({"rollout": {"pending": [0]}}), c["id"]),
     )
     await env.push()
-    assert env.notes(a0, DUE) == []  # the leader awaits its roll
-    await set_agent_status(env.pool, a0["id"], state="idle", context_pct=86)  # strong
+    assert env.policy(a0) is None  # the leader awaits its roll
+    await set_agent_status(env.pool, a0["id"], state="idle", context_pct=86)  # L2
     await env.push()
-    assert env.notes(a0, DUE) == []  # no weak note at the strong limit
+    policy = env.policy(a0)
+    assert policy is not None and policy["thresholds"]["l1_tokens"] is None  # L1 held back
     async with env.pool.connection() as conn:
         rows = await hive._subject_rows(conn)
     assert [
         (r["session_id"], hive._row_level(r, env.settings)[1])
         for r in rows
         if r["session_id"] == c["id"]
-    ] == [(c["id"], "strong")]
+    ] == [(c["id"], "l2")]
 
 
 async def test_hive_state_and_due_text_carry_budget_and_rule(env):
@@ -523,120 +467,6 @@ async def test_hive_state_and_due_text_carry_budget_and_rule(env):
     await env.push()
     text = env.notes(a0)[0]
     assert "150k tokens" in text and "20 minutes" in text and REREAD_RULE in text
-
-
-async def test_handover_due_resend_rules(env):
-    c, (a0, a1, a2) = await env.hive(
-        spec={"auto_compact_pct": 72}
-    )  # weak 57..62, buckets 11 and 12
-    await set_agent_status(env.pool, a0["id"], state="idle", context_pct=58)
-    await env.push()
-    assert len(env.notes(a0, DUE)) == 1
-
-    await set_agent_status(env.pool, a0["id"], state="idle", context_pct=59)  # same 5% bucket
-    # a candidate's state and context, with the order kept
-    await set_agent_status(env.pool, a2["id"], state="busy", context_pct=30)
-    await env.push()
-    assert len(env.notes(a0, DUE)) == 1
-
-    await set_agent_status(env.pool, a0["id"], state="idle", context_pct=60)  # next bucket
-    await env.push()
-    assert len(env.notes(a0, DUE)) == 2
-
-    await env.run("UPDATE agents SET ready = false WHERE id = %s", (a2["id"],))  # identity
-    await env.push()
-    assert len(env.notes(a0, DUE)) == 3
-    await env.run("UPDATE agents SET ready = true WHERE id = %s", (a2["id"],))
-    await env.push()
-    assert len(env.notes(a0, DUE)) == 4
-
-    await env.run(  # the epoch alone
-        "UPDATE session_leaders SET epoch = epoch + 1 WHERE session_id = %s", (c["id"],)
-    )
-    await env.push()
-    assert len(env.notes(a0, DUE)) == 5 and "Current epoch: 2" in env.notes(a0, DUE)[-1]
-
-    await set_agent_status(env.pool, a0["id"], state="idle", context_pct=50)  # compacted
-    await env.push()
-    assert len(env.notes(a0, DUE)) == 5
-    await set_agent_status(env.pool, a0["id"], state="idle", context_pct=58)  # due again
-    await env.push()
-    assert len(env.notes(a0, DUE)) == 6
-
-    # a new leader is judged on its own gauge, and the old leader is a member now
-    await set_agent_status(env.pool, a1["id"], state="idle", context_pct=10)
-    async with env.pool.connection() as conn:
-        await leadership.insert_request(conn, c["id"], "user", None, a1["id"], "test", None)
-    await env.lpass(c["id"])
-    await env.push()
-    assert len(env.notes(a0, DUE)) == 6 and env.notes(a1, DUE) == []
-    await set_agent_status(env.pool, a1["id"], state="idle", context_pct=58)
-    await env.age_leader(c["id"])  # the new leader has led long enough
-    await env.push()
-    assert len(env.notes(a1, DUE)) == 1 and len(env.notes(a0, DUE)) == 6
-
-
-async def test_handover_due_no_candidate(env):
-    c, (a0, a1) = await env.hive(2)  # scalable: a hive that is not static
-    await env.run("UPDATE agents SET ready = false WHERE id = %s", (a1["id"],))
-    await set_agent_status(env.pool, a0["id"], state="idle", context_pct=82)
-    await env.push()
-    (text,) = env.notes(a0, DUE)
-    assert "No ready successor; keep working." in text and "Candidates" not in text
-    assert "orchestrator_scale" not in text and "mcp__ccw__send_message" not in text
-
-    _, (s0, s1) = await env.hive(2, spec={"static": True, "max_replicas": 2})
-    await env.run("UPDATE agents SET ready = false WHERE id = %s", (s1["id"],))
-    await set_agent_status(env.pool, s0["id"], state="idle", context_pct=82)
-    await env.push()
-    (text,) = env.notes(s0, DUE)
-    assert "No ready successor; keep working." in text
-
-
-WEAK_WRAP = (
-    "Context limit (weak): wrap up. Finish the step you are in, commit and push, update your "
-    "task and todo, and leave notes a successor can act on. Nothing will happen if you keep "
-    "working."
-)
-WELCOME = (
-    "At a natural boundary, orchestrator_leadership_handover(to=..., epoch=..., reason=...) "
-    "is welcome."
-)
-SOLO_HANDOFF = (
-    "To hand off now on your own terms, call orchestrator_leadership_handover("
-    "reason=<your handoff>): your context is cleared and the handoff comes back to you."
-)
-
-
-async def test_weak_note_texts(env):
-    c, (a0, a1, a2) = await env.hive()
-    await set_agent_status(env.pool, a0["id"], state="idle", context_pct=82)
-    await env.push()
-    (text,) = env.notes(a0, DUE)
-    assert text.startswith("<handover-due>") and text.rstrip().endswith("</handover-due>")
-    assert WEAK_WRAP in text and WELCOME in text and "Candidates, best first: " in text
-    assert SOLO_HANDOFF not in text
-
-    _, (b0, b1) = await env.hive(2)
-    await env.run("UPDATE agents SET ready = false WHERE id = %s", (b1["id"],))
-    await set_agent_status(env.pool, b0["id"], state="idle", context_pct=82)
-    await env.push()
-    (text,) = env.notes(b0, DUE)
-    assert WEAK_WRAP in text and "No ready successor; keep working." in text
-    assert WELCOME not in text and SOLO_HANDOFF not in text
-
-    solo = await insert_session(env.pool, spec={"replicas": 1})
-    s0 = await env.agent(solo["id"], 0)
-    await env.run(
-        "INSERT INTO agent_limits (agent_id, start_context_tokens, since)"
-        " VALUES (%s, 1000, now() - interval '1 hour')",
-        (s0["id"],),
-    )
-    await set_agent_status(env.pool, s0["id"], state="idle", context_pct=82)
-    await env.push()
-    (text,) = env.notes(s0, DUE)
-    assert WEAK_WRAP in text and SOLO_HANDOFF in text
-    assert WELCOME not in text and "Candidates" not in text
 
 
 @dataclass(frozen=True)
@@ -658,7 +488,7 @@ async def _subjects(env) -> dict:
     }
 
 
-async def test_solo_agent_gets_weak_note(env):
+async def test_solo_agent_gets_pressure_policy(env):
     solo = await insert_session(env.pool, spec={})  # neither replicas nor max_replicas set
     s0 = await env.agent(solo["id"], 0)
     gauge = dict(state="idle", context_window_tokens=1000000)
@@ -666,7 +496,8 @@ async def test_solo_agent_gets_weak_note(env):
     assert await env.push() == 0
     # the first tick with a gauge records the start context
     assert await env.limits_start(s0["id"]) == 50000
-    assert env.notes(s0, DUE) == [] and env.notes(s0) == []  # no hive state for a solo agent
+    assert env.notes(s0, None) == [] and env.notes(s0) == []  # no notes for a solo agent
+    assert env.policy(s0) is None  # L0
 
     await set_agent_status(env.pool, s0["id"], context_used_tokens=90000, context_pct=9, **gauge)
     await env.push()
@@ -675,9 +506,10 @@ async def test_solo_agent_gets_weak_note(env):
     # tenure counts from the recorded start; the budget is start + 150k
     await env.run("UPDATE agent_limits SET since = now() - interval '1 hour'")
     await set_agent_status(env.pool, s0["id"], context_used_tokens=200000, context_pct=20, **gauge)
-    assert await env.push() == 1
-    assert len(env.notes(s0, DUE)) == 1
-    assert (await _subjects(env))[solo["id"]].level == "weak"
+    assert await env.push() == 0  # a policy, not a note
+    assert env.policy(s0)["thresholds"]["l1_tokens"] == 200000
+    assert env.policy(s0)["version"] == 1
+    assert (await _subjects(env))[solo["id"]].level == "l1"
 
     # a clear re-arms the start context: the next gauge is recorded again
     await insert_event(
@@ -687,8 +519,11 @@ async def test_solo_agent_gets_weak_note(env):
     await env.push()
     assert await env.limits_start(s0["id"]) == 30000
     await env.push()
-    assert env.notes(s0, DUE) and len(env.notes(s0, DUE)) == 1
     assert (await _subjects(env))[solo["id"]].level == "none"
+    # pushed before: it keeps its (now L0) policy, a new tenure holds L1 back, a new version
+    assert env.policy(s0)["thresholds"]["l1_tokens"] is None
+    assert env.policy(s0)["version"] == 2
+    assert env.notes(s0, None) == []
 
 
 async def test_solo_start_ignores_gauge_older_than_the_clear(env):
@@ -709,29 +544,15 @@ async def test_solo_start_ignores_gauge_older_than_the_clear(env):
     assert await env.limits_start(s0["id"]) == 30000
 
 
-async def test_weak_to_strong_sends_no_second_note(env):
-    c, (a0, a1, a2) = await env.hive(spec={"auto_compact_pct": 72})
-    await set_agent_status(env.pool, a0["id"], state="idle", context_pct=58)
-    await env.push()
-    assert len(env.notes(a0, DUE)) == 1
-    await set_agent_status(env.pool, a0["id"], state="idle", context_pct=70)  # strong
-    await env.push()
-    assert len(env.notes(a0, DUE)) == 1
-    await set_agent_status(env.pool, a0["id"], state="idle", context_pct=58)  # weak again
-    await env.push()
-    assert len(env.notes(a0, DUE)) == 1  # same key: still not resent
-
-
-async def test_member_never_gets_a_note(env):
+async def test_member_never_gets_pressure(env):
     c, (a0, a1) = await env.hive(2)
     for a in (a0, a1):
         await set_agent_status(env.pool, a["id"], state="idle", context_pct=90)
     subjects = await _subjects(env)
-    assert [(x.agent_id, x.solo, x.level) for x in subjects.values()] == [
-        (a0["id"], False, "strong")
-    ]
+    assert [(x.agent_id, x.solo, x.level) for x in subjects.values()] == [(a0["id"], False, "l3")]
     await env.push()
-    assert env.notes(a1, DUE) == []
+    assert env.policy(a0) is not None
+    assert env.policy(a1) is None
     assert await env.limits_start(a1["id"]) is None
 
 
@@ -746,34 +567,28 @@ async def test_trigger_created_solo_session_is_a_subject(env):
     await env.run("UPDATE agents SET gone_at = now() WHERE id = %s", (g0["id"],))
     subjects = await _subjects(env)
     assert set(subjects) == {solo["id"]}
-    assert (subjects[solo["id"]].solo, subjects[solo["id"]].level) == (True, "strong")
+    assert (subjects[solo["id"]].solo, subjects[solo["id"]].level) == (True, "l3")
 
 
-async def test_due_text_has_no_ccw_protocol(env):
-    for spec in ({}, {"peers": False}):
-        _, (a0, _a1, _a2) = await env.hive(spec=spec)
-        await set_agent_status(env.pool, a0["id"], state="idle", context_pct=82)
-        await env.push()
-        (text,) = env.notes(a0, DUE)
-        assert "mcp__ccw__send_message" not in text and '"ready"' not in text
-        assert "notify_when_idle" not in text and "peer-idle-notice" not in text
-
-
-async def test_handover_due_runs_when_hive_state_unchanged(env):
+async def test_pressure_runs_when_hive_state_unchanged(env):
     c, (a0, a1, a2) = await env.hive(spec={"auto_compact_pct": 72})
     await env.push()
     assert len(env.notes(a0)) == 1
     await set_agent_status(env.pool, a0["id"], state="idle", context_pct=58)
-    assert await env.push() == 1  # the structure hash is unchanged; the due note still goes
-    assert len(env.notes(a0)) == 1 and len(env.notes(a0, DUE)) == 1
+    await env.push()  # the structure hash is unchanged; the policy still goes
+    assert len(env.notes(a0)) == 1 and env.policy(a0)["version"] == 1
 
-    # a failed due push is retried on the next tick
-    await set_agent_status(env.pool, a0["id"], state="idle", context_pct=60)
+    # a failed push is retried on the next tick
     await env.run("UPDATE agents SET url = 'http://127.0.0.1:1' WHERE id = %s", (a0["id"],))
-    assert await env.push() == 0
+    await env.run(  # chat traffic: the profile, and so the policy content, changes
+        "INSERT INTO chat_activity (session_id, agent_id, direction) VALUES (%s, %s, 'out')",
+        (c["id"], a0["id"]),
+    )
+    await env.push()
+    assert env.policy(a0)["version"] == 1
     await env.run("UPDATE agents SET url = %s WHERE id = %s", (env.fake.base_url, a0["id"]))
-    assert await env.push() == 1
-    assert len(env.notes(a0, DUE)) == 2
+    await env.push()
+    assert env.policy(a0)["version"] == 2 and env.policy(a0)["profile"] == "chat"
 
 
 # ---------------------------------------------------------------- rollout_due

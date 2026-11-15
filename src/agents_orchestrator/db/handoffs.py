@@ -152,14 +152,17 @@ async def open_pressure(
     level: int,
     profile: str,
     trigger: Literal["pressure", "voluntary"] = "pressure",
+    used_tokens: int | None = None,
 ) -> Handoff:
-    """Open a `pressuring` row at `level` for a `work` or `chat` agent; raises UniqueViolation
-    while the agent already has an open row."""
+    """Open a `pressuring` row at `level` for a `work` or `chat` agent; at level 2 or more
+    `used_tokens` is kept in `l2_tokens_at`. Raises UniqueViolation while the agent already has
+    an open row."""
     row = await _fetch(
         conn,
-        "INSERT INTO agent_handoffs (session_id, agent_id, trigger, phase, level, profile)"
-        f" VALUES (%s, %s, %s, 'pressuring', %s, %s) RETURNING {_COLUMNS}",
-        (session_id, agent_id, trigger, level, profile),
+        "INSERT INTO agent_handoffs"
+        " (session_id, agent_id, trigger, phase, level, profile, l2_tokens_at)"
+        f" VALUES (%s, %s, %s, 'pressuring', %s, %s, %s) RETURNING {_COLUMNS}",
+        (session_id, agent_id, trigger, level, profile, used_tokens if level >= 2 else None),
     )
     assert row is not None
     return row
@@ -236,7 +239,8 @@ async def mark_escalated(conn: psycopg.AsyncConnection, row_id: int) -> bool:
 
 
 async def mark_nudged(conn: psycopg.AsyncConnection, row_id: int, level: int) -> bool:
-    """Record a nudge sent at `level`; True only while a lower level was nudged before."""
+    """Record a nudge sent at `level`; True only when no nudge at `level` or higher was recorded
+    yet (`nudged_level` starts at 0), so each level is nudged at most once."""
     cur = await conn.execute(
         "UPDATE agent_handoffs SET nudged_level = %s, progress_at = now()"
         " WHERE id = %s AND nudged_level < %s AND phase = ANY(%s)",
@@ -355,6 +359,16 @@ async def open_rows(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> lis
         return [Handoff(**row) for row in await cur.fetchall()]
 
 
+async def open_rows_all(conn: psycopg.AsyncConnection) -> list[Handoff]:
+    """Every open row, oldest first (the pressure push reads them)."""
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            f"SELECT {_COLUMNS} FROM agent_handoffs WHERE phase = ANY(%s) ORDER BY id",
+            (list(OPEN_PHASES),),
+        )
+        return [Handoff(**row) for row in await cur.fetchall()]
+
+
 async def queued_messages(
     conn: psycopg.AsyncConnection, row_id: int, *, notices_only: bool = False
 ) -> list[int]:
@@ -394,7 +408,7 @@ async def set_limits_start(
 # Phases before the discussion: a leader that moves while its row is in one of them carries the
 # row on to `discussing`, or closes it when the move was not its own handover.
 _PRE_DISCUSSION = ("pressuring", "submitted", "moving", "handed")
-# Reasons of the forced handover requests (the reconciler's rollout, the strong-limit handoff's
+# Reasons of the forced handover requests (the reconciler's rollout, the pressure handoff's
 # limit): no leader's judgment, so no handoff text from them and they never expire.
 FORCED_REASONS = ("rollout", "limit")
 

@@ -174,6 +174,9 @@ class Settings(BaseSettings):
     agent_shutdown_notice_seconds: int = Field(default=120, ge=0, le=600)
     agent_shutdown_handoff_seconds: int = Field(default=180, ge=0, le=600)
     agent_shutdown_stop_seconds: int = Field(default=90, ge=10, le=600)
+    #: Rendered as `shutdown.handoff.idle_proceed_seconds`: the notice wait ends early once the
+    #: session stayed idle this long.
+    agent_shutdown_idle_proceed_seconds: int = Field(default=60, ge=0, le=600)
 
     http_host: str = "0.0.0.0"
     http_port: int = 8000
@@ -240,12 +243,6 @@ class Settings(BaseSettings):
     # is earlier; never below the strong point.
     handover_critical_margin_pct: int = Field(default=5, ge=1, le=50)
     handover_critical_headroom_tokens: int = Field(default=25000, ge=0, le=500000)
-    #: Strong-limit handoff (dispatcher/handoff.py): the notice countdown, the one extension,
-    #: the idle time that ends the countdown early, and the quiet window (capped) a hive gets
-    #: to discuss before the ex-leader is cleared.
-    handover_notify_seconds: int = Field(default=300, ge=30, le=3600)
-    handover_extension_seconds: int = Field(default=300, ge=0, le=3600)
-    handover_idle_proceed_seconds: int = Field(default=60, ge=0, le=600)
     #: Handoff submit quality check and in-flight gate (handoff_quality.py, handoff_gate.py):
     #: the least characters over all fields, the least share of letters, digits and whitespace,
     #: the rejected submits that count as stuck, and the seconds to wait for the wrapper's
@@ -254,6 +251,8 @@ class Settings(BaseSettings):
     handoff_min_text_ratio: float = Field(default=0.6, ge=0, le=1)
     handoff_max_rejects: int = Field(default=3, ge=1, le=20)
     handoff_inflight_timeout_seconds: int = Field(default=15, ge=1, le=120)
+    #: The quiet window a hive gets to discuss before the ex-leader is cleared (its own
+    #: in-flight gate must be clear too); the cap drops only the session-quiet requirement.
     handover_quiet_seconds: int = Field(default=60, ge=0, le=3600)
     handover_quiet_cap_seconds: int = Field(default=600, ge=60, le=7200)
     #: A `clear` the wrapper accepted counts as lost (retried, then `clear_failed`) once the

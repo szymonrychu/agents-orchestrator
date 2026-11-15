@@ -7,7 +7,8 @@ the facts are the context size and what is still open.
 
 from __future__ import annotations
 
-from typing import Literal
+from collections.abc import Mapping
+from typing import Any, Literal
 
 Profile = Literal["work", "chat"]
 
@@ -151,6 +152,53 @@ def resume_text(task_ids: list[str], next_first: str | None) -> str:
     steps.append("recreate the session crons listed in the handoff")
     steps.append(f"continue with: {next_first}" if next_first else "continue with the next item")
     return "Resume now: " + "; ".join(f"{i}. {s}" for i, s in enumerate(steps, 1)) + "."
+
+
+_FIELDS = (
+    ("doing", "Doing"),
+    ("done", "Done"),
+    ("in_flight", "In flight"),
+    ("next", "Next, in order"),
+    ("open_requests", "Open requests"),
+    ("results", "Results"),
+    ("gotchas", "Gotchas"),
+)
+
+
+def render_handoff(handoff: Mapping[str, Any]) -> str:
+    """The fields of an accepted handoff as plain text, in the submit's order; abandoned items
+    with their reasons last."""
+    lines: list[str] = []
+    for key, title in _FIELDS:
+        value = handoff.get(key)
+        if not value:
+            continue
+        if isinstance(value, str):
+            lines.append(f"{title}: {value}")
+        else:
+            lines.append(f"{title}:")
+            lines.extend(f"- {item}" for item in value)
+    abandoned = handoff.get("abandoned") or []
+    if abandoned:
+        lines.append("Abandoned:")
+        lines.extend(f"- {a.get('item')}: {a.get('why')}" for a in abandoned)
+    return "\n".join(lines)
+
+
+def return_text(handoff: Mapping[str, Any], *, cleared: bool) -> str:
+    """The accepted handoff sent back to a solo agent after its clear (`cleared`), or after a
+    clear that failed (the context was kept)."""
+    nxt = handoff.get("next") or []
+    if cleared:
+        head = "Your context was cleared after your accepted handoff. " + resume_text(
+            [], str(nxt[0]) if nxt else None
+        )
+    else:
+        head = (
+            "The clear after your accepted handoff failed and your context was kept. "
+            "Your handoff, for reference:"
+        )
+    return head + "\n\n" + render_handoff(handoff)
 
 
 def shutdown_successor(pod: str, text: str) -> str:

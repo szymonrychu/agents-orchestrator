@@ -501,8 +501,8 @@ WHERE h.agent_id = %s
   AND h.phase IN ('pressuring', 'submitted', 'moving', 'handed', 'discussing', 'clearing',
                   'returning')
 """
-_HANDOFF_PRESSURE = ("pressuring",)
-_HANDOFF_NOTICES = ("handoff_notice", "handoff_request", "handoff_nudge", "handoff_escalation")
+# Removed kinds (the countdown's notice and request, T-423): never sent, cancelled at the claim.
+_HANDOFF_REMOVED = ("handoff_notice", "handoff_request")
 _HANDOFF_SOLO_HOLD = ("clearing", "returning")
 # A shutdown row holds the agent's other messages on its next pod until its clear (and, solo,
 # its return) ran: the fresh context reads nothing before them.
@@ -520,24 +520,23 @@ async def _handoff_gate(
     """`send`, `hold` or `cancel` for a message about to go to `agent_id` (`rows` caches the
     agent's open handoff row for one scan).
 
-    A handoff notice, nudge or escalation goes out only while its row is `pressuring` and the
-    context was not reset since the row opened, so none ever reaches a compacted or cleared
-    context; otherwise it is cancelled (a `handoff_request` is a removed kind and always is).
-    While the row is `clearing`/`returning` in the solo order, or a shutdown row waits for its
-    clear, every other message for the agent waits, so the clear and the return run with
-    nothing in between.
+    A `handoff_nudge` goes out only while its row is `pressuring` and the context was not reset
+    since the row opened, so none ever reaches a compacted or cleared context or an agent that
+    already submitted; otherwise it is cancelled, as is any `handoff_notice` or
+    `handoff_request` (removed kinds). Messages flow while a row is `pressuring`, `submitted`,
+    `moving` or `discussing`; only while a solo row is `clearing`/`returning`, or a shutdown row
+    waits for its clear, every other message for the agent waits, so the clear and the return run
+    with nothing in between.
     """
+    if notice in _HANDOFF_REMOVED:
+        return "cancel"
     if agent_id not in rows:
         rows[agent_id] = await _one(conn, _HANDOFF_ROW, (agent_id,))
     row = rows[agent_id]
-    if notice in _HANDOFF_NOTICES:
-        if row is None or row["reset"]:
+    if notice == "handoff_nudge":
+        if row is None or row["reset"] or row["phase"] != "pressuring":
             return "cancel"
-        return (
-            "send"
-            if row["phase"] in _HANDOFF_PRESSURE and notice != "handoff_request"
-            else "cancel"
-        )
+        return "send"
     if row is None or message_id == row["return_message_id"]:
         return "send"
     if (row["solo"] and row["phase"] in _HANDOFF_SOLO_HOLD) or (

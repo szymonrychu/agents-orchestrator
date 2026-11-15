@@ -7,6 +7,12 @@ import pytest
 from agents_orchestrator import handoff_texts as t
 
 PROFILES = ("work", "chat")
+HANDOFF = {
+    "doing": "wiring the pressure push",
+    "done": ["commit abc"],
+    "next": ["open the PR", "watch CI"],
+    "abandoned": [{"item": "task:bf3a", "why": "stale CI watcher, not needed"}],
+}
 
 
 def _all_texts() -> list[str]:
@@ -21,6 +27,8 @@ def _all_texts() -> list[str]:
         t.escalation_text("s", "agent-s-0", 3, 97.0, ["next"], ["background task bf3a"]),
         t.escalation_text("s", "agent-s-0", 2, None, [], []),
         t.shutdown_successor("agent-s-0", "text"),
+        t.return_text(HANDOFF, cleared=True),
+        t.return_text(HANDOFF, cleared=False),
     ]
     for level in (1, 2, 3):
         out.append(t.nudge_text(level))
@@ -108,3 +116,13 @@ def test_resume_text_is_an_instruction_list():
     text = t.resume_text(["T-9"], "finish step 3")
     assert text.startswith("Resume now: 1. call orchestrator_me")
     assert "T-9" in text and "finish step 3" in text
+
+
+def test_return_text_resumes_with_next_first_and_renders_fields():
+    text = t.return_text(HANDOFF, cleared=True)
+    assert "Resume now:" in text and "continue with: open the PR" in text
+    assert "Doing: wiring the pressure push" in text
+    assert "Next, in order:\n- open the PR\n- watch CI" in text
+    assert "- task:bf3a: stale CI watcher, not needed" in text
+    kept = t.return_text(HANDOFF, cleared=False)
+    assert "context was kept" in kept and "Resume now" not in kept
