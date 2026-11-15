@@ -34,11 +34,22 @@ NOT_STOPPING = (
     "NOT EXISTS (SELECT 1 FROM agent_status ss WHERE ss.agent_id = a.id"
     " AND ss.stopping_since IS NOT NULL)"
 )
-ELIGIBLE = f"{READY_STAYS} AND a.wrapper_session_id IS NOT NULL AND {NOT_STOPPING}"
-# The agents the dispatcher can hand a message to now (T-167): ready, not gone, not dead and
-# holding a wrapper session. Not `STAYS`: a leaving agent still holds the message it is given.
-# Behind the summary's `ready_with_session`. Alias `a`.
-HOLDS_SESSION = f"a.ready AND a.gone_at IS NULL AND NOT {DEAD} AND a.wrapper_session_id IS NOT NULL"
+# Failed login (T-225): the agent's claude shows a re-login screen (`agent_status.auth_state`).
+# It is never handed a message, never picked as leader or successor, and a failed leader is
+# handled as a lost leader. A new pod's snapshot clears the state. Alias `a`.
+AUTH_FAILED = (
+    "EXISTS (SELECT 1 FROM agent_status fs WHERE fs.agent_id = a.id AND fs.auth_state = 'failed')"
+)
+ELIGIBLE = (
+    f"{READY_STAYS} AND a.wrapper_session_id IS NOT NULL AND {NOT_STOPPING} AND NOT {AUTH_FAILED}"
+)
+# The agents the dispatcher can hand a message to now (T-167): ready, not gone, not dead, not
+# auth-failed and holding a wrapper session. Not `STAYS`: a leaving agent still holds the
+# message it is given. Behind the summary's `ready_with_session`. Alias `a`.
+HOLDS_SESSION = (
+    f"a.ready AND a.gone_at IS NULL AND NOT {DEAD}"
+    f" AND a.wrapper_session_id IS NOT NULL AND NOT {AUTH_FAILED}"
+)
 
 # The handover trigger: the leader's pod is leaving. Aliases: `l` the `session_leaders` row, `a`
 # the leader's agent, `c` the session. `LEAVING` is the ordinal test alone (the pass reads it as
