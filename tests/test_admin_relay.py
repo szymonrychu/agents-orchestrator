@@ -28,6 +28,7 @@ from test_api_sessions import client_for as main_client
 from agents_orchestrator.api import admin_relay, forward
 from agents_orchestrator.api.admin import ADMIN_PREFIX
 from agents_orchestrator.api.app import create_app
+from agents_orchestrator.preset_policy import privileged
 from agents_orchestrator.settings import Settings
 
 HOSTS = {"webhook": "http://webhook.test", "schedule": "http://schedule.test"}
@@ -696,6 +697,13 @@ async def test_relay_safe_preset_still_forwarded(rig, service, method, template)
     r = await rig.call(method, relay_url(service, template), json=body)
     assert r.status_code == _success(service, method, template), r.text
     assert _sent(rig, service, method, template)
+
+
+def test_session_messaging_is_not_a_privileged_flag():
+    """`session_messaging` is no grant: a spec carrying only it has no privileged flag, so the
+    relay's attachment view never marks such a preset `privileged`."""
+    assert privileged({"session_messaging": True}) == []
+    assert privileged({"session_messaging": True, "docker": True}) == ["docker"]
 
 
 async def test_relay_hidden_privileged_is_403(rig):
