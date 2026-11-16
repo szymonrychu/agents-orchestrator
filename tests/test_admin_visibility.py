@@ -16,7 +16,7 @@ from test_api_sessions import client_for as main_client
 
 from agents_orchestrator.api import (  # noqa: F401
     admin,
-    admin_archives,
+    admin_backups,
     admin_relay,
     admin_specs,
     proposal_routes,

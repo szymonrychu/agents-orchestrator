@@ -6,7 +6,7 @@ with parameters."""
 from __future__ import annotations
 
 import pytest
-from test_api_archives import settings_for
+from test_api_backups import settings_for
 
 from agents_orchestrator.api.admin import ADMIN_PREFIX
 from agents_orchestrator.api.app import create_app
@@ -33,7 +33,7 @@ DECLARED: dict[tuple[str, str], set[int]] = {
         413,
         503,
     },
-    ("PUT", f"{ADMIN_PREFIX}/archives/settings"): {403},
+    ("PUT", f"{ADMIN_PREFIX}/backups/cleanup/settings"): {403},
     ("PATCH", f"{ADMIN_PREFIX}/projects/{{slug}}"): {403, 404, 409},
     ("GET", f"{ADMIN_PREFIX}/vault"): {403, 502, 503},
     ("GET", f"{ADMIN_PREFIX}/usage/history"): {403, 503},

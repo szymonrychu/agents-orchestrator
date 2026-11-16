@@ -92,7 +92,7 @@ MINDMAP_TOOLS = [
 # Superleader admin tools: the plugin's declarative admin rows (any-mcp-tatara-plugins
 # orchestration/orchestrator admin.py), the vault tools included. History is read and search
 # only: there is no history delete tool, deleting a stored session is for the user (web UI).
-# The slice 2 reads (T-120): any session's live work, the deploy meta, the cache archives
+# The slice 2 reads (T-120): any session's live work, the deploy meta, the backups
 # (no download) and the usage history. A project grant tool files a proposal the user reviews
 # (T-120); revoke tools act at once. The slice 3 writes (labels, scale, lock reassign, message
 # cancel, project update, cleanup settings, spec delete, suggestion dismiss) are
@@ -115,10 +115,11 @@ ADMIN_TOOLS = [
     "session_projects_grant", "session_projects_revoke", "preset_projects_grant",
     "preset_projects_revoke", "preset_manageable_request",
     "sessions_admin_list", "session_activity", "session_events", "session_messages",
-    "session_locks", "session_commands", "meta_get", "archives_list", "archives_settings_get",
-    "archives_cleanup_preview", "usage_history", "usage_sessions",
+    "session_locks", "session_commands", "meta_get", "backups_list", "backup_versions",
+    "backup_manifest", "backups_copy", "backups_cleanup_get", "backups_cleanup_preview",
+    "usage_history", "usage_sessions",
     "session_labels_update", "session_scale", "session_lock_reassign", "session_message_cancel",
-    "project_update", "archives_settings_set", "spec_delete", "spec_suggestion_dismiss",
+    "project_update", "backups_cleanup_set", "spec_delete", "spec_suggestion_dismiss",
     "spec_queue_move",
     *PROPOSAL_TOOLS,
 ]  # fmt: skip

@@ -299,3 +299,53 @@ async def referenced_versions(conn: psycopg.AsyncConnection) -> set[uuid.UUID]:
         except ValueError:
             continue
     return out
+
+
+async def name_versions(conn: psycopg.AsyncConnection, name: str) -> list[Version]:
+    """Every version of `name`, newest first (no paging: the sweep and the delete need all)."""
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            f"SELECT {_COLUMNS} FROM backup_versions WHERE name = %s"
+            " ORDER BY created_at DESC, id DESC",
+            (name,),
+        )
+        return [_version(r) for r in await cur.fetchall()]
+
+
+async def all_versions(conn: psycopg.AsyncConnection) -> list[Version]:
+    """Every version of every name (the sweep plans over all of them)."""
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(f"SELECT {_COLUMNS} FROM backup_versions")
+        return [_version(r) for r in await cur.fetchall()]
+
+
+async def name_activity(conn: psycopg.AsyncConnection) -> dict[str, datetime]:
+    """Per name the later of its last restore (`last_used_at`) and its last save or copy."""
+    cur = await conn.execute(
+        "SELECT name, GREATEST(updated_at, COALESCE(last_used_at, updated_at)) FROM backups"
+    )
+    return {name: ts for name, ts in await cur.fetchall()}
+
+
+async def referencing(conn: psycopg.AsyncConnection) -> list[tuple[uuid.UUID, str, str]]:
+    """(version id, backup name, session slug) for every stored session status that names an
+    existing version as restore source or base (same reading as `referenced_versions`)."""
+    cur = await conn.execute(
+        "SELECT DISTINCT v.id, v.name, s.slug FROM sessions s,"
+        " jsonb_array_elements(CASE WHEN jsonb_typeof(s.status -> 'backup') = 'array'"
+        "   THEN s.status -> 'backup' ELSE '[]'::jsonb END) AS e(value),"
+        " unnest(ARRAY['version', 'base_version']) AS k,"
+        " backup_versions v"
+        " WHERE jsonb_typeof(e.value) = 'object' AND e.value ->> k = v.id::text"
+    )
+    return [(vid, name, slug) for vid, name, slug in await cur.fetchall()]
+
+
+async def known_keys(conn: psycopg.AsyncConnection, keys: list[str]) -> set[str]:
+    """The subset of `keys` that some version row owns."""
+    if not keys:
+        return set()
+    cur = await conn.execute(
+        "SELECT object_key FROM backup_versions WHERE object_key = ANY(%s)", (keys,)
+    )
+    return {r[0] for r in await cur.fetchall()}
