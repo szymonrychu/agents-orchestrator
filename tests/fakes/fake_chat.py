@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs
 
 from jsonschema import Draft202012Validator, FormatChecker
 from referencing import Registry, Resource
@@ -52,6 +53,28 @@ SKILL_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _default_history() -> list[dict[str, Any]]:
+    """Three past messages; the second one has an attachment."""
+    base = {
+        "role": "member",
+        "reply_to": None,
+        "truncated": False,
+        "withheld": None,
+        "edited": False,
+        "redacted": False,
+        "attachment": None,
+        "status": None,
+        "files": 0,
+    }
+    at = "2026-11-01T10:00:00+00:00"
+    attachment = {"kind": "image", "mime": "image/png", "size": 2048, "name": "photo.png"}
+    return [
+        {**base, "id": "m1", "from": "Ann B", "at": at, "text": "hello"},
+        {**base, "id": "m2", "from": "Ann B", "at": at, "text": None, "attachment": attachment},
+        {**base, "id": "m3", "role": "bot", "from": None, "at": at, "text": "hi Ann"},
+    ]
 
 
 def operations() -> dict[tuple[str, str], dict[str, Any]]:
@@ -139,7 +162,8 @@ class FakeChat:
 
     A route is `"METHOD /chat/v1/path"` with the template of the document, for example
     `"GET /chat/v1/messages/{id}"`. `.rooms` is the answer of the room listing; `.sends` maps the
-    ids it handed out to the send each one queued.
+    ids it handed out to the send each one queued. `.history` is the page source of the history
+    route and `.fetches` maps the ids of the attachment fetches to the session that asked.
     """
 
     token: str
@@ -157,6 +181,10 @@ class FakeChat:
         ]
     )
     sends: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # the room's past messages (oldest first) served by `/history`, and the attachment fetches
+    # queued by `/attachments` (id -> the session and message of the fetch)
+    history: list[dict[str, Any]] = field(default_factory=lambda: _default_history())
+    fetches: dict[str, dict[str, Any]] = field(default_factory=dict)
     # per-session room memory: the notes (body, version) and the skills (name -> record)
     notes: dict[uuid.UUID, tuple[str, int]] = field(default_factory=dict)
     skills: dict[uuid.UUID, dict[str, dict[str, Any]]] = field(default_factory=dict)
@@ -255,6 +283,10 @@ class FakeChat:
             return self._notes(key, call, session)
         if template.startswith(PREFIX + "/skills"):
             return self._skills(key, call, session, match)
+        if template == PREFIX + "/history":
+            return self._history(key, call)
+        if template.startswith(PREFIX + "/attachments"):
+            return self._attachments(key, call, session, match)
         if method == "POST":
             return self._post(key, call, session)
         if template.endswith("/rooms"):
@@ -295,6 +327,67 @@ class FakeChat:
                 "chars": len(body),
                 "max_chars": NOTES_MAX_CHARS,
                 "rule": "fake memory rule",
+            },
+        )
+
+    def _history(self, key: tuple[str, str], call: Call) -> tuple[int, Any]:
+        query = parse_qs(call.query)
+        ids = [m["id"] for m in self.history]
+        messages = list(self.history)
+        if "before" in query:
+            if query["before"][0] not in ids:
+                return self._error(key, 400, "bad_reference", "no such message")
+            messages = messages[: ids.index(query["before"][0])]
+        if "after" in query:
+            if query["after"][0] not in ids:
+                return self._error(key, 400, "bad_reference", "no such message")
+            messages = messages[ids.index(query["after"][0]) + 1 :]
+        if "from" in query:
+            messages = [m for m in messages if m["from"] == query["from"][0]]
+        limit = int(query.get("limit", ["50"])[0])
+        shown = messages[-limit:] if limit else []
+        return self._answer(
+            key,
+            200,
+            {
+                "room_id": DEFAULT_ROOM,
+                "note": "fake history note",
+                "messages": shown,
+                "has_more_before": len(messages) > len(shown),
+                "has_more_after": False,
+            },
+        )
+
+    def _attachments(
+        self, key: tuple[str, str], call: Call, session: uuid.UUID, match: re.Match[str]
+    ) -> tuple[int, Any]:
+        if key[0] == "POST":
+            sent = self._json(key, call)
+            if isinstance(sent, tuple):
+                return sent
+            found = next((m for m in self.history if m["id"] == sent["id"]), None)
+            if found is None:
+                return self._error(key, 400, "bad_reference", "no such message")
+            fetch_id = f"a{len(self.fetches) + 1}"
+            self.fetches[fetch_id] = {
+                "session": session,
+                "message": sent["id"],
+                "created_at": _now(),
+            }
+            return self._answer(key, 202, {"id": fetch_id, "status": "queued"})
+        found = self.fetches.get(match.group(1))
+        if found is None or found["session"] != session:
+            return self._error(key, 404, "not_found", f"no fetch {match.group(1)!r}")
+        return self._answer(
+            key,
+            200,
+            {
+                "id": match.group(1),
+                "message": found["message"],
+                "status": "queued",
+                "reason": None,
+                "created_at": found["created_at"],
+                "done_at": None,
             },
         )
 

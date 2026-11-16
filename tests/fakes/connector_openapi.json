@@ -43,6 +43,173 @@
         "title": "AccessView",
         "type": "object"
       },
+      "AdminRoomSettingsIn": {
+        "additionalProperties": false,
+        "description": "The agent admin body: as `RoomSettingsIn` without `agents_may_send_files`, which only the\nweb listener may set (an agent must not grant itself file sends); a request carrying it is\nrefused with 422 and a save leaves the stored value unchanged.",
+        "properties": {
+          "agent_aliases": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Aliases"
+          },
+          "agents_may_initiate": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agents May Initiate"
+          },
+          "anonymize_names": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anonymize Names"
+          },
+          "preset_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preset Id"
+          },
+          "trigger": {
+            "anyOf": [
+              {
+                "enum": [
+                  "all",
+                  "mention"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trigger"
+          }
+        },
+        "title": "AdminRoomSettingsIn",
+        "type": "object"
+      },
+      "AttachmentAccepted": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "status": {
+            "const": "queued",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "status"
+        ],
+        "title": "AttachmentAccepted",
+        "type": "object"
+      },
+      "AttachmentIn": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "the id (m<n>) of a message of this session's room that has an attachment",
+            "maxLength": 24,
+            "title": "Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "AttachmentIn",
+        "type": "object"
+      },
+      "AttachmentStatus": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "done_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Done At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "fetching",
+              "sent",
+              "failed",
+              "refused"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "message",
+          "status",
+          "reason",
+          "created_at",
+          "done_at"
+        ],
+        "title": "AttachmentStatus",
+        "type": "object"
+      },
       "BindingView": {
         "description": "The room's active binding; a reservation by a first run in progress has no session yet.",
         "properties": {
@@ -98,6 +265,10 @@
             "title": "Agents May Initiate",
             "type": "boolean"
           },
+          "agents_may_send_files": {
+            "title": "Agents May Send Files",
+            "type": "boolean"
+          },
           "bound": {
             "title": "Bound",
             "type": "boolean"
@@ -134,7 +305,8 @@
           "name",
           "kind",
           "bound",
-          "agents_may_initiate"
+          "agents_may_initiate",
+          "agents_may_send_files"
         ],
         "title": "ChatRoom",
         "type": "object"
@@ -254,6 +426,19 @@
           "message": {
             "title": "Message",
             "type": "string"
+          },
+          "occupier": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Only on 409 room_bound, for the orchestrator: the session bound to a room agents may start a chat in.",
+            "title": "Occupier"
           }
         },
         "required": [
@@ -274,6 +459,217 @@
           }
         },
         "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HistoryAttachment": {
+        "properties": {
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "mime": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mime"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "size": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size"
+          }
+        },
+        "required": [
+          "kind",
+          "mime",
+          "size",
+          "name"
+        ],
+        "title": "HistoryAttachment",
+        "type": "object"
+      },
+      "HistoryItem": {
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "title": "At",
+            "type": "string"
+          },
+          "attachment": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HistoryAttachment"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "edited": {
+            "title": "Edited",
+            "type": "boolean"
+          },
+          "files": {
+            "title": "Files",
+            "type": "integer"
+          },
+          "from": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "From"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "redacted": {
+            "title": "Redacted",
+            "type": "boolean"
+          },
+          "reply_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply To"
+          },
+          "role": {
+            "enum": [
+              "member",
+              "admin",
+              "bot"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Text"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          },
+          "withheld": {
+            "anyOf": [
+              {
+                "enum": [
+                  "denied",
+                  "encrypted",
+                  "infrastructure",
+                  "unsupported"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Withheld"
+          }
+        },
+        "required": [
+          "id",
+          "role",
+          "from",
+          "at",
+          "reply_to",
+          "text",
+          "truncated",
+          "withheld",
+          "edited",
+          "redacted",
+          "attachment",
+          "status",
+          "files"
+        ],
+        "title": "HistoryItem",
+        "type": "object"
+      },
+      "HistoryPage": {
+        "properties": {
+          "has_more_after": {
+            "title": "Has More After",
+            "type": "boolean"
+          },
+          "has_more_before": {
+            "title": "Has More Before",
+            "type": "boolean"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/HistoryItem"
+            },
+            "title": "Messages",
+            "type": "array"
+          },
+          "note": {
+            "title": "Note",
+            "type": "string"
+          },
+          "room_id": {
+            "title": "Room Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "room_id",
+          "note",
+          "messages",
+          "has_more_before",
+          "has_more_after"
+        ],
+        "title": "HistoryPage",
         "type": "object"
       },
       "MemberView": {
@@ -325,6 +721,15 @@
       "MessageIn": {
         "additionalProperties": false,
         "properties": {
+          "files": {
+            "description": "Relative paths of files in the calling agent's workdir, sent after the text, one Matrix event each. Needs the room's agents_may_send_files and the X-Orch-Agent header. Images at most 8000000 bytes, other files 25000000 (MATRIX_AGENT_IMAGE_MAX_BYTES, MATRIX_AGENT_FILE_MAX_BYTES).",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 4,
+            "title": "Files",
+            "type": "array"
+          },
           "reply_to": {
             "anyOf": [
               {
@@ -348,16 +753,41 @@
             "title": "Room"
           },
           "text": {
-            "maxLength": 16000,
-            "minLength": 1,
-            "title": "Text",
+            "anyOf": [
+              {
+                "maxLength": 16000,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Needs a non-whitespace character unless files are given (else 422 invalid_text).",
+            "title": "Text"
+          }
+        },
+        "title": "MessageIn",
+        "type": "object"
+      },
+      "NotesIn": {
+        "additionalProperties": false,
+        "properties": {
+          "body": {
+            "title": "Body",
             "type": "string"
+          },
+          "expected_version": {
+            "minimum": 0.0,
+            "title": "Expected Version",
+            "type": "integer"
           }
         },
         "required": [
-          "text"
+          "body",
+          "expected_version"
         ],
-        "title": "MessageIn",
+        "title": "NotesIn",
         "type": "object"
       },
       "PendingView": {
@@ -444,6 +874,20 @@
       "RoomAllowIn": {
         "description": "As `RoomSettingsIn`: preset and trigger are stored as sent (omitted clears), a null\n`agents_may_initiate` keeps the stored flag.",
         "properties": {
+          "agent_aliases": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Aliases"
+          },
           "agents_may_initiate": {
             "anyOf": [
               {
@@ -502,8 +946,19 @@
           "access": {
             "$ref": "#/components/schemas/AccessView"
           },
+          "agent_aliases": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Agent Aliases",
+            "type": "array"
+          },
           "agents_may_initiate": {
             "title": "Agents May Initiate",
+            "type": "boolean"
+          },
+          "agents_may_send_files": {
+            "title": "Agents May Send Files",
             "type": "boolean"
           },
           "alias": {
@@ -516,6 +971,10 @@
               }
             ],
             "title": "Alias"
+          },
+          "anonymize_names": {
+            "title": "Anonymize Names",
+            "type": "boolean"
           },
           "binding": {
             "anyOf": [
@@ -672,6 +1131,9 @@
           "trigger",
           "effective_trigger",
           "agents_may_initiate",
+          "anonymize_names",
+          "agent_aliases",
+          "agents_may_send_files",
           "session",
           "binding",
           "last_event_at",
@@ -689,8 +1151,19 @@
           "access": {
             "$ref": "#/components/schemas/AccessView"
           },
+          "agent_aliases": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Agent Aliases",
+            "type": "array"
+          },
           "agents_may_initiate": {
             "title": "Agents May Initiate",
+            "type": "boolean"
+          },
+          "agents_may_send_files": {
+            "title": "Agents May Send Files",
             "type": "boolean"
           },
           "alias": {
@@ -703,6 +1176,10 @@
               }
             ],
             "title": "Alias"
+          },
+          "anonymize_names": {
+            "title": "Anonymize Names",
+            "type": "boolean"
           },
           "binding": {
             "anyOf": [
@@ -855,6 +1332,9 @@
           "trigger",
           "effective_trigger",
           "agents_may_initiate",
+          "anonymize_names",
+          "agent_aliases",
+          "agents_may_send_files",
           "session",
           "binding",
           "last_event_at",
@@ -863,6 +1343,57 @@
           "members"
         ],
         "title": "RoomDetail",
+        "type": "object"
+      },
+      "RoomNotes": {
+        "properties": {
+          "body": {
+            "title": "Body",
+            "type": "string"
+          },
+          "chars": {
+            "title": "Chars",
+            "type": "integer"
+          },
+          "max_chars": {
+            "title": "Max Chars",
+            "type": "integer"
+          },
+          "room_id": {
+            "title": "Room Id",
+            "type": "string"
+          },
+          "rule": {
+            "title": "Rule",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "room_id",
+          "body",
+          "version",
+          "updated_at",
+          "chars",
+          "max_chars",
+          "rule"
+        ],
+        "title": "RoomNotes",
         "type": "object"
       },
       "RoomRequestIn": {
@@ -1062,48 +1593,84 @@
         "title": "RoomRequestView",
         "type": "object"
       },
-      "RoomSettingsIn": {
+      "RoomSkill": {
         "properties": {
-          "agents_may_initiate": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Agents May Initiate"
+          "body": {
+            "title": "Body",
+            "type": "string"
           },
-          "preset_id": {
-            "anyOf": [
-              {
-                "format": "uuid",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Preset Id"
+          "chars": {
+            "title": "Chars",
+            "type": "integer"
           },
-          "trigger": {
-            "anyOf": [
-              {
-                "enum": [
-                  "all",
-                  "mention"
-                ],
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Trigger"
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "max_chars": {
+            "title": "Max Chars",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "room_id": {
+            "title": "Room Id",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
           }
         },
-        "title": "RoomSettingsIn",
+        "required": [
+          "room_id",
+          "name",
+          "description",
+          "body",
+          "version",
+          "updated_at",
+          "chars",
+          "max_chars"
+        ],
+        "title": "RoomSkill",
+        "type": "object"
+      },
+      "RoomSkills": {
+        "properties": {
+          "max_chars": {
+            "title": "Max Chars",
+            "type": "integer"
+          },
+          "max_skills": {
+            "title": "Max Skills",
+            "type": "integer"
+          },
+          "room_id": {
+            "title": "Room Id",
+            "type": "string"
+          },
+          "skills": {
+            "items": {
+              "$ref": "#/components/schemas/SkillMeta"
+            },
+            "title": "Skills",
+            "type": "array"
+          }
+        },
+        "required": [
+          "room_id",
+          "skills",
+          "max_skills",
+          "max_chars"
+        ],
+        "title": "RoomSkills",
         "type": "object"
       },
       "RoomView": {
@@ -1111,8 +1678,19 @@
           "access": {
             "$ref": "#/components/schemas/AccessView"
           },
+          "agent_aliases": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Agent Aliases",
+            "type": "array"
+          },
           "agents_may_initiate": {
             "title": "Agents May Initiate",
+            "type": "boolean"
+          },
+          "agents_may_send_files": {
+            "title": "Agents May Send Files",
             "type": "boolean"
           },
           "alias": {
@@ -1125,6 +1703,10 @@
               }
             ],
             "title": "Alias"
+          },
+          "anonymize_names": {
+            "title": "Anonymize Names",
+            "type": "boolean"
           },
           "binding": {
             "anyOf": [
@@ -1270,6 +1852,9 @@
           "trigger",
           "effective_trigger",
           "agents_may_initiate",
+          "anonymize_names",
+          "agent_aliases",
+          "agents_may_send_files",
           "session",
           "binding",
           "last_event_at",
@@ -1436,6 +2021,13 @@
             "title": "Created At",
             "type": "string"
           },
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/SentFile"
+            },
+            "title": "Files",
+            "type": "array"
+          },
           "id": {
             "title": "Id",
             "type": "string"
@@ -1494,9 +2086,44 @@
           "reason",
           "room_id",
           "created_at",
-          "sent_at"
+          "sent_at",
+          "files"
         ],
         "title": "SendStatus",
+        "type": "object"
+      },
+      "SentFile": {
+        "properties": {
+          "mime": {
+            "title": "Mime",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "uploaded",
+              "sent",
+              "failed"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "mime",
+          "size",
+          "status"
+        ],
+        "title": "SentFile",
         "type": "object"
       },
       "SessionView": {
@@ -1535,6 +2162,91 @@
           "status"
         ],
         "title": "SessionView",
+        "type": "object"
+      },
+      "SkillDeleted": {
+        "properties": {
+          "deleted": {
+            "title": "Deleted",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "room_id": {
+            "title": "Room Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "room_id",
+          "name",
+          "deleted"
+        ],
+        "title": "SkillDeleted",
+        "type": "object"
+      },
+      "SkillIn": {
+        "additionalProperties": false,
+        "properties": {
+          "body": {
+            "minLength": 1,
+            "title": "Body",
+            "type": "string"
+          },
+          "description": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Description",
+            "type": "string"
+          },
+          "expected_version": {
+            "minimum": 0.0,
+            "title": "Expected Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "description",
+          "body",
+          "expected_version"
+        ],
+        "title": "SkillIn",
+        "type": "object"
+      },
+      "SkillMeta": {
+        "properties": {
+          "chars": {
+            "title": "Chars",
+            "type": "integer"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "version",
+          "updated_at",
+          "chars"
+        ],
+        "title": "SkillMeta",
         "type": "object"
       },
       "UserView": {
@@ -1944,9 +2656,126 @@
         "summary": "Allow Room"
       }
     },
+    "/chat/v1/admin/rooms/{room_id}/messages": {
+      "get": {
+        "description": "The room's history, oldest first, read only (the superleader's view).",
+        "operationId": "admin_room_history_chat_v1_admin_rooms__room_id__messages_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "room_id",
+            "required": true,
+            "schema": {
+              "title": "Room Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before"
+            }
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "After"
+            }
+          },
+          {
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "From"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Orch-Session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Admin Room History"
+      }
+    },
     "/chat/v1/admin/rooms/{room_id}/settings": {
       "put": {
-        "operationId": "put_settings_chat_v1_admin_rooms__room_id__settings_put",
+        "operationId": "put_admin_settings_chat_v1_admin_rooms__room_id__settings_put",
         "parameters": [
           {
             "in": "path",
@@ -1962,7 +2791,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/RoomSettingsIn"
+                "$ref": "#/components/schemas/AdminRoomSettingsIn"
               }
             }
           },
@@ -1990,7 +2819,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Put Settings"
+        "summary": "Put Admin Settings"
       }
     },
     "/chat/v1/admin/rules": {
@@ -2141,6 +2970,423 @@
         "summary": "List Users"
       }
     },
+    "/chat/v1/attachments": {
+      "post": {
+        "description": "Ask for the file of a past message of this session's room: the bot downloads it and\nsends it to the session as a new turn. Poll `GET /attachments/{request_id}`. Only\nimages, pdf, json and text files within the size cap are delivered.",
+        "operationId": "request_attachment_chat_v1_attachments_post",
+        "parameters": [
+          {
+            "description": "the calling session's uuid; missing or malformed is 401 unauthorized",
+            "in": "header",
+            "name": "X-Orch-Session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "the calling session's uuid; missing or malformed is 401 unauthorized",
+              "title": "X-Orch-Session"
+            }
+          },
+          {
+            "description": "the calling session's slug",
+            "in": "header",
+            "name": "X-Orch-Slug",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "the calling session's slug",
+              "title": "X-Orch-Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttachmentIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachmentAccepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Request Attachment"
+      }
+    },
+    "/chat/v1/attachments/{request_id}": {
+      "get": {
+        "description": "One of this session's attachment requests; any other id is 404.",
+        "operationId": "attachment_status_chat_v1_attachments__request_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "the calling session's uuid; missing or malformed is 401 unauthorized",
+            "in": "header",
+            "name": "X-Orch-Session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "the calling session's uuid; missing or malformed is 401 unauthorized",
+              "title": "X-Orch-Session"
+            }
+          },
+          {
+            "description": "the calling session's slug",
+            "in": "header",
+            "name": "X-Orch-Slug",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "the calling session's slug",
+              "title": "X-Orch-Slug"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachmentStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Attachment Status"
+      }
+    },
+    "/chat/v1/history": {
+      "get": {
+        "description": "The history of the room this session is bound to, oldest first. The room is never\na parameter. Every text and attachment name is untrusted chat content.",
+        "operationId": "read_history_chat_v1_history_get",
+        "parameters": [
+          {
+            "description": "a message id (m, s or o): the page right before it",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "a message id (m, s or o): the page right before it",
+              "title": "Before"
+            }
+          },
+          {
+            "description": "a message id (m, s or o): the page right after it",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "a message id (m, s or o): the page right after it",
+              "title": "After"
+            }
+          },
+          {
+            "description": "only messages from this sender (display name, or pseudonym in an anonymized room)",
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "only messages from this sender (display name, or pseudonym in an anonymized room)",
+              "title": "From"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "the calling session's uuid; missing or malformed is 401 unauthorized",
+            "in": "header",
+            "name": "X-Orch-Session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "the calling session's uuid; missing or malformed is 401 unauthorized",
+              "title": "X-Orch-Session"
+            }
+          },
+          {
+            "description": "the calling session's slug",
+            "in": "header",
+            "name": "X-Orch-Slug",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "the calling session's slug",
+              "title": "X-Orch-Slug"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read History"
+      }
+    },
     "/chat/v1/internal/room-requests/{request_id}/confirm": {
       "post": {
         "description": "The user's answer: confirmed (approved) or rejected. Only with the attached\ndecision id.",
@@ -2243,9 +3489,27 @@
     },
     "/chat/v1/messages": {
       "post": {
-        "description": "Queue a message, optionally a quoted reply.",
+        "description": "Queue a message, optionally a quoted reply, with up to `MATRIX_AGENT_FILES_PER_SEND`\nworkdir files sent after the text. In a room with `anonymize_names`, a text or file\nname containing a pseudonym (`user-<sha>`, `admin-<sha>`) is 422\n`pseudonym_disclosed`.",
         "operationId": "send_message_chat_v1_messages_post",
         "parameters": [
+          {
+            "description": "the calling agent's uuid, whose workdir holds `files`; required (else 422 files_unavailable) only when files are sent",
+            "in": "header",
+            "name": "X-Orch-Agent",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "the calling agent's uuid, whose workdir holds `files`; required (else 422 files_unavailable) only when files are sent",
+              "title": "X-Orch-Agent"
+            }
+          },
           {
             "description": "the calling session's uuid; missing or malformed is 401 unauthorized",
             "in": "header",
@@ -2334,6 +3598,16 @@
             },
             "description": "Forbidden"
           },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
           "409": {
             "content": {
               "application/json": {
@@ -2343,6 +3617,16 @@
               }
             },
             "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
           },
           "422": {
             "content": {
@@ -2494,6 +3778,238 @@
         "summary": "Send Status"
       }
     },
+    "/chat/v1/notes": {
+      "get": {
+        "description": "The notes of the room this session is bound to (empty, version 0, when none), with\nthe room memory rule.",
+        "operationId": "get_notes_chat_v1_notes_get",
+        "parameters": [
+          {
+            "description": "the calling session's uuid; missing or malformed is 401 unauthorized",
+            "in": "header",
+            "name": "X-Orch-Session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "the calling session's uuid; missing or malformed is 401 unauthorized",
+              "title": "X-Orch-Session"
+            }
+          },
+          {
+            "description": "the calling session's slug",
+            "in": "header",
+            "name": "X-Orch-Slug",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "the calling session's slug",
+              "title": "X-Orch-Slug"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoomNotes"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Get Notes"
+      },
+      "put": {
+        "description": "Replace the notes of the room this session is bound to, guarded by the version read\nbefore (0 creates); an empty body forgets them. Over the cap is 413.",
+        "operationId": "put_notes_chat_v1_notes_put",
+        "parameters": [
+          {
+            "description": "the calling session's uuid; missing or malformed is 401 unauthorized",
+            "in": "header",
+            "name": "X-Orch-Session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "the calling session's uuid; missing or malformed is 401 unauthorized",
+              "title": "X-Orch-Session"
+            }
+          },
+          {
+            "description": "the calling session's slug",
+            "in": "header",
+            "name": "X-Orch-Slug",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "the calling session's slug",
+              "title": "X-Orch-Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotesIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoomNotes"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Put Notes"
+      }
+    },
     "/chat/v1/reactions": {
       "post": {
         "description": "Queue a reaction to a message; it goes to that message's room.",
@@ -2587,6 +4103,16 @@
             },
             "description": "Forbidden"
           },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
           "409": {
             "content": {
               "application/json": {
@@ -2596,6 +4122,16 @@
               }
             },
             "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
           },
           "422": {
             "content": {
@@ -2633,7 +4169,7 @@
     },
     "/chat/v1/rooms": {
       "get": {
-        "description": "The rooms this session may post to: its bound room, else the unbound flagged rooms.",
+        "description": "The rooms this session may post to: its bound room, else the unbound flagged rooms.\nA room with `anonymize_names` is named with its people's pseudonyms.",
         "operationId": "list_rooms_chat_v1_rooms_get",
         "parameters": [
           {
@@ -2726,6 +4262,507 @@
           }
         },
         "summary": "List Rooms"
+      }
+    },
+    "/chat/v1/skills": {
+      "get": {
+        "description": "The skills of the room this session is bound to: name, description and version, no\nbodies.",
+        "operationId": "list_skills_chat_v1_skills_get",
+        "parameters": [
+          {
+            "description": "the calling session's uuid; missing or malformed is 401 unauthorized",
+            "in": "header",
+            "name": "X-Orch-Session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "the calling session's uuid; missing or malformed is 401 unauthorized",
+              "title": "X-Orch-Session"
+            }
+          },
+          {
+            "description": "the calling session's slug",
+            "in": "header",
+            "name": "X-Orch-Slug",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "the calling session's slug",
+              "title": "X-Orch-Slug"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoomSkills"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "List Skills"
+      }
+    },
+    "/chat/v1/skills/{name}": {
+      "delete": {
+        "description": "Delete a skill of the room this session is bound to.",
+        "operationId": "delete_skill_chat_v1_skills__name__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "description": "the calling session's uuid; missing or malformed is 401 unauthorized",
+            "in": "header",
+            "name": "X-Orch-Session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "the calling session's uuid; missing or malformed is 401 unauthorized",
+              "title": "X-Orch-Session"
+            }
+          },
+          {
+            "description": "the calling session's slug",
+            "in": "header",
+            "name": "X-Orch-Slug",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "the calling session's slug",
+              "title": "X-Orch-Slug"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillDeleted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Delete Skill"
+      },
+      "get": {
+        "description": "One skill of the room this session is bound to, with its body.",
+        "operationId": "get_skill_chat_v1_skills__name__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "description": "the calling session's uuid; missing or malformed is 401 unauthorized",
+            "in": "header",
+            "name": "X-Orch-Session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "the calling session's uuid; missing or malformed is 401 unauthorized",
+              "title": "X-Orch-Session"
+            }
+          },
+          {
+            "description": "the calling session's slug",
+            "in": "header",
+            "name": "X-Orch-Slug",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "the calling session's slug",
+              "title": "X-Orch-Slug"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoomSkill"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Get Skill"
+      },
+      "put": {
+        "description": "Create (`expected_version` 0) or replace a skill of the room this session is bound\nto. Over `MATRIX_ROOM_SKILL_MAX_CHARS` is 413; a create past `MATRIX_ROOM_SKILLS_MAX`\nis 409 `skill_limit`.",
+        "operationId": "put_skill_chat_v1_skills__name__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "description": "the calling session's uuid; missing or malformed is 401 unauthorized",
+            "in": "header",
+            "name": "X-Orch-Session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "the calling session's uuid; missing or malformed is 401 unauthorized",
+              "title": "X-Orch-Session"
+            }
+          },
+          {
+            "description": "the calling session's slug",
+            "in": "header",
+            "name": "X-Orch-Slug",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "the calling session's slug",
+              "title": "X-Orch-Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SkillIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoomSkill"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Put Skill"
       }
     },
     "/healthz": {

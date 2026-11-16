@@ -31,7 +31,7 @@ def upstream_client(fake: FakeChat) -> httpx.AsyncClient:
 
 
 def concrete(template: str) -> str:
-    return template.replace("{id}", "s1").replace("{name}", "demo")
+    return template.replace("{id}", "s1").replace("{name}", "demo").replace("{request_id}", "a1")
 
 
 def normalise(path: str) -> str:
@@ -84,7 +84,8 @@ def test_relay_routes_exist_upstream():
         if path.startswith(RELAY_PREFIX)
         for method in item
     ]
-    assert len(relayed) == 10, relayed  # rooms, messages, reactions, status, notes, skills
+    # rooms, messages, reactions, status, notes, skills, history, attachments
+    assert len(relayed) == 13, relayed
     assert {(method, path) for method, path in relayed} == {
         (method, f"{RELAY_PREFIX}{p}")
         for method, p in (
@@ -98,6 +99,9 @@ def test_relay_routes_exist_upstream():
             ("GET", "/skills/{name}"),
             ("PUT", "/skills/{name}"),
             ("DELETE", "/skills/{name}"),
+            ("GET", "/history"),
+            ("POST", "/attachments"),
+            ("GET", "/attachments/{request_id}"),
         )
     }
     for method, path in relayed:
@@ -135,6 +139,7 @@ async def test_fake_chat_matches_vendored_schema():
         ("POST", "/chat/v1/reactions"): {"to": "m3", "key": "\U0001f44d"},
         ("PUT", "/chat/v1/notes"): {"body": "likes tea", "expected_version": 0},
         ("PUT", "/chat/v1/skills/{name}"): {"description": "d", "body": "b", "expected_version": 0},
+        ("POST", "/chat/v1/attachments"): {"id": "m2"},
     }
     notes_put = valid[("PUT", "/chat/v1/notes")]
     skill_put = valid[("PUT", "/chat/v1/skills/{name}")]
@@ -177,6 +182,27 @@ async def test_fake_chat_matches_vendored_schema():
         assert (await call("PUT", "/chat/v1/skills/{name}", path, json=skill_put)).is_success
     over = await call("PUT", "/chat/v1/skills/{name}", "/chat/v1/skills/s20", json=skill_put)
     assert (over.status_code, over.json()["error"]["code"]) == (409, "skill_limit")
+
+    # history and attachment fetches: the page, the narrowing query and the fetch round trip
+    page = (await call("GET", "/chat/v1/history")).json()
+    assert [m["id"] for m in page["messages"]] == ["m1", "m2", "m3"]
+    narrow = await call(
+        "GET", "/chat/v1/history", "/chat/v1/history?before=m3&limit=1&from=Ann%20B"
+    )
+    assert [m["id"] for m in narrow.json()["messages"]] == ["m2"]
+    assert narrow.json()["has_more_before"] is True
+    assert (await call("GET", "/chat/v1/history", "/chat/v1/history?after=zz")).status_code == 400
+    fetch_body = valid[("POST", "/chat/v1/attachments")]
+    queued = await call("POST", "/chat/v1/attachments", json=fetch_body)
+    assert (queued.status_code, queued.json()["status"]) == (202, "queued")
+    mine = await call(
+        "GET", "/chat/v1/attachments/{request_id}", f"/chat/v1/attachments/{queued.json()['id']}"
+    )
+    assert (mine.status_code, mine.json()["message"]) == (200, "m2")
+    missing = await call("GET", "/chat/v1/attachments/{request_id}", "/chat/v1/attachments/a99")
+    assert missing.status_code == 404
+    unknown_message = await call("POST", "/chat/v1/attachments", json={"id": "m99"})
+    assert unknown_message.status_code == 400
 
     # error answers the fake produces by itself: bad token, bad session header, bad body
     bad_token = {**GOOD, "Authorization": "Bearer nope"}

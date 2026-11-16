@@ -1714,6 +1714,18 @@ Forwards to `DELETE .../skills/{name}` without a body: 200 `{room_id, name, dele
 
 The skill name is percent-encoded as one path segment, dots included, exactly like `send_id`; a name holding `/` is decoded by the server before routing and is 404 here without an upstream call. The orchestrator validates nothing (names, caps and versions are the upstream's). Bodies and descriptions are never logged.
 
+#### `GET /agent/v1/chat/history`
+
+Forwards to `GET .../history` with the query string byte for byte (`before`, `after`, `from`, `limit`) and no body: 200 `{room_id, note, messages, has_more_before, has_more_after}`, the past messages of the room bound to the caller's session (the room comes from the binding upstream, never from the request). Upstream refusals pass through: 409 `room_unbound`, 400 `bad_reference`, 422 `invalid_request`. A read is not a chat update and never touches `last_update_at`.
+
+#### `POST /agent/v1/chat/attachments`
+
+Forwards to `POST .../attachments`. Body `{id}`, the id of a past message of the bound room that has an attachment. 202 `{id, status: "queued"}`; the file arrives later as a new turn of the session, not in this answer. Upstream refusals pass through: 409 `room_unbound`, 409 `already_fetching`, 409 `no_attachment`, 422 `unsupported_type`, 422 `foreign_media`, 422 `bad_reference`, 422 `invalid_request`, 429 `rate_limited`. Not a chat update.
+
+#### `GET /agent/v1/chat/attachments/{request_id}`
+
+Forwards to `GET .../attachments/{request_id}` without a body: 200 `{id, message, status, reason, created_at, done_at}` with `status` one of `queued`, `fetching`, `sent`, `failed`, `refused`; 404 `not_found` for an id that is not one of the caller's session. The id is percent-encoded as one path segment, dots included. Not a chat update.
+
 ### Mindmap
 
 `GET|POST|PATCH|DELETE /agent/v1/mindmap/{path}` (agent port only) relays to `{ORCH_MINDMAP_URL}/mindmap/api/v1/{path}` with the same checks, headers (`Authorization: Bearer <ORCH_MINDMAP_TOKEN>`, `X-Orch-Session`, `X-Orch-Slug`, `X-Orch-Projects`) and 256 KiB body cap as the taskboard relay; status and JSON body pass through unchanged (a 204 stays a 204), a failed call is 503 `mindmap_unavailable`, an unconfigured upstream 503 `mindmap_unconfigured`. The allowlist is the agents-mindmap service route surface per method: maps (list, create, get, patch, graph, nodes, directions, links), nodes (get, patch, traverse, versions, growth-areas, links), growth-areas patch, edges (create, delete), knowledge notes, links (list, delete), directions (list, patch), projects and search; every other method or path, and any path with `..`, `.` or empty segments, is 404 `not_found` without an upstream call. `labels=mine` is not expanded. Scope class `project`: the service applies the read rule from `X-Orch-Projects`. The 19 `mindmap_*` tools (`MINDMAP_TOOLS` in `k8s/on_start.py`) join a session's allow list after the project room tools only when `ORCH_MINDMAP_URL` is set; `/api/v1/meta` reports `mindmap: true|false`.

@@ -13,6 +13,9 @@ occupier is relayed through the occupier's session (`chat_relay`, 202 `relayed`)
 error, a timeout or a non-JSON answer is 503 `chat_unavailable`.
 The room notes and skills routes (`/notes`, `/skills`, `/skills/{name}`) are relayed the same way;
 the upstream resolves the room from the caller's session binding, so no route takes a room.
+The history and attachment routes (`GET /history`, `POST /attachments`, `GET /attachments/{id}`)
+are relayed like notes: the query string of a history read goes through as is, the room comes from
+the binding upstream, and none of the three counts as a chat update.
 The orchestrator does not validate the bodies (the upstream does) and stores nothing. Log lines
 carry the method, path and status only, never a token or a body.
 """
@@ -92,6 +95,17 @@ class ChatReactionIn(BaseModel):
 
     to: str
     key: str
+
+
+class ChatAttachmentIn(BaseModel):
+    """An attachment fetch as the upstream reads it (OpenAPI only; the upstream validates it).
+
+    `id`: the id of a past message of the bound room that has an attachment.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
 
 
 _PASS_THROUGH = {"description": "The chat upstream's status and JSON body, unchanged"}
@@ -286,3 +300,36 @@ async def skill_delete(
     name: str, request: Request, agent: Caller, pool: Pool, settings: Cfg
 ) -> Response:
     return await _relay(request, agent, pool, settings, "DELETE", f"/skills/{_segment(name)}")
+
+
+@router.get(
+    "/history",
+    summary="Past messages of the room bound to the caller's session (leader only)",
+    responses={200: _PASS_THROUGH, **_RESPONSES},
+)
+async def history(request: Request, agent: Caller, pool: Pool, settings: Cfg) -> Response:
+    return await _relay(request, agent, pool, settings, "GET", "/history")
+
+
+@router.post(
+    "/attachments",
+    status_code=202,
+    summary="Fetch the attachment of a past chat message; it arrives as a new turn (leader only)",
+    responses={202: _PASS_THROUGH, **_POST_RESPONSES},
+    openapi_extra=_json_body(ChatAttachmentIn),
+)
+async def attachment_fetch(request: Request, agent: Caller, pool: Pool, settings: Cfg) -> Response:
+    return await _relay(request, agent, pool, settings, "POST", "/attachments")
+
+
+@router.get(
+    "/attachments/{request_id}",
+    summary="Status of an attachment fetch of the caller's session (leader only)",
+    responses={200: _PASS_THROUGH, **_RESPONSES},
+)
+async def attachment_status(
+    request_id: str, request: Request, agent: Caller, pool: Pool, settings: Cfg
+) -> Response:
+    return await _relay(
+        request, agent, pool, settings, "GET", f"/attachments/{_segment(request_id)}"
+    )
