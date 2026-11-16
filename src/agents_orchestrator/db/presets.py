@@ -204,6 +204,20 @@ async def set_extra_projects(
     return rows[0]
 
 
+async def set_manageable(
+    conn: psycopg.AsyncConnection, preset_id: uuid.UUID, value: bool
+) -> Preset | None:
+    """Set `superleader_manageable` and bump `updated_at`, so open preset spec proposals go
+    stale and re-base. None when the preset is gone."""
+    rows = await _fetch(
+        conn,
+        "UPDATE presets SET superleader_manageable = %s, updated_at = now()"
+        " WHERE id = %s RETURNING *",
+        (value, preset_id),
+    )
+    return rows[0] if rows else None
+
+
 async def manageable_ids(conn: psycopg.AsyncConnection) -> set[uuid.UUID]:
     cur = await conn.execute("SELECT id FROM presets WHERE superleader_manageable")
     return {r[0] for r in await cur.fetchall()}

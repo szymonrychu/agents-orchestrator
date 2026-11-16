@@ -541,3 +541,61 @@ async def test_visible_only_excludes_hidden_targets_before_limit(pool):
         assert await proposals.get(conn, a, session, visible_only=True) is not None
         assert await proposals.get(conn, hid, session) is not None
         assert await proposals.get(conn, hid, session, visible_only=True) is None
+
+
+async def _insert_kind(conn, kind, session, target):
+    return await proposals.insert(
+        conn,
+        kind=kind,
+        target_id=target,
+        target_name="Preset one",
+        proposer_session=session,
+        proposer_slug="lead",
+        proposer_superleader=True,
+        client_key=None,
+        reason="because",
+        base={},
+        fingerprint="fp1",
+        items=[_item("superleader_manageable", True)],
+        ttl_seconds=TTL,
+    )
+
+
+@pytest.mark.parametrize(
+    "kind", ["preset", "schedule", "session", "session_projects", "preset_projects"]
+)
+async def test_old_kinds_are_still_accepted(pool, kind):
+    async with pool.connection() as conn:
+        assert await _insert_kind(conn, kind, uuid.uuid4(), "t1")
+
+
+async def test_preset_manageable_kind_is_accepted_and_unknown_still_refused(pool):
+    async with pool.connection() as conn:
+        pid = await _insert_kind(conn, "preset_manageable", uuid.uuid4(), "t1")
+        assert (await proposals.get(conn, pid)).kind == "preset_manageable"
+        with pytest.raises(psycopg.errors.CheckViolation):
+            async with conn.transaction():
+                await _insert_kind(conn, "preset_other", uuid.uuid4(), "t1")
+
+
+async def test_preset_manageable_stays_visible_on_an_unmanageable_preset(pool):
+    session = uuid.uuid4()
+    async with pool.connection() as conn:
+        locked = await presets_repo.create(conn, "lck", {}, superleader_manageable=False)
+        pid = await _insert_kind(conn, "preset_manageable", session, str(locked.id))
+        plain = await _insert_kind(conn, "preset", session, str(locked.id))
+        kw = {"proposer_session": session, "statuses": proposals.ACTIVE, "limit": 10}
+        listed = await proposals.list_for(conn, visible_only=True, **kw)
+        assert [p.id for p in listed] == [pid]
+        assert await proposals.get(conn, pid, session, visible_only=True) is not None
+        assert await proposals.get(conn, plain, session, visible_only=True) is None
+        assert await proposals.active_on_preset(conn, locked.id) == [pid, plain]
+
+
+async def test_set_manageable_flips_the_flag_and_bumps_updated_at(pool):
+    async with pool.connection() as conn:
+        preset = await presets_repo.create(conn, "mng", {}, superleader_manageable=False)
+        flipped = await presets_repo.set_manageable(conn, preset.id, True)
+        assert flipped.superleader_manageable is True
+        assert flipped.updated_at > preset.updated_at
+        assert await presets_repo.set_manageable(conn, uuid.uuid4(), True) is None

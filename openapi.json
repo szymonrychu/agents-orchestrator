@@ -4603,7 +4603,8 @@
               "schedule",
               "session",
               "session_projects",
-              "preset_projects"
+              "preset_projects",
+              "preset_manageable"
             ],
             "title": "Kind",
             "type": "string"
