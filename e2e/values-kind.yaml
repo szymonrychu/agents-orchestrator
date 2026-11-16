@@ -53,7 +53,13 @@ env:
   # claude answers at once, and the notice wait ends early once the session stayed idle)
   ORCH_AGENT_SHUTDOWN_NOTICE_SECONDS: "30"
   ORCH_AGENT_SHUTDOWN_HANDOFF_SECONDS: "60"
-  ORCH_HANDOVER_IDLE_PROCEED_SECONDS: "5"
+  ORCH_AGENT_SHUTDOWN_IDLE_PROCEED_SECONDS: "5"
+  # the strong-path e2e ramps the context by hand: no minimum tenure before a pressure cycle,
+  # and a short stuck window (the watchdog only logs and notifies)
+  ORCH_HANDOVER_MIN_TENURE_SECONDS: "0"
+  ORCH_HANDOFF_STUCK_SECONDS: "60"
+  # an ex-leader waiting for its clear needs the session quiet this long (production: 60 s)
+  ORCH_HANDOVER_QUIET_SECONDS: "10"
   ORCH_LOG_LEVEL: INFO
 
 # Service port (other microservices): the e2e pod presents the fixed, non-secret token

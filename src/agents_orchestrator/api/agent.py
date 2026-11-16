@@ -11,7 +11,7 @@ import hmac
 import posixpath
 import uuid
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
 from xml.sax.saxutils import escape
 
@@ -19,9 +19,15 @@ import psycopg.errors
 from fastapi import APIRouter, Depends, Header, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
-from agents_orchestrator import taskboard_client
+from agents_orchestrator import (
+    handoff_gate,
+    handoff_profile,
+    handoff_quality,
+    pressure_policy,
+    taskboard_client,
+)
 from agents_orchestrator.api import projects as projects_api
-from agents_orchestrator.api import schemas, session_limits
+from agents_orchestrator.api import schemas, session_limits, workspace
 from agents_orchestrator.api import sessions as sessions_api
 from agents_orchestrator.api.errors import ApiError
 from agents_orchestrator.api.scope import ALL_PROJECTS, scope_of
@@ -47,6 +53,7 @@ from agents_orchestrator.db import projects as projects_repo
 from agents_orchestrator.db import queue as q
 from agents_orchestrator.db import sessions as sessions_repo
 from agents_orchestrator.dispatcher import feed
+from agents_orchestrator.dispatcher import hive as hive_push
 from agents_orchestrator.spec import WORKDIR_ROOT
 from agents_orchestrator.tokens import tokens_for
 
@@ -67,6 +74,25 @@ class ProjectRoom(BaseModel):
     project: str
     last_post_id: int | None
     unhandled: int
+
+
+class PressureView(BaseModel):
+    """The context pressure of a solo agent or a hive leader (spec 5.3)."""
+
+    level: int
+    context_pct: float | None
+    used_tokens: int | None
+    window_tokens: int | None
+    l1_tokens: int
+    l2_tokens: int
+    l3_tokens: int
+    compact_tokens: int
+    #: Phase of the open handoff row; None while none is open.
+    phase: str | None
+    profile: str | None
+    waiting_on: list[str]
+    rejects: int
+    escalated: bool
 
 
 class Me(BaseModel):
@@ -90,6 +116,8 @@ class Me(BaseModel):
     # one room cursor per project of a (non-superleader) current leader, home first then the
     # extra projects (T-120); empty for a member or a superleader
     project_rooms: list[ProjectRoom] = []
+    # context pressure; only for a solo agent or the current leader (None for a member)
+    pressure: PressureView | None = None
 
 
 class CloseRequest(BaseModel):
@@ -156,6 +184,33 @@ async def member_id(conn: Any, session_id: uuid.UUID, pod_name: str) -> uuid.UUI
     raise ApiError(404, "not_found", f"agent {pod_name} not found in this session")
 
 
+async def _pressure_view(
+    conn: Any, session: sessions_repo.Session, agent: agents_repo.Agent, settings: Any
+) -> PressureView | None:
+    subject = await hive_push.pressure_subject(conn, session.id, agent.id, settings)
+    if subject is None:
+        return None
+    window = subject.window_tokens or pressure_policy.DEFAULT_WINDOW_TOKENS
+    lv = subject.levels
+    l2 = hive_push.strong_tokens(lv, window)
+    row = await handoffs.open_row(conn, agent.id)
+    return PressureView(
+        level=max(subject.level, row.level) if row else subject.level,
+        context_pct=subject.context_pct,
+        used_tokens=subject.used_tokens,
+        window_tokens=subject.window_tokens,
+        l1_tokens=hive_push.l1_tokens(lv, window, l2),
+        l2_tokens=l2,
+        l3_tokens=hive_push.critical_tokens(lv, window),
+        compact_tokens=int(lv.compact_pct / 100 * window),
+        phase=row.phase if row else None,
+        profile=row.profile if row else None,
+        waiting_on=pressure_policy.waiting_on(row),
+        rejects=row.rejects if row else 0,
+        escalated=bool(row and row.escalated_at),
+    )
+
+
 @router.get("/me", response_model=Me, summary="Identity, leader and members of the caller")
 async def me(agent: Caller, pool: Pool, settings: Cfg) -> Me:
     async with pool.connection() as conn:
@@ -164,6 +219,9 @@ async def me(agent: Caller, pool: Pool, settings: Cfg) -> Me:
         members = await agents_repo.list_members(conn, agent.session_id)
         leads = leader is not None and leader[0] == agent.id
         state = await leader_state.collect(conn, agent.session_id) if leads else None
+        pressure = None
+        if session is not None and (leads or session.spec.alone):
+            pressure = await _pressure_view(conn, session, agent, settings)
         rooms: list[ProjectRoom] = []
         if leads and session is not None and not session.spec.session_messaging:
             unhandled = await leader_state.unhandled_room_counts(conn, session.id)
@@ -197,6 +255,7 @@ async def me(agent: Caller, pool: Pool, settings: Cfg) -> Me:
         projects_scope=scope_of(session),
         leader_state=leader_state.render_state(state) if state is not None else None,
         project_rooms=rooms,
+        pressure=pressure,
         members=[
             Member(
                 pod_name=m["pod_name"],
@@ -332,89 +391,166 @@ async def init_scripts_put(
     "/leadership/handover",
     status_code=202,
     response_model=schemas.LeadershipRequested,
-    summary="Hand leadership over, extend the handoff countdown or hand a solo context off",
+    summary="Hand leadership over (hive leader only)",
 )
 async def handover(
-    body: schemas.HandoverIn, agent: Caller, pool: Pool, settings: Cfg
+    body: schemas.HandoverIn, agent: Caller, pool: Pool
 ) -> schemas.LeadershipRequested:
-    """Queue a handover, extend the strong-limit countdown, or (solo agent) hand off its context.
-
-    The checks here fail fast; the dispatcher re-checks at apply time. A hive member is refused
-    in every branch; a solo agent has no leader to change, so its call is the voluntary handoff.
-    """
+    """Queue a handover. The checks here fail fast; the dispatcher re-checks at apply time. Only
+    the leader of a hive may hand leadership over; a solo agent submits a handoff instead."""
     async with pool.connection() as conn:
         session = await _session(conn, agent)
-        leader = None
-        if not session.spec.alone:
-            leader = await leadership.current_leader(conn, agent.session_id)
-            if leader is None or leader.agent_id != agent.id:
-                raise ApiError(
-                    409, "not_leader", "only the current leader can hand leadership over"
-                )
-        if body.extend:
-            deadline = await _extend_countdown(conn, agent, settings)
-            handled = await session_messaging.mark_handled(conn, agent.session_id, body.handled)
-            return schemas.LeadershipRequested(deadline_at=deadline, handled=handled)
-        assert body.reason is not None  # HandoverIn requires it unless extend
         if session.spec.alone:
-            await _solo_handoff(conn, agent, body.reason)
-            request_id = None
-        else:
-            assert leader is not None
-            request_id = await _hive_handover(conn, agent, leader, body)
+            raise ApiError(
+                409,
+                "not_hive",
+                "a solo agent has no leader to change: use orchestrator_handoff_submit",
+            )
+        leader = await leadership.current_leader(conn, agent.session_id)
+        if leader is None or leader.agent_id != agent.id:
+            raise ApiError(409, "not_leader", "only the current leader can hand leadership over")
+        request_id = await _hive_handover(conn, agent, leader, body)
         handled = await session_messaging.mark_handled(conn, agent.session_id, body.handled)
     return schemas.LeadershipRequested(request_id=request_id, handled=handled)
 
 
-async def _extend_countdown(conn: Any, agent: agents_repo.Agent, settings: Any) -> datetime:
-    row = await handoffs.extend(conn, agent.id, settings.handover_extension_seconds)
-    if row is not None:
-        assert row.deadline_at is not None
-        return row.deadline_at
-    open_row = await handoffs.open_row(conn, agent.id)
-    if open_row is not None and open_row.phase == "extended":
-        raise ApiError(409, "extension_used", "the countdown was already extended once")
-    raise ApiError(409, "no_countdown", "no handoff countdown is running that can be extended")
-
-
-SOLO_REPLACEABLE = ("notified", "extended", "requested")
-
-
-async def _solo_handoff(conn: Any, agent: agents_repo.Agent, text: str) -> None:
-    """Open the solo agent's voluntary handoff already `handed`; a countdown or a pending request
-    is replaced (its queued messages cancelled), a row further along refuses."""
-    row = await handoffs.open_row(conn, agent.id)
-    if row is not None:
-        if row.phase not in SOLO_REPLACEABLE:
-            raise ApiError(409, "handoff_open", f"a handoff is already {row.phase}")
-        queued = await handoffs.queued_messages(conn, row.id)
-        if not await handoffs.close(conn, row.id, "cancelled", "voluntary", SOLO_REPLACEABLE):
-            raise ApiError(409, "handoff_open", "a handoff just moved on")
-        for message_id in queued:
-            await q.cancel_message(conn, message_id)
-    try:
-        async with conn.transaction():  # savepoint: a conflict leaves the request usable
-            await handoffs.insert(
-                conn, agent.session_id, agent.id, "voluntary", "handed", handoff_text=text
-            )
-    except psycopg.errors.UniqueViolation:
-        raise ApiError(409, "handoff_open", "a handoff was just opened") from None
+def _check_epoch(leader: Any, epoch: int | None) -> None:
+    if epoch is None:
+        raise ApiError(422, "epoch_required", "a hive leader's handover needs the leader epoch")
+    if epoch != leader.epoch:
+        raise ApiError(409, "stale_epoch", f"epoch {epoch} is not the current epoch {leader.epoch}")
 
 
 async def _hive_handover(
     conn: Any, agent: agents_repo.Agent, leader: Any, body: schemas.HandoverIn
 ) -> int:
-    if body.epoch is None:
-        raise ApiError(422, "epoch_required", "a hive leader's handover needs the leader epoch")
-    if body.epoch != leader.epoch:
-        raise ApiError(
-            409, "stale_epoch", f"epoch {body.epoch} is not the current epoch {leader.epoch}"
-        )
+    _check_epoch(leader, body.epoch)
     to_id = await member_id(conn, agent.session_id, body.to) if body.to is not None else None
-    assert body.reason is not None
+    assert body.epoch is not None
     return await leadership.insert_request(
         conn, agent.session_id, "handover", agent.id, to_id, body.reason, body.epoch
     )
+
+
+# ---------------------------------------------------------------- handoff submit
+
+_REJECT_WORDS = {
+    "too_short": "the handoff is too short to carry a context over",
+    "not_text": "the handoff is mostly not text (emoji or punctuation)",
+}
+_REUSABLE = ("pressuring", "submitted")
+
+
+def _reason_words(reason: str) -> str:
+    kind, _, what = reason.partition(":")
+    if kind == "missing":
+        return f"the field {what} is empty"
+    if kind == "unreferenced":
+        return f"{what} is still running but no in_flight entry names it (list it or abandon it)"
+    return _REJECT_WORDS.get(reason, reason)
+
+
+def _rejected(reasons: list[str], rejects: int) -> ApiError:
+    return ApiError(
+        422,
+        "handoff_rejected",
+        "the handoff was not accepted: "
+        + "; ".join(_reason_words(r) for r in reasons)
+        + ". Fix it and call orchestrator_handoff_submit again.",
+        extra={"missing": reasons, "rejects": rejects},
+    )
+
+
+@router.post(
+    "/handoff",
+    status_code=202,
+    response_model=schemas.HandoffAccepted,
+    summary="Submit your handoff once your work is safe to hand over",
+)
+async def handoff_submit(
+    body: schemas.HandoffSubmitIn, request: Request, agent: Caller, pool: Pool, settings: Cfg
+) -> schemas.HandoffAccepted:
+    """Check order: hive leader and epoch, an open row (reused; a voluntary one is opened only
+    once the text passes), the quality of the text (422 `handoff_rejected`), then the in-flight
+    gate (409 `in_flight`, the handoff stored). A gate-clear submit is accepted 202; the
+    dispatcher then moves leadership (hive) or clears the context and returns the handoff (solo)
+    once the agent is idle."""
+    async with pool.connection() as conn:
+        session = await _session(conn, agent)
+        if not session.spec.alone:
+            leader = await leadership.current_leader(conn, agent.session_id)
+            if leader is None or leader.agent_id != agent.id:
+                raise ApiError(409, "not_leader", "only the current leader can submit a handoff")
+            _check_epoch(leader, body.epoch)
+            if body.to is not None:
+                await member_id(conn, agent.session_id, body.to)
+        row = await handoffs.open_row(conn, agent.id)
+        if row is not None and row.phase not in _REUSABLE:
+            raise ApiError(409, "handoff_open", f"a handoff is already {row.phase}")
+        subject = await hive_push.pressure_subject(conn, session.id, agent.id, settings)
+        profile = row.profile if row is not None else None
+        if profile is None:
+            profile = await handoff_profile.detect(
+                conn,
+                {"id": session.id, "spec": {"handoff_profile": session.spec.handoff_profile}},
+                agent.id,
+                None
+                if subject is None
+                else datetime.now(UTC) - timedelta(seconds=subject.tenure_seconds),
+            )
+        used = None if subject is None else subject.used_tokens
+    inflight = await workspace.fetch_inflight(request.app, settings, agent)
+    reasons = handoff_quality.check(body, profile, inflight, body.abandon, settings)
+    gate = handoff_gate.evaluate(inflight, body.abandon)
+    snapshot = inflight.model_dump(mode="json") if inflight else {"unknown": True}
+    snapshot = {**snapshot, "waiting_on": gate.waiting_on, "abandoned": gate.abandoned}
+    stored = body.model_dump(mode="json", exclude={"handled", "epoch"})
+    stored["abandoned"] = gate.abandoned
+    refusal: ApiError | None = None
+    handled: list[int] = []
+    async with pool.connection() as conn:
+        if reasons and row is None:  # a voluntary submit that fails the check opens no row
+            raise _rejected(reasons, 0)
+        if row is None:
+            try:
+                async with conn.transaction():  # savepoint: a concurrent open is no failure
+                    row = await handoffs.open_pressure(
+                        conn, session.id, agent.id, 0, profile, "voluntary"
+                    )
+            except psycopg.errors.UniqueViolation:
+                row = await handoffs.open_row(conn, agent.id)
+            if row is None or row.phase not in _REUSABLE:
+                phase = row.phase if row else "open"
+                raise ApiError(409, "handoff_open", f"a handoff is already {phase}")
+        if reasons:
+            rejects = await handoffs.record_reject(conn, row.id, reasons)
+            if rejects == 0:
+                refusal = ApiError(409, "handoff_open", "the handoff was just closed")
+            else:
+                refusal = _rejected(reasons, rejects)
+        elif not await handoffs.submit(conn, row.id, stored, snapshot, used):
+            refusal = ApiError(409, "handoff_open", "the handoff just moved on")
+        else:
+            handled = await session_messaging.mark_handled(conn, agent.session_id, body.handled)
+            if not gate.clear:
+                await handoffs.record_gate_block(conn, row.id, snapshot)
+                hint = (
+                    f" For scratch files: {handoff_gate.SCRATCH_HINT}."
+                    if any(w.startswith("scratch:") for w in gate.waiting_on)
+                    else ""
+                )
+                refusal = ApiError(
+                    409,
+                    "in_flight",
+                    "the handoff is stored but work is still in flight: "
+                    + ", ".join(gate.waiting_on)
+                    + ". Finish each, or abandon it with a reason, then submit again."
+                    + hint,
+                    extra={"waiting_on": gate.waiting_on},
+                )
+    if refusal is not None:
+        raise refusal
+    return schemas.HandoffAccepted(handoff_id=row.id, handled=handled)
 
 
 class LockPaths(BaseModel):

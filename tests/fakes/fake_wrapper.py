@@ -333,6 +333,11 @@ class FakeWrapper:
         self.notes_enabled = True
         self.notes_max_chars = 2000
         self._notes_delay = 0.0
+        # context pressure (wrapper >= 0.19.0): the policy per session, the in-flight inventory
+        # the gate reads, and a switch for `pressure.enabled false` (409 pressure_disabled)
+        self.pressure: dict[str, dict[str, Any]] = {}
+        self.pressure_enabled = True
+        self.inflight: dict[str, dict[str, Any]] = {}
         self.requests: list[tuple[str, str]] = []  # (method, path) of every authenticated call
         # dialog API: the open dialog per session (the wrapper's `dialog_view` shape), the ids
         # answered so far, and the body of every accepted answer
@@ -584,6 +589,14 @@ class FakeWrapper:
         """A priority send holds its answer this long (the wrapper's interrupt), its turn
         listed `pending` meanwhile, as the wrapper does."""
         self._priority_hold = seconds
+
+    def disable_pressure(self, disabled: bool = True) -> None:
+        """Answer 409 pressure_disabled, as a wrapper with pressure.enabled false."""
+        self.pressure_enabled = not disabled
+
+    def set_inflight(self, session_id: str, **fields: Any) -> None:
+        """Set the `GET /inflight` body of a session (subagents, background_tasks, ...)."""
+        self.inflight[session_id] = fields
 
     def disable_notes(self, disabled: bool = True) -> None:
         """Answer 409 notes_disabled, as a wrapper with notes.enabled false."""
@@ -966,6 +979,50 @@ class FakeWrapper:
             payload = {"key": key, "source": source, "text": text, "chars": len(text)}
             self.emit("note_received", payload, session_id)
             return {"key": key, "pending": len(self.held_notes(session_id))}
+
+        @app.put("/v1/sessions/{session_id}/pressure")
+        async def put_pressure(session_id: str, request: Request) -> dict[str, Any]:
+            self._auth(request)
+            body = await self._json_body(request)
+            if not self.pressure_enabled:
+                raise _Err(409, "pressure_disabled", "context pressure is disabled")
+            self._get(session_id)
+            version = body.get("version")
+            if not isinstance(version, int) or version < 1:
+                raise _Err(422, "invalid_request", "version: must be an integer of at least 1")
+            cur = self.pressure.get(session_id)
+            if cur is not None and version < cur["version"]:
+                raise _Err(409, "stale_version", f"policy version {version} is older")
+            result = "unchanged" if cur == body else "set"
+            self.pressure[session_id] = body
+            return {"version": version, "result": result, "level": 0}
+
+        @app.get("/v1/sessions/{session_id}/pressure")
+        async def get_pressure(session_id: str, request: Request) -> dict[str, Any]:
+            self._auth(request)
+            self._get(session_id)
+            pol = self.pressure.get(session_id)
+            return {
+                "version": pol["version"] if pol else None,
+                "level": 0,
+                "context": self._get(session_id).context,
+                "handoff_state": pol.get("handoff_state", "none") if pol else "none",
+                "deliveries": 0,
+                "stop_blocks_this_turn": 0,
+            }
+
+        @app.delete("/v1/sessions/{session_id}/pressure", status_code=204)
+        async def delete_pressure(session_id: str, request: Request) -> Response:
+            self._auth(request)
+            self._get(session_id)
+            self.pressure.pop(session_id, None)
+            return Response(status_code=204)
+
+        @app.get("/v1/sessions/{session_id}/inflight")
+        async def get_inflight(session_id: str, request: Request) -> dict[str, Any]:
+            self._auth(request)
+            self._get(session_id)
+            return self.inflight.get(session_id, {})
 
         @app.get("/v1/sessions/{session_id}/files")
         async def list_files(

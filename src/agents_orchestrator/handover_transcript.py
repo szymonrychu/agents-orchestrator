@@ -150,10 +150,13 @@ def render_transcript(
     omitted_turns: int,
     budget_bytes: int,
     output_chars: int,
+    package_md: str = "",
 ) -> str:
-    """Markdown: header, the State section, the previous leader's judgment, then the last turns
-    oldest first. The oldest body lines are dropped until the UTF-8 size fits `budget_bytes`;
-    header, State and judgment are never dropped (the State may exceed the budget alone)."""
+    """Markdown: header, the State section, the previous leader's judgment, the successor
+    package's Handoff and Inventory sections (`package_md`, already within half the budget),
+    then the last turns oldest first. The oldest body lines are dropped until the UTF-8 size
+    fits `budget_bytes`; header, State, judgment and the package are never dropped (the State
+    may exceed the budget alone)."""
     judgment = (
         _esc(header.summary)
         if header.summary is not None
@@ -173,6 +176,7 @@ def render_transcript(
         "",
         judgment,
         "",
+        *([package_md.rstrip("\n"), ""] if package_md else []),
         "## Last turns (newest at the end)",
         "",
     ]

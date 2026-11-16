@@ -15,24 +15,25 @@ The hash covers only the structure (leader, epoch, members, wrapper sessions, re
 busy/idle flip or a context change pushes nothing. Members pull live state with
 `orchestrator_me` and peers' activity with `orchestrator_activity`; nothing is streamed.
 
-The one exception is the keyed `handover_due` note (hive-decoupling D4, T-256): a hive leader
-or the single agent of a non-hive session (a "solo" agent, see `_subject_rows`) that reaches
-the weak limit (see `due_level`) is told once per agent, epoch, 5% bucket and candidate list to
-wrap up; a leader also gets its candidates, a solo agent the voluntary handoff. The weak limit is
-reached once its context grew by ORCH_HANDOVER_BUDGET_TOKENS on top of the context it had when
-its tenure began and it has been there ORCH_HANDOVER_MIN_TENURE_SECONDS, never while its pod
-awaits a rollout; without a token gauge the percent rule (compact - HANDOVER_MARGIN_PCT)
-applies. The strong limit (`strong_tokens`) needs neither tenure nor rollout. The start context
-is `session_leaders.start_context_tokens` for a leader and `agent_limits.start_context_tokens`
-for a solo agent (recorded on the first tick with a gauge and again after each clear); the
-dispatcher fills both. It is evaluated on every push tick, outside the hash and claim path
-above, and remembered per session in `HiveState`. Solo agents get only this note (no hive
-state, rollout or outcome pushes).
+Limit subjects (hive-decoupling D4, T-256, T-423): a hive leader and the single agent of a
+non-hive session (a "solo" agent, see `_subject_rows`) are under context pressure from L1 on
+(`due_level`: L1 once its context grew by ORCH_HANDOVER_BUDGET_TOKENS on top of the context it had
+when its tenure began, after ORCH_HANDOVER_MIN_TENURE_SECONDS and never while its pod awaits a
+rollout; L2 at the strong point, L3 at the critical point, neither needing tenure). The start
+context is `session_leaders.start_context_tokens` for a leader and
+`agent_limits.start_context_tokens` for a solo agent (recorded on the first tick with a gauge and
+again after each clear); the dispatcher fills both.
 
-While a strong-limit handoff row (dispatcher/handoff.py) of a leader or solo agent counts down
-(phase notified or extended), the agent also gets the keyed `handoff_notice` note with the
-countdown text and the minutes left, once per row and phase (so again after an extension); a
-failed push is retried next tick. Members never get it.
+Pressure is a policy, not a note (`_push_pressure`, spec 5.2): every limit subject at L1 or above,
+every agent with an open handoff row (an ex-leader waiting for its clear included) and every
+agent pushed before gets the policy of `pressure_policy.build` with `PUT /v1/sessions/{id}/pressure`
+whenever its content hash changes; the wrapper evaluates the level from its own gauge and
+delivers the texts. Every PRESSURE_CHECK_SECONDS a `GET` compares the wrapper's version with the
+last push and re-puts it when they differ (a wrapper restart lost it). The version is per agent
+and strictly increasing: max(wrapper reported, last pushed) + 1. A wrapper without the route (404)
+or with pressure disabled (409 `pressure_disabled`) is logged once per agent and wrapper session
+and skipped. Nothing here names a time or asks for a handoff: the agent submits its own
+(`dispatcher/handoff.py`).
 
 The leader's keyed `rollout_due` note (voluntary handover 3.7) tells it a rollout waits on it: sent
 once per (leader, epoch, revision) while the reconciler's `status.rollout.leader_since` is set and
@@ -52,7 +53,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import math
 import time
 import uuid
 from collections.abc import Callable
@@ -63,26 +63,16 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from agents_orchestrator import handoff_texts
 from agents_orchestrator.db import handoffs, leadership
-from agents_orchestrator.db.eligibility import (
-    ELIGIBLE,
-    HANDOVER_MARGIN_PCT,
-    HEADROOM,
-    SUCCESSOR_ORDER,
-)
+from agents_orchestrator.db.eligibility import HANDOVER_MARGIN_PCT
 from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE
 from agents_orchestrator.dispatcher import feed
-from agents_orchestrator.handoff_texts import (
-    WEAK_LEADER_CANDIDATES,
-    WEAK_LEADER_NONE,
-    WEAK_SOLO,
-    WEAK_WRAP_UP,
-    strong_notice,
-)
 from agents_orchestrator.handover_transcript import REREAD_RULE
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import SessionSpec, legacy_context
 from agents_orchestrator.wrapper.client import NoteOutcome, WrapperClient
+from agents_orchestrator.wrapper.models import WrapperError, WrapperUnreachable
 
 log = logging.getLogger(__name__)
 
@@ -90,51 +80,57 @@ log = logging.getLogger(__name__)
 PUSH_INTERVAL_SECONDS = 10
 PUSH_TIMEOUT_SECONDS = 3
 STATE_KEY = "hive_state"
-DUE_KEY = "handover_due"
 ROLLOUT_KEY = "rollout_due"
 OUTCOME_KEY = "leadership_request"
-NOTICE_KEY = "handoff_notice"
 OUTCOME_WINDOW_SECONDS = 300
-BUCKET_PCT = 5
+PRESSURE_CHECK_SECONDS = 60
 PULL_SENTENCE = (
     "Call orchestrator_me for live state and context, orchestrator_activity for what peers did."
 )
 
 ClientFactory = Callable[[uuid.UUID, str], WrapperClient]
 
-# Who could take over from a leader that is due: ELIGIBLE agents other than the leader that have
-# headroom (eligibility.HEADROOM; a candidate without it would hand leadership straight back), in
-# the leadership pass's successor order (eligibility.SUCCESSOR_ORDER), so the first one is the
-# agent the pass picks for an untargeted handover. Params: session, leader, compact (the pods'
-# default compaction point).
-_CANDIDATES = f"""
-SELECT a.pod_name, a.wrapper_session_id, coalesce(s.state, 'unknown') AS state, s.context_pct
-FROM agents a LEFT JOIN agent_status s ON s.agent_id = a.id
-JOIN sessions c ON c.id = a.session_id
-WHERE a.session_id = %(session)s AND a.id <> %(leader)s AND {ELIGIBLE} AND {HEADROOM}
-ORDER BY {SUCCESSOR_ORDER}
-"""
-
-# What the dispatcher last told a leader or solo agent (weak note): (agent id, epoch, 5% bucket,
-# candidate identity).
-DueKey = tuple[uuid.UUID, int, int, tuple[tuple[str, str], ...]]
-
 # What the dispatcher last told a leader about a rollout: (leader agent id, epoch, revision).
 RolloutKey = tuple[uuid.UUID, int, str]
 
 
+Level = Literal["none", "l1", "l2", "l3"]
+LEVEL_NUMBER: dict[str, int] = {"none": 0, "l1": 1, "l2": 2, "l3": 3}
+
+
+@dataclass(frozen=True)
+class Steering:
+    """A session's claimed task ids and todo lines as the last handoff pass read them from the
+    taskboard (the push loop never calls the taskboard itself); `at` is a monotonic clock."""
+
+    task_ids: tuple[str, ...]
+    todo: tuple[str, ...]
+    at: float
+
+
 @dataclass
 class HiveState:
-    """In-memory push state of one dispatcher: the throttle clock, the last `handover_due` and
-    `rollout_due` keys and the `leadership_request` outcomes already sent (request ids, pruned to
-    the window) per session. A restart re-sends each of them at most once more."""
+    """In-memory push state of one dispatcher: the throttle clocks, the last `rollout_due` key and
+    the `leadership_request` outcomes already sent (request ids, pruned to the window) per
+    session, and per agent the pressure policy last pushed. A restart re-sends each of them at
+    most once more."""
 
     last_tick: dict[uuid.UUID, float] = field(default_factory=dict)
-    due_sent: dict[uuid.UUID, DueKey] = field(default_factory=dict)
     rollout_sent: dict[uuid.UUID, RolloutKey] = field(default_factory=dict)
     outcome_sent: dict[uuid.UUID, set[int]] = field(default_factory=dict)
-    # the strong countdown note last sent per session: (handoff row id, phase)
-    notice_sent: dict[uuid.UUID, tuple[int, str]] = field(default_factory=dict)
+    # per agent: (policy hash, version, clock of the last GET check) of the last successful PUT
+    pressure_pushed: dict[uuid.UUID, tuple[str, int, float]] = field(default_factory=dict)
+    # per agent: the wrapper session the entry above belongs to
+    pressure_session: dict[uuid.UUID, str] = field(default_factory=dict)
+    # per agent: the wrapper session that answered 404 or 409 pressure_disabled (logged once)
+    pressure_off: dict[uuid.UUID, str] = field(default_factory=dict)
+    pressure_tick: float | None = None
+    # per session: its claimed tasks and todo as the handoff pass last read them (written by
+    # the pass, read by the policy build; the push loop never asks the taskboard)
+    steering: dict[uuid.UUID, Steering] = field(default_factory=dict)
+    # per agent: the row id whose accepted handoff was last pushed as the post-compaction
+    # reminder (the reminder goes out once)
+    reminded: dict[uuid.UUID, int] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------- the note text
@@ -155,6 +151,8 @@ class Levels:
     fallback_pct: int  # weak, for an unknown token gauge: max(compact - HANDOVER_MARGIN_PCT, 1)
     start_tokens: int | None
     budget_tokens: int
+    critical_margin_pct: float = 5  # L3: compact - critical_margin_pct (the percent fallback)
+    critical_headroom_tokens: int = 25000
 
 
 def levels(spec: dict[str, Any], start_tokens: int | None, settings: Settings) -> Levels:
@@ -167,11 +165,13 @@ def levels(spec: dict[str, Any], start_tokens: int | None, settings: Settings) -
         fallback_pct=max(compact - HANDOVER_MARGIN_PCT, 1),
         start_tokens=start_tokens,
         budget_tokens=settings.handover_budget_tokens,
+        critical_margin_pct=settings.handover_critical_margin_pct,
+        critical_headroom_tokens=settings.handover_critical_headroom_tokens,
     )
 
 
 def strong_tokens(lv: Levels, window_tokens: int) -> int:
-    """The context size from which the strong limit applies: the smaller of the percent margin
+    """The context size from which level 2 (strong) applies: the smaller of the percent margin
     below compaction and the headroom in tokens below it, floored at 0."""
     return max(
         0,
@@ -184,6 +184,28 @@ def strong_tokens(lv: Levels, window_tokens: int) -> int:
     )
 
 
+def critical_tokens(lv: Levels, window_tokens: int) -> int:
+    """The context size from which level 3 (critical) applies: the smaller of the percent margin
+    and the token headroom below compaction, never below the level 2 point."""
+    return max(
+        strong_tokens(lv, window_tokens),
+        int(
+            min(
+                (lv.compact_pct - lv.critical_margin_pct) / 100 * window_tokens,
+                lv.compact_pct / 100 * window_tokens - lv.critical_headroom_tokens,
+            )
+        ),
+    )
+
+
+def l1_tokens(lv: Levels, window_tokens: int, l2_tokens: int) -> int:
+    """The context size from which L1 applies: the start-plus-budget point, or the percent
+    fallback of the window when the tenure start is unknown, never above the L2 point."""
+    if lv.start_tokens is not None:
+        return min(lv.start_tokens + lv.budget_tokens, l2_tokens)
+    return min(int(lv.fallback_pct / 100 * window_tokens), l2_tokens)
+
+
 def due_level(
     lv: Levels,
     used_tokens: int | None,
@@ -192,23 +214,30 @@ def due_level(
     tenure_seconds: float,
     min_tenure_seconds: int,
     rollout_pending: bool,
-) -> Literal["none", "weak", "strong"]:
-    """The limit an agent is at: `strong` at the strong limit whatever else holds, `weak` past
-    its token budget (or the percent fallback) once the minimum tenure is over and its pod does
-    not await a rollout, else `none`."""
+) -> Level:
+    """The pressure level of an agent. `l3` at the critical point and `l2` at the strong point,
+    whatever else holds; `l1` past its token budget (or the percent fallback) once the minimum
+    tenure is over and its pod does not await a rollout; else `none`. Tokens decide when the
+    window is known; the percentages only when it is not."""
     window = window_tokens if window_tokens is not None and window_tokens > 0 else None
     tokens = used_tokens is not None and window is not None
     cap = strong_tokens(lv, window) if window is not None else None
-    if pct is not None and pct >= lv.strong_pct:
-        return "strong"
+    crit = critical_tokens(lv, window) if window is not None else None
+    by_pct = not tokens and pct is not None
+    if by_pct and pct >= lv.compact_pct - lv.critical_margin_pct:
+        return "l3"
+    if tokens and used_tokens is not None and crit is not None and used_tokens >= crit:
+        return "l3"
+    if by_pct and pct >= lv.strong_pct:
+        return "l2"
     if tokens and used_tokens is not None and cap is not None and used_tokens >= cap:
-        return "strong"
-    if tokens and lv.start_tokens is not None and used_tokens is not None and cap is not None:
-        hit = used_tokens >= min(lv.start_tokens + lv.budget_tokens, cap)
+        return "l2"
+    if tokens and used_tokens is not None and window is not None and cap is not None:
+        hit = used_tokens >= l1_tokens(lv, window, cap)
     else:
-        hit = pct is not None and pct >= lv.fallback_pct
+        hit = by_pct and pct >= lv.fallback_pct
     if hit and tenure_seconds >= min_tenure_seconds and not rollout_pending:
-        return "weak"
+        return "l1"
     return "none"
 
 
@@ -243,11 +272,11 @@ def hive_state_payload(
 def handover_advice(lv: Levels, settings: Settings) -> str:
     """The standing handover guidance of the hive-state note."""
     return (
-        "Leadership is yours until you hand it over. The orchestrator sends a handover_due note "
-        f"when you should: after {round(lv.budget_tokens / 1000)}k tokens of work on top of your "
-        "context at the start of leadership and at least "
-        f"{round(settings.handover_min_tenure_seconds / 60)} minutes as leader, and always "
-        f"before {lv.strong_pct:g}% context. {REREAD_RULE}"
+        "Leadership is yours until you hand it over. Context pressure tells you when: after "
+        f"{round(lv.budget_tokens / 1000)}k tokens of work on top of your context at the start "
+        f"of leadership and at least {round(settings.handover_min_tenure_seconds / 60)} minutes "
+        f"as leader, and always before {lv.strong_pct:g}% context. Hand off with "
+        f"orchestrator_handoff_submit. {REREAD_RULE}"
     )
 
 
@@ -272,25 +301,6 @@ def render_hive_state(payload: dict[str, Any], slug: str, advice: str) -> str:
     lines.append(advice)
     lines.append(PULL_SENTENCE)
     lines.append("</hive-state>")
-    return "\n".join(lines)
-
-
-def render_handover_due(epoch: int, candidates: list[dict[str, Any]], *, solo: bool) -> str:
-    """The `<handover-due>` text block pushed under the key `handover_due` at the weak limit.
-
-    Every agent is told to wrap up; the rest depends on who it is: a hive leader gets its
-    candidates (or the lack of them), a solo agent the voluntary handoff.
-    """
-    lines = ["<handover-due>", WEAK_WRAP_UP]
-    if solo:
-        lines.append(WEAK_SOLO)
-    elif not candidates:
-        lines.append(WEAK_LEADER_NONE)
-    else:
-        names = ", ".join(feed._clean(c["pod_name"]) for c in candidates)
-        lines.append(f"Candidates, best first: {names}. Current epoch: {epoch}.")
-        lines.append(WEAK_LEADER_CANDIDATES)
-    lines.append("</handover-due>")
     return "\n".join(lines)
 
 
@@ -328,7 +338,6 @@ class _Plan:
     session_id: uuid.UUID
     slug: str
     levels: Levels
-    level: Literal["none", "weak", "strong"]
     advice: str
     # the leader's context when its leadership began, to record when still unknown
     fill_start: int | None
@@ -343,17 +352,8 @@ class _Plan:
     scalable: bool
     # handover requests decided within OUTCOME_WINDOW_SECONDS that an agent made, by id
     outcomes: list[dict[str, Any]]
-    # ELIGIBLE successors, best first; None while the leader is not due
-    candidates: list[dict[str, Any]] | None = None
     # the reconciler's status.rollout while only the leader's pod is left (leader_since set)
     rollout: dict[str, Any] | None = None
-    # a session of one agent: the agent is its own leader, there is no hive state to push
-    solo: bool = False
-    # the leader's strong row while it counts down: (row id, phase, minutes left)
-    countdown: tuple[int, str, int] | None = None
-    # while it counts down: a successor exists (`leadership.successor`, the one the handoff
-    # pass and `handed()` use, so the note promises what the notice message promised)
-    successor: bool = False
 
     @property
     def receivers(self) -> list[dict[str, Any]]:
@@ -378,7 +378,7 @@ async def _read(
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT a.pod_name AS leader, a.ordinal, l.agent_id, l.epoch, l.state_hash,"
-            " l.start_context_tokens, extract(epoch FROM now() - l.since) AS tenure"
+            " l.start_context_tokens"
             " FROM session_leaders l JOIN agents a ON a.id = l.agent_id WHERE l.session_id = %s",
             (cid,),
         )
@@ -404,28 +404,6 @@ async def _read(
             spec, leader["start_context_tokens"] if fill_start is None else fill_start, settings
         )
         rollout = (session.get("status") or {}).get("rollout") or {}
-        level = "none"
-        if lead is not None:
-            level = due_level(
-                lv,
-                used,
-                lead["context_window_tokens"],
-                lead["context_pct"],
-                float(leader["tenure"]),
-                settings.handover_min_tenure_seconds,
-                leader["ordinal"] in (rollout.get("pending") or []),
-            )
-        candidates = None
-        if level != "none":
-            await cur.execute(
-                _CANDIDATES,
-                {
-                    "session": cid,
-                    "leader": leader["agent_id"],
-                    "compact": settings.default_auto_compact_pct,
-                },
-            )
-            candidates = await cur.fetchall()
         await cur.execute(
             "SELECT id, from_agent_id, status, reject_reason FROM leadership_requests"
             " WHERE session_id = %s AND kind = 'handover' AND from_agent_id IS NOT NULL"
@@ -434,22 +412,11 @@ async def _read(
             (cid, OUTCOME_WINDOW_SECONDS),
         )
         outcomes = await cur.fetchall()
-    countdown = await handoffs.countdown(conn, leader["agent_id"])
-    successor = countdown is not None and (
-        await leadership.successor(
-            conn,
-            cid,
-            leader["agent_id"],
-            leadership.PassPolicy(default_auto_compact_pct=settings.default_auto_compact_pct),
-        )
-        is not None
-    )
     typed = SessionSpec.model_validate(spec, context=legacy_context(session.get("secret_versions")))
     return _Plan(
         session_id=cid,
         slug=session["slug"],
         levels=lv,
-        level=level,
         advice=handover_advice(lv, settings),
         fill_start=fill_start,
         max_replicas=spec.get("max_replicas") or spec.get("replicas") or 1,
@@ -462,10 +429,7 @@ async def _read(
         members=members,
         scalable=typed.scalable,
         outcomes=outcomes,
-        candidates=candidates,
         rollout=rollout if rollout.get("leader_since") else None,
-        countdown=countdown,
-        successor=successor,
     )
 
 
@@ -508,63 +472,6 @@ async def _push_agent(
     text = render_hive_state(payload, plan.slug, plan.advice)
     client = client_factory(plan.session_id, member["url"])
     return await _note(client, member["wrapper_session_id"], text, STATE_KEY)
-
-
-async def _push_due(plan: _Plan, state: HiveState, client_factory: ClientFactory) -> int:
-    """Tell an agent at the weak limit to wrap up, once per due key.
-
-    Runs on every tick, whatever the hive_state hash says. When the agent is below the weak limit
-    (or there is no leader to tell) nothing is sent and the key is forgotten, so an agent that
-    compacted and climbs again is told again. At the strong limit the weak note is not repeated
-    (the strong limit has its own handling). A failed push is not remembered: the next tick
-    retries it.
-    """
-    leader = next((m for m in plan.receivers if m["pod_name"] == plan.leader), None)
-    if plan.candidates is None or leader is None:
-        if plan.candidates is None:
-            state.due_sent.pop(plan.session_id, None)
-        return 0
-    if plan.level != "weak":
-        return 0
-    identity = tuple((c["pod_name"], c["wrapper_session_id"]) for c in plan.candidates)
-    used, window = leader["context_used_tokens"], leader["context_window_tokens"]
-    pct = leader["context_pct"]
-    if pct is None:  # due by tokens alone
-        pct = 100 * used / window
-    key: DueKey = (plan.leader_id, plan.epoch, int(pct // BUCKET_PCT), identity)
-    if state.due_sent.get(plan.session_id) == key:
-        return 0
-    text = render_handover_due(plan.epoch, plan.candidates, solo=plan.solo)
-    client = client_factory(plan.session_id, leader["url"])
-    outcome = await _note(client, leader["wrapper_session_id"], text, DUE_KEY)
-    if outcome != "failed":
-        state.due_sent[plan.session_id] = key
-    return int(outcome == "ok")
-
-
-async def _push_countdown(
-    plan: _Plan, state: HiveState, settings: Settings, client_factory: ClientFactory
-) -> int:
-    """Repeat the strong countdown notice as the keyed `handoff_notice` note, once per row and
-    phase; forgotten once nothing counts down. A failed push is retried on the next tick."""
-    if plan.countdown is None:
-        state.notice_sent.pop(plan.session_id, None)
-        return 0
-    leader = next((m for m in plan.receivers if m["pod_name"] == plan.leader), None)
-    row_id, phase, minutes = plan.countdown
-    if leader is None or state.notice_sent.get(plan.session_id) == (row_id, phase):
-        return 0
-    # decided at send time: a hive with no eligible successor follows the solo order (L3)
-    text = strong_notice(
-        minutes,
-        math.ceil(settings.handover_extension_seconds / 60),
-        hive=not plan.solo and plan.successor,
-    )
-    client = client_factory(plan.session_id, leader["url"])
-    outcome = await _note(client, leader["wrapper_session_id"], text, NOTICE_KEY)
-    if outcome != "failed":
-        state.notice_sent[plan.session_id] = (row_id, phase)
-    return int(outcome == "ok")
 
 
 async def _push_rollout(
@@ -694,8 +601,6 @@ async def _push_session(
         }
         await _release(pool, plan, current, failed, all_ok=not failed)
         sent = sum(outcome == "ok" for outcome in outcomes)
-    sent += await _push_due(plan, state, client_factory)
-    sent += await _push_countdown(plan, state, settings, client_factory)
     sent += await _push_rollout(plan, state, settings, client_factory)
     return sent + await _push_outcomes(plan, state, client_factory)
 
@@ -766,13 +671,16 @@ async def _subject_rows(
     return rows
 
 
-def _row_level(
-    row: dict[str, Any], settings: Settings
-) -> tuple[Levels, Literal["none", "weak", "strong"], int | None]:
+def _pending(row: dict[str, Any]) -> bool:
+    """The agent's pod awaits its rollout (its ordinal is in `status.rollout.pending`)."""
+    rollout = (row["status"] or {}).get("rollout") or {}
+    return row["ordinal"] in (rollout.get("pending") or [])
+
+
+def _row_level(row: dict[str, Any], settings: Settings) -> tuple[Levels, Level, int | None]:
     """The levels, the level and the start context to record (None when it is known already)."""
     fill = row["context_used_tokens"] if row["start_tokens"] is None else None
     lv = levels(row["spec"], row["start_tokens"] if fill is None else fill, settings)
-    rollout = (row["status"] or {}).get("rollout") or {}
     level = due_level(
         lv,
         row["context_used_tokens"],
@@ -780,65 +688,326 @@ def _row_level(
         row["context_pct"],
         float(row["tenure"]),
         settings.handover_min_tenure_seconds,
-        row["ordinal"] in (rollout.get("pending") or []),
+        _pending(row),
     )
     return lv, level, fill
 
 
-async def _push_solo_session(
+@dataclass(frozen=True)
+class PressureSubject:
+    """The live pressure reading of one leader or solo agent (`Me` and the submit route)."""
+
+    levels: Levels
+    level: int
+    used_tokens: int | None
+    window_tokens: int | None
+    context_pct: float | None
+    tenure_seconds: float
+
+
+async def pressure_subject(
+    conn: psycopg.AsyncConnection, session_id: uuid.UUID, agent_id: uuid.UUID, settings: Settings
+) -> PressureSubject | None:
+    """The reading of `agent_id` when it is the leader or solo agent of an active session, else
+    None. The level is computed in tokens (unknown gauge: 0)."""
+    for row in await _subject_rows(conn, session_id=session_id):
+        if row["agent_id"] != agent_id:
+            continue
+        lv, level, _ = _row_level(row, settings)
+        return PressureSubject(
+            levels=lv,
+            level=LEVEL_NUMBER[level],
+            used_tokens=row["context_used_tokens"],
+            window_tokens=row["context_window_tokens"],
+            context_pct=row["context_pct"],
+            tenure_seconds=float(row["tenure"]),
+        )
+    return None
+
+
+async def _fill_solo_start(
     pool: AsyncConnectionPool,
     session_id: uuid.UUID,
+    settings: Settings,
+    state: HiveState,
+    clock: Callable[[], float],
+) -> None:
+    """Under the session lock, record a solo agent's start context when unknown (its first
+    gauge, or the first after a clear). Solo agents get no notes: their pressure is the policy."""
+    async with pool.connection() as conn, conn.transaction():
+        if not await _try_lock(conn, session_id):
+            return
+        state.last_tick[session_id] = clock()
+        rows = await _subject_rows(conn, session_id=session_id, solo=True)
+        if not rows:
+            return
+        fill = _row_level(rows[0], settings)[2]
+        if fill is not None:
+            await handoffs.set_limits_start(conn, rows[0]["agent_id"], fill)
+
+
+# ---------------------------------------------------------------- pressure policy push
+
+# The open rows' agents that are not limit subjects (an ex-leader waiting for its clear): their
+# gauge and session, to build their policy.
+_ROW_AGENTS = f"""
+SELECT c.id AS session_id, c.spec, a.id AS agent_id, a.url, a.wrapper_session_id,
+    s.context_used_tokens, s.context_window_tokens, {_GAUGE_STALE} AS gauge_stale
+FROM agents a JOIN sessions c ON c.id = a.session_id
+LEFT JOIN agent_status s ON s.agent_id = a.id
+WHERE a.id = ANY(%(agents)s) AND a.gone_at IS NULL AND c.desired = 'active'
+"""
+
+
+@dataclass(frozen=True)
+class _PressureTarget:
+    agent_id: uuid.UUID
+    session_id: uuid.UUID
+    url: str
+    wrapper_session_id: str
+    body: dict[str, Any]  # the policy with version 0
+    hash: str
+    reminder_row: int | None = None  # the row whose handoff this policy reminds of
+
+
+async def _pressure_targets(
+    conn: psycopg.AsyncConnection, settings: Settings, state: HiveState
+) -> list[_PressureTarget]:
+    """Every limit subject at L1 or above, with an open row, or pushed before; every other agent
+    with an open handoff row (an ex-leader). Shutdown rows have their own path."""
+    from agents_orchestrator import handoff_profile, pressure_policy  # cycle: they import hive
+
+    rows = {h.agent_id: h for h in await handoffs.open_rows_all(conn) if h.trigger != "shutdown"}
+    out: list[_PressureTarget] = []
+
+    def add(
+        agent_id: uuid.UUID,
+        session_id: uuid.UUID,
+        url: str | None,
+        wsid: str | None,
+        body: dict[str, Any],
+        reminder_row: int | None = None,
+    ) -> None:
+        if url and wsid:
+            h = pressure_policy.policy_hash(body)
+            out.append(_PressureTarget(agent_id, session_id, url, wsid, body, h, reminder_row))
+
+    reminders = {
+        a: r
+        for a, r in (await handoffs.unapplied_compacted(conn)).items()
+        if r.id > state.reminded.get(a, 0)
+    }
+
+    def extras(
+        row: handoffs.Handoff | None, session_id: uuid.UUID, reminder: handoffs.Handoff | None
+    ) -> pressure_policy.PolicyExtras:
+        resubmit = bool(row is not None and (row.inflight or {}).get("resubmit"))
+        cached = state.steering.get(session_id)
+        task_ids, todo = (cached.task_ids, cached.todo) if cached else ((), ())
+        steer = row if row is not None else reminder
+        profile: handoff_texts.Profile = (
+            "chat" if steer is not None and steer.profile == "chat" else "work"
+        )
+        compact = handoff_texts.compact_instructions(row, task_ids, profile, todo=todo)
+        reinject = handoff_texts.reinject_text(steer, task_ids, todo, profile)
+        if row is None or row.phase != "returning" or row.handoff is None:
+            return pressure_policy.PolicyExtras(
+                resubmit=resubmit, compact_instructions=compact, reinject_text=reinject
+            )
+        # a solo agent's fresh context: the resume check until the return turn ends
+        first = [str(n) for n in row.handoff.get("next") or [] if str(n).strip()]
+        text = handoff_texts.resume_text(
+            [], first[0] if first else None, chat=row.profile == "chat"
+        )
+        return pressure_policy.PolicyExtras(
+            resume_pending=True,
+            resume_text=text,
+            compact_instructions=compact,
+            reinject_text=reinject,
+        )
+
+    seen: set[uuid.UUID] = set()
+    for subject in await _subject_rows(conn):
+        agent_id = subject["agent_id"]
+        lv, level, _ = _row_level(subject, settings)
+        row = rows.get(agent_id)
+        seen.add(agent_id)
+        reminder = reminders.get(agent_id) if row is None else None
+        if (
+            level == "none"
+            and row is None
+            and agent_id not in state.pressure_pushed
+            and reminder is None
+        ):
+            continue
+        known = row.profile if row is not None else None
+        profile: handoff_texts.Profile
+        if known == "work" or known == "chat":
+            profile = known
+        else:
+            tenure = float(subject["tenure"] or 0)  # 0: the tenure start is unknown
+            tenure_start = await _since(conn, tenure) if tenure > 0 else None
+            profile = await handoff_profile.detect(
+                conn, {"id": subject["session_id"], "spec": subject["spec"]}, agent_id, tenure_start
+            )
+        l1_on = float(subject["tenure"]) >= settings.handover_min_tenure_seconds and not _pending(
+            subject
+        )
+        body = pressure_policy.build(
+            lv,
+            subject["context_window_tokens"],
+            l1_on,
+            profile,
+            row,
+            hive=not subject["solo"],
+            version=0,
+            extras=extras(row, subject["session_id"], reminder),
+        )
+        add(
+            agent_id,
+            subject["session_id"],
+            subject["url"],
+            subject["wrapper_session_id"],
+            body,
+            reminder.id if reminder is not None and body["reinject_text"] else None,
+        )
+    others = [a for a in rows if a not in seen]
+    if others:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(_ROW_AGENTS, {"agents": others})
+            for got in await cur.fetchall():
+                row = rows[got["agent_id"]]
+                window = None if got["gauge_stale"] else got["context_window_tokens"]
+                body = pressure_policy.build(
+                    levels(got["spec"], None, settings),
+                    window,
+                    False,
+                    "chat" if row.profile == "chat" else "work",
+                    row,
+                    hive=True,
+                    version=0,
+                    extras=extras(row, got["session_id"], None),
+                )
+                add(got["agent_id"], got["session_id"], got["url"], got["wrapper_session_id"], body)
+    return out
+
+
+async def _since(conn: psycopg.AsyncConnection, seconds: float) -> Any:
+    cur = await conn.execute("SELECT now() - make_interval(secs => %s)", (seconds,))
+    row = await cur.fetchone()
+    return row[0] if row else None
+
+
+def _off(state: HiveState, target: _PressureTarget, exc: WrapperError) -> bool:
+    """404 (no route, or an unknown session) or 409 pressure_disabled: the wrapper takes no
+    policy. Logged once per agent and wrapper session; True when it was such an answer."""
+    if exc.status != 404 and exc.code != "pressure_disabled":
+        return False
+    if state.pressure_off.get(target.agent_id) != target.wrapper_session_id:
+        log.info(
+            "pressure policy for agent %s skipped: wrapper answered %s %s",
+            target.agent_id,
+            exc.status,
+            exc.code,
+        )
+    state.pressure_off[target.agent_id] = target.wrapper_session_id
+    return True
+
+
+async def _push_policy(
+    target: _PressureTarget,
+    state: HiveState,
+    client_factory: ClientFactory,
+    now: float,
+) -> bool:
+    """PUT the target's policy when its content changed since the last successful push, or when
+    the wrapper's version differs from it at the periodic check; True when a PUT was taken."""
+    agent_id, wsid = target.agent_id, target.wrapper_session_id
+    if state.pressure_off.get(agent_id) == wsid:
+        return False
+    last = state.pressure_pushed.get(agent_id)
+    last_version = last[1] if last is not None else 0  # per agent, across wrapper sessions
+    if last is not None and state.pressure_session.get(agent_id) != wsid:
+        last = None  # a new wrapper session holds nothing of the old one
+    if last is not None and last[0] == target.hash and now - last[2] < PRESSURE_CHECK_SECONDS:
+        return False
+    client = client_factory(target.session_id, target.url)
+    try:
+        async with asyncio.timeout(PUSH_TIMEOUT_SECONDS * 3):
+            reported = (await client.get_pressure(wsid)).version
+            if last is not None and last[0] == target.hash and reported == last[1]:
+                state.pressure_pushed[agent_id] = (last[0], last[1], now)
+                return False
+            for attempt in (1, 2):
+                version = max(reported or 0, last_version) + 1
+                try:
+                    await client.put_pressure(wsid, {**target.body, "version": version})
+                    break
+                except WrapperError as exc:
+                    if exc.code != "stale_version" or attempt == 2:
+                        raise
+                    reported = (await client.get_pressure(wsid)).version
+    except WrapperError as exc:
+        if not _off(state, target, exc):
+            log.info("pressure policy for agent %s not pushed: %s", agent_id, exc)
+        return False
+    except (WrapperUnreachable, TimeoutError) as exc:
+        log.info("pressure policy for agent %s not pushed: %s", agent_id, type(exc).__name__)
+        return False
+    state.pressure_pushed[agent_id] = (target.hash, version, now)
+    if target.reminder_row is not None:
+        state.reminded[agent_id] = target.reminder_row
+    state.pressure_session[agent_id] = wsid
+    state.pressure_off.pop(agent_id, None)
+    return True
+
+
+async def _drop_policy(
+    agent_id: uuid.UUID, state: HiveState, pool: AsyncConnectionPool, client_factory: ClientFactory
+) -> None:
+    """An agent pushed before that is neither a limit subject nor has an open row (a member now):
+    its wrapper's policy is removed, so a member never gets pressure. Best effort, forgotten
+    either way."""
+    wsid = state.pressure_session.pop(agent_id, None)
+    state.pressure_pushed.pop(agent_id, None)
+    state.pressure_off.pop(agent_id, None)
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT session_id, url, wrapper_session_id FROM agents"
+            " WHERE id = %s AND gone_at IS NULL",
+            (agent_id,),
+        )
+        got = await cur.fetchone()
+    if got is None or not got["url"] or got["wrapper_session_id"] != wsid or wsid is None:
+        return
+    client = client_factory(got["session_id"], got["url"])
+    try:
+        async with asyncio.timeout(PUSH_TIMEOUT_SECONDS):
+            await client.delete_pressure(wsid)
+    except (WrapperError, WrapperUnreachable, TimeoutError) as exc:
+        log.info("pressure policy of agent %s not removed: %s", agent_id, type(exc).__name__)
+
+
+async def _push_pressure(
+    pool: AsyncConnectionPool,
     settings: Settings,
     client_factory: ClientFactory,
     state: HiveState,
     clock: Callable[[], float],
 ) -> int:
-    """The solo counterpart of `_push_session`: under the lock, record the start context when
-    unknown (first gauge, or the first after a clear) and decide the level; then, with no
-    transaction open, send the weak note."""
+    """The pressure policy push, at most every PUSH_INTERVAL_SECONDS (by `clock`); the PUTs
+    taken. Read in one short transaction, pushed with none open."""
+    now = clock()
+    if state.pressure_tick is not None and now - state.pressure_tick < PUSH_INTERVAL_SECONDS:
+        return 0
+    state.pressure_tick = now
     async with pool.connection() as conn, conn.transaction():
-        if not await _try_lock(conn, session_id):
-            return 0
-        state.last_tick[session_id] = clock()
-        rows = await _subject_rows(conn, session_id=session_id, solo=True)
-        if not rows:
-            return 0
-        row = rows[0]
-        lv, level, fill = _row_level(row, settings)
-        if fill is not None:
-            await handoffs.set_limits_start(conn, row["agent_id"], fill)
-        candidates = [] if level != "none" else None
-        countdown = await handoffs.countdown(conn, row["agent_id"])
-    member = {k: row[k] for k in ("pod_name", "url", "wrapper_session_id", "ready", "state")}
-    member.update(
-        id=row["agent_id"],
-        context_pct=row["context_pct"],
-        context_used_tokens=row["context_used_tokens"],
-        context_window_tokens=row["context_window_tokens"],
-    )
-    plan = _Plan(
-        session_id=session_id,
-        slug=row["slug"],
-        levels=lv,
-        level=level,
-        advice="",
-        fill_start=None,
-        max_replicas=1,
-        static=True,
-        leader=row["pod_name"],
-        leader_id=row["agent_id"],
-        leader_ordinal=row["ordinal"],
-        epoch=0,
-        hashes={},
-        members=[member],
-        scalable=False,
-        outcomes=[],
-        candidates=candidates,
-        solo=True,
-        countdown=countdown,
-    )
-    sent = await _push_due(plan, state, client_factory)
-    return sent + await _push_countdown(plan, state, settings, client_factory)
+        targets = await _pressure_targets(conn, settings, state)
+    wanted = {t.agent_id for t in targets}
+    for agent_id in [a for a in state.pressure_pushed if a not in wanted]:
+        await _drop_policy(agent_id, state, pool, client_factory)
+    taken = await asyncio.gather(*(_push_policy(t, state, client_factory, now) for t in targets))
+    return sum(taken)
 
 
 async def push_once(
@@ -848,7 +1017,8 @@ async def push_once(
     state: HiveState | None = None,
     clock: Callable[[], float] = time.monotonic,
 ) -> int:
-    """One push pass over every hive session and solo agent; returns the number of notes accepted.
+    """One push pass over every hive session and solo agent; returns the number of notes accepted
+    (pressure policies are not notes and are not counted).
 
     A session is evaluated at most once per PUSH_INTERVAL_SECONDS (by `clock`). One failing
     session is logged and never holds up the others.
@@ -863,9 +1033,7 @@ async def push_once(
         if last is not None and clock() - last < PUSH_INTERVAL_SECONDS:
             continue
         try:
-            total += await _push_solo_session(
-                pool, session_id, settings, client_factory, state, clock
-            )
+            await _fill_solo_start(pool, session_id, settings, state, clock)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -880,4 +1048,10 @@ async def push_once(
             raise
         except Exception:
             log.exception("hive push for session %s failed", session["id"])
+    try:
+        await _push_pressure(pool, settings, client_factory, state, clock)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        log.exception("pressure push failed")
     return total

@@ -49,6 +49,7 @@ def test_runaway_limits_sparse_and_bounds():
     for field, bad in [
         ("max_turns_per_task", 9),
         ("max_tokens_per_task", 999999),
+        ("max_stop_continuations", 4),  # the wrapper needs more than pressure l3_stop_blocks + 1
         ("max_stop_continuations", 1001),
         ("max_agent_spawns", 100001),
         ("tool_failure_repeats", 1),
@@ -78,6 +79,18 @@ def test_settings_bounds(monkeypatch):
         Settings()
     monkeypatch.setenv("ORCH_RUNAWAY_MAX_TURNS_PER_TASK", "0")
     assert Settings().runaway_max_turns_per_task == 0
+
+
+def test_stop_continuations_lower_bound_is_5(monkeypatch):
+    assert SessionSpec.model_validate({"runaway": {"max_stop_continuations": 5}})
+    SessionSpec.model_validate({"runaway": {"max_stop_continuations": 0}})
+    with pytest.raises(ValidationError):
+        SessionSpec.model_validate({"runaway": {"max_stop_continuations": 4}})
+    monkeypatch.setenv("ORCH_RUNAWAY_MAX_STOP_CONTINUATIONS", "5")
+    assert Settings().runaway_max_stop_continuations == 5
+    monkeypatch.setenv("ORCH_RUNAWAY_MAX_STOP_CONTINUATIONS", "4")
+    with pytest.raises((SettingsError, ValidationError), match="max_stop_continuations|MAX_STOP"):
+        Settings()
 
 
 def test_effective_spec_over_settings():

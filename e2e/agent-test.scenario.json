@@ -2,6 +2,34 @@
   "boot": {"bypass_dialog": true, "min_seconds": 0.1},
   "queue_input": true,
   "turns": [
+    {"match": "Resume now", "steps": [
+      {"tool": "Bash", "input": {"command": "echo resumed"}, "result": "resumed"},
+      {"text": "Resumed from the handoff package."}
+    ]},
+    {"match": "ramp to l2", "steps": [
+      {"statusline": {"context_window": {"used_percentage": null, "context_window_size": 200000, "current_usage": {"input_tokens": 140000}}}},
+      {"sleep": 25},
+      {"tool": "Bash", "input": {"command": "echo l2"}, "result": "ok"},
+      {"text": "Context is high."}
+    ]},
+    {"match": "ramp to l3", "steps": [
+      {"statusline": {"context_window": {"used_percentage": null, "context_window_size": 200000, "current_usage": {"input_tokens": 170000}}}},
+      {"sleep": 25},
+      {"tool": "Bash", "input": {"command": "echo l3"}, "result": "ok"},
+      {"text": "Context is critical."}
+    ]},
+    {"match": "background watcher", "steps": [
+      {"text": "Started the CI watcher."},
+      {"background": {"after": 1, "text": "Still watching.", "background_tasks": [
+        {"id": "bg1", "type": "shell", "status": "running", "description": "ci watcher"}
+      ]}}
+    ]},
+    {"match": "watcher done", "steps": [{"text": "The watcher finished."}]},
+    {"match": "compact now", "steps": [
+      {"text": "Compacting now."},
+      {"auto_compact": {"pre_tokens": 170000}},
+      {"text": "Compaction done."}
+    ]},
     {"match": "slow", "steps": [{"text": "Working slowly."}, {"sleep": 4}, {"text": "Slow work done."}]},
     {"match": "compact mid turn", "steps": [
       {"text": "Working before the compaction."},
@@ -14,7 +42,7 @@
     ]},
     {"match": "marathon", "steps": [{"text": "Working through the marathon."}, {"sleep": 300}, {"text": "Marathon work done."}]},
     {"match": "This pod is shutting down", "steps": [{"text": "Parked my step for the shutdown."}]},
-    {"match": "Write your handoff now", "steps": [{"text": "E2E-HANDOFF: resume work item 42 at the parser, tests are green."}]},
+    {"match": "Write your handoff now", "steps": [{"text": "E2E-HANDOFF: resume work item 42 at the parser. The tokenizer rewrite is finished and its unit tests are green, the grammar tables are regenerated, and the one step left is to wire the new parser into the command loader and rerun the whole suite. Nothing is in flight and no job is running. The branch is pushed and the pull request description is current."}]},
     {"match": "self-initiated", "steps": [{"text": "Noted the self-restart."}]},
     {"match": "Continue the task where you left off", "steps": [{"text": "Resumed after the restart and finished."}]}
   ]

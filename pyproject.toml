@@ -29,7 +29,7 @@ dev = [
     "pytest-asyncio",
     "testcontainers[postgres]",
     "ruff",
-    "claude-code-wrapper @ git+https://github.com/szymonrychu/claude-code-wrapper@5cdb7e988c08cf128b4f4450d780cc37fa0a482e",
+    "claude-code-wrapper @ git+https://github.com/szymonrychu/claude-code-wrapper@1c5ce877f131e8f0a863cd8b7933e02feb2b2b9f",
     "moto[server]>=5.2.4",
     "any-mcp-tatara-orchestrator @ git+https://github.com/szymonrychu/any-mcp-tatara-plugins@v0.54.1#subdirectory=orchestration/orchestrator",
 ]

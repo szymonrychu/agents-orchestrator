@@ -18,7 +18,9 @@ from agents_orchestrator.wrapper.models import (
     DialogState,
     Envelope,
     Gone,
+    Inflight,
     PeersView,
+    PressureView,
     Rejected,
     Snapshot,
     SubmitOutcome,
@@ -294,6 +296,26 @@ class WrapperClient:
             log.info("note to session %s not delivered: %s", session_id, exc)
             return "failed"
         return "ok"
+
+    async def put_pressure(self, session_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        """Push the context pressure policy (wrapper with `pressure.enabled`). Raises
+        WrapperError: 409 `stale_version` (a newer policy is in force) or `pressure_disabled`,
+        404 for an unknown session or a wrapper without the route, 422 for a refused body."""
+        resp = await self._request("PUT", f"/sessions/{session_id}/pressure", json=body)
+        return resp.json()
+
+    async def get_pressure(self, session_id: str) -> PressureView:
+        resp = await self._request("GET", f"/sessions/{session_id}/pressure")
+        return PressureView.model_validate(resp.json())
+
+    async def delete_pressure(self, session_id: str) -> None:
+        """Remove the session's pressure policy (the agent is no longer under pressure)."""
+        await self._request("DELETE", f"/sessions/{session_id}/pressure")
+
+    async def get_inflight(self, session_id: str, timeout: float = 15.0) -> Inflight:
+        """The in-flight inventory the gate reads before any clear or move."""
+        resp = await self._request("GET", f"/sessions/{session_id}/inflight", timeout=timeout)
+        return Inflight.model_validate(resp.json())
 
     async def peers(self) -> PeersView:
         return PeersView.model_validate((await self._request("GET", "/peers")).json())

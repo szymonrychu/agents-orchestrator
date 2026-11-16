@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -12,8 +12,8 @@ from pydantic import (
     Field,
     SecretStr,
     StrictBool,
+    StringConstraints,
     field_validator,
-    model_validator,
 )
 
 from agents_orchestrator.labels import normalize_labels
@@ -711,6 +711,8 @@ Notice = Literal[
     "handoff_return",
     "autoclose",
     "runaway_parked",
+    "handoff_nudge",
+    "handoff_escalation",
 ]
 
 
@@ -922,21 +924,62 @@ class HandoverIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     to: str | None = None
-    #: The reason of a hive handover, or the handoff text of a solo agent's voluntary handoff;
-    #: not needed with `extend`.
-    reason: str | None = Field(default=None, min_length=1, max_length=2000)
-    #: The leader's epoch; required of a hive leader's handover, unused otherwise.
+    #: The reason of a hive leader's handover.
+    reason: str = Field(min_length=1, max_length=2000)
+    #: The leader's epoch; required of a hive leader's handover.
     epoch: int | None = None
-    #: Push the deadline of the strong-limit countdown out once instead of handing over.
-    extend: bool = False
     #: Ids of incoming session messages the leader answered or that need no answer.
     handled: list[int] = Field(default_factory=list, max_length=50)
 
-    @model_validator(mode="after")
-    def _reason_unless_extend(self) -> HandoverIn:
-        if not self.extend and self.reason is None:
-            raise ValueError("reason is required unless extend is true")
-        return self
+
+HANDOFF_ITEM_MAX_CHARS = 2000
+HANDOFF_LIST_MAX = 50
+HandoffItems = Annotated[
+    list[Annotated[str, StringConstraints(max_length=HANDOFF_ITEM_MAX_CHARS)]],
+    Field(max_length=HANDOFF_LIST_MAX),
+]
+
+
+class Abandon(BaseModel):
+    """An in-flight item the agent deliberately drops, with the reason (reported to the
+    successor and in the escalation log)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    item: str = Field(min_length=1, max_length=HANDOFF_ITEM_MAX_CHARS)
+    why: str = Field(min_length=10, max_length=HANDOFF_ITEM_MAX_CHARS)
+
+
+class HandoffSubmitIn(BaseModel):
+    """The handoff an agent submits once its work is safe to hand over (spec 5.3)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    doing: str = Field(default="", max_length=4000)
+    done: HandoffItems = Field(default_factory=list)
+    in_flight: HandoffItems = Field(default_factory=list)
+    #: In order: the first entry is what the successor does first.
+    next: HandoffItems = Field(default_factory=list)
+    open_requests: HandoffItems = Field(default_factory=list)
+    results: HandoffItems = Field(default_factory=list)
+    gotchas: HandoffItems = Field(default_factory=list)
+    abandon: list[Abandon] = Field(default_factory=list, max_length=HANDOFF_LIST_MAX)
+    #: Ids of incoming session messages the agent answered or that need no answer.
+    handled: list[int] = Field(default_factory=list, max_length=50)
+    #: Hive: the preferred successor (pod name).
+    to: str | None = None
+    #: Hive leader: the leader epoch (required).
+    epoch: int | None = None
+
+
+class HandoffAccepted(BaseModel):
+    handoff_id: int
+    phase: Literal["submitted"] = "submitted"
+    applies: str = (
+        "once you are idle: leadership moves (hive) or your context is cleared and the handoff "
+        "comes back to you (solo)"
+    )
+    handled: list[int] = []
 
 
 class MakeLeaderIn(BaseModel):
@@ -959,10 +1002,7 @@ class ScaleResult(BaseModel):
 
 
 class LeadershipRequested(BaseModel):
-    #: None for an extension and for a solo agent's voluntary handoff (no leadership request).
-    request_id: int | None = None
-    #: The new deadline of the handoff countdown, set for an extension.
-    deadline_at: datetime | None = None
+    request_id: int
     status: Literal["pending"] = "pending"
     applies: str = "when your turn has ended and your background agents have reported"
     handled: list[int] = []

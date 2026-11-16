@@ -26,6 +26,7 @@ HIVE_TOOLS = [
     "me",
     "activity",
     "leadership_handover",
+    "handoff_submit",
     "leadership_withdraw",
     "lock_claim",
     "lock_release",
@@ -68,9 +69,9 @@ TAIL_TOOLS = [
 ]
 # Allowed before the pinned plugin ships them; add a name here when the allow-list leads the
 # plugin pin and remove it when the pin offers the tool (project room T-117 O9; project grants
-# T-120).
+# T-120). Empty while the pin (v0.53.0) offers every allowed tool.
 PLUGIN_PENDING: set[str] = set()
-ALONE_TOOLS = ["me", "leadership_handover", *TAIL_TOOLS]
+ALONE_TOOLS = ["me", "handoff_submit", *TAIL_TOOLS]
 PROPOSAL = [
     "proposal_create",
     "proposal_revise",
@@ -588,7 +589,7 @@ def test_alone_session_allow_is_the_literal_e2e_list():
     pending ones included (the plugin pin only filters them at load, never from the allow list)."""
     allow = on_start.orchestrator_allow(SessionSpec(replicas=1))
     assert allow == [
-        "me", "leadership_handover", "sessions_list", "session_send", "init_scripts_get",
+        "me", "handoff_submit", "sessions_list", "session_send", "init_scripts_get",
         "init_scripts_edit",
         "chat_rooms", "chat_send", "chat_react", "chat_status",
         "chat_history", "chat_attachment_fetch", "chat_attachment_status",

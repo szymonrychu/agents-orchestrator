@@ -263,3 +263,50 @@ async def test_me_project_room_none_for_member_and_superleader(pool, dsn):
     await _post(app, r["A"])
     assert (await _me(app, r["B"], r["B"].member_ip))["project_rooms"] == []
     assert (await _me(app, r["S"], r["S"].leader_ip))["project_rooms"] == []
+
+
+async def test_me_pressure_for_solo_and_leader_none_for_member(pool, dsn):
+    from agents_orchestrator.db import handoffs
+
+    # a hive: the leader (a0) has pressure, the member (a1) has none
+    c = await insert_session(pool, spec={"replicas": 2, "max_replicas": 4})
+    a0 = await insert_agent(pool, c["id"], ordinal=0, ready=True)
+    a1 = await insert_agent(pool, c["id"], ordinal=1, ready=True)
+    await set_ip(pool, a0["id"], IP0)
+    await set_ip(pool, a1["id"], IP1)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO session_leaders (session_id, agent_id, epoch, since, reason)"
+            " VALUES (%s, %s, 1, now() - interval '1 hour', 'start')",
+            (c["id"], a0["id"]),
+        )
+    await set_agent_status(
+        pool, a0["id"], context_used_tokens=170_000, context_window_tokens=200_000, context_pct=85
+    )
+    app = create_app(make_settings(dsn), pool)
+    leader = await _me(app, type("A", (), {"id": c["id"]}), IP0)
+    p = leader["pressure"]
+    assert p["level"] == 3 and p["used_tokens"] == 170_000 and p["window_tokens"] == 200_000
+    assert (p["l2_tokens"], p["l3_tokens"]) == (130_000, 165_000)
+    assert p["l1_tokens"] <= p["l2_tokens"] < p["l3_tokens"] < p["compact_tokens"]
+    assert (p["phase"], p["profile"], p["waiting_on"], p["rejects"], p["escalated"]) == (
+        None,
+        None,
+        [],
+        0,
+        False,
+    )
+    async with pool.connection() as conn:
+        row = await handoffs.open_pressure(conn, c["id"], a0["id"], 2, "chat")
+        await handoffs.record_reject(conn, row.id, ["too_short"])
+    p = (await _me(app, type("A", (), {"id": c["id"]}), IP0))["pressure"]
+    assert (p["phase"], p["profile"], p["rejects"]) == ("pressuring", "chat", 1)
+    assert (await _me(app, type("A", (), {"id": c["id"]}), IP1))["pressure"] is None
+
+    # a solo agent
+    s = await insert_session(pool, spec={"replicas": 1})
+    s0 = await insert_agent(pool, s["id"], ordinal=0, ready=True)
+    await set_ip(pool, s0["id"], "10.9.0.60")
+    solo = (await _me(app, type("A", (), {"id": s["id"]}), "10.9.0.60"))["pressure"]
+    assert solo["level"] == 0 and solo["used_tokens"] is None and solo["window_tokens"] is None
+    assert solo["l2_tokens"] > 0

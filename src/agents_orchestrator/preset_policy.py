@@ -68,6 +68,7 @@ NON_SECURITY: frozenset[str] = frozenset(
         "resources",
         "max_attempts",
         "auto_compact_pct",
+        "handoff_profile",
         "autoclose_after_seconds",
         "reuse_running_agent",
         "usage_quota",

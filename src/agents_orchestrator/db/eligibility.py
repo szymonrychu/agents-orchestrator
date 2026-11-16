@@ -115,8 +115,8 @@ HEADROOM = (
 ROLLOUT_PENDING = "coalesce(c.status->'rollout'->'pending' @> to_jsonb(a.ordinal), false)"
 
 # One successor rule (voluntary-handover 3.2), shared by every pick of the leadership pass and
-# the leader's `handover_due` candidate list, so a moved leader is always the agent the note
-# would have named and nobody hands leadership straight back. Among ELIGIBLE agents: not awaiting
+# the hive state's successor hint, so a moved leader is always the agent the hint
+# named and nobody hands leadership straight back. Among ELIGIBLE agents: not awaiting
 # a rollout first, not background-busy, idle first, lowest `context_pct` (unknown last), then
 # ordinal. Aliases `a` (agents), `s` (LEFT JOINed agent_status) and `c` (sessions).
 SUCCESSOR_ORDER = (

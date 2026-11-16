@@ -1,12 +1,17 @@
-"""Strong-limit handoff state machine (`dispatcher/handoff.handoff_pass`) against Postgres.
+"""Cooperative context-pressure handoff (`dispatcher/handoff.handoff_pass`) against Postgres and
+the fake wrapper (its pressure policy and in-flight inventory).
 
-Time moves through SQL: deadlines, free_since and discuss_since are pushed into the past.
+Time moves through SQL: free_since, discuss_since and command times are pushed into the past.
+Submits are written the way `api/agent.handoff_submit` writes them (the route has its own tests).
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
+import re
 import uuid
+from types import SimpleNamespace
 
 import psycopg
 import pytest
@@ -15,33 +20,66 @@ from factories import (
     insert_event,
     insert_message,
     insert_session,
-    insert_turn,
     set_agent_status,
 )
 from fakes import fake_wrapper
 from fakes.fake_wrapper import FakeWrapper
 from psycopg.rows import dict_row
 
+from agents_orchestrator import handoff_gate, handoff_texts
 from agents_orchestrator.db import handoffs, handover, leadership, queue
 from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE
 from agents_orchestrator.dispatcher import Dispatcher, handoff, hive
-from agents_orchestrator.handoff_texts import RETURN_EMPTY, strong_notice
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.wrapper.client import WrapperClient
+from agents_orchestrator.wrapper.models import Inflight
 
 KEY = "k" * 32
 TOKEN = "test-token"
 WINDOW = 200000
-# compact 95 (the default): strong = min(85% of 200k, 95% of 200k - 60k) = 130k tokens
+# compact 95 (the default), 200k window: L2 (strong) = min(85%, 95% - 60k) = 130k tokens,
+# L3 (critical) = min(90%, 95% - 25k) = 165k tokens
 STRONG = 140000
+CRITICAL = 170000
 LOW = 20000
+HANDOFF = {
+    "doing": "wiring the cooperative handoff into the dispatcher",
+    "done": ["commit abc123 on feat/forced-handoff"],
+    "in_flight": [],
+    "next": ["open the draft PR", "watch CI"],
+    "open_requests": [],
+    "results": ["tests in tests/test_handoff_pass.py"],
+    "gotchas": ["reinstall the wrapper after mise run lint"],
+}
+TASK = {"id": "bf3a", "description": "CI watch"}
+
+
+@pytest.fixture
+async def fake(monkeypatch):
+    monkeypatch.setattr(fake_wrapper, "MAX_SESSIONS", 200)
+    f = FakeWrapper(token=TOKEN)
+    await f.start()
+    try:
+        yield f
+    finally:
+        await f.stop()
 
 
 class Env:
-    def __init__(self, pool, dsn: str) -> None:
-        self.pool = pool
-        self.settings = Settings(database_url=dsn, master_key=KEY)
+    def __init__(self, pool, dsn: str, fake: FakeWrapper) -> None:
+        self.pool, self.dsn, self.fake = pool, dsn, fake
+        self.settings = Settings(database_url=dsn, master_key=KEY, handoff_min_chars=1)
         self.policy = handoff.HandoffPolicy.from_settings(self.settings)
+        self.clients: list[WrapperClient] = []
+        self.fetch = handoff.inflight_fetcher(self.factory, 5.0)
+        self.tasks: list[dict] | None = None  # the taskboard's claimed tasks; None: unreadable
+        self.state = hive.HiveState()
+        self.clock = 1000.0
+
+    def factory(self, session_id, url) -> WrapperClient:
+        client = WrapperClient(url, TOKEN)
+        self.clients.append(client)
+        return client
 
     async def run(self, sql: str, params: tuple = ()) -> None:
         async with self.pool.connection() as conn:
@@ -54,7 +92,48 @@ class Env:
 
     async def step(self, session_id) -> list[str]:
         async with self.pool.connection() as conn:
-            return await handoff.handoff_pass(conn, session_id, self.policy, self.settings)
+            return await handoff.handoff_pass(
+                conn,
+                session_id,
+                self.policy,
+                self.settings,
+                self.fetch,
+                taskboard=self.taskboard,
+                steering=self.state.steering,
+            )
+
+    async def taskboard(self, session) -> list[dict]:
+        if self.tasks is None:
+            raise RuntimeError("taskboard unavailable")
+        return self.tasks
+
+    async def push(self, advance: float = 100.0) -> None:
+        self.clock += advance
+        await hive.push_once(
+            self.pool, self.settings, self.factory, self.state, clock=lambda: self.clock
+        )
+
+    def policy_of(self, agent: dict) -> dict | None:
+        return self.fake.pressure.get(agent["wrapper_session_id"])
+
+    async def wsid(self) -> str:
+        client = WrapperClient(self.fake.base_url, TOKEN)
+        try:
+            return (
+                await client.create_session(f"h{uuid.uuid4().hex[:6]}", "/w")
+            ).wrapper_session_id
+        finally:
+            await client.aclose()
+
+    async def agent(self, session_id, ordinal: int) -> dict:
+        return await insert_agent(
+            self.pool,
+            session_id,
+            ordinal=ordinal,
+            ready=True,
+            wrapper_session_id=await self.wsid(),
+            url=self.fake.base_url,
+        )
 
     async def gauge(self, agent_id, used: int, **kw) -> None:
         kw.setdefault("state", "idle")
@@ -69,7 +148,7 @@ class Env:
 
     async def solo(self, used: int = STRONG) -> tuple[dict, dict]:
         c = await insert_session(self.pool, spec={})
-        a = await insert_agent(self.pool, c["id"], ordinal=0, ready=True, wrapper_session_id="w0")
+        a = await self.agent(c["id"], 0)
         await self.gauge(a["id"], used)
         return c, a
 
@@ -77,15 +156,17 @@ class Env:
         c = await insert_session(self.pool, spec={"replicas": n, "max_replicas": 4})
         agents = []
         for i in range(n):
-            a = await insert_agent(
-                self.pool, c["id"], ordinal=i, ready=True, wrapper_session_id=f"w{i}"
-            )
+            a = await self.agent(c["id"], i)
             await self.gauge(a["id"], LOW)
             agents.append(a)
         async with self.pool.connection() as conn:
             await leadership.leadership_pass(conn, c["id"])
         await self.gauge(agents[0]["id"], used)
         return c, agents
+
+    async def lpass(self, session_id):
+        async with self.pool.connection() as conn:
+            return await leadership.leadership_pass(conn, session_id)
 
     async def row(self, agent_id) -> handoffs.Handoff | None:
         async with self.pool.connection() as conn:
@@ -112,29 +193,36 @@ class Env:
             (agent_id,),
         )
 
-    async def past_deadline(self, agent_id) -> None:
-        await self.run(
-            "UPDATE agent_handoffs SET deadline_at = now() - interval '1 second'"
-            " WHERE agent_id = %s AND phase IN ('notified', 'extended')",
-            (agent_id,),
+    async def requests(self, session_id) -> list[dict]:
+        return await self.rows(
+            "SELECT * FROM leadership_requests WHERE session_id = %s ORDER BY id", (session_id,)
         )
 
-    async def turn_ends(
-        self, message: dict, agent_id, final_text: str | None, *, ago: int = 0
-    ) -> str:
-        """The message was sent and its turn completed `ago` seconds ago."""
-        turn = await insert_turn(
-            self.pool, agent_id, status="completed", final_text=final_text, completed_at=None
-        )
-        await self.run(
-            "UPDATE turns SET completed_at = now() - make_interval(secs => %s) WHERE turn_id = %s",
-            (ago, turn["turn_id"]),
-        )
-        await self.run(
-            "UPDATE messages SET status = 'sent', agent_id = %s, turn_id = %s WHERE id = %s",
-            (agent_id, turn["turn_id"], message["id"]),
-        )
-        return turn["turn_id"]
+    def inflight(self, agent: dict, **fields) -> None:
+        self.fake.set_inflight(agent["wrapper_session_id"], **fields)
+
+    async def submit(self, agent: dict, *, to: str | None = None, abandon=()) -> bool:
+        """What the submit route stores for a text that passed the quality check: the handoff,
+        the wrapper's inventory with the gate's verdict, a gate block when it blocks. Opens a
+        voluntary row when none is open. True when the gate was clear."""
+        inflight = Inflight.model_validate(self.fake.inflight.get(agent["wrapper_session_id"], {}))
+        gate = handoff_gate.evaluate(inflight, [SimpleNamespace(**a) for a in abandon])
+        snap = {
+            **inflight.model_dump(mode="json"),
+            "waiting_on": gate.waiting_on,
+            "abandoned": gate.abandoned,
+        }
+        stored = {**HANDOFF, "to": to, "abandon": list(abandon), "abandoned": gate.abandoned}
+        async with self.pool.connection() as conn:
+            row = await handoffs.open_row(conn, agent["id"])
+            if row is None:
+                row = await handoffs.open_pressure(
+                    conn, agent["session_id"], agent["id"], 0, "work", "voluntary"
+                )
+            assert await handoffs.submit(conn, row.id, stored, snap, None)
+            if not gate.clear:
+                await handoffs.record_gate_block(conn, row.id, snap)
+        return gate.clear
 
     async def idle_for(self, agent_id, seconds: int) -> None:
         await self.run(
@@ -143,12 +231,12 @@ class Env:
             (seconds, agent_id),
         )
 
-    async def to_requested(self, session_id, agent_id) -> dict:
-        assert (await self.step(session_id))[0].startswith("notified:")
-        await self.past_deadline(agent_id)
-        assert any(t.startswith("requested:") for t in await self.step(session_id))
-        (req,) = await self.messages(agent_id, "handoff_request")
-        return req
+    async def busy(self, agent_id) -> None:
+        await self.run(
+            "UPDATE agent_status SET state = 'busy', current_turn_id = 't-busy'"
+            " WHERE agent_id = %s",
+            (agent_id,),
+        )
 
     async def cleared(self, session_id, agent_id) -> None:
         await insert_event(self.pool, session_id, agent_id, type="session_cleared", data={})
@@ -160,26 +248,52 @@ class Env:
             (status, psycopg.types.json.Jsonb(result), command_id),
         )
 
+    async def to_clearing(self, c: dict, a: dict) -> dict:
+        """A solo agent under pressure with an accepted gate-clear submit, cleared once idle."""
+        assert await self.step(c["id"]) == [f"pressuring:{a['id']}"]
+        assert await self.submit(a)
+        assert await self.step(c["id"]) == [f"clearing:{a['id']}"]
+        (cmd,) = await self.commands(a["id"])
+        return cmd
+
+    async def to_returning(self, c: dict, a: dict) -> dict:
+        cmd = await self.to_clearing(c, a)
+        await self.finish_command(cmd["id"], "done", {"response": {"id": "c1"}})
+        await self.cleared(c["id"], a["id"])
+        assert await self.step(c["id"]) == [f"returning:{a['id']}"]
+        (ret,) = await self.messages(a["id"], "handoff_return")
+        return ret
+
 
 @pytest.fixture
-def env(pool, dsn) -> Env:
-    return Env(pool, dsn)
+async def env(pool, dsn, fake):
+    e = Env(pool, dsn, fake)
+    try:
+        yield e
+    finally:
+        for client in e.clients:
+            await client.aclose()
 
 
-# ---------------------------------------------------------------- settings and texts
+# ---------------------------------------------------------------- settings
 
 
-def test_settings_defaults_and_bounds(dsn):
+def test_removed_handover_settings_are_gone(dsn, monkeypatch):
+    for name in (
+        "handover_notify_seconds",
+        "handover_extension_seconds",
+        "handover_idle_proceed_seconds",
+    ):
+        assert name not in Settings.model_fields
+        monkeypatch.setenv(f"ORCH_{name.upper()}", "77")
+    s = Settings(database_url=dsn, master_key=KEY)  # an old env is ignored, not an alias
+    assert not hasattr(s, "handover_notify_seconds")
+    assert s.agent_shutdown_idle_proceed_seconds == 60
+
+
+def test_quiet_settings_defaults_and_bounds(dsn):
     s = Settings(database_url=dsn, master_key=KEY)
-    assert (
-        s.handover_notify_seconds,
-        s.handover_extension_seconds,
-        s.handover_idle_proceed_seconds,
-        s.handover_quiet_seconds,
-        s.handover_quiet_cap_seconds,
-    ) == (300, 300, 60, 60, 600)
-    with pytest.raises(ValueError):
-        Settings(database_url=dsn, master_key=KEY, handover_notify_seconds=10)
+    assert (s.handover_quiet_seconds, s.handover_quiet_cap_seconds) == (60, 600)
     with pytest.raises(ValueError):
         Settings(
             database_url=dsn,
@@ -189,64 +303,83 @@ def test_settings_defaults_and_bounds(dsn):
         )
 
 
-def test_notice_text_verbatim():
-    assert strong_notice(5, 5, hive=False) == (
-        "Context limit (strong): in 5 minutes you will be asked for a handoff, then your context"
-        " is cleared. Finish or park your current step now: commit and push, update your task"
-        " and todo. Need more time? Call orchestrator_leadership_handover(extend=true) once for"
-        " 5 more minutes."
+def test_clear_settings_defaults_and_bounds(dsn):
+    s = Settings(database_url=dsn, master_key=KEY)
+    assert (s.handover_clear_timeout_seconds, s.handover_clear_failed_block_seconds) == (
+        180,
+        1800,
     )
-    assert "then your context is cleared and leadership moves to a successor." in strong_notice(
-        5, 5, hive=True
-    )
+    with pytest.raises(ValueError):
+        Settings(database_url=dsn, master_key=KEY, handover_clear_timeout_seconds=5)
 
 
-# ---------------------------------------------------------------- 1. open
+# ---------------------------------------------------------------- open and pressure
 
 
-async def test_strong_opens_notified_row_and_notice_message(env):
-    c, a = await env.solo()
-    assert await env.step(c["id"]) == [f"notified:{a['id']}"]
-    row = await env.row(a["id"])
-    assert (row.trigger, row.phase) == ("strong", "notified")
-    (left,) = await env.rows(
-        "SELECT extract(epoch FROM deadline_at - now()) AS s FROM agent_handoffs WHERE id = %s",
-        (row.id,),
-    )
-    assert 295 <= left["s"] <= 300
-    (msg,) = await env.messages(a["id"])
-    assert (msg["lane"], msg["notice"], msg["status"]) == ("regular", "handoff_notice", "queued")
-    assert msg["target_agent_id"] == a["id"]
-    assert msg["text"] == strong_notice(5, 5, hive=False)
-    # a second pass opens nothing more
-    assert await env.step(c["id"]) == []
-    assert len(await env.messages(a["id"])) == 1
-
-
-async def test_weak_level_opens_nothing(env, dsn):
+async def test_l1_opens_pressuring_row_and_pushes_policy(env, dsn):
     env.settings = Settings(database_url=dsn, master_key=KEY, handover_budget_tokens=50000)
-    c, a = await env.solo(used=125000)  # past start + 50k, below the strong 130k
+    c, a = await env.solo(used=100000)  # past start + 50k, below L2 (130k)
     await env.run(
         "INSERT INTO agent_limits (agent_id, start_context_tokens, since)"
         " VALUES (%s, 0, now() - interval '2 hours')",
         (a["id"],),
     )
-    async with env.pool.connection() as conn:
-        (subject,) = await hive._subject_rows(conn, session_id=c["id"])
-    assert hive._row_level(subject, env.settings)[1] == "weak"
+    assert await env.step(c["id"]) == [f"pressuring:{a['id']}"]
+    row = await env.row(a["id"])
+    assert (row.trigger, row.phase, row.level, row.profile) == (
+        "pressure",
+        "pressuring",
+        1,
+        "work",
+    )
+    assert await env.messages(a["id"]) == []  # pressure is a policy, never a message
+    assert await env.step(c["id"]) == []  # one row
+    await env.push()
+    policy = env.policy_of(a)
+    assert policy is not None and policy["version"] == 1
+    assert policy["handoff_state"] == "none" and policy["profile"] == "work"
+    assert policy["thresholds"]["l1_tokens"] == 50000
+    assert policy["thresholds"]["l2_tokens"] == 130000
+
+
+async def test_below_l1_opens_nothing_and_pushes_nothing(env):
+    c, a = await env.solo(used=LOW)
     assert await env.step(c["id"]) == []
     assert await env.row(a["id"]) is None
-    assert await env.messages(a["id"]) == []
+    await env.push()
+    assert env.policy_of(a) is None
+
+
+async def test_level_rises_to_l3_no_clear_no_message(env):
+    c, a = await env.solo(used=STRONG)
+    assert await env.step(c["id"]) == [f"pressuring:{a['id']}"]
+    assert (await env.row(a["id"])).level == 2
+    await env.gauge(a["id"], CRITICAL)
+    assert await env.step(c["id"]) == [f"level:{a['id']}:3"]
+    row = await env.row(a["id"])
+    assert (row.phase, row.level, row.l2_tokens_at) == ("pressuring", 3, STRONG)
+    await env.idle_for(a["id"], 3600)  # idle for an hour: still nothing is forced
+    for _ in range(3):
+        assert await env.step(c["id"]) == []
+    assert await env.commands(a["id"]) == []
+    # an idle agent gets its one nudge of the level (spec 5.2), nothing else
+    got = await env.messages(a["id"])
+    assert [(m["notice"], m["text"]) for m in got] == [
+        ("handoff_nudge", handoff_texts.nudge_text(3))
+    ]
+    assert await env.rows("SELECT * FROM commands WHERE agent_id = %s", (a["id"],)) == []
 
 
 async def test_member_never_gets_a_row(env):
     c, (a0, a1, a2) = await env.hive()
     for a in (a1, a2):
-        await env.gauge(a["id"], 180000)
-    assert await env.step(c["id"]) == [f"notified:{a0['id']}"]
+        await env.gauge(a["id"], CRITICAL)
+    assert await env.step(c["id"]) == [f"pressuring:{a0['id']}"]
+    await env.push()
     for a in (a1, a2):
         assert await env.row(a["id"]) is None
         assert await env.messages(a["id"]) == []
+        assert env.policy_of(a) is None
 
 
 async def test_stopping_or_not_live_agent_opens_nothing(env):
@@ -259,131 +392,162 @@ async def test_stopping_or_not_live_agent_opens_nothing(env):
     assert await env.row(a["id"]) is None
 
 
-# ---------------------------------------------------------------- 2. request
-
-
-async def test_deadline_queues_request_regular_lane(env):
+async def test_chat_activity_profiles_the_row_chat(env):
     c, a = await env.solo()
-    await env.step(c["id"])
-    await env.run("UPDATE agent_status SET state = 'busy' WHERE agent_id = %s", (a["id"],))
-    assert await env.step(c["id"]) == []
-    await env.past_deadline(a["id"])
-    assert await env.step(c["id"]) == [f"requested:{a['id']}"]
-    (req,) = await env.messages(a["id"], "handoff_request")
-    assert (req["lane"], req["status"], req["target_agent_id"]) == ("regular", "queued", a["id"])
-    assert req["text"].startswith("Write your handoff now as your reply")
-    row = await env.row(a["id"])
-    assert (row.phase, row.request_message_id) == ("requested", req["id"])
-
-
-async def test_extended_deadline_is_respected(env):
-    c, a = await env.solo()
-    await env.step(c["id"])
-    async with env.pool.connection() as conn:
-        assert await handoffs.extend(conn, a["id"], 300) is not None
-    (notice,) = await env.messages(a["id"], "handoff_notice")
-    await env.turn_ends(notice, a["id"], "ok", ago=120)
-    await env.idle_for(a["id"], 120)
-    # the original deadline passed, the extended one did not; no early proceed while extended
     await env.run(
-        "UPDATE agent_handoffs SET deadline_at = deadline_at - interval '300 seconds'"
-        " WHERE agent_id = %s",
-        (a["id"],),
+        "INSERT INTO chat_activity (session_id, agent_id, direction) VALUES (%s, %s, 'out')",
+        (c["id"], a["id"]),
     )
-    assert await env.step(c["id"]) == []
-    assert (await env.row(a["id"])).phase == "extended"
-    await env.past_deadline(a["id"])
-    assert await env.step(c["id"]) == [f"requested:{a['id']}"]
-
-
-async def test_early_proceed_after_idle_60s(env):
-    c, a = await env.solo()
     await env.step(c["id"])
-    (notice,) = await env.messages(a["id"], "handoff_notice")
-    await env.turn_ends(notice, a["id"], "parked", ago=30)
-    await env.idle_for(a["id"], 30)
-    assert await env.step(c["id"]) == []  # idle, but not for 60 s yet
-    await env.turn_ends(notice, a["id"], "parked", ago=61)
-    await env.idle_for(a["id"], 61)
+    assert (await env.row(a["id"])).profile == "chat"
+    await env.push()
+    assert env.policy_of(a)["profile"] == "chat"
+
+
+# ---------------------------------------------------------------- submitted
+
+
+async def test_submitted_clear_solo_waits_for_idle_then_clears(env):
+    c, a = await env.solo()
+    assert await env.step(c["id"]) == [f"pressuring:{a['id']}"]
+    await env.busy(a["id"])
+    assert await env.submit(a)
+    assert await env.step(c["id"]) == []  # a running turn: never interrupted
+    assert await env.commands(a["id"]) == []
+    await env.idle_for(a["id"], 1)
     await env.run(
         "UPDATE agent_status SET background_subagents = jsonb_build_object('x', now()::text)"
         " WHERE agent_id = %s",
         (a["id"],),
     )
-    assert await env.step(c["id"]) == []  # a background subagent still runs
+    assert await env.step(c["id"]) == []  # a background subagent runs
     await env.run(
         "UPDATE agent_status SET background_subagents = '{}' WHERE agent_id = %s", (a["id"],)
     )
-    assert await env.step(c["id"]) == [f"requested:{a['id']}"]
+    assert await env.step(c["id"]) == [f"clearing:{a['id']}"]
+    (cmd,) = await env.commands(a["id"])
+    row = await env.row(a["id"])
+    assert (row.phase, row.clear_command_id, row.clear_attempts) == ("clearing", cmd["id"], 1)
+    assert await env.step(c["id"]) == []  # no return before the clear happened
+    await env.finish_command(cmd["id"], "done", {"response": {"id": "c1"}})
+    await env.cleared(c["id"], a["id"])
+    assert await env.step(c["id"]) == [f"returning:{a['id']}"]
+    (ret,) = await env.messages(a["id"], "handoff_return")
+    assert ret["text"].startswith("Resume now: 1. call orchestrator_me")
+    assert "continue with: open the draft PR" in ret["text"]
+    assert "Doing: wiring the cooperative handoff into the dispatcher" in ret["text"]
+    assert (ret["lane"], ret["target_agent_id"]) == ("regular", a["id"])
+    await env.run("UPDATE messages SET status = 'sent' WHERE id = %s", (ret["id"],))
+    assert await env.step(c["id"]) == [f"done:{a['id']}"]
+    last = await env.last_row(a["id"])
+    assert (last["phase"], last["close_reason"]) == ("done", "returned")
+    assert last["cleared_at"] is not None
 
 
-async def test_no_early_proceed_while_notice_turn_running(env):
+async def test_submitted_blocked_stays_and_pushes_waiting_on(env):
     c, a = await env.solo()
     await env.step(c["id"])
-    (notice,) = await env.messages(a["id"], "handoff_notice")
-    turn = await insert_turn(env.pool, a["id"], status="running")
-    await env.run(
-        "UPDATE messages SET status = 'sent', agent_id = %s, turn_id = %s WHERE id = %s",
-        (a["id"], turn["turn_id"], notice["id"]),
-    )
-    await env.idle_for(a["id"], 600)  # even a stale idle gauge does not count
-    assert await env.step(c["id"]) == []
-    assert (await env.row(a["id"])).phase == "notified"
+    env.inflight(a, background_tasks=[TASK])
+    assert not await env.submit(a)
+    await env.idle_for(a["id"], 600)
+    for _ in range(2):
+        assert await env.step(c["id"]) == []  # the stored inventory is current
+    row = await env.row(a["id"])
+    assert row.phase == "submitted"
+    assert row.inflight["waiting_on"] == ["task:bf3a (CI watch)"]
+    assert await env.commands(a["id"]) == []
+    await env.push()
+    policy = env.policy_of(a)
+    assert policy["handoff_state"] == "blocked"
+    assert policy["waiting_on"] == ["task:bf3a (CI watch)"]
+    assert "{waiting_on}" in policy["texts"]["l2"]["full"]
+    # a second task starts: the stored inventory follows, the policy too
+    env.inflight(a, background_tasks=[TASK, {"id": "c9", "description": "tail logs"}])
+    assert await env.step(c["id"]) == [f"blocked:{a['id']}"]
+    await env.push()
+    assert env.policy_of(a)["waiting_on"] == ["task:bf3a (CI watch)", "task:c9 (tail logs)"]
+    assert env.policy_of(a)["version"] == 2
 
 
-async def test_request_waits_for_running_turn(env):
+async def test_blocker_clears_tells_agent_to_resubmit(env):
     c, a = await env.solo()
     await env.step(c["id"])
-    turn = await insert_turn(env.pool, a["id"], status="running")
-    await env.run(
-        "UPDATE agent_status SET state = 'busy', current_turn_id = %s WHERE agent_id = %s",
-        (turn["turn_id"], a["id"]),
-    )
-    await env.past_deadline(a["id"])
-    assert await env.step(c["id"]) == [f"requested:{a['id']}"]
-    (req,) = await env.messages(a["id"], "handoff_request")
-    assert (req["status"], req["lane"]) == ("queued", "regular")  # never priority
-    # nothing is interrupted and the row waits for the request's own turn
-    assert await env.rows("SELECT * FROM commands WHERE kind = 'interrupt'") == []
-    assert await env.step(c["id"]) == []
-    assert (await env.row(a["id"])).phase == "requested"
-    assert all(m["lane"] != "priority" for m in await env.messages(a["id"]))
+    env.inflight(a, background_tasks=[TASK])
+    assert not await env.submit(a)
+    await env.step(c["id"])
+    env.inflight(a)  # the task reported
+    assert await env.step(c["id"]) == [f"resubmit:{a['id']}"]
+    row = await env.row(a["id"])
+    assert row.phase == "submitted" and row.inflight["resubmit"] is True
+    assert row.inflight["waiting_on"] == []
+    for _ in range(2):
+        assert await env.step(c["id"]) == []  # idle, gate clear: still waits for the resubmit
+    assert await env.commands(a["id"]) == []
+    await env.push()
+    policy = env.policy_of(a)
+    assert policy["handoff_state"] == "submitted"
+    assert handoff_texts.resubmit_text() in policy["texts"]["l2"]["full"]
+    assert await env.submit(a)  # the agent re-reads the results and submits again
+    assert await env.step(c["id"]) == [f"clearing:{a['id']}"]
 
 
-# ---------------------------------------------------------------- 3. handed
+async def test_abandoned_task_does_not_block_but_still_holds_the_idle_clear(env):
+    c, a = await env.solo()
+    await env.step(c["id"])
+    env.inflight(a, background_tasks=[TASK])
+    abandon = [{"item": "task:bf3a", "why": "stale CI watcher, the PR is merged"}]
+    assert await env.submit(a, abandon=abandon)
+    assert await env.step(c["id"]) == []  # still running: the agent is not idle yet
+    env.inflight(a)
+    assert await env.step(c["id"]) == [f"clearing:{a['id']}"]
 
 
-async def test_hive_handed_inserts_forced_limit_request(env):
+async def test_hive_submit_inserts_limit_request_moving(env):
     c, (a0, a1, a2) = await env.hive()
-    req = await env.to_requested(c["id"], a0["id"])
-    await env.turn_ends(req, a0["id"], "my handoff")
-    got = await env.step(c["id"])
-    assert got == [f"handed:{a0['id']}", f"handover_requested:{a0['id']}"]
-    row = await env.row(a0["id"])
-    assert (row.phase, row.handoff_text) == ("handed", "my handoff")
-    (lr,) = await env.rows("SELECT * FROM leadership_requests WHERE session_id = %s", (c["id"],))
-    assert (lr["kind"], lr["reason"], lr["from_agent_id"], lr["to_agent_id"]) == (
+    assert await env.step(c["id"]) == [f"pressuring:{a0['id']}"]
+    assert await env.submit(a0, to=a2["pod_name"])
+    assert await env.step(c["id"]) == [f"moving:{a0['id']}"]
+    (lr,) = await env.requests(c["id"])
+    assert (lr["kind"], lr["reason"], lr["from_agent_id"], lr["to_agent_id"], lr["epoch"]) == (
         "handover",
         handoff.LIMIT_REASON,
         a0["id"],
-        None,
+        a2["id"],
+        1,
     )
-    assert lr["epoch"] == 1 and lr["status"] == "queued"
+    row = await env.row(a0["id"])
+    assert (row.phase, row.leadership_request_id) == ("moving", lr["id"])
     assert await env.commands(a0["id"]) == []  # no clear before the discussion
-    # the row waits for the leadership pass; no second request
-    assert await env.step(c["id"]) == []
-    assert len(await env.rows("SELECT * FROM leadership_requests")) == 1
+    assert await env.step(c["id"]) == []  # waits for the leadership pass, one request
+    assert len(await env.requests(c["id"])) == 1
+    change = await env.lpass(c["id"])
+    assert change is not None and change.agent_id == a2["id"]
+    row = await env.row(a0["id"])
+    assert (row.phase, row.successor_agent_id) == ("discussing", a2["id"])
+
+
+async def test_hive_submit_to_an_ineligible_pod_lets_the_pass_pick(env):
+    c, (a0, a1, a2) = await env.hive()
+    await env.step(c["id"])
+    await env.run("UPDATE agents SET ready = false WHERE id = %s", (a2["id"],))
+    assert await env.submit(a0, to=a2["pod_name"])
+    assert await env.step(c["id"]) == [f"moving:{a0['id']}"]
+    (lr,) = await env.requests(c["id"])
+    assert lr["to_agent_id"] is None
 
 
 async def test_rejected_limit_request_falls_back_to_solo_order(env):
     c, (a0, a1, a2) = await env.hive()
-    req = await env.to_requested(c["id"], a0["id"])
-    await env.turn_ends(req, a0["id"], "my handoff")
+    await env.step(c["id"])
+    assert await env.submit(a0)
     await env.step(c["id"])
     await env.run(
         "UPDATE leadership_requests SET status = 'rejected', reject_reason = 'no_peers',"
         " decided_at = now()"
     )
+    env.inflight(a0, background_tasks=[TASK])
+    assert await env.step(c["id"]) == []  # still the leader, but the gate blocks
+    env.inflight(a0)
     assert await env.step(c["id"]) == [f"clearing:{a0['id']}"]
     assert len(await env.commands(a0["id"])) == 1
 
@@ -391,77 +555,71 @@ async def test_rejected_limit_request_falls_back_to_solo_order(env):
 async def test_single_live_hive_follows_solo_order(env):
     c, (a0, a1) = await env.hive(2)
     await env.run("UPDATE agents SET ready = false WHERE id = %s", (a1["id"],))
-    req = await env.to_requested(c["id"], a0["id"])
-    await env.turn_ends(req, a0["id"], "alone")
-    assert await env.step(c["id"]) == [f"handed:{a0['id']}", f"clearing:{a0['id']}"]
-    assert await env.rows("SELECT * FROM leadership_requests") == []
+    await env.step(c["id"])
+    assert await env.submit(a0)
+    assert await env.step(c["id"]) == [f"clearing:{a0['id']}"]
+    assert await env.requests(c["id"]) == []
     (cmd,) = await env.commands(a0["id"])
-    row = await env.row(a0["id"])
-    assert (row.phase, row.clear_command_id, row.clear_attempts) == ("clearing", cmd["id"], 1)
     await env.finish_command(cmd["id"], "done", {"response": {"id": "c1"}})
     await env.cleared(c["id"], a0["id"])
     assert await env.step(c["id"]) == [f"returning:{a0['id']}"]
     (ret,) = await env.messages(a0["id"], "handoff_return")
-    assert "alone" in ret["text"]
+    assert "open the draft PR" in ret["text"]
 
 
-async def test_solo_handed_enqueues_clear_then_return_after_session_cleared(env):
-    c, a = await env.solo()
-    req = await env.to_requested(c["id"], a["id"])
-    await env.turn_ends(req, a["id"], "solo handoff text")
-    assert await env.step(c["id"]) == [f"handed:{a['id']}", f"clearing:{a['id']}"]
-    (cmd,) = await env.commands(a["id"])
-    # no return before the clear happened
-    assert await env.step(c["id"]) == []
-    await env.finish_command(cmd["id"], "done", {"response": {"id": "c1"}})
-    assert await env.step(c["id"]) == []
-    assert await env.messages(a["id"], "handoff_return") == []
-    await env.cleared(c["id"], a["id"])
-    assert await env.step(c["id"]) == [f"returning:{a['id']}"]
-    (ret,) = await env.messages(a["id"], "handoff_return")
-    assert ret["text"] == (
-        "Handoff from your previous context (strong limit, cleared just now):\n\nsolo handoff text"
-    )
-    assert (ret["lane"], ret["target_agent_id"]) == ("regular", a["id"])
-    row = await env.row(a["id"])
-    assert (row.phase, row.return_message_id) == ("returning", ret["id"])
-    assert row.cleared_at is not None
-    assert await env.step(c["id"]) == []
-    await env.run("UPDATE messages SET status = 'sent' WHERE id = %s", (ret["id"],))
-    assert await env.step(c["id"]) == [f"done:{a['id']}"]
-    last = await env.last_row(a["id"])
-    assert (last["phase"], last["close_reason"]) == ("done", "returned")
-    assert len(await env.messages(a["id"], "handoff_return")) == 1
-
-
-async def test_solo_voluntary_row_clears_and_returns(env, dsn):
-    """The row the agent route opens for a solo voluntary handoff (T-256 step 8) is cleared by
-    the pass and its text comes back after the clear."""
-    from test_api_agent import client_for, headers, make_settings, set_ip
-
-    from agents_orchestrator.api.app import create_app
-
+async def test_solo_voluntary_submit_below_l1_clears_and_returns(env):
     c, a = await env.solo(used=LOW)
-    await set_ip(env.pool, a["id"], "10.9.0.51")
-    async with client_for(create_app(make_settings(dsn), env.pool), "10.9.0.51") as http:
-        r = await http.post(
-            "/agent/v1/leadership/handover",
-            json={"reason": "voluntary handoff text"},
-            headers=headers(c["id"]),
-        )
-    assert r.status_code == 202, r.text
+    assert await env.step(c["id"]) == []
+    assert await env.submit(a)  # the route opens a voluntary row at level 0
     assert await env.step(c["id"]) == [f"clearing:{a['id']}"]
     (cmd,) = await env.commands(a["id"])
     await env.finish_command(cmd["id"], "done", {"response": {"id": "c1"}})
     await env.cleared(c["id"], a["id"])
     assert await env.step(c["id"]) == [f"returning:{a['id']}"]
-    (ret,) = await env.messages(a["id"], "handoff_return")
-    assert "voluntary handoff text" in ret["text"]
-    await env.run("UPDATE messages SET status = 'sent' WHERE id = %s", (ret["id"],))
-    assert await env.step(c["id"]) == [f"done:{a['id']}"]
+    last = await env.last_row(a["id"])
+    assert last["trigger"] == "voluntary"
 
 
-# ---------------------------------------------------------------- 4. discussing
+async def test_stale_voluntary_pressuring_row_is_closed(env):
+    # a rejected or lost voluntary submit left a level-0 row in pressuring (step 10 review)
+    c, a = await env.solo(used=LOW)
+    async with env.pool.connection() as conn:
+        await handoffs.open_pressure(conn, c["id"], a["id"], 0, "work", "voluntary")
+    assert await env.step(c["id"]) == [f"cancelled:{a['id']}:stale"]
+    assert await env.row(a["id"]) is None
+    # at L1 or above the same row is an ordinary pressure row and stays
+    async with env.pool.connection() as conn:
+        await handoffs.open_pressure(conn, c["id"], a["id"], 0, "work", "voluntary")
+    await env.gauge(a["id"], STRONG)
+    assert await env.step(c["id"]) == [f"level:{a['id']}:2"]
+    assert (await env.row(a["id"])).phase == "pressuring"
+
+
+async def test_inflight_timeout_skips_the_session(env):
+    c, a = await env.solo()
+    await env.step(c["id"])
+    assert await env.submit(a)
+
+    async def slow(session_id, url, wsid):
+        raise TimeoutError
+
+    env.fetch = slow
+    assert await env.step(c["id"]) == []
+    assert (await env.row(a["id"])).phase == "submitted"
+    assert await env.commands(a["id"]) == []
+
+
+async def test_unreachable_wrapper_blocks_the_gate(env):
+    c, a = await env.solo()
+    await env.step(c["id"])
+    assert await env.submit(a)
+    await env.run("UPDATE agents SET url = 'http://127.0.0.1:1' WHERE id = %s", (a["id"],))
+    assert await env.step(c["id"]) == [f"blocked:{a['id']}"]
+    assert (await env.row(a["id"])).inflight["waiting_on"] == [handoff_gate.UNREACHABLE]
+    assert await env.commands(a["id"]) == []
+
+
+# ---------------------------------------------------------------- discussing
 
 
 async def _discussing(env, *, quiet_ago: int, since_ago: int):
@@ -506,13 +664,12 @@ async def test_voluntary_handover_clears_after_quiet_window(env):
         await leadership.insert_request(
             conn, c["id"], "handover", a0["id"], a1["id"], "context full", 1
         )
-        change = await leadership.leadership_pass(conn, c["id"])
+    change = await env.lpass(c["id"])
     assert change is not None and change.agent_id == a1["id"]
     assert await env.commands(a0["id"]) == []  # the apply no longer clears
     row = await env.row(a0["id"])
     assert (row.trigger, row.phase, row.handoff_text) == ("voluntary", "discussing", "context full")
     assert await env.step(c["id"]) == []  # the window is open
-    assert await env.commands(a0["id"]) == []
     for a in (a0, a1, a2):
         await env.idle_for(a["id"], 61)
     await env.run(
@@ -528,7 +685,7 @@ async def test_voluntary_handover_clears_after_quiet_window(env):
     assert await env.step(c["id"]) == [f"done:{a0['id']}"]
 
 
-async def test_discussing_clears_at_cap_while_busy(env):
+async def test_discussing_cap_drops_only_the_session_quiet_requirement(env):
     c, (a0, a1, a2) = await _discussing(env, quiet_ago=700, since_ago=300)
     await env.run("UPDATE agent_status SET state = 'busy' WHERE agent_id = %s", (a1["id"],))
     assert await env.step(c["id"]) == []
@@ -536,31 +693,222 @@ async def test_discussing_clears_at_cap_while_busy(env):
     assert await env.step(c["id"]) == [f"clearing:{a0['id']}"]
 
 
-# ---------------------------------------------------------------- cancellation
+async def test_ex_leader_not_cleared_while_inflight_after_quiet_cap(env):
+    c, (a0, a1, a2) = await _discussing(env, quiet_ago=700, since_ago=601)
+    env.inflight(a0, subagents=1, worktrees=[{"path": "/workdir/code/x", "dirty": 2}])
+    assert await env.step(c["id"]) == [f"blocked:{a0['id']}"]
+    for _ in range(2):
+        assert await env.step(c["id"]) == []  # quiet and capped, still not cleared
+    assert await env.commands(a0["id"]) == []
+    row = await env.row(a0["id"])
+    assert row.phase == "discussing"
+    assert row.inflight["waiting_on"] == [
+        "subagent:1 running",
+        "worktree:/workdir/code/x dirty 2",
+    ]
+    await env.push()  # the ex-leader is a member now, but keeps its pressure until cleared
+    policy = env.policy_of(a0)
+    assert policy["handoff_state"] == "accepted"
+    assert policy["waiting_on"] == row.inflight["waiting_on"]
+    env.inflight(a0)
+    assert await env.step(c["id"]) == [f"clearing:{a0['id']}"]
 
 
-async def test_compaction_cancels_open_row_and_queued_messages(env):
-    # notified: the notice message is cancelled with the row
+async def test_ex_leader_cleared_when_quiet_and_gate_clear(env):
+    c, (a0, a1, a2) = await _discussing(env, quiet_ago=61, since_ago=61)
+    env.inflight(a0, crons=[{"id": "c1", "schedule": "*/5 * * * *", "prompt": "check"}])
+    assert await env.step(c["id"]) == [f"clearing:{a0['id']}"]  # crons never block
+
+
+async def test_ex_leader_policy_removed_once_its_row_closed(env):
+    c, (a0, a1, a2) = await env.hive(used=STRONG)
+    await env.step(c["id"])
+    assert await env.submit(a0)
+    await env.step(c["id"])
+    await env.push()
+    assert env.policy_of(a0)["handoff_state"] == "accepted"
+    assert (await env.lpass(c["id"])).agent_id != a0["id"]
+    assert (await env.row(a0["id"])).phase == "discussing"
+    await env.push()
+    assert env.policy_of(a0) is not None  # a member now, its row still open: pressure stays
+    await env.run("UPDATE agent_handoffs SET discuss_since = now() - interval '601 seconds'")
+    assert await env.step(c["id"]) == [f"clearing:{a0['id']}"]
+    (cmd,) = await env.commands(a0["id"])
+    await env.finish_command(cmd["id"], "done", {"response": {"id": "c1"}})
+    await env.cleared(c["id"], a0["id"])
+    assert await env.step(c["id"]) == [f"done:{a0['id']}"]
+    await env.push()
+    assert env.policy_of(a0) is None  # a member gets no pressure
+
+
+# ---------------------------------------------------------------- closing before moving
+
+
+async def test_two_agent_ping_pong_closes_the_returning_leaders_row(env):
+    # a 2-agent hive: A hands to B and stays busy (discussing), then B's limit move goes back
+    # to A. A's discussing row closes cancelled leader_again in the move: A is never cleared
+    # as an ex-leader while it leads (B's handoff would be lost) and opens its own cycle
+    c, (a, b) = await env.hive(n=2)
+    assert await env.step(c["id"]) == [f"pressuring:{a['id']}"]
+    assert await env.submit(a)
+    assert await env.step(c["id"]) == [f"moving:{a['id']}"]
+    assert (await env.lpass(c["id"])).agent_id == b["id"]
+    a_row = await env.row(a["id"])
+    assert a_row.phase == "discussing"
+    await env.busy(a["id"])
+    await env.gauge(b["id"], STRONG)
+    assert await env.step(c["id"]) == [f"pressuring:{b['id']}"]
+    assert await env.submit(b)
+    assert await env.step(c["id"]) == [f"moving:{b['id']}"]
+    (_, lr) = await env.requests(c["id"])
+    assert (lr["from_agent_id"], lr["reason"]) == (b["id"], handoff.LIMIT_REASON)
+    assert (await env.lpass(c["id"])).agent_id == a["id"]
+    last = await env.last_row(a["id"])
+    assert (last["id"], last["phase"], last["close_reason"]) == (
+        a_row.id,
+        "cancelled",
+        "leader_again",
+    )
+    assert (await env.row(b["id"])).phase == "discussing"
+    # A idle and the session quiet past the cap: only B, the ex-leader now, is cleared
+    for agent in (a, b):
+        await env.idle_for(agent["id"], 700)
+    await env.run(
+        "UPDATE sessions SET created_at = now() - interval '1 day',"
+        " last_update_at = now() - interval '1 day' WHERE id = %s",
+        (c["id"],),
+    )
+    await env.run("UPDATE agent_handoffs SET discuss_since = now() - interval '700 seconds'")
+    await env.gauge(a["id"], STRONG)
+    await env.idle_for(a["id"], 700)
+    assert sorted(await env.step(c["id"])) == sorted(
+        [f"clearing:{b['id']}", f"pressuring:{a['id']}"]
+    )
+    assert await env.commands(a["id"]) == []
+    assert (await env.row(a["id"])).phase == "pressuring"
+
+
+async def _clearing_ex_leader(env):
+    """A 2-agent hive: A hands to B by its limit move and, quiet and idle, is being cleared."""
+    c, (a, b) = await env.hive(n=2)
+    assert await env.step(c["id"]) == [f"pressuring:{a['id']}"]
+    assert await env.submit(a)
+    assert await env.step(c["id"]) == [f"moving:{a['id']}"]
+    assert (await env.lpass(c["id"])).agent_id == b["id"]
+    for agent in (a, b):
+        await env.idle_for(agent["id"], 700)
+    await env.run(
+        "UPDATE sessions SET created_at = now() - interval '1 day',"
+        " last_update_at = now() - interval '1 day' WHERE id = %s",
+        (c["id"],),
+    )
+    await env.run(
+        "UPDATE agent_handoffs SET discuss_since = now() - interval '700 seconds'"
+        " WHERE agent_id = %s",
+        (a["id"],),
+    )
+    assert await env.step(c["id"]) == [f"clearing:{a['id']}"]
+    (cmd,) = await env.commands(a["id"])
+    return c, a, b, cmd
+
+
+async def _user_moves_lead_to(env, c, agent) -> None:
+    async with env.pool.connection() as conn:
+        await leadership.insert_request(conn, c["id"], "user", None, agent["id"], "test", None)
+    assert (await env.lpass(c["id"])).agent_id == agent["id"]
+
+
+async def test_clearing_ex_leader_leading_again_has_its_queued_clear_cancelled(env):
+    # the ex-leader's clear is still queued when a user pick makes it leader again: the clear
+    # is cancelled and the row closed leader_again with the move, never read as clear_failed
+    c, a, b, cmd = await _clearing_ex_leader(env)
+    row = await env.row(a["id"])
+    await _user_moves_lead_to(env, c, a)
+    (got,) = await env.commands(a["id"])
+    assert (got["id"], got["status"]) == (cmd["id"], "cancelled")
+    last = await env.rows("SELECT * FROM agent_handoffs WHERE id = %s", (row.id,))
+    assert (last[0]["phase"], last[0]["close_reason"]) == ("cancelled", "leader_again")
+    out = await env.step(c["id"])
+    assert not any("clear_failed" in o for o in out)
+    assert len(await env.commands(a["id"])) == 1
+
+
+async def test_clearing_ex_leader_leading_again_keeps_a_running_clear(env):
+    c, a, b, cmd = await _clearing_ex_leader(env)
+    await env.run(
+        "UPDATE commands SET status = 'running', started_at = now() WHERE id = %s", (cmd["id"],)
+    )
+    await _user_moves_lead_to(env, c, a)
+    assert (await env.commands(a["id"]))[0]["status"] == "running"
+    assert (await env.row(a["id"])).phase == "clearing"
+
+
+async def test_clear_retry_not_requeued_while_the_agent_leads(env):
+    # the running clear is refused (subagents_running) after the ex-leader leads again: the
+    # retry would wipe the successor's handoff it now holds, so the row closes leader_again
+    c, a, b, cmd = await _clearing_ex_leader(env)
+    await env.run(
+        "UPDATE commands SET status = 'running', started_at = now() WHERE id = %s", (cmd["id"],)
+    )
+    await _user_moves_lead_to(env, c, a)
+    await env.finish_command(
+        cmd["id"], "failed", {"error": "WrapperError: 409 subagents_running: /clear is refused"}
+    )
+    assert f"cancelled:{a['id']}:leader_again" in await env.step(c["id"])
+    assert len(await env.commands(a["id"])) == 1
+    last = await env.rows("SELECT * FROM agent_handoffs WHERE clear_command_id = %s", (cmd["id"],))
+    assert (last[0]["phase"], last[0]["close_reason"]) == ("cancelled", "leader_again")
+
+
+async def test_compaction_closes_pressuring_and_submitted_compacted(env):
     c, a = await env.solo()
     await env.step(c["id"])
     await insert_event(env.pool, c["id"], a["id"], type="compacted", data={"trigger": "auto"})
-    assert await env.step(c["id"]) == [f"cancelled:{a['id']}:compacted"]
+    assert await env.step(c["id"]) == [f"done:{a['id']}:compacted"]
     last = await env.last_row(a["id"])
-    assert (last["phase"], last["close_reason"]) == ("cancelled", "compacted")
-    (notice,) = await env.messages(a["id"], "handoff_notice")
-    assert notice["status"] == "cancelled"
+    assert (last["phase"], last["close_reason"]) == ("done", "compacted")
     # the gauge still shows the pre-compaction context: no new row until it is re-read
     assert await env.step(c["id"]) == []
-    # requested: the queued request is cancelled and never reaches the compacted context
+    # submitted (with a nudge still queued): the gauge dropped below L1 (a manual /compact)
     c2, a2 = await env.solo()
-    await env.to_requested(c2["id"], a2["id"])
-    await env.gauge(a2["id"], LOW)  # manual /compact: the gauge dropped below the weak level
-    assert await env.step(c2["id"]) == [f"cancelled:{a2['id']}:compacted"]
-    (req,) = await env.messages(a2["id"], "handoff_request")
-    assert req["status"] == "cancelled"
-    # the next strong crossing opens a new row
+    await env.step(c2["id"])
+    nudge = await insert_message(
+        env.pool,
+        c2["id"],
+        text="nudge",
+        target_agent_id=a2["id"],
+        lane="regular",
+        notice="handoff_nudge",
+    )
+    env.inflight(a2, background_tasks=[TASK])
+    assert not await env.submit(a2)
+    await env.gauge(a2["id"], LOW)
+    assert await env.step(c2["id"]) == [f"done:{a2['id']}:compacted"]
+    assert (await env.rows("SELECT status FROM messages WHERE id = %s", (nudge["id"],)))[0][
+        "status"
+    ] == "cancelled"
+    assert await env.commands(a2["id"]) == []
+    # the next L1 crossing starts a new cycle
     await env.gauge(a2["id"], STRONG)
-    assert await env.step(c2["id"]) == [f"notified:{a2['id']}"]
+    assert await env.step(c2["id"]) == [f"pressuring:{a2['id']}"]
+
+
+async def test_compacting_alone_does_not_close(env):
+    c, a = await env.solo()
+    await env.step(c["id"])
+    await insert_event(env.pool, c["id"], a["id"], type="compacting", data={})
+    await insert_event(env.pool, c["id"], a["id"], type="compact_failed", data={})
+    assert await env.step(c["id"]) == []
+    assert (await env.row(a["id"])).phase == "pressuring"
+
+
+async def test_external_clear_while_pressuring_cancels_cleared(env):
+    c, a = await env.solo()
+    await env.step(c["id"])
+    await env.cleared(c["id"], a["id"])
+    assert await env.step(c["id"]) == [f"cancelled:{a['id']}:cleared"]
+    last = await env.last_row(a["id"])
+    assert (last["phase"], last["close_reason"]) == ("cancelled", "cleared")
 
 
 async def test_shutdown_and_closing_cancel(env):
@@ -579,70 +927,52 @@ async def test_leadership_change_cancels_not_leader(env):
     await env.step(c["id"])
     async with env.pool.connection() as conn:
         await leadership.insert_request(conn, c["id"], "user", None, a1["id"], "test", None)
-        await leadership.leadership_pass(conn, c["id"])
+    await env.lpass(c["id"])
     # the leadership pass closes the row in the move's transaction (handoffs.on_leader_moved)
     assert await env.step(c["id"]) == []
     last = await env.last_row(a0["id"])
     assert (last["phase"], last["close_reason"]) == ("cancelled", "not_leader")
-    (notice,) = await env.messages(a0["id"], "handoff_notice")
-    assert notice["status"] == "cancelled"
+    assert await env.commands(a0["id"]) == []
 
 
-@pytest.mark.parametrize("variant", ["solo", "hive"])
-async def test_empty_final_text_continues(env, variant, caplog):
-    if variant == "solo":
-        c, a = await env.solo()
-    else:
-        c, (a, _, _) = await env.hive()
-    req = await env.to_requested(c["id"], a["id"])
-    await env.turn_ends(req, a["id"], "   ")
-    with caplog.at_level("INFO"):
-        got = await env.step(c["id"])
-    assert got[0] == f"handed:{a['id']}"
-    assert "handoff_empty" in caplog.text
-    row = await env.row(a["id"])
-    assert row.handoff_text is None
-    if variant == "hive":
-        assert got[1] == f"handover_requested:{a['id']}"
-        return
-    assert got[1] == f"clearing:{a['id']}"
-    (cmd,) = await env.commands(a["id"])
-    await env.finish_command(cmd["id"], "done", {"response": {"id": "c1"}})
-    await env.cleared(c["id"], a["id"])
+async def test_limit_request_rejected_after_a_move_closes_not_leader(env):
+    c, (a0, a1, a2) = await env.hive()
     await env.step(c["id"])
-    (ret,) = await env.messages(a["id"], "handoff_return")
-    assert ret["text"] == RETURN_EMPTY
-
-
-async def test_failed_request_message_never_hangs(env):
-    c, a = await env.solo()
-    req = await env.to_requested(c["id"], a["id"])
+    assert await env.submit(a0)
+    await env.step(c["id"])
     await env.run(
-        "UPDATE messages SET status = 'failed', error = 'unavailable' WHERE id = %s", (req["id"],)
+        "UPDATE leadership_requests SET status = 'rejected', reject_reason = 'x',"
+        " decided_at = now()"
     )
-    assert await env.step(c["id"]) == [f"handed:{a['id']}", f"clearing:{a['id']}"]
-
-
-async def test_lost_request_turn_never_hangs(env):
-    c, a = await env.solo()
-    req = await env.to_requested(c["id"], a["id"])
-    turn = await insert_turn(env.pool, a["id"], status="running")
     await env.run(
-        "UPDATE messages SET status = 'sent', agent_id = %s, turn_id = %s WHERE id = %s",
-        (a["id"], turn["turn_id"], req["id"]),
+        "UPDATE session_leaders SET agent_id = %s, epoch = epoch + 1 WHERE session_id = %s",
+        (a1["id"], c["id"]),
     )
-    await env.idle_for(a["id"], 10)
-    assert await env.step(c["id"]) == []
-    await env.idle_for(a["id"], 61)  # idle with no current turn: the turn record was lost
-    assert (await env.step(c["id"]))[0] == f"handed:{a['id']}"
+    assert await env.step(c["id"]) == [f"cancelled:{a0['id']}:not_leader"]
+    assert await env.commands(a0["id"]) == []
+
+
+# ---------------------------------------------------------------- clearing
+
+
+async def test_clear_retry_requires_gate(env):
+    c, a = await env.solo()
+    cmd = await env.to_clearing(c, a)
+    await env.finish_command(
+        cmd["id"], "failed", {"error": "WrapperError: 409 subagents_running: /clear is refused"}
+    )
+    env.inflight(a, background_tasks=[TASK])  # work started again after the submit
+    for _ in range(2):
+        assert await env.step(c["id"]) == []
+    assert len(await env.commands(a["id"])) == 1
+    env.inflight(a)
+    assert await env.step(c["id"]) == [f"clear_retry:{a['id']}"]
+    assert len(await env.commands(a["id"])) == 2
 
 
 async def test_clear_refused_subagents_running_is_retried(env):
     c, a = await env.solo()
-    req = await env.to_requested(c["id"], a["id"])
-    await env.turn_ends(req, a["id"], "text")
-    await env.step(c["id"])
-    (cmd,) = await env.commands(a["id"])
+    cmd = await env.to_clearing(c, a)
     # refused at the wrapper's POST while a background subagent runs
     await env.finish_command(
         cmd["id"], "failed", {"error": "WrapperError: 409 subagents_running: /clear is refused"}
@@ -671,7 +1001,7 @@ async def test_clear_refused_subagents_running_is_retried(env):
         data={"record": {"id": "w-2", "name": "clear", "error": "subagents_running"}},
     )
     assert await env.step(c["id"]) == [f"clear_retry:{a['id']}"]
-    # after 5 attempts the row closes clear_failed and the solo agent still gets its return
+    # after 5 attempts the row closes clear_failed and the solo agent still gets its handoff
     await env.run("UPDATE agent_handoffs SET clear_attempts = 5 WHERE agent_id = %s", (a["id"],))
     last_cmd = (await env.commands(a["id"]))[-1]
     await env.finish_command(last_cmd["id"], "failed", {"error": "409 subagents_running"})
@@ -681,271 +1011,29 @@ async def test_clear_refused_subagents_running_is_retried(env):
     (ret,) = await env.messages(a["id"], "handoff_return")
     assert last["return_message_id"] == ret["id"]
     assert ret["status"] == "queued"
-    # still at the strong limit, but no new cycle until the context is cleared or compacted
+    # still at L2, but no new cycle until the context is cleared or compacted
     assert await env.step(c["id"]) == []
     await insert_event(env.pool, c["id"], a["id"], type="compacted", data={})
     await env.gauge(a["id"], STRONG)
-    assert await env.step(c["id"]) == [f"notified:{a['id']}"]
+    assert await env.step(c["id"]) == [f"pressuring:{a['id']}"]
     assert len(await env.messages(a["id"], "handoff_return")) == 1
 
 
 async def test_other_clear_failure_closes_and_returns(env):
     c, a = await env.solo()
-    req = await env.to_requested(c["id"], a["id"])
-    await env.turn_ends(req, a["id"], "text")
-    await env.step(c["id"])
-    (cmd,) = await env.commands(a["id"])
+    cmd = await env.to_clearing(c, a)
     await env.finish_command(cmd["id"], "failed", {"error": "agent has no session"})
     assert await env.step(c["id"]) == [f"cancelled:{a['id']}:clear_failed"]
-    assert len(await env.messages(a["id"], "handoff_return")) == 1
-
-
-async def test_return_sent_once_across_pod_restart_during_clearing(env):
-    c, a = await env.solo()
-    req = await env.to_requested(c["id"], a["id"])
-    await env.turn_ends(req, a["id"], "text")
-    await env.step(c["id"])
-    (cmd,) = await env.commands(a["id"])
-    await env.finish_command(cmd["id"], "done", {"response": {"id": "c1"}})
-    # the pod restarts: a new wrapper session, the cleared event is replayed and ingested
-    await env.run("UPDATE agents SET wrapper_session_id = 'w0-new' WHERE id = %s", (a["id"],))
-    await env.cleared(c["id"], a["id"])
-    await insert_event(
-        env.pool, c["id"], a["id"], wrapper_session_id="w0-new", type="session_cleared", data={}
-    )
-    # a fresh dispatcher (new policy object) and two concurrent passes
-    env.policy = handoff.HandoffPolicy.from_settings(env.settings)
-    results = await asyncio.gather(env.step(c["id"]), env.step(c["id"]))
-    assert sorted(results, key=len) == [[], [f"returning:{a['id']}"]]
-    assert await env.step(c["id"]) == []
-    assert len(await env.messages(a["id"], "handoff_return")) == 1
-
-
-# ---------------------------------------------------------------- lock
-
-
-async def test_pass_skipped_without_claim_lock(env, dsn):
-    c, a = await env.solo()
-    async with await psycopg.AsyncConnection.connect(dsn) as holder, holder.transaction():
-        await holder.execute(
-            "SELECT pg_advisory_xact_lock(%s, hashtext(%s::text))",
-            (_CLAIM_LOCK_NAMESPACE, c["id"]),
-        )
-        assert await env.step(c["id"]) == []
-        assert await env.row(a["id"]) is None
-    assert await env.step(c["id"]) == [f"notified:{a['id']}"]
-
-
-async def test_handoff_sessions_lists_subjects_and_open_rows(env):
-    c, a = await env.solo()
-    h, _ = await env.hive()
-    closing, b = await env.solo()
-    async with env.pool.connection() as conn:
-        await handoffs.insert(conn, closing["id"], b["id"], "strong", "notified")
-    await env.run("UPDATE sessions SET desired = 'deleting' WHERE id = %s", (closing["id"],))
-    async with env.pool.connection() as conn:
-        got = await handoff.handoff_sessions(conn)
-    assert {c["id"], h["id"], closing["id"]} <= set(got)
-
-
-# ---------------------------------------------------------------- the keyed note
-
-
-@pytest.fixture
-async def fake(monkeypatch):
-    monkeypatch.setattr(fake_wrapper, "MAX_SESSIONS", 100)
-    f = FakeWrapper(token=TOKEN)
-    await f.start()
-    try:
-        yield f
-    finally:
-        await f.stop()
-
-
-async def test_notice_note_pushed_while_notified(env, fake):
-    clients: list[WrapperClient] = []
-
-    def factory(session_id, url) -> WrapperClient:
-        client = WrapperClient(url, TOKEN)
-        clients.append(client)
-        return client
-
-    creator = WrapperClient(fake.base_url, TOKEN)
-    try:
-        wsid = (await creator.create_session(f"n{uuid.uuid4().hex[:4]}", "/w")).wrapper_session_id
-    finally:
-        await creator.aclose()
-    c = await insert_session(env.pool, spec={})
-    a = await insert_agent(
-        env.pool, c["id"], ordinal=0, ready=True, wrapper_session_id=wsid, url=fake.base_url
-    )
-    await env.gauge(a["id"], STRONG)
-    state = hive.HiveState()
-    clock = [1000.0]
-
-    async def push() -> None:
-        clock[0] += 100
-        await hive.push_once(env.pool, env.settings, factory, state, clock=lambda: clock[0])
-
-    def notes() -> list[str]:
-        return [n["text"] for n in fake.notes.get(wsid, []) if n["key"] == "handoff_notice"]
-
-    try:
-        await push()
-        assert notes() == []  # strong, but no row yet
-        await env.step(c["id"])
-        await push()
-        assert len(notes()) == 1 and notes()[0].startswith("Context limit (strong)")
-        await push()
-        assert len(notes()) == 1  # once per row and phase
-        async with env.pool.connection() as conn:
-            await handoffs.extend(conn, a["id"], 300)
-        await push()
-        assert len(notes()) == 2 and "in 10 minutes" in notes()[1]
-    finally:
-        for client in clients:
-            await client.aclose()
-
-
-async def test_dispatcher_runs_the_pass_after_leadership(env):
-    d = Dispatcher(env.pool, env.settings)
-    try:
-        c, a = await env.solo()
-        await d._drain_leadership()
-        assert (await env.row(a["id"])).phase == "notified"
-        assert d._push_wake.is_set()
-        # throttled: a second wake within the interval runs no pass
-        await env.past_deadline(a["id"])
-        await d._drain_leadership()
-        assert (await env.row(a["id"])).phase == "notified"
-        d._handoff_at = None
-        await d._drain_leadership()
-        assert (await env.row(a["id"])).phase == "requested"
-    finally:
-        await d.aclose()
-
-
-# ---------------------------------------------------------------- fix round 1 (review of step 6)
-
-
-async def _claim(env) -> int | None:
-    async with env.pool.connection() as conn:
-        claim = await queue.claim_and_pick(conn)
-    return claim.message_id if claim is not None else None
-
-
-async def _status(env, message_id: int) -> str:
-    (row,) = await env.rows("SELECT status FROM messages WHERE id = %s", (message_id,))
-    return row["status"]
-
-
-@pytest.mark.parametrize("event", ["compacted", "session_cleared"])
-async def test_claim_never_sends_request_into_reset_context(env, event):
-    # C1: the request is queued, the context is reset, and the message drain runs before any
-    # handoff pass: the claim itself must refuse the request
-    c, a = await env.solo()
-    req = await env.to_requested(c["id"], a["id"])
-    await insert_event(env.pool, c["id"], a["id"], type=event, data={})
-    assert await _claim(env) is None
-    assert await _status(env, req["id"]) == "cancelled"
-
-
-@pytest.mark.parametrize("event", ["compacted", "session_cleared"])
-async def test_claim_never_sends_notice_into_reset_context(env, event):
-    c, a = await env.solo()
-    await env.step(c["id"])
-    (notice,) = await env.messages(a["id"], "handoff_notice")
-    await insert_event(env.pool, c["id"], a["id"], type=event, data={})
-    assert await _claim(env) is None
-    assert await _status(env, notice["id"]) == "cancelled"
-
-
-async def test_claim_cancels_handoff_messages_of_a_moved_row(env):
-    # an orphan request (its row is not requested) and a notice of a closed row never go out
-    c, a = await env.solo()
-    await env.step(c["id"])
-    orphan = await insert_message(
-        env.pool,
-        c["id"],
-        text="orphan",
-        target_agent_id=a["id"],
-        lane="regular",
-        notice="handoff_request",
-    )
-    (notice,) = await env.messages(a["id"], "handoff_notice")
-    await env.run(
-        "UPDATE agent_handoffs SET phase = 'cancelled', close_reason = 'test', closed_at = now()"
-        " WHERE agent_id = %s",
-        (a["id"],),
-    )
-    assert await _claim(env) is None
-    assert await _status(env, orphan["id"]) == "cancelled"
-    assert await _status(env, notice["id"]) == "cancelled"
-
-
-async def test_moving_to_requested_cancels_the_queued_notice(env):
-    # M4: a notice still queued at the deadline is not delivered right before the request
-    c, a = await env.solo()
-    await env.step(c["id"])
-    await env.past_deadline(a["id"])
-    assert await env.step(c["id"]) == [f"requested:{a['id']}"]
-    (notice,) = await env.messages(a["id"], "handoff_notice")
-    assert notice["status"] == "cancelled"
-
-
-async def test_solo_holds_other_messages_from_request_until_return_sent(env):
-    # I1: work queued behind the request waits for the clear and the return
-    c, a = await env.solo()
-    await env.step(c["id"])
-    (notice,) = await env.messages(a["id"], "handoff_notice")
-    await env.turn_ends(notice, a["id"], "ok", ago=1)
-    await env.past_deadline(a["id"])
-    await env.step(c["id"])
-    (req,) = await env.messages(a["id"], "handoff_request")
-    work = await insert_message(env.pool, c["id"], text="user work", lane="regular")
-    targeted = await insert_message(
-        env.pool, c["id"], text="peer work", target_agent_id=a["id"], lane="regular"
-    )
-    assert await _claim(env) == req["id"]
-    assert await _claim(env) is None  # requested: held
-    await env.turn_ends(req, a["id"], "handoff text")
-    assert await env.step(c["id"]) == [f"handed:{a['id']}", f"clearing:{a['id']}"]
-    assert await _claim(env) is None  # clearing: held
-    (cmd,) = await env.commands(a["id"])
-    await env.finish_command(cmd["id"], "done", {"response": {"id": "c1"}})
-    await env.cleared(c["id"], a["id"])
-    assert await env.step(c["id"]) == [f"returning:{a['id']}"]
     (ret,) = await env.messages(a["id"], "handoff_return")
-    assert await _claim(env) == ret["id"]  # the return goes first
-    assert await _claim(env) is None
-    await env.run("UPDATE messages SET status = 'sent' WHERE id = %s", (ret["id"],))
-    assert await env.step(c["id"]) == [f"done:{a['id']}"]
-    assert {await _claim(env), await _claim(env)} == {work["id"], targeted["id"]}
-
-
-async def test_hive_member_messages_are_not_held(env):
-    # only the subject's own messages wait; a member keeps getting its targeted work
-    c, (a0, a1, _) = await env.hive()
-    await env.to_requested(c["id"], a0["id"])
-    member = await insert_message(
-        env.pool, c["id"], text="member", target_agent_id=a1["id"], lane="regular"
-    )
-    claimed = {await _claim(env), await _claim(env)}
-    assert member["id"] in claimed
-
-
-async def _clearing(env) -> tuple[dict, dict, dict]:
-    c, a = await env.solo()
-    req = await env.to_requested(c["id"], a["id"])
-    await env.turn_ends(req, a["id"], "text")
-    await env.step(c["id"])
-    (cmd,) = await env.commands(a["id"])
-    return c, a, cmd
+    assert "cleared" not in ret["text"].split("\n")[0].replace("clear after", "")
+    assert ret["text"].startswith("The clear after your accepted handoff failed")
+    assert "Doing: wiring the cooperative handoff" in ret["text"]
 
 
 async def test_clearing_without_session_cleared_times_out_and_retries(env):
-    # I2: the wrapper accepted /clear and then restarted: no session_cleared, no command_failed
-    c, a, cmd = await _clearing(env)
+    # the wrapper accepted /clear and then restarted: no session_cleared, no command_failed
+    c, a = await env.solo()
+    cmd = await env.to_clearing(c, a)
     await env.finish_command(cmd["id"], "done", {"response": {"id": "c1"}})
     await env.idle_for(a["id"], 600)
     assert await env.step(c["id"]) == []  # accepted just now: not yet
@@ -953,16 +1041,11 @@ async def test_clearing_without_session_cleared_times_out_and_retries(env):
         "UPDATE commands SET finished_at = now() - make_interval(secs => %s) WHERE id = %s",
         (env.settings.handover_clear_timeout_seconds + 1, cmd["id"]),
     )
-    await env.run(
-        "UPDATE agent_status SET state = 'busy', current_turn_id = 't' WHERE agent_id = %s",
-        (a["id"],),
-    )
+    await env.busy(a["id"])
     assert await env.step(c["id"]) == []  # a running turn may still be ahead of the clear
     await env.idle_for(a["id"], env.settings.handover_clear_timeout_seconds + 1)
     assert await env.step(c["id"]) == [f"clear_retry:{a['id']}"]
-    row = await env.row(a["id"])
-    assert row.clear_attempts == 2
-    # the last attempt times out too: closed clear_failed, the solo agent still gets its return
+    assert (await env.row(a["id"])).clear_attempts == 2
     await env.run("UPDATE agent_handoffs SET clear_attempts = 5 WHERE agent_id = %s", (a["id"],))
     last_cmd = (await env.commands(a["id"]))[-1]
     await env.run(
@@ -974,144 +1057,12 @@ async def test_clearing_without_session_cleared_times_out_and_retries(env):
     assert len(await env.messages(a["id"], "handoff_return")) == 1
 
 
-async def test_external_clear_during_countdown_cancels_cleared(env):
-    # I3: a /clear by the user or the agent while the notice counts down
-    c, a = await env.solo()
-    await env.step(c["id"])
-    await env.cleared(c["id"], a["id"])
-    assert await env.step(c["id"]) == [f"cancelled:{a['id']}:cleared"]
-    (notice,) = await env.messages(a["id"], "handoff_notice")
-    assert notice["status"] == "cancelled"
-    last = await env.last_row(a["id"])
-    assert (last["phase"], last["close_reason"]) == ("cancelled", "cleared")
-
-
-async def test_compacting_alone_does_not_cancel(env):
-    # M2: a PreCompact whose compaction then fails leaves the context as it was
-    c, a = await env.solo()
-    await env.step(c["id"])
-    await insert_event(env.pool, c["id"], a["id"], type="compacting", data={})
-    await insert_event(env.pool, c["id"], a["id"], type="compact_failed", data={})
-    assert await env.step(c["id"]) == []
-    assert (await env.row(a["id"])).phase == "notified"
-
-
-async def test_clear_failed_block_expires(env):
-    # concern 2: after clear_failed a later strong crossing starts a new cycle once the block ends
-    c, a, cmd = await _clearing(env)
-    await env.finish_command(cmd["id"], "failed", {"error": "agent has no session"})
-    assert await env.step(c["id"]) == [f"cancelled:{a['id']}:clear_failed"]
-    assert await env.step(c["id"]) == []
-    await env.run(
-        "UPDATE agent_handoffs SET closed_at = now() - make_interval(secs => %s)"
-        " WHERE agent_id = %s",
-        (env.settings.handover_clear_failed_block_seconds + 1, a["id"]),
-    )
-    assert await env.step(c["id"]) == [f"notified:{a['id']}"]
-
-
-def test_clear_settings_defaults_and_bounds(dsn):
-    s = Settings(database_url=dsn, master_key=KEY)
-    assert (s.handover_clear_timeout_seconds, s.handover_clear_failed_block_seconds) == (
-        180,
-        1800,
-    )
-    with pytest.raises(ValueError):
-        Settings(database_url=dsn, master_key=KEY, handover_clear_timeout_seconds=5)
-
-
-async def test_clear_failed_return_text_says_not_cleared(env):
-    # M8
-    c, a, cmd = await _clearing(env)
-    await env.finish_command(cmd["id"], "failed", {"error": "agent has no session"})
-    await env.step(c["id"])
-    (ret,) = await env.messages(a["id"], "handoff_return")
-    assert "cleared just now" not in ret["text"]
-    assert ret["text"].endswith("\n\ntext")
-
-
-async def test_single_live_hive_notice_promises_no_successor(env):
-    # concern 3: the wording is decided at send time from whether a successor exists
-    c, (a0, a1) = await env.hive(2)
-    await env.run("UPDATE agents SET ready = false WHERE id = %s", (a1["id"],))
-    await env.step(c["id"])
-    (notice,) = await env.messages(a0["id"], "handoff_notice")
-    assert "successor" not in notice["text"]
-    c2, (b0, _, _) = await env.hive()
-    await env.step(c2["id"])
-    (notice2,) = await env.messages(b0["id"], "handoff_notice")
-    assert "leadership moves to a successor" in notice2["text"]
-
-
-async def test_single_live_hive_note_promises_no_successor(env, fake):
-    clients: list[WrapperClient] = []
-
-    def factory(session_id, url) -> WrapperClient:
-        client = WrapperClient(url, TOKEN)
-        clients.append(client)
-        return client
-
-    creator = WrapperClient(fake.base_url, TOKEN)
-    try:
-        wsid = (await creator.create_session(f"h{uuid.uuid4().hex[:4]}", "/w")).wrapper_session_id
-    finally:
-        await creator.aclose()
-    c, (a0, a1) = await env.hive(2)
-    await env.run(
-        "UPDATE agents SET wrapper_session_id = %s, url = %s WHERE id = %s",
-        (wsid, fake.base_url, a0["id"]),
-    )
-    await env.run("UPDATE agents SET ready = false WHERE id = %s", (a1["id"],))
-    await env.step(c["id"])
-    state = hive.HiveState()
-    try:
-        await hive.push_once(env.pool, env.settings, factory, state, clock=lambda: 1000.0)
-        notes = [n["text"] for n in fake.notes.get(wsid, []) if n["key"] == "handoff_notice"]
-        assert len(notes) == 1
-        assert "successor" not in notes[0]
-    finally:
-        for client in clients:
-            await client.aclose()
-
-
-def test_notice_text_without_extension_and_rounding():
-    # M7: no extension offer when extensions are off; minutes round up like the countdown
-    text = strong_notice(5, 0, hive=False)
-    assert "Need more time" not in text
-    assert text.endswith("update your task and todo.")
-
-
-async def test_notice_extension_minutes_round_up(env, dsn):
-    env.settings = Settings(database_url=dsn, master_key=KEY, handover_extension_seconds=150)
-    env.policy = handoff.HandoffPolicy.from_settings(env.settings)
-    c, a = await env.solo()
-    await env.step(c["id"])
-    (notice,) = await env.messages(a["id"], "handoff_notice")
-    assert "once for 3 more minutes" in notice["text"]
-
-
-async def test_failing_session_list_does_not_stop_message_drain(env, monkeypatch):
-    # M6
-    d = Dispatcher(env.pool, env.settings)
-
-    async def boom(conn):
-        raise RuntimeError("db hiccup")
-
-    monkeypatch.setattr(handoff, "handoff_sessions", boom)
-    try:
-        await d._drain_leadership()  # logged, not raised
-    finally:
-        await d.aclose()
-
-
-# ---------------------------------------------------------------- fix round 2
-
-
 @pytest.mark.parametrize("status", ["queued", "running"])
 async def test_clear_command_never_finished_times_out(env, status):
-    # N1: the dispatcher died between claiming the clear and completing it (running), or never
+    # the dispatcher died between claiming the clear and completing it (running), or never
     # claimed it (queued): the row must not hang in clearing, holding the solo agent's messages
-    c, a, cmd = await _clearing(env)
+    c, a = await env.solo()
+    cmd = await env.to_clearing(c, a)
     stale = env.settings.handover_clear_timeout_seconds + 1
     await env.run(
         "UPDATE commands SET status = %s,"
@@ -1127,13 +1078,9 @@ async def test_clear_command_never_finished_times_out(env, status):
     )
     assert await env.step(c["id"]) == [f"clear_retry:{a['id']}"]
     first, retry = await env.commands(a["id"])
-    # the lost command is finished, so it can never run after the retry (or after the return)
-    # failed with the retryable clear_timeout in both cases (F1: a cancelled one reads as the
-    # non-retryable `cancelled` on a later pass)
     assert first["status"] == "failed"
     assert first["result"] == {"error": "clear_timeout"}
     assert retry["status"] == "queued"
-    # the last attempt is lost too: closed clear_failed, the solo agent still gets its return
     await env.run("UPDATE agent_handoffs SET clear_attempts = 5 WHERE agent_id = %s", (a["id"],))
     await env.run(
         "UPDATE commands SET status = %s, created_at = now() - make_interval(secs => %s),"
@@ -1145,54 +1092,365 @@ async def test_clear_command_never_finished_times_out(env, status):
     assert len(await env.messages(a["id"], "handoff_return")) == 1
 
 
-async def _hive_note(env, fake, *, successor_used: int) -> tuple[str, str]:
-    """The strong notice message and keyed note of a two-agent hive whose member is at
-    `successor_used` tokens."""
-    clients: list[WrapperClient] = []
-
-    def factory(session_id, url) -> WrapperClient:
-        client = WrapperClient(url, TOKEN)
-        clients.append(client)
-        return client
-
-    creator = WrapperClient(fake.base_url, TOKEN)
-    try:
-        wsid = (await creator.create_session(f"h{uuid.uuid4().hex[:4]}", "/w")).wrapper_session_id
-    finally:
-        await creator.aclose()
-    c, (a0, a1) = await env.hive(2)
+async def test_clear_failed_block_expires(env):
+    c, a = await env.solo()
+    cmd = await env.to_clearing(c, a)
+    await env.finish_command(cmd["id"], "failed", {"error": "agent has no session"})
+    assert await env.step(c["id"]) == [f"cancelled:{a['id']}:clear_failed"]
+    assert await env.step(c["id"]) == []
     await env.run(
-        "UPDATE agents SET wrapper_session_id = %s, url = %s WHERE id = %s",
-        (wsid, fake.base_url, a0["id"]),
+        "UPDATE agent_handoffs SET closed_at = now() - make_interval(secs => %s)"
+        " WHERE agent_id = %s",
+        (env.settings.handover_clear_failed_block_seconds + 1, a["id"]),
     )
-    await env.gauge(a1["id"], successor_used)
+    assert await env.step(c["id"]) == [f"pressuring:{a['id']}"]
+
+
+async def test_return_sent_once_across_pod_restart_during_clearing(env):
+    c, a = await env.solo()
+    cmd = await env.to_clearing(c, a)
+    await env.finish_command(cmd["id"], "done", {"response": {"id": "c1"}})
+    # the pod restarts: a new wrapper session, the cleared event is replayed and ingested
+    await env.run(
+        "UPDATE agents SET wrapper_session_id = %s WHERE id = %s", (await env.wsid(), a["id"])
+    )
+    await env.cleared(c["id"], a["id"])
+    await insert_event(
+        env.pool, c["id"], a["id"], wrapper_session_id="w0-new", type="session_cleared", data={}
+    )
+    env.policy = handoff.HandoffPolicy.from_settings(env.settings)  # a fresh dispatcher
+    results = await asyncio.gather(env.step(c["id"]), env.step(c["id"]))
+    assert sorted(results, key=len) == [[], [f"returning:{a['id']}"]]
+    assert await env.step(c["id"]) == []
+    assert len(await env.messages(a["id"], "handoff_return")) == 1
+
+
+async def test_single_live_hive_leader_not_reopened_on_pre_clear_gauge(env):
+    # after an L3 clear the leader's gauge still shows the old context until the wrapper
+    # reports again; it must read as no gauge (no new row) and the L1 baseline resets
+    c, (a0, a1) = await env.hive(2)
+    await env.run("UPDATE agents SET ready = false WHERE id = %s", (a1["id"],))
+    (before,) = await env.rows(
+        "SELECT start_context_tokens FROM session_leaders WHERE session_id = %s", (c["id"],)
+    )
+    assert before["start_context_tokens"] is not None
     await env.step(c["id"])
-    (message,) = await env.messages(a0["id"], "handoff_notice")
+    assert await env.submit(a0)
+    assert await env.step(c["id"]) == [f"clearing:{a0['id']}"]
+    (cmd,) = await env.commands(a0["id"])
+    await env.finish_command(cmd["id"], "done", {"response": {"id": "c1"}})
+    await env.cleared(c["id"], a0["id"])
+    assert await env.step(c["id"]) == [f"returning:{a0['id']}"]
+    (ret,) = await env.messages(a0["id"], "handoff_return")
+    await env.run("UPDATE messages SET status = 'sent' WHERE id = %s", (ret["id"],))
+    assert await env.step(c["id"]) == [f"done:{a0['id']}"]
+    assert await env.step(c["id"]) == []  # the L2 gauge predates the clear
+    (after,) = await env.rows(
+        "SELECT start_context_tokens FROM session_leaders WHERE session_id = %s", (c["id"],)
+    )
+    assert after["start_context_tokens"] is None
+    (session,) = await env.rows(
+        "SELECT id, slug, spec, status FROM sessions WHERE id = %s", (c["id"],)
+    )
+    async with env.pool.connection() as conn:
+        plan = await hive._read(conn, session, env.settings)
+    assert plan is not None and plan.fill_start is None  # not recorded from the stale gauge
+    await env.gauge(a0["id"], LOW)  # the first reading after the clear
+    async with env.pool.connection() as conn:
+        plan = await hive._read(conn, session, env.settings)
+    assert plan is not None and plan.fill_start == LOW
+
+
+# ---------------------------------------------------------------- the pressure policy push
+
+
+async def test_policy_repushed_after_wrapper_restart(env):
+    c, a = await env.solo()
+    await env.step(c["id"])
+    await env.push()
+    assert env.policy_of(a)["version"] == 1
+    puts = len([r for r in env.fake.requests if r[0] == "PUT"])
+    await env.push(advance=10)  # nothing changed: no PUT
+    assert len([r for r in env.fake.requests if r[0] == "PUT"]) == puts
+    env.fake.pressure.clear()  # the wrapper restarted and lost the policy
+    await env.push(advance=20)  # before the periodic check
+    assert env.policy_of(a) is None
+    await env.push(advance=61)
+    policy = env.policy_of(a)
+    assert policy is not None and policy["version"] == 2  # max(none, 1) + 1
+    assert policy["handoff_state"] == "none"
+    await env.push(advance=61)  # the check finds the same version: no PUT
+    assert env.policy_of(a)["version"] == 2
+
+
+async def test_policy_version_seeded_from_the_wrapper(env):
+    c, a = await env.solo()
+    await env.step(c["id"])
+    env.fake.pressure[a["wrapper_session_id"]] = {"version": 41, "handoff_state": "none"}
+    await env.push()
+    assert env.policy_of(a)["version"] == 42
+
+
+async def test_older_wrapper_404_skipped_no_crash(env, caplog):
+    c, a = await env.solo()
+    c2, b = await env.solo()
+    await env.step(c["id"])
+    await env.step(c2["id"])
+    env.fake.disable_pressure()  # 409 pressure_disabled
+    await env.run("UPDATE agents SET wrapper_session_id = 'ses_gone' WHERE id = %s", (b["id"],))
+    with caplog.at_level(logging.INFO, logger="agents_orchestrator.dispatcher.hive"):
+        await env.push()
+        await env.push(advance=100)
+    lines = [r.getMessage() for r in caplog.records if "pressure policy" in r.getMessage()]
+    assert len([x for x in lines if str(a["id"]) in x]) == 1  # logged once per agent
+    assert len([x for x in lines if str(b["id"]) in x]) == 1
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    # the pass carries on without pressure: an accepted gate-clear submit still clears
+    assert await env.submit(a)
+    assert await env.step(c["id"]) == [f"clearing:{a['id']}"]
+
+
+async def test_no_handoff_request_or_notice_messages_ever_queued(env):
+    c, a = await env.solo()
+    await env.to_returning(c, a)
+    h, (b0, b1, b2) = await env.hive()
+    await env.step(h["id"])
+    await env.gauge(b0["id"], CRITICAL)
+    for _ in range(3):
+        await env.step(h["id"])
+    assert await env.submit(b0)
+    await env.step(h["id"])
+    await env.lpass(h["id"])
+    await env.step(h["id"])
+    await env.push()
+    msgs = await env.rows("SELECT notice, text FROM messages")
+    assert not [m for m in msgs if m["notice"] in ("handoff_notice", "handoff_request")]
+    texts = [m["text"] for m in msgs] + [
+        t for p in env.fake.pressure.values() for v in p["texts"].values() for t in v.values()
+    ]
+    for text in texts:
+        assert not re.search(r"minute|deadline", text, re.I), text
+        assert not re.search(r"\bin \d+", text), text
+
+
+# ---------------------------------------------------------------- queue gate
+
+
+async def _claim(env) -> int | None:
+    async with env.pool.connection() as conn:
+        claim = await queue.claim_and_pick(conn)
+    return claim.message_id if claim is not None else None
+
+
+async def _status(env, message_id: int) -> str:
+    (row,) = await env.rows("SELECT status FROM messages WHERE id = %s", (message_id,))
+    return row["status"]
+
+
+async def test_messages_flow_while_pressuring_and_submitted(env):
+    c, a = await env.solo()
+    await env.step(c["id"])
+    work = await insert_message(
+        env.pool, c["id"], text="work", target_agent_id=a["id"], lane="regular"
+    )
+    assert await _claim(env) == work["id"]  # pressuring
+    await env.run("UPDATE messages SET status = 'sent' WHERE id = %s", (work["id"],))
+    env.inflight(a, background_tasks=[TASK])
+    assert not await env.submit(a)
+    more = await insert_message(env.pool, c["id"], text="more", lane="regular")
+    assert await _claim(env) == more["id"]  # submitted, blocked
+
+
+async def test_solo_clearing_holds_other_messages(env):
+    c, a = await env.solo()
+    await env.to_clearing(c, a)
+    work = await insert_message(env.pool, c["id"], text="user work", lane="regular")
+    targeted = await insert_message(
+        env.pool, c["id"], text="peer work", target_agent_id=a["id"], lane="regular"
+    )
+    assert await _claim(env) is None  # clearing: held
+    (cmd,) = await env.commands(a["id"])
+    await env.finish_command(cmd["id"], "done", {"response": {"id": "c1"}})
+    await env.cleared(c["id"], a["id"])
+    assert await env.step(c["id"]) == [f"returning:{a['id']}"]
+    (ret,) = await env.messages(a["id"], "handoff_return")
+    assert await _claim(env) == ret["id"]  # the return goes first
+    assert await _claim(env) is None
+    await env.run("UPDATE messages SET status = 'sent' WHERE id = %s", (ret["id"],))
+    assert await env.step(c["id"]) == [f"done:{a['id']}"]
+    assert {await _claim(env), await _claim(env)} == {work["id"], targeted["id"]}
+
+
+async def test_hive_member_messages_are_not_held(env):
+    # only the subject's own messages wait; a member keeps getting its targeted work
+    c, (a0, a1) = await env.hive(2)
+    await env.run("UPDATE agents SET ready = false WHERE id = %s", (a1["id"],))
+    await env.step(c["id"])
+    assert await env.submit(a0)
+    assert await env.step(c["id"]) == [f"clearing:{a0['id']}"]  # the only live agent
+    await env.run("UPDATE agents SET ready = true WHERE id = %s", (a1["id"],))
+    member = await insert_message(
+        env.pool, c["id"], text="member", target_agent_id=a1["id"], lane="regular"
+    )
+    own = await insert_message(
+        env.pool, c["id"], text="own", target_agent_id=a0["id"], lane="regular"
+    )
+    assert await _claim(env) == member["id"]
+    assert await _claim(env) is None
+    assert await _status(env, own["id"]) == "queued"
+
+
+@pytest.mark.parametrize("event", ["compacted", "session_cleared"])
+async def test_nudge_cancelled_after_reset(env, event):
+    c, a = await env.solo()
+    await env.step(c["id"])
+    nudge = await insert_message(
+        env.pool,
+        c["id"],
+        text="nudge",
+        target_agent_id=a["id"],
+        lane="regular",
+        notice="handoff_nudge",
+    )
+    await insert_event(env.pool, c["id"], a["id"], type=event, data={})
+    assert await _claim(env) is None  # the drain runs before any pass
+    assert await _status(env, nudge["id"]) == "cancelled"
+
+
+async def test_nudge_sent_only_while_pressuring(env):
+    c, a = await env.solo()
+    await env.step(c["id"])
+    first = await insert_message(
+        env.pool,
+        c["id"],
+        text="nudge",
+        target_agent_id=a["id"],
+        lane="regular",
+        notice="handoff_nudge",
+    )
+    assert await _claim(env) == first["id"]
+    await env.run("UPDATE messages SET status = 'sent' WHERE id = %s", (first["id"],))
+    env.inflight(a, background_tasks=[TASK])
+    assert not await env.submit(a)
+    late = await insert_message(
+        env.pool,
+        c["id"],
+        text="nudge",
+        target_agent_id=a["id"],
+        lane="regular",
+        notice="handoff_nudge",
+    )
+    assert await _claim(env) is None
+    assert await _status(env, late["id"]) == "cancelled"
+
+
+async def test_removed_notice_kinds_are_always_cancelled(env):
+    c, a = await env.solo()
+    await env.step(c["id"])
+    ids = []
+    for kind in ("handoff_notice", "handoff_request"):
+        m = await insert_message(
+            env.pool, c["id"], text="old", target_agent_id=a["id"], lane="regular", notice=kind
+        )
+        ids.append(m["id"])
+    assert await _claim(env) is None
+    assert [await _status(env, i) for i in ids] == ["cancelled", "cancelled"]
+
+
+# ---------------------------------------------------------------- lock and dispatcher
+
+
+async def test_pass_skipped_without_claim_lock(env, dsn):
+    c, a = await env.solo()
+    async with await psycopg.AsyncConnection.connect(dsn) as holder, holder.transaction():
+        await holder.execute(
+            "SELECT pg_advisory_xact_lock(%s, hashtext(%s::text))",
+            (_CLAIM_LOCK_NAMESPACE, c["id"]),
+        )
+        assert await env.step(c["id"]) == []
+        assert await env.row(a["id"]) is None
+    assert await env.step(c["id"]) == [f"pressuring:{a['id']}"]
+
+
+async def test_handoff_sessions_lists_subjects_and_open_rows(env):
+    c, a = await env.solo()
+    h, _ = await env.hive()
+    closing, b = await env.solo()
+    async with env.pool.connection() as conn:
+        await handoffs.open_pressure(conn, closing["id"], b["id"], 2, "work")
+    await env.run("UPDATE sessions SET desired = 'deleting' WHERE id = %s", (closing["id"],))
+    async with env.pool.connection() as conn:
+        got = await handoff.handoff_sessions(conn)
+    assert {c["id"], h["id"], closing["id"]} <= set(got)
+
+
+async def test_dispatcher_runs_the_pass_after_leadership(env):
+    d = Dispatcher(env.pool, env.settings)
     try:
-        await hive.push_once(env.pool, env.settings, factory, hive.HiveState(), clock=lambda: 1.0)
-        (note,) = [n["text"] for n in fake.notes.get(wsid, []) if n["key"] == "handoff_notice"]
+        c, a = await env.solo()
+        await d._drain_leadership()
+        assert (await env.row(a["id"])).phase == "pressuring"
+        assert d._push_wake.is_set()
+        # throttled: a second wake within the interval runs no pass
+        assert await env.submit(a)
+        await d._drain_leadership()
+        assert (await env.row(a["id"])).phase == "submitted"
+        d._handoff_at = None
+        # the pass reads the inventory through the dispatcher's fetcher (the fake's token here)
+        d._inflight = env.fetch
+        await d._drain_leadership()
+        assert (await env.row(a["id"])).phase == "clearing"
     finally:
-        for client in clients:
-            await client.aclose()
-    return message["text"], note
+        await d.aclose()
 
 
-async def test_hive_note_with_successor_keeps_the_clause(env, fake):
-    # N3: the positive case of the keyed note
-    message, note = await _hive_note(env, fake, successor_used=LOW)
-    assert "successor" in message
-    assert "successor" in note
+async def test_failing_session_list_does_not_stop_message_drain(env, monkeypatch):
+    d = Dispatcher(env.pool, env.settings)
+
+    async def boom(conn):
+        raise RuntimeError("db hiccup")
+
+    monkeypatch.setattr(handoff, "handoff_sessions", boom)
+    try:
+        await d._drain_leadership()  # logged, not raised
+    finally:
+        await d.aclose()
 
 
-async def test_hive_note_and_message_agree_on_successor_without_headroom(env, fake):
-    # N3: a ready member without headroom is still the successor `handed()` picks, so the note
-    # promises it as the message does
-    message, note = await _hive_note(env, fake, successor_used=STRONG)
-    assert "successor" in message
-    assert "successor" in note
+async def test_open_lost_to_a_concurrent_row_is_skipped(env, monkeypatch):
+    # a row opened between the pass's read and its insert (the submit route's voluntary row)
+    # must not abort the pass
+    c, a = await env.solo()
+    assert await env.submit(a)
+
+    async def no_rows(conn, session_id):
+        return []
+
+    monkeypatch.setattr(handoff.handoffs, "open_rows", no_rows)
+    assert await env.step(c["id"]) == []
+    assert (await env.row(a["id"])).trigger == "voluntary"
 
 
-# ---------------------------------------------------------------- pod shutdown (step 10)
+async def test_handoff_pass_skips_parked_session(env):
+    c, a = await env.solo()
+    parked, b = await env.solo()
+    await env.run(
+        "UPDATE sessions SET parked_at = now(), parked_reason = 'turns' WHERE id = %s",
+        (parked["id"],),
+    )
+    async with env.pool.connection() as conn:
+        got = await handoff.handoff_sessions(conn)
+    assert c["id"] in got and parked["id"] not in got
+    d = Dispatcher(env.pool, env.settings)
+    try:
+        await d._drain_leadership()
+    finally:
+        await d.aclose()
+    assert (await env.row(a["id"])).phase == "pressuring"
+    assert await env.rows("SELECT id FROM agent_handoffs WHERE agent_id = %s", (b["id"],)) == []
+
+
+# ---------------------------------------------------------------- pod shutdown
 
 
 async def _shutdown(env, session_id, agent_id, text: str | None, status: str = "completed"):
@@ -1222,15 +1480,13 @@ async def _next_pod(env, agent_id) -> None:
 
 
 async def _leader_lost(env, session_id) -> None:
-    async with env.pool.connection() as conn:
-        await leadership.leadership_pass(conn, session_id)  # marks unready_since
+    await env.lpass(session_id)  # marks unready_since
     await env.run(
         "UPDATE session_leaders SET unready_since = now() - interval '1 hour'"
         " WHERE session_id = %s",
         (session_id,),
     )
-    async with env.pool.connection() as conn:
-        await leadership.leadership_pass(conn, session_id)
+    await env.lpass(session_id)
 
 
 async def _deliver(env) -> list:
@@ -1244,6 +1500,7 @@ async def _deliver(env) -> list:
             output_chars=500,
             decisions=no_decisions,
             shutdown_hold_seconds=330,
+            settings=env.settings,
         )
 
 
@@ -1258,12 +1515,9 @@ async def test_shutdown_solo_next_pod_clears_then_returns(env):
         "handed",
         "solo shutdown text",
     )
-    # the old pod is still stopping: nothing until the next pod is ready (and the event is
-    # handled once)
     assert await env.step(c["id"]) == []
     assert await env.commands(a["id"]) == []
     assert await _claim(env) is None
-    # ready, but its stream not attached yet (still marked stopping): no clear either
     await env.run("UPDATE agents SET ready = true WHERE id = %s", (a["id"],))
     assert await env.step(c["id"]) == []
     assert await env.commands(a["id"]) == []
@@ -1297,14 +1551,10 @@ async def test_shutdown_leader_handoff_goes_to_successor_and_old_agent_is_cleare
     await env.gauge(a2["id"], 60000)  # a1 is the successor (lowest context)
     await env.run("UPDATE agent_status SET stopping_since = now() WHERE agent_id = %s", (a0["id"],))
     await insert_event(env.pool, c["id"], a0["id"], type="shutdown_started", data={})
-    # the pod stays Ready through the routine: the stopping mark alone moves leadership
-    # (leader_lost) on the next pass, before the handoff turn and with no unready grace
-    async with env.pool.connection() as conn:
-        await leadership.leadership_pass(conn, c["id"])
+    await env.lpass(c["id"])
     async with env.pool.connection() as conn:
         leader = await leadership.current_leader(conn, c["id"])
     assert leader.agent_id == a1["id"]
-    # the successor's notice waits for the dying leader's handoff
     assert await _deliver(env) == []
     await _shutdown_handoff(env, c["id"], a0["id"], "leader shutdown text")
     assert await env.step(c["id"]) == [f"shutdown_handed:{a0['id']}"]
@@ -1317,9 +1567,9 @@ async def test_shutdown_leader_handoff_goes_to_successor_and_old_agent_is_cleare
         f"Handoff from {a0['pod_name']} (written by it):\nleader shutdown text\n\n"
     )
     assert (await env.row(a0["id"])).delivered_at is not None
-    assert await _deliver(env) == []  # once
+    assert await _deliver(env) == []
 
-    assert await env.step(c["id"]) == []  # the old pod is still stopping
+    assert await env.step(c["id"]) == []
     await _next_pod(env, a0["id"])
     assert await env.step(c["id"]) == [f"clearing:{a0['id']}"]
     (cmd,) = await env.commands(a0["id"])
@@ -1329,12 +1579,10 @@ async def test_shutdown_leader_handoff_goes_to_successor_and_old_agent_is_cleare
     last = await env.last_row(a0["id"])
     assert (last["phase"], last["close_reason"]) == ("done", "cleared")
     assert await env.messages(a0["id"], "handoff_return") == []
-    assert len(await env.messages(a1["id"])) == 1  # nothing else: the text went out once
+    assert len(await env.messages(a1["id"])) == 1
 
 
 async def test_shutdown_leader_text_follows_a_notice_already_sent(env):
-    # the successor's notice went out before the handoff (hold over, or a scale-down move): the
-    # pass sends the text to the successor itself, once
     c, (a0, a1, a2) = await env.hive(used=LOW)
     await env.gauge(a2["id"], 60000)
     await env.run("UPDATE agent_status SET stopping_since = now() WHERE agent_id = %s", (a0["id"],))
@@ -1344,7 +1592,7 @@ async def test_shutdown_leader_text_follows_a_notice_already_sent(env):
         "UPDATE agent_status SET stopping_since = now() - interval '1 hour' WHERE agent_id = %s",
         (a0["id"],),
     )
-    assert await _deliver(env) == [c["id"]]  # past the hold: the notice goes without the text
+    assert await _deliver(env) == [c["id"]]
     await env.run("UPDATE agent_status SET stopping_since = now() WHERE agent_id = %s", (a0["id"],))
     await _shutdown_handoff(env, c["id"], a0["id"], "late text")
     assert await env.step(c["id"]) == [
@@ -1395,38 +1643,26 @@ async def test_shutdown_without_text_does_nothing(env, text, status):
     assert await env.messages(a["id"]) == []
 
 
-async def test_sigterm_during_open_strong_row_closes_it_shutdown(env):
-    # before handed (the request queued) and after it (the clear queued): both close at SIGTERM
+async def test_sigterm_during_open_row_closes_it_shutdown(env):
+    # pressuring, and clearing (the clear queued): both close at SIGTERM
     c, a = await env.solo()
-    req = await env.to_requested(c["id"], a["id"])
+    await env.step(c["id"])
     await env.run("UPDATE agent_status SET stopping_since = now() WHERE agent_id = %s", (a["id"],))
     assert await env.step(c["id"]) == [f"cancelled:{a['id']}:shutdown"]
-    assert await _status(env, req["id"]) == "cancelled"
 
     c2, a2 = await env.solo()
-    req2 = await env.to_requested(c2["id"], a2["id"])
-    await env.turn_ends(req2, a2["id"], "strong text")
-    assert await env.step(c2["id"]) == [f"handed:{a2['id']}", f"clearing:{a2['id']}"]
-    (cmd,) = await env.commands(a2["id"])
+    await env.to_clearing(c2, a2)
     await env.run("UPDATE agent_status SET stopping_since = now() WHERE agent_id = %s", (a2["id"],))
     assert await env.step(c2["id"]) == [f"cancelled:{a2['id']}:shutdown"]
     (cmd,) = await env.commands(a2["id"])
     assert cmd["status"] == "cancelled"  # the queued clear never runs on the dying pod
-    # the shutdown handoff then opens the shutdown row
     await _shutdown(env, c2["id"], a2["id"], "shutdown text")
     assert await env.step(c2["id"]) == [f"shutdown_handed:{a2['id']}"]
 
 
 async def test_returning_row_survives_sigterm_and_keeps_its_return(env):
     c, a = await env.solo()
-    req = await env.to_requested(c["id"], a["id"])
-    await env.turn_ends(req, a["id"], "strong text")
-    await env.step(c["id"])
-    (cmd,) = await env.commands(a["id"])
-    await env.finish_command(cmd["id"], "done", {"response": {"id": "c1"}})
-    await env.cleared(c["id"], a["id"])
-    assert await env.step(c["id"]) == [f"returning:{a['id']}"]
-    (ret,) = await env.messages(a["id"], "handoff_return")
+    ret = await env.to_returning(c, a)
     await env.run("UPDATE agent_status SET stopping_since = now() WHERE agent_id = %s", (a["id"],))
     assert await env.step(c["id"]) == []  # the return waits for the next pod
     assert await _claim(env) is None
@@ -1437,119 +1673,365 @@ async def test_returning_row_survives_sigterm_and_keeps_its_return(env):
     ]
     closed = (
         await env.rows(
-            "SELECT * FROM agent_handoffs WHERE agent_id = %s AND trigger = 'strong'", (a["id"],)
+            "SELECT * FROM agent_handoffs WHERE agent_id = %s AND trigger = 'pressure'", (a["id"],)
         )
     )[0]
     assert (closed["phase"], closed["close_reason"]) == ("cancelled", "shutdown")
     assert await _status(env, ret["id"]) == "queued"  # still delivered, after the new return
 
 
-async def test_no_handoff_request_dispatched_to_stopping_agent(env):
+# ---------------------------------------------------------------- fix round 1 (decision 716)
+
+
+async def _quiet_hive(env, c, agents) -> None:
+    """Every agent idle and the session quiet long past the discussion cap."""
+    await env.run(
+        "UPDATE sessions SET created_at = now() - interval '1 day',"
+        " last_update_at = now() - interval '1 day' WHERE id = %s",
+        (c["id"],),
+    )
+    for a in agents:
+        await env.idle_for(a["id"], 700)
+
+
+@pytest.mark.parametrize("before", ["pressuring", "refused", "accepted"])
+async def test_rollout_move_never_clears_the_ex_leader(env, before):
+    # a rollout move is not the row's own limit request: the row closes, no clear ever follows
+    c, (a0, a1, a2) = await env.hive()
+    assert await env.step(c["id"]) == [f"pressuring:{a0['id']}"]
+    if before == "refused":
+        env.inflight(a0, background_tasks=[TASK])
+        assert not await env.submit(a0)
+    elif before == "accepted":
+        assert await env.submit(a0)  # the pass has not moved it yet
+    async with env.pool.connection() as conn:
+        await leadership.insert_request(conn, c["id"], "handover", a0["id"], a1["id"], "rollout", 1)
+    assert (await env.lpass(c["id"])).agent_id == a1["id"]
+    last = await env.last_row(a0["id"])
+    assert (last["phase"], last["close_reason"]) == ("cancelled", "not_leader")
+    env.inflight(a0)
+    await _quiet_hive(env, c, (a0, a1, a2))
+    for _ in range(3):
+        await env.step(c["id"])
+    assert await env.commands(a0["id"]) == []
+    assert await env.row(a0["id"]) is None
+
+
+def _interleave(monkeypatch, between) -> None:
+    """Run `between` (committed on its own connection) right after the pass read its rows."""
+    real = handoffs.open_rows
+    done = []
+
+    async def open_rows(conn, session_id):
+        rows = await real(conn, session_id)
+        if not done:
+            done.append(True)
+            await between()
+        return rows
+
+    monkeypatch.setattr(handoffs, "open_rows", open_rows)
+
+
+async def test_blocked_resubmit_after_the_read_stops_the_limit_request(env, monkeypatch):
+    c, (a0, a1, a2) = await env.hive()
+    await env.step(c["id"])
+    assert await env.submit(a0)  # accepted, gate clear
+
+    async def resubmit() -> None:
+        env.inflight(a0, background_tasks=[TASK])
+        assert not await env.submit(a0)  # 409 in_flight to the agent
+
+    _interleave(monkeypatch, resubmit)
+    assert await env.step(c["id"]) == []
+    assert await env.requests(c["id"]) == []
+    row = await env.row(a0["id"])
+    assert row.phase == "submitted"
+    assert row.inflight["waiting_on"] == ["task:bf3a (CI watch)"]
+
+
+async def test_blocked_resubmit_after_the_read_stops_the_solo_clear(env, monkeypatch):
     c, a = await env.solo()
     await env.step(c["id"])
-    await env.past_deadline(a["id"])
-    await env.run("UPDATE agent_status SET stopping_since = now() WHERE agent_id = %s", (a["id"],))
-    # stopping before the pass: no request is queued at all
-    assert await env.step(c["id"]) == [f"cancelled:{a['id']}:shutdown"]
-    assert await env.messages(a["id"], "handoff_request") == []
-    # a request queued just before SIGTERM is never claimed and is cancelled with its row
-    c2, a2 = await env.solo()
-    req = await env.to_requested(c2["id"], a2["id"])
-    await env.run("UPDATE agent_status SET stopping_since = now() WHERE agent_id = %s", (a2["id"],))
-    assert await _claim(env) is None
-    assert await _status(env, req["id"]) == "queued"
-    assert await env.step(c2["id"]) == [f"cancelled:{a2['id']}:shutdown"]
-    assert await _status(env, req["id"]) == "cancelled"
-    # no new countdown opens while stopping
-    assert await env.step(c2["id"]) == []
+    assert await env.submit(a)
 
+    async def resubmit() -> None:
+        env.inflight(a, background_tasks=[TASK])
+        assert not await env.submit(a)
 
-# ---------------------------------------------------------------- final review fix round
-
-
-async def test_single_live_hive_leader_not_reopened_on_pre_clear_gauge(env):
-    # I1: after an L3 clear the leader's gauge still shows the old context until the wrapper
-    # reports again; it must read as no gauge (no new strong row) and the weak baseline resets
-    c, (a0, a1) = await env.hive(2)
-    await env.run("UPDATE agents SET ready = false WHERE id = %s", (a1["id"],))
-    (before,) = await env.rows(
-        "SELECT start_context_tokens FROM session_leaders WHERE session_id = %s", (c["id"],)
-    )
-    assert before["start_context_tokens"] is not None
-    req = await env.to_requested(c["id"], a0["id"])
-    await env.turn_ends(req, a0["id"], "alone")
-    assert await env.step(c["id"]) == [f"handed:{a0['id']}", f"clearing:{a0['id']}"]
-    (cmd,) = await env.commands(a0["id"])
-    await env.finish_command(cmd["id"], "done", {"response": {"id": "c1"}})
-    await env.cleared(c["id"], a0["id"])
-    assert await env.step(c["id"]) == [f"returning:{a0['id']}"]
-    (ret,) = await env.messages(a0["id"], "handoff_return")
-    await env.run("UPDATE messages SET status = 'sent' WHERE id = %s", (ret["id"],))
-    assert await env.step(c["id"]) == [f"done:{a0['id']}"]
-    assert await env.step(c["id"]) == []  # the strong gauge predates the clear
-    (after,) = await env.rows(
-        "SELECT start_context_tokens FROM session_leaders WHERE session_id = %s", (c["id"],)
-    )
-    assert after["start_context_tokens"] is None
-    (session,) = await env.rows(
-        "SELECT id, slug, spec, status FROM sessions WHERE id = %s", (c["id"],)
-    )
-    async with env.pool.connection() as conn:
-        plan = await hive._read(conn, session, env.settings)
-    assert plan is not None and plan.fill_start is None  # not recorded from the stale gauge
-    await env.gauge(a0["id"], LOW)  # the first reading after the clear
-    async with env.pool.connection() as conn:
-        plan = await hive._read(conn, session, env.settings)
-    assert plan is not None and plan.fill_start == LOW
-
-
-async def test_priority_message_is_not_held_by_a_requested_row(env):
-    # I2: the requested hold lasts as long as the agent's running turn; a priority message (the
-    # user interrupting on purpose) goes through, regular work still waits for the handoff
-    c, a = await env.solo()
-    req = await env.to_requested(c["id"], a["id"])
-    assert await _claim(env) == req["id"]
-    regular = await insert_message(
-        env.pool, c["id"], text="later", target_agent_id=a["id"], lane="regular"
-    )
-    urgent = await insert_message(env.pool, c["id"], text="stop that", lane="priority")
-    assert await _claim(env) == urgent["id"]
-    assert await _claim(env) is None
-    assert await _status(env, regular["id"]) == "queued"
-
-
-async def test_open_lost_to_a_concurrent_row_is_skipped(env, monkeypatch):
-    # m1: a row opened between the pass's read and its insert (the route's solo voluntary
-    # handoff) must not abort the pass
-    c, a = await env.solo()
-    async with env.pool.connection() as conn:
-        await handoffs.insert(conn, c["id"], a["id"], "voluntary", "handed", handoff_text="mine")
-
-    async def no_rows(conn, session_id):
-        return []
-
-    monkeypatch.setattr(handoff.handoffs, "open_rows", no_rows)
+    _interleave(monkeypatch, resubmit)
     assert await env.step(c["id"]) == []
-    assert await env.messages(a["id"], "handoff_notice") == []
+    assert await env.commands(a["id"]) == []
+    row = await env.row(a["id"])
+    assert (row.phase, row.inflight["waiting_on"]) == ("submitted", ["task:bf3a (CI watch)"])
 
 
-# ---------------------------------------------------------------- runaway park (T-224)
-
-
-async def test_handoff_pass_skips_parked_session(env):
+async def test_accepted_submit_after_the_read_is_not_overwritten_by_resubmit(env, monkeypatch):
     c, a = await env.solo()
-    parked, b = await env.solo()
-    await env.run(
-        "UPDATE sessions SET parked_at = now(), parked_reason = 'turns' WHERE id = %s",
-        (parked["id"],),
-    )
+    await env.step(c["id"])
+    env.inflight(a, background_tasks=[TASK])
+    assert not await env.submit(a)
+    await env.step(c["id"])
+    env.inflight(a)  # the task reported: the pass would ask for a resubmit
+
+    async def fresh() -> None:
+        assert await env.submit(a)  # the agent re-submitted first, accepted clear
+
+    _interleave(monkeypatch, fresh)
+    assert await env.step(c["id"]) == []
+    row = await env.row(a["id"])
+    assert row.phase == "submitted"
+    assert "resubmit" not in row.inflight and row.inflight["waiting_on"] == []
+    monkeypatch.undo()
+    assert await env.step(c["id"]) == [f"clearing:{a['id']}"]
+
+
+async def test_submit_after_the_move_is_refused(env):
+    # the other order: the pass moved first, a later submit no longer changes the row
+    c, (a0, a1, a2) = await env.hive()
+    await env.step(c["id"])
+    assert await env.submit(a0)
+    assert await env.step(c["id"]) == [f"moving:{a0['id']}"]
+    row = await env.row(a0["id"])
     async with env.pool.connection() as conn:
-        got = await handoff.handoff_sessions(conn)
-    assert c["id"] in got and parked["id"] not in got
-    d = Dispatcher(env.pool, env.settings)
-    try:
-        await d._drain_leadership()
-    finally:
-        await d.aclose()
-    assert (await env.row(a["id"])).phase == "notified"
-    assert await env.rows("SELECT id FROM agent_handoffs WHERE agent_id = %s", (b["id"],)) == []
+        assert not await handoffs.submit(conn, row.id, HANDOFF, {"waiting_on": []}, None)
+    assert (await env.row(a0["id"])).phase == "moving"
+
+
+async def test_ex_leader_mid_turn_not_cleared_after_quiet_cap(env):
+    # the cap drops the session-quiet requirement, never the ex-leader's own turn boundary
+    c, (a0, a1, a2) = await _discussing(env, quiet_ago=700, since_ago=601)
+    await env.busy(a0["id"])
+    for _ in range(2):
+        assert await env.step(c["id"]) == []
+    assert await env.commands(a0["id"]) == []
+    assert (await env.row(a0["id"])).phase == "discussing"
+    await env.idle_for(a0["id"], 1)
+    assert await env.step(c["id"]) == [f"clearing:{a0['id']}"]
+
+
+# ---------------------------------------------------------------- idle nudge (spec 5.2)
+
+
+async def nudges(env, agent_id) -> list[dict]:
+    return await env.messages(agent_id, "handoff_nudge")
+
+
+async def test_idle_l2_nudged_once(env):
+    c, a = await env.solo(used=STRONG)
+    assert await env.step(c["id"]) == [f"pressuring:{a['id']}"]
+    for _ in range(3):
+        await env.step(c["id"])
+    (msg,) = await nudges(env, a["id"])
+    assert (msg["lane"], msg["status"], msg["text"]) == (
+        "regular",
+        "queued",
+        handoff_texts.nudge_text(2),
+    )
+    row = await env.row(a["id"])
+    assert row.nudged_level == 2 and row.phase == "pressuring"
+    assert await env.commands(a["id"]) == []  # a nudge is a message, never a command
+
+
+async def test_busy_agent_not_nudged(env):
+    c, a = await env.solo(used=STRONG)
+    await env.busy(a["id"])
+    for _ in range(3):
+        await env.step(c["id"])
+    assert await nudges(env, a["id"]) == []  # the wrapper pressures a busy agent
+    await env.idle_for(a["id"], 5)
+    await env.step(c["id"])
+    assert len(await nudges(env, a["id"])) == 1
+
+
+async def test_background_task_running_not_nudged(env):
+    c, a = await env.solo(used=STRONG)
+    env.inflight(a, background_tasks=[TASK])
+    for _ in range(3):
+        await env.step(c["id"])
+    assert await nudges(env, a["id"]) == []  # its task wakes it when it reports
+    env.inflight(a, background_tasks=[])
+    await env.step(c["id"])
+    assert len(await nudges(env, a["id"])) == 1
+
+
+async def test_l3_nudged_again_once(env):
+    c, a = await env.solo(used=STRONG)
+    for _ in range(2):
+        await env.step(c["id"])
+    assert len(await nudges(env, a["id"])) == 1
+    await env.gauge(a["id"], CRITICAL)
+    for _ in range(4):
+        await env.step(c["id"])
+    got = await nudges(env, a["id"])
+    assert [m["text"] for m in got] == [handoff_texts.nudge_text(2), handoff_texts.nudge_text(3)]
+    assert (await env.row(a["id"])).nudged_level == 3
+
+
+async def test_nudge_inventory_timeout_skips_only_the_nudge(env):
+    c, a = await env.solo(used=STRONG)
+    assert await env.step(c["id"]) == [f"pressuring:{a['id']}"]
+
+    async def slow(session_id, url, wsid):
+        raise TimeoutError
+
+    async with env.pool.connection() as conn:
+        await handoff.handoff_pass(conn, c["id"], env.policy, env.settings, slow)
+    assert await nudges(env, a["id"]) == []
+    await env.gauge(a["id"], LOW)
+    async with env.pool.connection() as conn:
+        out = await handoff.handoff_pass(conn, c["id"], env.policy, env.settings, slow)
+    assert out == [f"done:{a['id']}:compacted"]  # the pass itself still ran
+
+
+# ---------------------------------------------------------------- successor package, resume
+
+
+async def _attachment_names(env, message_id) -> list[str]:
+    async with env.pool.connection() as conn:
+        return [a.name for a in await queue.message_attachments(conn, message_id)]
+
+
+async def test_solo_return_carries_package_and_sets_resume_pending(env):
+    c, a = await env.solo()
+    ret = await env.to_returning(c, a)
+    row = await env.row(a["id"])
+    assert ret["text"].startswith("Resume now: 1. call orchestrator_me")
+    assert "continue with: open the draft PR" in ret["text"]
+    assert "Doing: wiring the cooperative handoff into the dispatcher" in ret["text"]
+    assert "orchestrator_task_get" not in ret["text"].split("\n", 1)[0]  # no taskboard configured
+    assert "claimed tasks unavailable" in ret["text"].lower()  # degraded, never missing
+    assert await _attachment_names(env, ret["id"]) == [f"handoff-{row.id}.md"]
+    await env.push()
+    policy = env.policy_of(a)
+    assert policy["resume_pending"] is True
+    assert policy["resume_text"].startswith("Resume now: 1. call orchestrator_me")
+    assert "open the draft PR" in policy["resume_text"]
+
+
+async def test_resume_pending_cleared_after_return_turn(env):
+    c, a = await env.solo()
+    ret = await env.to_returning(c, a)
+    # the return was delivered and its turn is running: the row (and the resume check) stay
+    await env.run(
+        "UPDATE messages SET status = 'sent', turn_id = 't-ret' WHERE id = %s", (ret["id"],)
+    )
+    await env.busy(a["id"])
+    await env.run(
+        "UPDATE agent_status SET current_turn_id = 't-ret' WHERE agent_id = %s", (a["id"],)
+    )
+    assert await env.step(c["id"]) == []
+    assert (await env.row(a["id"])).phase == "returning"
+    await env.push()
+    assert env.policy_of(a)["resume_pending"] is True
+    # the turn ended: the row closes and the next policy no longer asks for the resume check
+    await env.idle_for(a["id"], 1)
+    assert await env.step(c["id"]) == [f"done:{a['id']}"]
+    await env.push()
+    assert env.policy_of(a)["resume_pending"] is False
+    assert env.policy_of(a)["resume_text"] == ""
+
+
+async def test_solo_shutdown_rejected_text_returns_package_with_inventory(env):
+    env.settings = env.settings.model_copy(update={"handoff_min_chars": 300})
+    c, a = await env.solo(LOW)
+    await _shutdown(env, c["id"], a["id"], "[thumbs-up]")
+    assert await env.step(c["id"]) == [f"shutdown_handed:{a['id']}"]
+    await _next_pod(env, a["id"])
+    assert await env.step(c["id"]) == [f"clearing:{a['id']}"]
+    (cmd,) = await env.commands(a["id"])
+    await env.finish_command(cmd["id"], "done", {"response": {"id": "c1"}})
+    await env.cleared(c["id"], a["id"])
+    assert await env.step(c["id"]) == [f"returning:{a['id']}"]
+    (ret,) = await env.messages(a["id"], "handoff_return")
+    assert "the shutdown handoff text was rejected (too_short" in ret["text"].lower()
+    assert "[thumbs-up]" not in ret["text"]
+    assert ret["text"].startswith("Resume now:")
+
+
+async def test_shutdown_leader_rejected_text_sent_to_successor_as_package(env):
+    env.settings = env.settings.model_copy(update={"handoff_min_chars": 300})
+    c, (a0, a1, a2) = await env.hive(used=LOW)
+    await env.gauge(a2["id"], 60000)
+    await env.run("UPDATE agent_status SET stopping_since = now() WHERE agent_id = %s", (a0["id"],))
+    await insert_event(env.pool, c["id"], a0["id"], type="shutdown_started", data={})
+    await env.lpass(c["id"])
+    assert await _deliver(env) == []
+    await _shutdown_handoff(env, c["id"], a0["id"], "[thumbs-up]")
+    assert await env.step(c["id"]) == [f"shutdown_handed:{a0['id']}"]
+    assert await _deliver(env) == [c["id"]]
+    (notice,) = await env.messages(a1["id"], "handover")
+    assert "the shutdown handoff text was rejected (too_short" in notice["text"].lower()
+    assert "[thumbs-up]" not in notice["text"]
+
+
+async def test_shutdown_leader_rejected_text_after_notice_sent_as_package(env):
+    env.settings = env.settings.model_copy(update={"handoff_min_chars": 300})
+    c, (a0, a1, a2) = await env.hive(used=LOW)
+    await env.gauge(a2["id"], 60000)
+    await env.run("UPDATE agent_status SET stopping_since = now() WHERE agent_id = %s", (a0["id"],))
+    await env.run("UPDATE agents SET ready = false WHERE id = %s", (a0["id"],))
+    await _leader_lost(env, c["id"])
+    await env.run(
+        "UPDATE agent_status SET stopping_since = now() - interval '1 hour' WHERE agent_id = %s",
+        (a0["id"],),
+    )
+    assert await _deliver(env) == [c["id"]]
+    await env.run("UPDATE agent_status SET stopping_since = now() WHERE agent_id = %s", (a0["id"],))
+    await _shutdown_handoff(env, c["id"], a0["id"], "[thumbs-up]")
+    assert await env.step(c["id"]) == [
+        f"shutdown_handed:{a0['id']}",
+        f"handoff_sent:{a1['id']}",
+    ]
+    texts = [m["text"] for m in await env.messages(a1["id"])]
+    assert "the shutdown handoff text was rejected (too_short" in texts[1].lower()
+    assert "[thumbs-up]" not in texts[1]
+
+
+# ---------------------------------------------------------------- compaction steering (spec 5.8)
+
+STEER_TASKS = [
+    {"id": "T-437", "title": "steer", "status": "doing",
+     "todo": [{"text": "write the texts", "status": "open"}]},
+]  # fmt: skip
+
+
+async def test_compact_instructions_present_while_cycle_open(env):
+    env.tasks = STEER_TASKS
+    c, a = await env.solo()
+    assert await env.step(c["id"]) == [f"pressuring:{a['id']}"]
+    await env.push()
+    policy = env.policy_of(a)
+    assert policy["compact_instructions"].startswith("Preserve verbatim: open requests")
+    assert "T-437" in policy["compact_instructions"]
+    assert "open: write the texts" in policy["compact_instructions"]
+    assert "T-437" in policy["reinject_text"]
+
+
+async def test_no_steering_without_cycle(env):
+    env.tasks = STEER_TASKS
+    c, a = await env.solo(used=LOW)
+    assert await env.step(c["id"]) == []
+    assert env.state.steering == {}  # no taskboard call for a session without a cycle
+    await env.push()
+    assert env.policy_of(a) is None
+
+
+async def test_reinject_reminder_once_after_compaction_then_empty(env):
+    env.tasks = STEER_TASKS
+    c, a = await env.solo()
+    await env.step(c["id"])
+    assert await env.submit(a)
+    await env.push()
+    assert "wiring the cooperative handoff" in env.policy_of(a)["reinject_text"]
+    await insert_event(env.pool, c["id"], a["id"], type="compacted", data={"trigger": "auto"})
+    await env.gauge(a["id"], LOW)
+    assert await env.step(c["id"]) == [f"done:{a['id']}:compacted"]
+    await env.push()
+    policy = env.policy_of(a)
+    assert policy["compact_instructions"] == ""  # the cycle is closed
+    assert "wiring the cooperative handoff" in policy["reinject_text"]  # the one reminder
+    assert "T-437" in policy["reinject_text"]
+    await env.push()
+    assert env.policy_of(a)["reinject_text"] == ""  # discarded after one push
+    await env.push()
+    assert env.policy_of(a)["reinject_text"] == ""

@@ -8,7 +8,7 @@ import uuid
 from factories import insert_agent, insert_session, set_agent_status
 
 from agents_orchestrator.db import eligibility, leadership, queue, sessions
-from agents_orchestrator.dispatcher import hive
+from agents_orchestrator.dispatcher import handoff
 
 
 def test_no_limit_is_the_only_spelling_of_the_literal() -> None:
@@ -30,8 +30,7 @@ def test_call_sites_embed_the_shared_fragments() -> None:
     assert eligibility.HANDOVER_TRIGGER in leadership._CANDIDATES
     assert eligibility.ELIGIBLE in leadership._SUCCESSOR
     assert eligibility.SUCCESSOR_ORDER in leadership._SUCCESSOR
-    assert eligibility.SUCCESSOR_ORDER in hive._CANDIDATES
-    assert eligibility.ELIGIBLE in hive._CANDIDATES
+    assert eligibility.ELIGIBLE in handoff._TARGET
     assert eligibility.HANDOVER_TRIGGER in queue._HANDOVER_PENDING
     assert eligibility.ELIGIBLE in queue._HANDOVER_PENDING
 
@@ -39,7 +38,6 @@ def test_call_sites_embed_the_shared_fragments() -> None:
 def test_rollout_and_headroom_in_both_picks() -> None:
     assert eligibility.ROLLOUT_PENDING in eligibility.SUCCESSOR_ORDER
     assert eligibility.HEADROOM in leadership._SUCCESSOR
-    assert eligibility.HEADROOM in hive._CANDIDATES
     assert not hasattr(eligibility, "THRESHOLD")
 
 

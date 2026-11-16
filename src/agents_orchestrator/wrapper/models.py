@@ -244,3 +244,56 @@ def describe_exception(exc: BaseException, context: str = "") -> str:
     if text:
         return text
     return f"{type(exc).__name__} ({context})" if context else type(exc).__name__
+
+
+class PressureView(_Model):
+    """GET /v1/sessions/{id}/pressure: the policy version in force and the live evaluation."""
+
+    version: int | None = None
+    level: int = 0
+    context: Context | None = None
+    handoff_state: Literal["none", "submitted", "blocked", "accepted"] = "none"
+    deliveries: int = 0
+    stop_blocks_this_turn: int = 0
+
+
+class Inflight(_Model):
+    """GET /v1/sessions/{id}/inflight: work that makes a clear or a move unsafe.
+
+    Blocking: running subagents, background tasks, worktrees that are dirty or ahead of their
+    upstream, pod-local scratch files, and a git scan that timed out (`unknown`). Session crons
+    are carried to the successor and never block."""
+
+    subagents: int = 0
+    background_tasks: list[dict[str, Any]] = Field(default_factory=list)
+    crons: list[dict[str, Any]] = Field(default_factory=list)
+    worktrees: list[dict[str, Any]] = Field(default_factory=list)
+    scratch: list[dict[str, Any]] = Field(default_factory=list)
+    unknown: bool = False
+
+    def blocking_items(self) -> list[str]:
+        return blocking_items(self.model_dump(mode="json"))
+
+
+def _label(item: dict[str, Any], *keys: str) -> str:
+    return " ".join(str(item[k]) for k in keys if item.get(k)) or "?"
+
+
+def blocking_items(inflight: dict[str, Any] | None) -> list[str]:
+    """Short names of what blocks, from an Inflight dump or a stored `agent_handoffs.inflight`."""
+    if not inflight:
+        return []
+    out: list[str] = []
+    if inflight.get("subagents"):
+        out.append(f"{inflight['subagents']} subagent(s)")
+    for t in inflight.get("background_tasks") or []:
+        out.append("background task " + _label(t, "id", "description"))
+    for w in inflight.get("worktrees") or []:
+        if w.get("dirty") or w.get("ahead"):
+            what = "dirty" if w.get("dirty") else "unpushed"
+            out.append(f"worktree {_label(w, 'path')} {what}")
+    for s in inflight.get("scratch") or []:
+        out.append("scratch " + _label(s, "path"))
+    if inflight.get("unknown"):
+        out.append("in-flight scan incomplete")
+    return out

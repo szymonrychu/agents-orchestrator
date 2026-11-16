@@ -1,114 +1,185 @@
-"""Strong-limit handoff state machine (T-256, plan 5.5): `handoff_pass`, dispatcher process only.
+"""Cooperative context-pressure handoff state machine (T-423, spec 5.10): `handoff_pass`,
+dispatcher process only.
 
 Per session, under the session's claim advisory lock (the one `leadership_pass` takes; skipped
 when another dispatcher holds it) and in one transaction, every open `agent_handoffs` row of the
 session moves at most along its phases and every limit subject (hive leader or solo agent, see
-`hive._subject_rows`) at the strong limit without an open row gets one:
+`hive._subject_rows`) at L1 or above without an open row gets one. Every transition is a
+status-guarded update; an enqueue happens in a savepoint with the guarded update it belongs to,
+so a lost race leaves no orphan message, command or request.
 
-1. strong, no open row, agent live and not stopping: row `notified` with `deadline_at = now() +
-   notify`, plus a `handoff_notice` message (regular lane, targeted). The push loop repeats the
-   text as the keyed note `handoff_notice` while the row is notified or extended.
-2. notified/extended: past `deadline_at`, or (notified only) once the notice's turn ended and the
-   agent stayed idle with no background subagent for `idle_proceed_seconds`: a `handoff_request`
-   message (regular lane: it never interrupts a running turn), phase `requested`.
-3. requested: once the request's turn ended (or the message failed, or its turn record was lost
-   and the agent sat idle), its `final_text` is the handoff (blank: `handoff_empty` is logged),
-   phase `handed`. A hive leader with an eligible successor then gets a forced `handover`
-   request (reason `limit`; the leadership pass applies it and moves the row on); anyone else
-   (solo, or a hive whose leader is the only live agent, L3) follows the solo order: a `clear`
-   command, phase `clearing`. A `limit` request rejected while the agent still leads falls back
-   to the solo order; one rejected after leadership moved closes the row `not_leader`.
-4. discussing (hive order, `discuss_since` set): once the session was quiet for `quiet_seconds`
-   (no live agent busy, waiting or with background work, nothing queued or in flight, and
-   neither the quiet clock, an agent's free/wait mark nor a turn end moved since) or
-   `quiet_cap_seconds` after `discuss_since` whatever the activity: `clear`, phase `clearing`.
-5. clearing: a `session_cleared` event after the clear command closes the row `done cleared`
-   (hive order) or, in the solo order (`discuss_since` NULL), queues the `handoff_return`
-   message in the same transaction as the move to `returning`, so it is sent exactly once;
-   `returning` closes `done returned` once that message is sent. A clear refused with
-   `subagents_running` (the wrapper's 409, or its `command_failed` event) is queued again once
-   the agent has no background subagent, and an accepted clear with no `session_cleared` after
-   the agent sat idle `clear_timeout_seconds` (a wrapper restart lost it) is queued again,
-   MAX_CLEAR_ATTEMPTS times in all; any other failure, or the last attempt, closes the row
-   `cancelled clear_failed` (solo order: after queuing the return anyway, worded for a kept
-   context); no new row opens for that agent for `clear_failed_block_seconds` unless its
-   context is cleared or compacted first.
+Nothing here forces anything on an agent because of its context (decision 716): no deadline, no
+request for a handoff, no capture of reply text, no interrupt. A `clear` command or a `limit`
+leadership request is queued only after the agent submitted a handoff that was accepted with
+its in-flight gate clear (`api/agent.handoff_submit`), and only while the gate is still clear.
+The pressure itself is the policy the push loop puts to the wrapper (`hive._push_pressure`).
 
-Cancellation before `handed`: the session is closing (`session_closing`), the agent is gone or
-stopping (`shutdown`), it is no longer a limit subject (`not_leader`), its context was
-compacted (a `compacted` event since the row opened, or the gauge fell below the weak level:
-`compacted`) or cleared by anyone (a `session_cleared` event since the row opened: `cleared`).
-Its queued notice or request message is cancelled with it (status-guarded). After `handed`
-only a closing session or a gone agent cancels a row. Every enqueue happens in a savepoint
-with the guarded row update, so a lost update leaves no orphan message or command.
+1. No open row, level >= L1, agent live and not stopping: `open_pressure` (`pressuring`, the
+   profile detected). While a row is open before `moving` its level follows the gauge up
+   (`set_level`).
+2. pressuring: nothing is forced. An idle agent (no turn, no background subagent, no running
+   background task in its inventory) gets one regular-lane nudge per level >= 2 (`nudge`). At
+   L3 (pressuring; or submitted with `handoff_max_rejects` rejects or a blocked gate) the row is
+   escalated once per cycle (`escalate`): a session message to every live superleader session
+   and, through `notify_escalations`, a taskboard notice to the user. Neither clears, moves or
+   interrupts anything.
+3. submitted: the wrapper's in-flight inventory is fetched on every pass before the lock
+   (bounded by `handoff_inflight_timeout_seconds`; on a timeout the session is skipped this
+   pass) and judged by `handoff_gate.evaluate` with the submit's `abandon` list.
+   - blocked: the inventory is stored with its `waiting_on` (the policy says `blocked`).
+   - blocked before, clear now: stored with `resubmit` (the policy tells the agent to submit
+     again, results may change the handoff); the row stays until the agent re-submits.
+   - accepted clear (the route stored a non-blocking inventory) and still clear: a hive leader
+     with an eligible successor gets a `handover` request with reason `limit` (to the submit's
+     `to` when that agent is eligible), `moving`; a solo agent, or a hive leader that is the only
+     live agent, gets a `clear` once it is idle (no current turn, no background subagent, no
+     running background task in the inventory), `clearing`.
+4. moving: the leadership pass's `handoffs.on_leader_moved` carries the row to `discussing`. A
+   `limit` request rejected while the agent still leads falls back to the solo order (a clear
+   once idle and the gate clear); one rejected after leadership moved closes the row
+   `cancelled not_leader`.
+5. discussing (hive ex-leader): cleared only when the session is quiet (`_QUIET`;
+   `quiet_cap_seconds` after the move only drops the session-quiet requirement, never the
+   ex-leader's own: past the cap it is still cleared only once idle) AND its own in-flight gate
+   is clear; until then it keeps its policy (`accepted`, with `waiting_on`). Only the row's own
+   `limit` move or the leader's voluntary handover reaches this phase: a rollout or user move
+   closes the row before it (`handoffs.on_leader_moved`), so it is never cleared. An ex-leader
+   that leads again (a 2-agent hive's ping-pong, a user pick, a leader_lost move) has its row
+   closed `cancelled leader_again` in that move, so it is never cleared while it leads; so does
+   a `clearing` row whose clear is still queued (the clear cancelled with it).
+6. clearing: a `session_cleared` after the clear closes the row `done cleared` (hive order) or,
+   solo, queues the accepted handoff back (`handoff_texts.return_text`) with the move to
+   `returning`, exactly once. A clear refused with `subagents_running` or lost (no
+   `session_cleared` after `clear_timeout_seconds` idle) is queued again, MAX_CLEAR_ATTEMPTS in
+   all, and only while no background subagent runs and the gate is clear; an ex-leader leading
+   again is never re-cleared (its row closes `cancelled leader_again`); any other failure, or
+   the last attempt, closes the row `cancelled clear_failed` (solo: the handoff still comes back,
+   worded for a kept context); no new row opens for that agent for
+   `clear_failed_block_seconds` unless its context is cleared or compacted first.
+7. returning: closed `done returned` once the message is sent and its turn ended; until then the
+   policy carries `resume_pending` and the resume text (`hive._pressure_targets`).
 
-The claim (`db/queue.py`) guards the same rules at dispatch time, since the message drain can
-run before the next pass: a notice or request whose row moved on, or whose agent's context was
-reset since the row opened, is cancelled instead of sent; and while a row is `requested`, or
-`clearing`/`returning` in the solo order, every other message for that agent waits, so the
-handoff, the clear and the return run with nothing in between (a priority message is not held
-while `requested`, see `queue._handoff_gate`).
+A transition of a `submitted` row is guarded on the `submitted_at` the pass read
+(`seen_submit`): a resubmit committed since, blocked or accepted, makes it lose, so neither a
+move nor a clear follows a refused submit, and a fresh accepted submit is never overwritten.
 
-`shutdown` rows belong to the shutdown path and are left alone here.
+A `moving` row (its `limit` request not applied yet) closes on a context reset like the
+phases before it, its queued request rejected `superseded` with it (row-116 class).
+
+Before `moving`: a `compacted` event since the row opened, or the gauge back below L1, closes
+the row `done compacted` (a voluntary row is not judged by the gauge); a `session_cleared` by
+anyone `cancelled cleared`; no longer a limit subject `cancelled not_leader`; a voluntary row
+still `pressuring` below L1 (a submit that never landed) `cancelled stale`. In any phase: the
+agent gone or stopping `cancelled shutdown`, the session closing `cancelled session_closing`.
+Queued nudges and the queued return of a closed row are cancelled with it.
+
+The claim (`db/queue._handoff_gate`) holds the agent's other messages only while a solo row is
+`clearing`/`returning` (and while a shutdown row waits for its clear), so the clear and the
+return run with nothing in between.
+
+`shutdown` rows belong to the pod-shutdown path (plan 5.8) and keep their flow.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import psycopg
 from psycopg.rows import dict_row
-from psycopg.types.json import Jsonb
 
+from agents_orchestrator import (
+    handoff_gate,
+    handoff_package,
+    handoff_profile,
+    handoff_quality,
+    handoff_texts,
+    taskboard_client,
+)
+from agents_orchestrator.api.scope import scope_of
 from agents_orchestrator.db import handoffs, leadership, queue
-from agents_orchestrator.db.eligibility import BACKGROUND_BUSY, HOLDS_SESSION, background_busy
-from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE
+from agents_orchestrator.db import sessions as sessions_repo
+from agents_orchestrator.db.eligibility import (
+    BACKGROUND_BUSY,
+    ELIGIBLE,
+    HOLDS_SESSION,
+    background_busy,
+)
+from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE, StoredAttachment
 from agents_orchestrator.db.sessions import quiet_clock_sql
 from agents_orchestrator.dispatcher import hive
-from agents_orchestrator.handoff_texts import (
-    STRONG_REQUEST,
-    shutdown_successor,
-    strong_notice,
-    strong_return,
-)
+from agents_orchestrator.handoff_texts import shutdown_successor
 from agents_orchestrator.settings import Settings
+from agents_orchestrator.wrapper.client import WrapperClient
+from agents_orchestrator.wrapper.models import (
+    Inflight,
+    WrapperError,
+    WrapperTimeout,
+    WrapperUnreachable,
+)
 
 log = logging.getLogger(__name__)
 
-LIMIT_REASON = "limit"
+LIMIT_REASON = handoffs.LIMIT_REASON
 MAX_CLEAR_ATTEMPTS = 5
-BEFORE_HANDED = ("notified", "extended", "requested")
-# A context reset before `handed` cancels the row, with this close reason. `compacting` alone is
-# not one: a PreCompact whose compaction then fails leaves the context as it was.
+BEFORE_MOVING = ("pressuring", "submitted")
+# How long the claimed tasks cached for the compaction steering stay current.
+STEERING_REFRESH_SECONDS = 60.0
+# A context reset before `moving` closes the row, with this reason. `compacting` alone is not
+# one: a PreCompact whose compaction then fails leaves the context as it was.
 RESET_EVENTS = {"compacted": "compacted", "session_cleared": "cleared"}
+# The phases whose pass reads the wrapper's in-flight inventory.
+GATED = ("submitted", "moving", "discussing", "clearing")
+
+# (session id, agent url, wrapper session id) -> the inventory, None when the wrapper did not
+# answer usably (the gate then blocks); raises TimeoutError when it did not answer in time.
+InflightFetch = Callable[[uuid.UUID, str, str], Awaitable[Inflight | None]]
 
 
 @dataclass(frozen=True)
 class HandoffPolicy:
-    notify_seconds: int
-    extension_seconds: int
-    idle_proceed_seconds: int
     quiet_seconds: int
     quiet_cap_seconds: int
     clear_timeout_seconds: int
     clear_failed_block_seconds: int
+    inflight_timeout_seconds: int
 
     @classmethod
     def from_settings(cls, settings: Settings) -> HandoffPolicy:
         return cls(
-            settings.handover_notify_seconds,
-            settings.handover_extension_seconds,
-            settings.handover_idle_proceed_seconds,
             settings.handover_quiet_seconds,
             settings.handover_quiet_cap_seconds,
             settings.handover_clear_timeout_seconds,
             settings.handover_clear_failed_block_seconds,
+            settings.handoff_inflight_timeout_seconds,
         )
+
+
+def inflight_fetcher(
+    client_factory: Callable[[uuid.UUID, str], WrapperClient], timeout: float
+) -> InflightFetch:
+    """The wrapper's `GET /inflight` through `client_factory` (the dispatcher's clients)."""
+
+    async def fetch(session_id: uuid.UUID, url: str, wrapper_session_id: str) -> Inflight | None:
+        client = client_factory(session_id, url)
+        try:
+            async with asyncio.timeout(timeout):
+                return await client.get_inflight(wrapper_session_id, timeout=timeout)
+        except WrapperTimeout as exc:
+            raise TimeoutError from exc
+        except (WrapperError, WrapperUnreachable):
+            return None
+
+    return fetch
 
 
 # A stopping mark older than this is not looked at for a shutdown handoff: the routine reports
@@ -132,7 +203,7 @@ _STOPPING = (
 # Sessions a pass can do something for: active unparked hive sessions with a leader, active
 # unparked solo sessions with a live agent, any session with an open row (closing ones included,
 # to cancel it) and any session with a shutdown handoff to store. A parked session (T-224) opens
-# no new handoff: its queue is held, so a notice could never be delivered.
+# no new handoff: its queue is held.
 _SESSIONS = f"""
 SELECT c.id FROM sessions c WHERE c.desired = 'active' AND c.parked_at IS NULL AND (
     ({leadership.HIVE} AND EXISTS (SELECT 1 FROM session_leaders l WHERE l.session_id = c.id))
@@ -154,20 +225,47 @@ WHERE a.session_id = %(session)s AND {_STOPPING}
 ORDER BY s.stopping_since, a.id
 """
 
-# What the pass needs to know about one agent. `idle_long`: idle, no turn, no background
-# subagent, free for `idle` seconds. `compact_stale`: a compaction event newer than the last
-# `agent_status` write; the ingester writes that row on every event, so in production this
-# rarely holds and no reopen on the pre-compaction gauge relies on the wrapper's null `context`
-# event right after `compacted` (the gauge becomes unknown, which never reaches strong).
-# `clear_failed`: the agent's last row closed `clear_failed` less than `block` seconds ago and
-# its context was neither cleared nor compacted since (a new cycle would likely fail the same
-# way; after the block a later strong crossing starts one).
+# The open, gated rows of a session whose agent can be asked for its inventory.
+_GATED_AGENTS = """
+SELECT h.agent_id, a.url, a.wrapper_session_id FROM agent_handoffs h
+JOIN agents a ON a.id = h.agent_id
+WHERE h.session_id = %s AND h.phase = ANY(%s) AND h.trigger <> 'shutdown'
+  AND a.gone_at IS NULL
+"""
+
+# Pressuring rows of a session that may get an idle nudge this pass (level 2 or more, not nudged
+# at it yet, the agent idle by its status): their agent's inventory is read for background
+# tasks. A failed or slow read only skips the nudge, never the pass.
+_NUDGE_AGENTS = f"""
+SELECT h.agent_id, a.url, a.wrapper_session_id FROM agent_handoffs h
+JOIN agents a ON a.id = h.agent_id
+LEFT JOIN agent_status s ON s.agent_id = a.id
+WHERE h.session_id = %s AND h.phase = 'pressuring' AND h.trigger <> 'shutdown'
+  AND h.level >= 2 AND h.nudged_level < h.level AND a.gone_at IS NULL
+  AND coalesce(s.state = 'idle' AND s.current_turn_id IS NULL AND NOT {BACKGROUND_BUSY}, false)
+"""
+
+# The live superleader sessions (`spec.session_messaging`) besides `%s`, the escalated
+# session. A superleader's scope is every project (`api/scope.scope_of`), so each covers it.
+_SUPERLEADERS = """
+SELECT c.id FROM sessions c
+WHERE c.desired = 'active' AND c.id <> %s
+  AND COALESCE((c.spec->>'session_messaging')::boolean, false)
+  AND EXISTS (SELECT 1 FROM agents a WHERE a.session_id = c.id AND a.gone_at IS NULL)
+ORDER BY c.id
+"""
+ESCALATION_LABEL = "context-pressure"
+
+# What the pass needs to know about one agent. `idle`: idle, no turn, no background subagent.
+# `compact_stale`: a compaction event newer than the last `agent_status` write (the gauge still
+# shows the pre-compaction context). `clear_failed`: the agent's last row closed `clear_failed`
+# less than `block` seconds ago and its context was neither cleared nor compacted since.
 _FACTS = f"""
 SELECT a.id, a.gone_at IS NOT NULL AS gone, {HOLDS_SESSION} AS live,
     s.stopping_since IS NOT NULL AS stopping, s.stopping_since,
     coalesce({BACKGROUND_BUSY}, false) AS background_busy,
-    coalesce(s.state = 'idle' AND s.current_turn_id IS NULL AND NOT {BACKGROUND_BUSY}
-        AND s.free_since <= now() - make_interval(secs => %(idle)s), false) AS idle_long,
+    coalesce(s.state = 'idle' AND s.current_turn_id IS NULL AND NOT {BACKGROUND_BUSY}, false)
+        AS idle,
     EXISTS (SELECT 1 FROM events e WHERE e.agent_id = a.id AND e.type = 'compacted'
         AND e.created_at > coalesce(s.updated_at, '-infinity')) AS compact_stale,
     coalesce((SELECT h.close_reason = 'clear_failed'
@@ -226,6 +324,13 @@ SELECT k.status, k.result,
 FROM commands k LEFT JOIN agent_status s ON s.agent_id = k.agent_id WHERE k.id = %(command)s
 """
 
+# The submit's preferred successor when it is eligible (aliases as in `leadership._SUCCESSOR`).
+_TARGET = f"""
+SELECT a.id FROM agents a LEFT JOIN agent_status s ON s.agent_id = a.id
+JOIN sessions c ON c.id = a.session_id
+WHERE a.session_id = %(session)s AND a.pod_name = %(pod)s AND a.id <> %(other)s AND {ELIGIBLE}
+"""
+
 
 def _hive_order(row: handoffs.Handoff) -> bool:
     """The row's handoff went to a successor, so nothing comes back after the clear: a leader's
@@ -233,6 +338,17 @@ def _hive_order(row: handoffs.Handoff) -> bool:
     return row.discuss_since is not None or (
         row.trigger == "shutdown" and row.successor_agent_id is not None
     )
+
+
+def _snapshot(
+    inflight: Inflight | None, gate: handoff_gate.GateResult, *, resubmit: bool = False
+) -> dict[str, Any]:
+    """The inventory as the submit route stores it, plus the gate's verdict."""
+    snap = inflight.model_dump(mode="json") if inflight is not None else {"unknown": True}
+    snap = {**snap, "waiting_on": gate.waiting_on, "abandoned": gate.abandoned}
+    if resubmit:
+        snap["resubmit"] = True
+    return snap
 
 
 class _Lost(Exception):
@@ -243,6 +359,37 @@ async def _one(conn: psycopg.AsyncConnection, query: str, params: Any) -> dict |
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(query, params)
         return await cur.fetchone()
+
+
+async def _all(conn: psycopg.AsyncConnection, query: str, params: Any) -> list[dict]:
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(query, params)
+        return await cur.fetchall()
+
+
+def _reasons(row: handoffs.Handoff) -> list[str]:
+    """The row's reject reasons, each once, in first-seen order."""
+    return list(dict.fromkeys(str(r) for r in row.reject_reasons or []))
+
+
+async def escalation_text(
+    conn: psycopg.AsyncConnection,
+    row: handoffs.Handoff,
+    level: int,
+    pct: float | None,
+    waiting_on: list[str],
+) -> str:
+    """`handoff_texts.escalation_text` for the row: session slug, agent pod, level, context %,
+    reject reasons and what it waits on."""
+    got = await _one(
+        conn,
+        "SELECT c.slug, a.pod_name FROM agents a JOIN sessions c ON c.id = a.session_id"
+        " WHERE a.id = %s",
+        (row.agent_id,),
+    )
+    slug = got["slug"] if got else str(row.session_id)
+    pod = (got["pod_name"] if got else None) or str(row.agent_id)
+    return handoff_texts.escalation_text(slug, pod, level, pct, _reasons(row), waiting_on)
 
 
 async def handoff_sessions(conn: psycopg.AsyncConnection) -> list[uuid.UUID]:
@@ -263,11 +410,22 @@ class _Pass:
         session: dict,
         policy: HandoffPolicy,
         settings: Settings,
+        inflight: dict[uuid.UUID, Inflight | None],
+        nudge_inflight: dict[uuid.UUID, Inflight | None] | None = None,
+        taskboard: handoff_package.TaskboardFetch | None = None,
+        chat: handoff_package.ChatFetch | None = None,
+        steering: dict[uuid.UUID, hive.Steering] | None = None,
     ) -> None:
+        self.steering = steering
+        self.taskboard = taskboard or handoff_package.default_taskboard(settings)
+        self.chat = chat or handoff_package.default_chat(settings)
         self.conn = conn
         self.session = session
         self.policy = policy
         self.settings = settings
+        self.inflight = inflight
+        # the inventories read for idle-nudge candidates (absent: not read or not in time)
+        self.nudge_inflight = nudge_inflight or {}
         self.out: list[str] = []
 
     @property
@@ -280,7 +438,6 @@ class _Pass:
             _FACTS,
             {
                 "agent": agent_id,
-                "idle": self.policy.idle_proceed_seconds,
                 "block": self.policy.clear_failed_block_seconds,
                 "context_reset": list(RESET_EVENTS),
             },
@@ -291,20 +448,47 @@ class _Pass:
             "stopping": False,
             "stopping_since": None,
             "background_busy": False,
-            "idle_long": False,
+            "idle": False,
             "compact_stale": False,
             "clear_failed": False,
         }
 
-    async def message(self, text: str, agent_id: uuid.UUID, notice: str | None) -> int:
+    async def message(
+        self,
+        text: str,
+        agent_id: uuid.UUID,
+        notice: str | None,
+        attachments: list[StoredAttachment] | None = None,
+    ) -> int:
         return await queue.enqueue_message(
-            self.conn, self.session["id"], text, agent_id, lane="regular", notice=notice
+            self.conn,
+            self.session["id"],
+            text,
+            agent_id,
+            lane="regular",
+            notice=notice,
+            attachments=attachments or [],
+        )
+
+    async def package(self, row: handoffs.Handoff) -> handoff_package.Package:
+        """The successor package of the row (the claimed tasks and room notes asked through
+        the pass's fetchers, each bounded by its client's own timeout)."""
+        session = await sessions_repo.get(self.conn, self.session["id"])
+        assert session is not None
+        return await handoff_package.build_package(
+            self.conn, row, session, self.settings, taskboard=self.taskboard, chat=self.chat
+        )
+
+    def shutdown_rejected(self, row: handoffs.Handoff) -> bool:
+        """A pod-shutdown text that fails the quality check is not delivered as the handoff."""
+        return row.handoff is None and bool(
+            handoff_quality.check_text(row.handoff_text or "", self.settings)
         )
 
     async def guarded(self, work: Callable[[], Awaitable[bool]]) -> bool:
         """Run `work` (enqueues plus the guarded row update it returns the outcome of) in a
-        savepoint: when the update loses, the enqueued message or command is rolled back with
-        it, so a lost race never leaves an orphan behind."""
+        savepoint: when the update loses, the enqueued message, command or request is rolled
+        back with it, so a lost race never leaves an orphan behind."""
         try:
             async with self.conn.transaction():
                 if not await work():
@@ -320,78 +504,100 @@ class _Pass:
             self.settings.handover_max_wait_seconds,
         )
 
-    async def _has_successor(self, agent_id: uuid.UUID) -> bool:
-        policy = self._pass_policy()
-        return (
-            await leadership.successor(self.conn, self.session["id"], agent_id, policy) is not None
+    def gate(self, row: handoffs.Handoff) -> handoff_gate.GateResult:
+        """The in-flight gate of the row's agent as of this pass (no answer: blocked)."""
+        abandon = [
+            SimpleNamespace(item=str(a.get("item") or ""), why=str(a.get("why") or ""))
+            for a in (row.handoff or {}).get("abandon") or []
+        ]
+        return handoff_gate.evaluate(self.inflight.get(row.agent_id), abandon)
+
+    def background_tasks(self, agent_id: uuid.UUID) -> bool:
+        got = self.inflight.get(agent_id)
+        return got is None or bool(got.background_tasks)
+
+    @staticmethod
+    def seen_submit(row: handoffs.Handoff) -> datetime | None:
+        """The submit a `submitted` row's transition is judged on: the update loses when the
+        agent submitted again since this pass read the row (the route takes no lock)."""
+        return row.submitted_at if row.phase == "submitted" else None
+
+    async def store_inflight(self, row: handoffs.Handoff, snap: dict[str, Any]) -> bool:
+        """Keep the latest inventory on the row (only when it changed: `progress_at` moves)."""
+        if snap == (row.inflight or {}):
+            return False
+        return await handoffs.advance(
+            self.conn,
+            row.id,
+            [row.phase],
+            row.phase,
+            seen_submit=self.seen_submit(row),
+            inflight=snap,
         )
 
     # ------------------------------------------------------------ 1. open
 
     async def open(self, subject: dict) -> None:
         agent_id = subject["agent_id"]
-        if hive._row_level(subject, self.settings)[1] != "strong":
+        level = hive.LEVEL_NUMBER[hive._row_level(subject, self.settings)[1]]
+        if level < 1:
             return
         facts = await self.facts(agent_id)
         if not facts["live"] or facts["stopping"] or facts["compact_stale"]:
             return
         if facts["clear_failed"]:
             return  # its last cycle could not clear: none again until a clear or compaction
+        tenure = float(subject["tenure"] or 0)  # 0: the tenure start is unknown
+        profile = await handoff_profile.detect(
+            self.conn,
+            {"id": self.session["id"], "spec": subject["spec"]},
+            agent_id,
+            datetime.now(UTC) - timedelta(seconds=tenure) if tenure > 0 else None,
+        )
         try:
             async with self.conn.transaction():
-                row = await handoffs.insert(
+                row = await handoffs.open_pressure(
                     self.conn,
                     self.session["id"],
                     agent_id,
-                    "strong",
-                    "notified",
-                    deadline_at=await self._in(self.policy.notify_seconds),
+                    level,
+                    profile,
+                    used_tokens=subject["context_used_tokens"],
                 )
         except psycopg.errors.UniqueViolation:
-            return  # a row opened since the pass read them (the route's solo voluntary handoff)
-        # the wording is decided now: a hive whose leader is the only live agent follows the
-        # solo order (L3), so it is not promised a successor
-        moves = not subject["solo"] and await self._has_successor(agent_id)
-        text = strong_notice(
-            math.ceil(self.policy.notify_seconds / 60),
-            math.ceil(self.policy.extension_seconds / 60),
-            hive=moves,
-        )
-        await self.message(text, agent_id, "handoff_notice")
-        log.info("handoff %s: agent %s notified (strong limit)", row.id, agent_id)
-        self.out.append(f"notified:{agent_id}")
+            return  # a row opened since the pass read them (the submit route's voluntary row)
+        log.info("handoff %s: agent %s under pressure (level %s)", row.id, agent_id, level)
+        self.out.append(f"pressuring:{agent_id}")
+        await self.refresh_steering(row)
+        await self.escalate(row, level, subject)  # opened right at L3
 
-    async def _in(self, seconds: int) -> Any:
-        row = await _one(self.conn, "SELECT now() + make_interval(secs => %s) AS t", (seconds,))
+    async def _now(self) -> Any:
+        row = await _one(self.conn, "SELECT now() AS t", ())
         assert row is not None
         return row["t"]
 
-    # ------------------------------------------------------------ cancellation
+    # ------------------------------------------------------------ closing
 
-    async def cancel(self, row: handoffs.Handoff, reason: str, *, messages: bool = True) -> None:
-        """Close the row `cancelled`; with `messages`, its queued messages are cancelled too, and
-        a clear of it still queued (so a dying pod is not cleared after its row closed)."""
-        if not await handoffs.close(self.conn, row.id, "cancelled", reason):
+    async def close(
+        self, row: handoffs.Handoff, phase: str, reason: str, *, messages: bool = True
+    ) -> None:
+        """Close the row; with `messages`, its queued nudges and return are cancelled too, and a
+        clear of it still queued (so a dying pod is not cleared after its row closed)."""
+        if not await handoffs.close(self.conn, row.id, phase, reason):  # type: ignore[arg-type]
             return
-        for message_id in await self._queued_messages(row) if messages else []:
+        for message_id in await handoffs.queued_messages(self.conn, row.id) if messages else []:
             await queue.cancel_message(self.conn, message_id)
         if messages and row.clear_command_id is not None:
-            await self.conn.execute(
-                "UPDATE commands SET status = 'cancelled', finished_at = now()"
-                " WHERE id = %s AND status = 'queued'",
-                (row.clear_command_id,),
-            )
-        log.info("handoff %s: agent %s cancelled (%s)", row.id, row.agent_id, reason)
-        self.out.append(f"cancelled:{row.agent_id}:{reason}")
+            await queue.cancel_queued_command(self.conn, row.clear_command_id)
+        log.info("handoff %s: agent %s %s (%s)", row.id, row.agent_id, phase, reason)
+        self.out.append(f"{phase}:{row.agent_id}:{reason}")
 
-    async def _queued_messages(
-        self, row: handoffs.Handoff, *, notices_only: bool = False
-    ) -> list[int]:
-        return await handoffs.queued_messages(self.conn, row.id, notices_only=notices_only)
+    async def cancel(self, row: handoffs.Handoff, reason: str, *, messages: bool = True) -> None:
+        await self.close(row, "cancelled", reason, messages=messages)
 
-    def _below_weak(self, subject: dict) -> bool:
-        """The gauge alone is below the weak level: infinite tenure and no rollout, so `none`
-        means below weak by context (with no start context, by the percent fallback)."""
+    def _below_l1(self, subject: dict) -> bool:
+        """The gauge alone is below L1: infinite tenure and no rollout, so `none` means below L1
+        by context (with no start context, by the percent fallback)."""
         used, pct = subject["context_used_tokens"], subject["context_pct"]
         if used is None and pct is None:
             return False  # no reading: nothing to judge by
@@ -403,7 +609,7 @@ class _Pass:
 
     async def _reset_since(self, row: handoffs.Handoff) -> str | None:
         """The close reason of a context reset (compaction or a /clear from anyone) since the
-        row opened, if any. Before `handed` the row has no clear of its own."""
+        row opened, if any. Before `moving` the row has no clear of its own."""
         found = await _one(
             self.conn,
             "SELECT e.type FROM events e, agent_handoffs h WHERE h.id = %s"
@@ -413,173 +619,279 @@ class _Pass:
         )
         return RESET_EVENTS[found["type"]] if found is not None else None
 
-    async def cancel_reason(
+    async def close_reason(
         self, row: handoffs.Handoff, subject: dict | None, facts: dict
-    ) -> str | None:
+    ) -> tuple[str, str] | None:
+        """(phase, reason) to close the row with, or None."""
         if not self.active:
-            return "session_closing"
-        if facts["gone"]:
-            return "shutdown"
-        if self._sigterm_since(row, facts):
-            return "shutdown"
-        if row.phase not in BEFORE_HANDED:
+            return "cancelled", "session_closing"
+        if facts["gone"] or self._sigterm_since(row, facts):
+            return "cancelled", "shutdown"
+        if row.phase == "moving":
+            # its limit request still waits (or was rejected): a reset first makes the handoff
+            # stale, so the row closes and the request is rejected `superseded` with it
+            reset = await self._reset_since(row)
+            if reset is None:
+                return None
+            return ("done", "compacted") if reset == "compacted" else ("cancelled", reset)
+        if row.phase not in BEFORE_MOVING:
             return None
         if subject is None:
-            return "not_leader"
+            return "cancelled", "not_leader"
         reset = await self._reset_since(row)
+        if reset == "compacted":
+            return "done", "compacted"
         if reset is not None:
-            return reset
-        if self._below_weak(subject):
-            return "compacted"
+            return "cancelled", reset
+        level = hive.LEVEL_NUMBER[hive._row_level(subject, self.settings)[1]]
+        if row.trigger != "voluntary" and self._below_l1(subject):
+            return "done", "compacted"
+        if row.trigger == "voluntary" and row.phase == "pressuring" and level < 1:
+            return "cancelled", "stale"  # a voluntary submit that never landed
         return None
 
     @staticmethod
     def _sigterm_since(row: handoffs.Handoff, facts: dict) -> bool:
-        """The agent's pod got SIGTERM while the row is open: before `handed` any stopping mark,
+        """The agent's pod got SIGTERM while the row is open: before `moving` any stopping mark,
         later one set after the row opened (a shutdown row's own pod set its mark before it).
         A `returning` row stays: its return waits for the next pod (the claim takes nothing
         for a stopping agent) and goes out there."""
         if not facts["stopping"]:
             return False
-        if row.phase in BEFORE_HANDED:
+        if row.phase in BEFORE_MOVING:
             return True
         return row.phase != "returning" and facts["stopping_since"] >= row.created_at
 
     # ------------------------------------------------------------ the phases
 
+    async def refresh_steering(self, row: handoffs.Handoff) -> None:
+        """Cache the session's claimed task ids and todo for the pressure policy's compaction
+        steering (its push loop never asks the taskboard). Read at most once per
+        STEERING_REFRESH_SECONDS; an unreadable taskboard keeps the previous cache."""
+        if self.steering is None or row.phase not in ("pressuring", "submitted"):
+            return
+        sid = self.session["id"]
+        cached = self.steering.get(sid)
+        if cached is not None and time.monotonic() - cached.at < STEERING_REFRESH_SECONDS:
+            return
+        session = await sessions_repo.get(self.conn, sid)
+        if session is None:
+            return
+        try:
+            tasks = await self.taskboard(session)
+        except Exception as exc:
+            log.info("steering tasks of session %s unavailable: %s", sid, type(exc).__name__)
+            return
+        self.steering[sid] = hive.Steering(
+            tuple(t["id"] for t in tasks),
+            tuple(
+                f"{x.get('status')}: {x.get('text')}" for t in tasks for x in t.get("todo") or []
+            ),
+            time.monotonic(),
+        )
+
     async def step(self, row: handoffs.Handoff, subject: dict | None) -> None:
+        await self.refresh_steering(row)
         facts = await self.facts(row.agent_id)
         if row.trigger == "shutdown" and row.phase == "handed":
             await self.shutdown_handed(row, facts)
             return
-        reason = await self.cancel_reason(row, subject, facts)
-        if reason is not None:
-            await self.cancel(row, reason)
+        closing = await self.close_reason(row, subject, facts)
+        if closing is not None:
+            await self.close(row, *closing)
             return
-        if row.phase in ("notified", "extended"):
-            await self.countdown(row, facts)
-        elif row.phase == "requested":
-            await self.requested(row, facts)
-        elif row.phase == "handed":
-            await self.handed(row)
+        if subject is not None and row.phase in BEFORE_MOVING:
+            level = hive.LEVEL_NUMBER[hive._row_level(subject, self.settings)[1]]
+            if level > row.level and await handoffs.set_level(
+                self.conn, row.id, level, subject["context_used_tokens"]
+            ):
+                self.out.append(f"level:{row.agent_id}:{level}")
+            level = max(level, row.level)
+            await self.escalate(row, level, subject)
+            await self.nudge(row, level, facts)
+        if row.phase == "submitted":
+            await self.submitted(row, subject, facts)
+        elif row.phase == "moving":
+            await self.moving(row, facts)
         elif row.phase == "discussing":
-            await self.discussing(row)
+            await self.discussing(row, facts)
         elif row.phase == "clearing":
             await self.clearing(row, facts)
         elif row.phase == "returning":
             await self.returning(row)
 
-    async def countdown(self, row: handoffs.Handoff, facts: dict) -> None:
-        due = await _one(
-            self.conn,
-            "SELECT deadline_at <= now() AS due FROM agent_handoffs WHERE id = %s",
-            (row.id,),
-        )
-        proceed = bool(due and due["due"])
-        if not proceed and row.phase == "notified" and facts["idle_long"]:
-            proceed = await self._notice_turn_ended(row)
-        if not proceed:
-            return
+    # ------------------------------------------------------------ escalation and nudge
 
-        async def request() -> bool:
-            message_id = await self.message(STRONG_REQUEST, row.agent_id, "handoff_request")
-            return await handoffs.advance(
-                self.conn, row.id, [row.phase], "requested", request_message_id=message_id
+    async def escalate(self, row: handoffs.Handoff, level: int, subject: dict) -> None:
+        """Decision 717: an agent at L3 that does not hand off is reported once per cycle
+        (`mark_escalated`) to every live superleader session (a regular-lane session message,
+        notice `handoff_escalation`) and, through `notify_escalations`, to the user on the
+        taskboard. Due at L3 while `pressuring`, or `submitted` with `handoff_max_rejects`
+        rejects or the gate blocked. Nothing is cleared, moved or interrupted: at the compact
+        point the steered auto-compaction is the fallback."""
+        if row.escalated_at is not None or level < 3 or row.trigger == "shutdown":
+            return
+        waiting_on = list((row.inflight or {}).get("waiting_on") or [])
+        if row.phase == "submitted":
+            gate = self.gate(row)
+            if gate.clear and row.rejects < self.settings.handoff_max_rejects:
+                return  # accepted and still clear: the move or the clear follows
+            waiting_on = gate.waiting_on
+        elif row.phase != "pressuring":
+            return
+        text = await escalation_text(self.conn, row, level, subject["context_pct"], waiting_on)
+        targets = await _all(self.conn, _SUPERLEADERS, (self.session["id"],))
+
+        async def send() -> bool:
+            ids = []
+            for target in targets:
+                try:
+                    ids.append(
+                        await queue.enqueue_message(
+                            self.conn,
+                            target["id"],
+                            text,
+                            lane="regular",
+                            notice="handoff_escalation",
+                        )
+                    )
+                except queue.SessionBeingDeleted:
+                    continue  # that superleader is going away; the others and the user remain
+            return await handoffs.mark_escalated(self.conn, row.id, ids)
+
+        if await self.guarded(send):
+            log.info(
+                "handoff %s: agent %s escalated to %d superleader session(s)",
+                row.id,
+                row.agent_id,
+                len(targets),
             )
 
-        if not await self.guarded(request):
+    async def nudge(self, row: handoffs.Handoff, level: int, facts: dict) -> None:
+        """One regular-lane message per level >= 2 (`mark_nudged`) to an idle agent whose row is
+        `pressuring`: no turn, no background subagent and no running background task in the
+        inventory read this pass. A busy agent gets its pressure from the wrapper; an idle
+        context does not grow, so one message per level is all."""
+        if row.phase != "pressuring" or level < 2 or row.nudged_level >= level:
             return
-        # a notice still queued (the agent was busy all countdown) would arrive right before
-        # the request: drop it
-        for message_id in await self._queued_messages(row, notices_only=True):
-            await queue.cancel_message(self.conn, message_id)
-        log.info("handoff %s: agent %s asked for its handoff", row.id, row.agent_id)
-        self.out.append(f"requested:{row.agent_id}")
-
-    async def _notice_turn_ended(self, row: handoffs.Handoff) -> bool:
-        found = await _one(
-            self.conn,
-            "SELECT t.completed_at IS NOT NULL AS ended FROM messages m"
-            " JOIN agent_handoffs h ON h.id = %s"
-            " LEFT JOIN turns t ON t.turn_id = m.turn_id"
-            " WHERE m.target_agent_id = h.agent_id AND m.notice = 'handoff_notice'"
-            " AND m.created_at >= h.created_at AND m.status = 'sent'"
-            " ORDER BY m.id LIMIT 1",
-            (row.id,),
-        )
-        return bool(found and found["ended"])
-
-    async def requested(self, row: handoffs.Handoff, facts: dict) -> None:
-        msg = await _one(
-            self.conn,
-            "SELECT m.status, t.completed_at IS NOT NULL AS ended, t.final_text,"
-            " s.current_turn_id IS NOT DISTINCT FROM m.turn_id AS current"
-            " FROM messages m LEFT JOIN turns t ON t.turn_id = m.turn_id"
-            " LEFT JOIN agent_status s ON s.agent_id = m.target_agent_id WHERE m.id = %s",
-            (row.request_message_id,),
-        )
-        if msg is None or msg["status"] in ("failed", "cancelled"):
-            text = None  # the request never ran: carry on without a handoff
-        elif msg["status"] == "sent" and (
-            msg["ended"] or (facts["idle_long"] and not msg["current"])
-        ):
-            text = msg["final_text"]
-        else:
+        if row.trigger == "shutdown" or not facts["idle"]:
             return
-        if text is not None and not text.strip():
-            text = None
-        if not await handoffs.advance(
-            self.conn, row.id, ["requested"], "handed", handoff_text=text
-        ):
-            return
-        if text is None:
-            log.info("handoff_empty: handoff %s of agent %s has no text", row.id, row.agent_id)
-        self.out.append(f"handed:{row.agent_id}")
-        await self.handed(row)
+        inventory = self.nudge_inflight.get(row.agent_id)
+        if inventory is None or inventory.background_tasks:
+            return  # not read, unusable or background work running: no nudge this pass
 
-    async def handed(self, row: handoffs.Handoff) -> None:
+        async def send() -> bool:
+            await self.message(handoff_texts.nudge_text(level), row.agent_id, "handoff_nudge")
+            return await handoffs.mark_nudged(self.conn, row.id, level)
+
+        if await self.guarded(send):
+            log.info("handoff %s: idle agent %s nudged at level %s", row.id, row.agent_id, level)
+
+    async def submitted(self, row: handoffs.Handoff, subject: dict | None, facts: dict) -> None:
+        gate = self.gate(row)
+        before = row.inflight or {}
+        if not gate.clear:
+            if await self.store_inflight(row, _snapshot(self.inflight.get(row.agent_id), gate)):
+                self.out.append(f"blocked:{row.agent_id}")
+            return
+        if before.get("waiting_on") or before.get("resubmit"):
+            # blocked at the submit or since: the agent re-submits (results may change it)
+            snap = _snapshot(self.inflight.get(row.agent_id), gate, resubmit=True)
+            if await self.store_inflight(row, snap):
+                self.out.append(f"resubmit:{row.agent_id}")
+            return
+        # accepted with the gate clear, and still clear
+        if subject is not None and not subject["solo"]:
+            leader = await leadership.current_leader(self.conn, self.session["id"])
+            if (
+                leader is not None
+                and leader.agent_id == row.agent_id
+                and await self.request_move(row, leader)
+            ):
+                return
+        await self.clear_when_idle(row, ["submitted"], facts)
+
+    async def request_move(self, row: handoffs.Handoff, leader: leadership.Leader) -> bool:
+        """A `limit` handover to the submit's `to` (when eligible) or the pass's pick; False
+        when no successor exists (the leader is the only live agent: the solo order)."""
         session_id = self.session["id"]
-        leader = await leadership.current_leader(self.conn, session_id)
-        if row.trigger != "strong" or leader is None:
-            await self.clear(row, ["handed"])  # solo order
-            return
-        request = await _one(
+        to = (row.handoff or {}).get("to")
+        target = None
+        if to:
+            got = await _one(
+                self.conn, _TARGET, {"session": session_id, "pod": to, "other": row.agent_id}
+            )
+            target = got["id"] if got is not None else None
+        if target is None and (
+            await leadership.successor(self.conn, session_id, row.agent_id, self._pass_policy())
+            is None
+        ):
+            return False
+
+        async def move() -> bool:
+            request_id = await leadership.insert_request(
+                self.conn, session_id, "handover", row.agent_id, target, LIMIT_REASON, leader.epoch
+            )
+            return await handoffs.advance(
+                self.conn,
+                row.id,
+                ["submitted"],
+                "moving",
+                seen_submit=self.seen_submit(row),
+                leadership_request_id=request_id,
+            )
+
+        if await self.guarded(move):
+            log.info("handoff %s: limit handover requested for agent %s", row.id, row.agent_id)
+            self.out.append(f"moving:{row.agent_id}")
+        return True
+
+    async def clear_when_idle(
+        self, row: handoffs.Handoff, from_phases: list[str], facts: dict
+    ) -> None:
+        """The solo order: a clear once the agent is idle (no turn, no background subagent, no
+        background task in this pass's inventory). The caller checked the gate."""
+        if facts["idle"] and not self.background_tasks(row.agent_id):
+            await self.clear(row, from_phases)
+
+    async def moving(self, row: handoffs.Handoff, facts: dict) -> None:
+        got = await _one(
             self.conn,
-            "SELECT r.status FROM leadership_requests r, agent_handoffs h WHERE h.id = %s"
-            " AND r.session_id = h.session_id AND r.kind = 'handover' AND r.reason = %s"
-            " AND r.from_agent_id = h.agent_id AND r.created_at >= h.created_at"
-            " ORDER BY r.id DESC LIMIT 1",
-            (row.id, LIMIT_REASON),
+            "SELECT status FROM leadership_requests WHERE id = %s",
+            (row.leadership_request_id,),
         )
-        status = request["status"] if request is not None else None
-        if status in ("queued", "applied"):
+        if got is not None and got["status"] == "queued":
             return  # the leadership pass decides; its apply moves the row on
-        if leader.agent_id != row.agent_id:
+        leader = await leadership.current_leader(self.conn, self.session["id"])
+        if leader is None or leader.agent_id != row.agent_id:
             await self.cancel(row, "not_leader")  # moved by something else
             return
-        if status == "rejected":
-            await self.clear(row, ["handed"])  # still the leader: the solo order
+        # rejected while still leading: the solo order, gate permitting
+        gate = self.gate(row)
+        if not gate.clear:
+            await self.store_inflight(row, _snapshot(self.inflight.get(row.agent_id), gate))
             return
-        if not await self._has_successor(row.agent_id):
-            await self.clear(row, ["handed"])  # L3: the only live agent
-            return
-        await leadership.insert_request(
-            self.conn, session_id, "handover", row.agent_id, None, LIMIT_REASON, leader.epoch
-        )
-        log.info("handoff %s: limit handover requested for agent %s", row.id, row.agent_id)
-        self.out.append(f"handover_requested:{row.agent_id}")
+        await self.clear_when_idle(row, ["moving"], facts)
 
     async def clear(self, row: handoffs.Handoff, from_phases: list[str]) -> None:
         async def start() -> bool:
             command_id = await queue.enqueue_command(self.conn, row.agent_id, "clear")
-            return await handoffs.start_clear(self.conn, row.id, from_phases, command_id)
+            return await handoffs.start_clear(
+                self.conn, row.id, from_phases, command_id, seen_submit=self.seen_submit(row)
+            )
 
         if await self.guarded(start):
             log.info("handoff %s: clearing agent %s", row.id, row.agent_id)
             label = "clear_retry" if from_phases == ["clearing"] else "clearing"
             self.out.append(f"{label}:{row.agent_id}")
 
-    async def discussing(self, row: handoffs.Handoff) -> None:
+    async def discussing(self, row: handoffs.Handoff, facts: dict) -> None:
+        gate = self.gate(row)
+        snap = _snapshot(self.inflight.get(row.agent_id), gate)
+        if not gate.clear:
+            if await self.store_inflight(row, snap):
+                self.out.append(f"blocked:{row.agent_id}")
+            return
         got = await _one(
             self.conn,
             _QUIET,
@@ -589,8 +901,13 @@ class _Pass:
                 "cap": self.policy.quiet_cap_seconds,
             },
         )
-        if got is not None and (got["quiet"] or got["capped"]):
+        # the cap drops only the session-quiet requirement: the ex-leader's own turn boundary
+        # always holds, with no cap (no clear lands on a working agent, decision 716)
+        idle = facts["idle"] and not self.background_tasks(row.agent_id)
+        if got is not None and (got["quiet"] or got["capped"]) and idle:
             await self.clear(row, ["discussing"])
+        elif (row.inflight or {}).get("waiting_on"):
+            await self.store_inflight(row, snap)  # its blockers are done: the policy says so
 
     async def clearing(self, row: handoffs.Handoff, facts: dict) -> None:
         state = await _one(
@@ -617,7 +934,11 @@ class _Pass:
             await self.drop_lost_clear(row.clear_command_id)
         retryable = "subagents_running" in error or error == "clear_timeout"
         if retryable and row.clear_attempts < MAX_CLEAR_ATTEMPTS:
-            if not facts["background_busy"]:
+            if await self.leads_again(row):
+                await self.cancel(row, "leader_again")  # its retry would wipe the lead's context
+                return
+            gate_clear = row.trigger == "shutdown" or self.gate(row).clear
+            if not facts["background_busy"] and gate_clear:
                 await self.clear(row, ["clearing"])
             return
         log.info("handoff %s: clear of agent %s failed (%s)", row.id, row.agent_id, error)
@@ -625,21 +946,26 @@ class _Pass:
             await self.send_return(row, cleared=False)  # the solo agent still gets its handoff
         await self.cancel(row, "clear_failed", messages=False)
 
+    async def leads_again(self, row: handoffs.Handoff) -> bool:
+        """An ex-leader's discussion row whose agent leads again (a user pick, a leader_lost
+        move or its successor's own limit move): its context now holds the lead's handoff."""
+        if row.discuss_since is None or row.trigger == "shutdown":
+            return False
+        leader = await leadership.current_leader(self.conn, self.session["id"])
+        return leader is not None and leader.agent_id == row.agent_id
+
     async def drop_lost_clear(self, command_id: int | None) -> None:
         """Finish a clear that timed out, still queued or running, as `failed` with the retryable
         `clear_timeout` (never `cancelled`, which reads as non-retryable on a later pass),
         status-guarded, so it never runs after its retry or the return; a late completion of a
         running one then changes nothing."""
-        await self.conn.execute(
-            "UPDATE commands SET finished_at = now(), result = %s, status = 'failed'"
-            " WHERE id = %s AND status IN ('queued', 'running')",
-            (Jsonb({"error": "clear_timeout"}), command_id),
-        )
+        if command_id is not None:
+            await queue.fail_unfinished_command(self.conn, command_id, {"error": "clear_timeout"})
 
     async def cleared(self, row: handoffs.Handoff) -> None:
         if _hive_order(row):  # nothing comes back
             if await handoffs.advance(
-                self.conn, row.id, ["clearing"], "clearing", cleared_at=await self._in(0)
+                self.conn, row.id, ["clearing"], "clearing", cleared_at=await self._now()
             ) and await handoffs.close(self.conn, row.id, "done", "cleared"):
                 log.info("handoff %s: agent %s cleared", row.id, row.agent_id)
                 self.out.append(f"done:{row.agent_id}")
@@ -647,22 +973,36 @@ class _Pass:
         if await self.send_return(row, cleared=True):
             self.out.append(f"returning:{row.agent_id}")
 
-    async def send_return(self, row: handoffs.Handoff, *, cleared: bool) -> bool:
-        """Queue the handoff back to the agent with the move to `returning` (exactly once).
+    async def return_message(
+        self, row: handoffs.Handoff, *, cleared: bool
+    ) -> tuple[str, list[StoredAttachment] | None]:
+        """What goes back to a solo agent: after its clear the successor package of the accepted
+        handoff (resume list first, the inventory attached as `handoff-<row id>.md`); after a
+        failed clear (the context was kept) the handoff for reference; a pod-shutdown text as
+        today, unless it failed the quality check (then the package, with the reasons)."""
+        if self.shutdown_rejected(row) or (row.handoff is not None and cleared):
+            package = await self.package(row)
+            attachment = StoredAttachment(
+                f"handoff-{row.id}.md", "text/markdown", package.attachment.encode()
+            )
+            return package.text, [attachment]
+        if row.handoff is not None:
+            return handoff_texts.return_text(row.handoff, cleared=cleared), None
+        text = row.handoff_text or ""
+        why = "pod shutdown" if row.trigger == "shutdown" else "handoff"
+        if not cleared:
+            return f"Handoff from your current context ({why}, the clear failed):\n\n{text}", None
+        return f"Handoff from your previous context ({why}, cleared just now):\n\n{text}", None
 
-        `cleared` False: the clear failed and the agent kept its context (other wording)."""
+    async def send_return(self, row: handoffs.Handoff, *, cleared: bool) -> bool:
+        """Queue the handoff back to the agent with the move to `returning` (exactly once)."""
 
         async def send() -> bool:
-            message_id = await self.message(
-                strong_return(
-                    row.handoff_text, cleared=cleared, shutdown=row.trigger == "shutdown"
-                ),
-                row.agent_id,
-                "handoff_return",
-            )
+            text, attachments = await self.return_message(row, cleared=cleared)
+            message_id = await self.message(text, row.agent_id, "handoff_return", attachments)
             fields: dict[str, Any] = {"return_message_id": message_id}
             if cleared:
-                fields["cleared_at"] = await self._in(0)
+                fields["cleared_at"] = await self._now()
                 # a leader that kept the lead (L3, rejected limit, shutdown) starts afresh
                 await leadership.reset_start_context(self.conn, self.session["id"], row.agent_id)
             return await handoffs.advance(self.conn, row.id, ["clearing"], "returning", **fields)
@@ -772,11 +1112,18 @@ class _Pass:
         assert row.handoff_text is not None
 
         async def send() -> bool:
-            await self.message(
-                shutdown_successor(pod["pod_name"] if pod else str(row.agent_id), row.handoff_text),
-                leader.agent_id,
-                None,
-            )
+            if self.shutdown_rejected(row):
+                package = await self.package(row)
+                text = package.text
+                attachments = [
+                    StoredAttachment(
+                        f"handoff-{row.id}.md", "text/markdown", package.attachment.encode()
+                    )
+                ]
+            else:
+                pod_name = pod["pod_name"] if pod else str(row.agent_id)
+                text, attachments = shutdown_successor(pod_name, row.handoff_text), None
+            await self.message(text, leader.agent_id, None, attachments)
             return await handoffs.mark_delivered(self.conn, row.id)
 
         if await self.guarded(send):
@@ -784,12 +1131,24 @@ class _Pass:
             self.out.append(f"handoff_sent:{leader.agent_id}")
         return False
 
+    async def return_turn_running(self, row: handoffs.Handoff, msg: dict | None) -> bool:
+        """The turn the return message started has not ended: the agent's current turn is it."""
+        turn = await _one(
+            self.conn,
+            "SELECT m.turn_id IS NOT NULL AND s.current_turn_id = m.turn_id AS running"
+            " FROM messages m LEFT JOIN agent_status s ON s.agent_id = %s WHERE m.id = %s",
+            (row.agent_id, row.return_message_id),
+        )
+        return bool(turn and turn["running"])
+
     async def returning(self, row: handoffs.Handoff) -> None:
         msg = await _one(
             self.conn, "SELECT status FROM messages WHERE id = %s", (row.return_message_id,)
         )
         status = msg["status"] if msg is not None else "failed"
         if status == "sent":
+            if await self.return_turn_running(row, msg):
+                return  # the policy keeps asking for the resume check until the turn ends
             if await handoffs.close(self.conn, row.id, "done", "returned"):
                 log.info("handoff %s: agent %s got its handoff back", row.id, row.agent_id)
                 self.out.append(f"done:{row.agent_id}")
@@ -797,15 +1156,58 @@ class _Pass:
             await self.cancel(row, "return_failed")
 
 
+async def _inventories(
+    conn: psycopg.AsyncConnection, session_id: uuid.UUID, fetch: InflightFetch | None
+) -> tuple[dict[uuid.UUID, Inflight | None], dict[uuid.UUID, Inflight | None]]:
+    """The in-flight inventory of every agent with a gated row, and of every idle-nudge
+    candidate, read with no transaction or lock held across the wrapper calls. Raises
+    TimeoutError when a gated one did not answer in time; a nudge candidate that did not is
+    left out (no nudge this pass)."""
+    async with conn.transaction():
+        gated = await _all(conn, _GATED_AGENTS, (session_id, list(GATED)))
+        nudges = await _all(conn, _NUDGE_AGENTS, (session_id,))
+    out: dict[uuid.UUID, Inflight | None] = {a["agent_id"]: None for a in gated}
+    if fetch is None:
+        return out, {}
+
+    def usable(agents: list[dict]) -> list[dict]:
+        return [a for a in agents if a["url"] and a["wrapper_session_id"]]
+
+    async def nudge_read(a: dict) -> tuple[uuid.UUID, Inflight | None] | None:
+        try:
+            return a["agent_id"], await fetch(session_id, a["url"], a["wrapper_session_id"])
+        except TimeoutError:
+            return None
+
+    asked = usable(gated)
+    got, nudged = await asyncio.gather(
+        asyncio.gather(*(fetch(session_id, a["url"], a["wrapper_session_id"]) for a in asked)),
+        asyncio.gather(*(nudge_read(a) for a in usable(nudges))),
+    )
+    out.update({a["agent_id"]: inv for a, inv in zip(asked, got, strict=True)})
+    return out, dict(n for n in nudged if n is not None)
+
+
 async def handoff_pass(
     conn: psycopg.AsyncConnection,
     session_id: uuid.UUID,
     policy: HandoffPolicy,
     settings: Settings,
+    fetch: InflightFetch | None = None,
+    taskboard: handoff_package.TaskboardFetch | None = None,
+    chat: handoff_package.ChatFetch | None = None,
+    steering: dict[uuid.UUID, hive.Steering] | None = None,
 ) -> list[str]:
     """Move the session's handoff rows on and open new ones; the transitions made, in order
-    (e.g. `notified:<agent>`, `cancelled:<agent>:<reason>`). Empty when another dispatcher holds
-    the session's claim lock (the pass is skipped) or nothing changed."""
+    (e.g. `pressuring:<agent>`, `done:<agent>:compacted`). Empty when another dispatcher holds
+    the session's claim lock, an in-flight inventory did not arrive in time (the session is
+    skipped this pass) or nothing changed. `fetch` reads the wrapper's in-flight inventory;
+    without it every gate reads as blocked."""
+    try:
+        inflight, nudge_inflight = await _inventories(conn, session_id, fetch)
+    except TimeoutError:
+        log.info("handoff pass for session %s skipped: in-flight inventory timed out", session_id)
+        return []
     async with conn.transaction():
         lock = await _one(
             conn,
@@ -817,7 +1219,9 @@ async def handoff_pass(
         session = await _one(conn, "SELECT id, desired FROM sessions WHERE id = %s", (session_id,))
         if session is None:
             return []
-        run = _Pass(conn, session, policy, settings)
+        run = _Pass(
+            conn, session, policy, settings, inflight, nudge_inflight, taskboard, chat, steering
+        )
         subjects = await hive._subject_rows(conn, session_id=session_id) if run.active else []
         by_agent = {s["agent_id"]: s for s in subjects}
         touched: set[uuid.UUID] = set()
@@ -837,3 +1241,159 @@ async def handoff_pass(
             if subject["agent_id"] not in touched:
                 await run.open(subject)
         return run.out
+
+
+async def notify_escalations(
+    conn: psycopg.AsyncConnection,
+    settings: Settings,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> list[str]:
+    """The user's side of an escalation (decision 717): for every open escalated row whose
+    notice is not posted yet, a comment on the session's claimed task, or, when it has none, a
+    notice task (`client_key` per row, so a retry is a no-op on the taskboard). Marked
+    `escalation_notified_at` once posted, so a dispatcher restart never posts it twice; a
+    failed post is retried on the next call. No transaction is held across the HTTP calls. A
+    row that closed meanwhile is not notified (the cycle ended). Returns `notified:<agent>`
+    entries."""
+    if not settings.taskboard_available:
+        return []
+    async with conn.transaction():
+        pending = []
+        for row in await handoffs.escalations_to_notify(conn):
+            session = await sessions_repo.get(conn, row.session_id)
+            if session is None:
+                continue
+            pct = await _one(
+                conn,
+                "SELECT context_pct FROM agent_status WHERE agent_id = %s",
+                (row.agent_id,),
+            )
+            text = await escalation_text(
+                conn,
+                row,
+                row.level,
+                pct["context_pct"] if pct else None,
+                list((row.inflight or {}).get("waiting_on") or []),
+            )
+            pod = await _one(conn, "SELECT pod_name FROM agents WHERE id = %s", (row.agent_id,))
+            pending.append((row, session, text, (pod or {}).get("pod_name") or str(row.agent_id)))
+    out: list[str] = []
+    for row, session, text, pod in pending:
+        try:
+            key = await _post_user_notice(
+                settings,
+                session,
+                title=handoff_texts.escalation_title(session.slug, pod),
+                text=text,
+                client_key=f"handoff-escalation-{row.id}",
+                transport=transport,
+            )
+        except taskboard_client.TaskboardUnavailable as exc:
+            log.warning("handoff %s: escalation notice not posted (%s); retrying", row.id, exc)
+            continue
+        if key is None:
+            log.warning("handoff %s: escalation notice not posted; retrying", row.id)
+            continue
+        async with conn.transaction():
+            await handoffs.mark_escalation_notified(conn, row.id)
+        log.info("handoff %s: escalation of agent %s posted (%s)", row.id, row.agent_id, key)
+        out.append(f"notified:{row.agent_id}")
+    return out
+
+
+async def _post_user_notice(
+    settings: Settings,
+    session: sessions_repo.Session,
+    *,
+    title: str,
+    text: str,
+    client_key: str,
+    transport: httpx.AsyncBaseTransport | None,
+) -> str | None:
+    """Tell the user on the taskboard: a comment on the session's claimed task, or, when it has
+    none, a notice task (`client_key` makes a retry a no-op there). Returns the claimed task key
+    or `"notice"`, None when the post failed; raises `TaskboardUnavailable` when the claimed
+    task cannot be looked up."""
+    scope = scope_of(session)
+    key = await taskboard_client.claimed_task(
+        settings, session.id, session.slug, scope, transport=transport
+    )
+    if key is not None:
+        ok = await taskboard_client.add_comment(
+            settings, session.id, session.slug, scope, key, text, transport=transport
+        )
+        return key if ok else None
+    ok = await taskboard_client.create_notice_task(
+        settings,
+        session.id,
+        session.slug,
+        scope,
+        title=title,
+        body=text,
+        client_key=client_key,
+        labels=[ESCALATION_LABEL],
+        transport=transport,
+    )
+    return "notice" if ok else None
+
+
+async def watchdog(
+    conn: psycopg.AsyncConnection,
+    settings: Settings,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> list[str]:
+    """The stuck-row watchdog (spec 5.11): an open row without progress for
+    `handoff_stuck_seconds` (a `discussing` row: since `discuss_since`) gets one WARNING log
+    `handoff_stuck row=<id> session=<slug> phase=<phase> since=<ts>` and one taskboard notice to
+    the user. It only reports: nothing is cleared, moved, closed or touched but the row's
+    `stuck_reported_at` (which is no progress). Without a taskboard the log line alone is the
+    report; a failed post is retried on the next call and logs nothing yet. Returns
+    `stuck:<row id>` entries."""
+    pending = []
+    async with conn.transaction():
+        for row in await handoffs.stuck_rows(conn, settings.handoff_stuck_seconds):
+            session = await sessions_repo.get(conn, row.session_id)
+            if session is None:
+                continue
+            pod = await _one(conn, "SELECT pod_name FROM agents WHERE id = %s", (row.agent_id,))
+            since = row.discuss_since if row.phase == "discussing" else None
+            pending.append(
+                (
+                    row,
+                    session,
+                    (pod or {}).get("pod_name") or str(row.agent_id),
+                    (since or row.progress_at).isoformat(),
+                )
+            )
+    out: list[str] = []
+    for row, session, pod, since in pending:
+        if settings.taskboard_available:
+            try:
+                key = await _post_user_notice(
+                    settings,
+                    session,
+                    title=handoff_texts.stuck_title(session.slug, pod),
+                    text=handoff_texts.stuck_text(session.slug, pod, row.phase, since),
+                    client_key=f"handoff-stuck-{row.id}",
+                    transport=transport,
+                )
+            except taskboard_client.TaskboardUnavailable as exc:
+                log.debug("handoff %s: stuck notice not posted (%s); retrying", row.id, exc)
+                continue
+            if key is None:
+                log.debug("handoff %s: stuck notice not posted; retrying", row.id)
+                continue
+        async with conn.transaction():
+            if not await handoffs.mark_stuck_reported(conn, row.id):
+                continue  # closed or reported meanwhile
+        log.warning(
+            "handoff_stuck row=%s session=%s phase=%s since=%s",
+            row.id,
+            session.slug,
+            row.phase,
+            since,
+        )
+        out.append(f"stuck:{row.id}")
+    return out

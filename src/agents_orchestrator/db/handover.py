@@ -17,6 +17,8 @@ from typing import Any
 import psycopg
 from psycopg.rows import dict_row
 
+from agents_orchestrator import handoff_package as hp
+from agents_orchestrator import handoff_quality
 from agents_orchestrator import handover_transcript as ht
 from agents_orchestrator.api.scope import scope_of
 from agents_orchestrator.db import handoffs, leader_state
@@ -24,6 +26,7 @@ from agents_orchestrator.db import sessions as sessions_repo
 from agents_orchestrator.db.handoffs import SHUTDOWN_TEXT
 from agents_orchestrator.db.queue import StoredAttachment, enqueue_message
 from agents_orchestrator.db.sessions import _sweep_each
+from agents_orchestrator.settings import Settings
 from agents_orchestrator.taskboard_client import OpenDecision
 
 log = logging.getLogger(__name__)
@@ -168,13 +171,21 @@ async def deliver_handover(
     output_chars: int,
     decisions: DecisionsFetcher,
     shutdown_hold_seconds: int,
+    settings: Settings,
+    taskboard: hp.TaskboardFetch | None = None,
+    chat: hp.ChatFetch | None = None,
 ) -> list[uuid.UUID]:
     """Queue one handover notice per pending leader change (epoch above
     `handover_notice_epoch`, a predecessor, session active); returns the sessions served. Two
     changes before one poll get one notice, for the current row. The epoch write is
     status-guarded and shares the transaction of the notice, so two sweepers queue one. A
     stopping predecessor's notice waits for its shutdown handoff, at most
-    `shutdown_hold_seconds` from its stopping mark (`_SHUTDOWN_HOLD`)."""
+    `shutdown_hold_seconds` from its stopping mark (`_SHUTDOWN_HOLD`). The predecessor's own
+    handoff leads the notice as the successor package (`handoff_package`, the claimed tasks and
+    room notes read through `taskboard` and `chat`, by default the settings' upstreams) and its
+    Handoff and Inventory sections join the attached file."""
+    ask_taskboard = taskboard or hp.default_taskboard(settings)
+    ask_chat = chat or hp.default_chat(settings)
     params = {"shutdown_hold": shutdown_hold_seconds}
     fetched = await _fetch_decisions(conn, decisions, params)
 
@@ -202,6 +213,34 @@ async def deliver_handover(
             await leader_state.collect(conn, session_id), decisions=fetched.get(session_id)
         )
         turns = await transcript_rows(conn, row["previous_agent_id"], row["since"])
+        notice = ht.notice_text(header, budget_bytes)
+        # the predecessor's own handoff (graceful handover) leads the notice; marked delivered in
+        # this transaction so a later change never repeats it. Only a row written during the
+        # predecessor's own tenure counts: an older undelivered one is stale. A structured
+        # handoff, or a shutdown text that fails the quality check, goes out as the package.
+        taken = await handoffs.take_row(
+            conn, row["previous_agent_id"], row["agent_id"], row["previous_since"]
+        )
+        package_md = ""
+        if taken is not None and (
+            taken.handoff is not None
+            or (
+                taken.trigger == "shutdown"
+                and handoff_quality.check_text(taken.handoff_text or "", settings)
+            )
+        ):
+            session = await sessions_repo.get(conn, session_id)
+            assert session is not None
+            package = await hp.build_package(
+                conn, taken, session, settings, taskboard=ask_taskboard, chat=ask_chat
+            )
+            notice = f"{package.text}\n\n{notice}"
+            package_md = package.attachment
+        elif taken is not None and taken.handoff_text is not None:
+            notice = (
+                f"Handoff from {header.predecessor_pod} (written by it):\n{taken.handoff_text}"
+                f"\n\n{notice}"
+            )
         body = ht.render_transcript(
             header,
             leader_state.render_state(state),
@@ -209,18 +248,8 @@ async def deliver_handover(
             omitted_turns=turns.omitted_turns,
             budget_bytes=budget_bytes,
             output_chars=output_chars,
+            package_md=package_md,
         ).encode()
-        notice = ht.notice_text(header, budget_bytes)
-        # the predecessor's own handoff (graceful handover) leads the notice; marked delivered in
-        # this transaction so a later change never repeats it. Only a row written during the
-        # predecessor's own tenure counts: an older undelivered one is stale.
-        handoff = await handoffs.take_undelivered(
-            conn, row["previous_agent_id"], row["agent_id"], row["previous_since"]
-        )
-        if handoff is not None:
-            notice = (
-                f"Handoff from {header.predecessor_pod} (written by it):\n{handoff}\n\n{notice}"
-            )
         await enqueue_message(
             conn,
             session_id,

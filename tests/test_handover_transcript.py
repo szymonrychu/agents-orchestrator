@@ -192,3 +192,23 @@ def test_notice_names_the_real_budget():
     assert "(turns capped at 16 KiB)" in ht.notice_text(HEADER)
     assert "(turns capped at 8 KiB)" in ht.notice_text(HEADER, 8192)
     assert "(turns capped at 1024 KiB)" in ht.notice_text(HEADER, 1 << 20)
+
+
+def test_package_sections_join_the_file_within_the_budget():
+    package = "# Handoff\n\nDoing: the thing\n\n# Inventory\n\n- T-9 [active] the task\n"
+    rows = [row(i, "assistant_text", text="w" * 400) for i in range(1, 60)]
+    text = ht.render_transcript(
+        HEADER,
+        STATE,
+        rows,
+        omitted_turns=0,
+        budget_bytes=4096,
+        output_chars=500,
+        package_md=package,
+    )
+    assert len(text.encode()) <= 4096
+    order = ["## Judgment of the previous leader", "# Handoff", "# Inventory", "## Last turns"]
+    positions = [text.index(h) for h in order]
+    assert positions == sorted(positions)
+    assert "earlier history omitted" in text  # the body gave way, never the package
+    assert "Doing: the thing" in text and "T-9" in text

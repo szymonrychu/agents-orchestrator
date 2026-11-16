@@ -62,12 +62,16 @@
       guard:\n  max_stop_continuations: 25\n  max_agent_spawns: 300\n  tool_failure_repeats:\
       \ 3\nshutdown:\n  handoff:\n    enabled: true\n    notice_seconds: 120\n   \
       \ handoff_seconds: 180\n    idle_proceed_seconds: 60\n    notice_prompt: 'This\
-      \ pod is shutting down: in about 2 minutes you will be asked\n      for a handoff,\
-      \ then the agent stops. Finish or park your current step now: commit\n     \
-      \ and push, update your task and todo. There is no extension.'\n    handoff_prompt:\
-      \ 'Write your handoff now as your reply: what you were doing, what\n      is\
-      \ done (commits, PRs), what is next and in which order, open decisions and\n\
-      \      gotchas. Your reply text is the handoff; do not start new work.'\n"
+      \ pod is shutting down. Finish or park your current step now:\n      commit\
+      \ and push, update your task and todo. You will be asked for a handoff\n   \
+      \   next. Persist any scratch file you still need into the shared workdir scratchpad\n\
+      \      (.scratchpad/<name>/); do not leave it under /tmp or anywhere else on\
+      \ the pod.'\n    handoff_prompt: 'Write your handoff now as your reply: what\
+      \ you were doing, what\n      is done (commits, PRs), what is next and in which\
+      \ order, open decisions and\n      gotchas. Your reply text is the handoff;\
+      \ do not start new work. Persist any\n      scratch file you still need into\
+      \ the shared workdir scratchpad (.scratchpad/<name>/);\n      do not leave it\
+      \ under /tmp or anywhere else on the pod.'\npressure:\n  enabled: true\n"
     on-start.sh: "#!/bin/sh\nset -eu\nREF=v0.5.0\nok=1\ninstall() {\n  step=$1\n \
       \ shift\n  [ \"$ok\" = 1 ] || return 0\n  \"$@\" && return 0\n  echo \"on-start:\
       \ $step failed (exit $?)\" >&2\n  ok=0\n}\nif ! grep -qxF -- \"$REF\" /opt/any-mcp/.ref\
@@ -121,7 +125,7 @@
           agents.szymonrichert.pl/session: alpha
           app.kubernetes.io/managed-by: agents-orchestrator
         annotations:
-          agents.szymonrichert.pl/config-hash: a18d8e8388eb782fe0634e2a77efbeed51ee726823c90a4d5b42619718603420
+          agents.szymonrichert.pl/config-hash: 519e4406f7bba5ac1aa4a456a1ceb1ad1bc71d005f2168363b2f4bc1dd2467fd
       spec:
         imagePullSecrets:
         - name: regcred

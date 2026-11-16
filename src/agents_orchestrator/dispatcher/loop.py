@@ -19,7 +19,13 @@ from psycopg_pool import AsyncConnectionPool
 
 from agents_orchestrator import credential
 from agents_orchestrator.api.session_limits import may_message
-from agents_orchestrator.db import leadership, project_posts, queue, session_messaging
+from agents_orchestrator.db import (
+    chat_activity,
+    leadership,
+    project_posts,
+    queue,
+    session_messaging,
+)
 from agents_orchestrator.db import sessions as sessions_repo
 from agents_orchestrator.db.pool import listen
 from agents_orchestrator.dispatcher import handoff, hive
@@ -45,6 +51,8 @@ MAX_IN_FLIGHT = 8
 CHANNELS = ("agent_free", "message_queued", leadership.CHANNEL, leadership.LEADER_CHANGED_CHANNEL)
 COMMAND_KINDS = ("interrupt", "compact", "clear")
 HANDOFF_INTERVAL_SECONDS = 5
+#: How often the dispatcher prunes `chat_activity` (with the stuck-row watchdog).
+CHAT_PRUNE_SECONDS = 3600
 
 
 class Dispatcher:
@@ -63,6 +71,10 @@ class Dispatcher:
         )
         self._handoff_policy = handoff.HandoffPolicy.from_settings(settings)
         self._handoff_at: float | None = None
+        self._chat_pruned_at: float | None = None
+        self._inflight = handoff.inflight_fetcher(
+            self._client, float(settings.handoff_inflight_timeout_seconds)
+        )
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -186,11 +198,11 @@ class Dispatcher:
             await self._drain_handoffs(conn)
 
     async def _drain_handoffs(self, conn: Any) -> None:
-        """Right after the leadership passes: the strong-limit handoff pass for every session
+        """Right after the leadership passes: the context-pressure handoff pass for every session
         with a limit subject or an open row (`handoff.handoff_sessions`), at most once per
-        HANDOFF_INTERVAL_SECONDS (its timings are minutes). One failing session is logged and
-        never holds up the others; any transition wakes the push loop, so a new countdown note
-        goes out at once."""
+        HANDOFF_INTERVAL_SECONDS. One failing session is logged and never holds up the others;
+        any transition wakes the push loop, so the changed pressure policy goes out at once.
+        Then the user's taskboard notices of new escalations (`handoff.notify_escalations`)."""
         now = time.monotonic()
         if self._handoff_at is not None and now - self._handoff_at < HANDOFF_INTERVAL_SECONDS:
             return
@@ -205,7 +217,12 @@ class Dispatcher:
         for session_id in sessions:
             try:
                 moved = await handoff.handoff_pass(
-                    conn, session_id, self._handoff_policy, self.settings
+                    conn,
+                    session_id,
+                    self._handoff_policy,
+                    self.settings,
+                    self._inflight,
+                    steering=self.hive.steering,
                 )
             except Exception:
                 log.exception("handoff pass for session %s failed", session_id)
@@ -213,6 +230,24 @@ class Dispatcher:
             if moved:
                 self._push_wake.set()
                 log.info("session %s handoff: %s", session_id, ", ".join(moved))
+        try:
+            notified = await handoff.notify_escalations(conn, self.settings)
+            if notified:
+                log.info("handoff escalation notices: %s", ", ".join(notified))
+        except Exception:
+            log.exception("handoff escalation notices failed")  # retried on the next drain
+            await conn.rollback()
+        try:
+            await handoff.watchdog(conn, self.settings)  # reports a stuck row, changes nothing
+            if self._chat_pruned_at is None or now - self._chat_pruned_at >= CHAT_PRUNE_SECONDS:
+                self._chat_pruned_at = now
+                async with conn.transaction():
+                    pruned = await chat_activity.prune(conn)
+                if pruned:
+                    log.info("chat_activity: pruned %s old rows", pruned)
+        except Exception:
+            log.exception("handoff watchdog failed")  # retried on the next drain
+            await conn.rollback()
 
     async def verify_pending(self) -> int:
         """Check verifying messages against their wrappers, once per wake and poll (D24)."""

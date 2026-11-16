@@ -637,6 +637,7 @@ NON_SECURITY_EDITS: dict[str, dict] = {
     "resources": {"resources": {"requests": {"cpu": "1"}}},
     "max_attempts": {"max_attempts": 3},
     "auto_compact_pct": {"auto_compact_pct": 70},
+    "handoff_profile": {"handoff_profile": "chat"},
     "autoclose_after_seconds": {"autoclose_after_seconds": 600},
     "reuse_running_agent": {"reuse_running_agent": True},
     "usage_quota": {"usage_quota": {"seven_day_pct": 60}},

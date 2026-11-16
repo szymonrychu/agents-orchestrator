@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from dataclasses import replace
 
 import psycopg
 import pytest
@@ -157,7 +156,7 @@ async def test_handover_reason_2000_ok_2001_rejected(pool, dsn):
     assert (await post_handover(dsn, pool, c, reason="x" * 2001)).status_code == 422
 
 
-# ---------------------------------------------------------------- T-256 step 8
+# ---------------------------------------------------------------- T-423 step 10
 
 
 SOLO_IP = "10.9.0.50"
@@ -170,114 +169,30 @@ async def solo_session(pool, ip: str = SOLO_IP):
     return solo, s0
 
 
-async def open_handoff(pool, session_id, agent_id, phase="notified", trigger="strong", secs=300):
-    async with pool.connection() as conn:
-        return await handoffs.insert(
-            conn,
-            session_id,
-            agent_id,
-            trigger,
-            phase,
-            deadline_at=None if phase in ("handed", "requested") else _later(secs),
-        )
-
-
-def _later(secs: int):
-    from datetime import UTC, datetime, timedelta
-
-    return datetime.now(UTC) + timedelta(seconds=secs)
-
-
-async def handoff_rows(pool, agent_id):
-    async with pool.connection() as conn:
-        cur = await conn.execute(
-            "SELECT trigger, phase, close_reason, handoff_text, deadline_at FROM agent_handoffs"
-            " WHERE agent_id = %s ORDER BY id",
-            (agent_id,),
-        )
-        return await cur.fetchall()
-
-
-async def test_extend_moves_deadline_once(pool, dsn):
-    c, a0 = await solo_session(pool)
-    row = await open_handoff(pool, c["id"], a0["id"])
-    r = await post_handover(dsn, pool, c, ip=SOLO_IP, extend=True, reason=None, epoch=None)
-    assert r.status_code == 202, r.text
-    body = r.json()
-    assert body["request_id"] is None and body["deadline_at"] is not None
-    ((_, phase, _, _, deadline),) = await handoff_rows(pool, a0["id"])
-    assert phase == "extended"
-    assert deadline.timestamp() == pytest.approx(row.deadline_at.timestamp() + 300, abs=2)
-    r = await post_handover(dsn, pool, c, ip=SOLO_IP, extend=True, reason=None, epoch=None)
-    assert (r.status_code, r.json()["error"]["code"]) == (409, "extension_used")
-
-
-async def test_extend_without_countdown_409(pool, dsn):
-    c, a0 = await solo_session(pool)
-    r = await post_handover(dsn, pool, c, ip=SOLO_IP, extend=True, reason=None, epoch=None)
-    assert (r.status_code, r.json()["error"]["code"]) == (409, "no_countdown")
-    await open_handoff(pool, c["id"], a0["id"], phase="requested")
-    r = await post_handover(dsn, pool, c, ip=SOLO_IP, extend=True, reason=None, epoch=None)
-    assert (r.status_code, r.json()["error"]["code"]) == (409, "no_countdown")
-
-
-async def test_extend_marks_handled_and_hive_leader_may_extend(pool, dsn):
-    c, a0, _ = await hive(pool)
-    await open_handoff(pool, c["id"], a0["id"])
-    r = await post_handover(dsn, pool, c, extend=True, reason=None, epoch=None, handled=[])
-    assert r.status_code == 202, r.text
-    assert r.json()["deadline_at"] is not None
+async def test_extend_field_rejected_422(pool, dsn):
+    c, _, _ = await hive(pool)
+    r = await post_handover(dsn, pool, c, extend=True)
+    assert r.status_code == 422, r.text
     assert await requests(pool, c["id"]) == []
 
 
-async def test_member_extend_409_not_leader(pool, dsn):
-    c, a0, a1 = await hive(pool)
-    await open_handoff(pool, c["id"], a1["id"])
-    r = await post_handover(dsn, pool, c, ip=IP1, extend=True, reason=None, epoch=None)
-    assert (r.status_code, r.json()["error"]["code"]) == (409, "not_leader")
-    assert [row[1] for row in await handoff_rows(pool, a1["id"])] == ["notified"]
+async def test_reason_required_422(pool, dsn):
+    c, _, _ = await hive(pool)
+    async with client_for(create_app(make_settings(dsn), pool), IP0) as http:
+        r = await http.post(
+            "/agent/v1/leadership/handover", json={"epoch": 3}, headers=headers(c["id"])
+        )
+    assert r.status_code == 422, r.text
 
 
-async def test_solo_voluntary_handoff_opens_handed_row(pool, dsn):
+async def test_solo_leadership_handover_409_not_hive(pool, dsn):
     c, a0 = await solo_session(pool)
     r = await post_handover(dsn, pool, c, ip=SOLO_IP, reason="my handoff", epoch=None)
-    assert r.status_code == 202, r.text
-    assert r.json()["request_id"] is None
-    assert [row[:4] for row in await handoff_rows(pool, a0["id"])] == [
-        ("voluntary", "handed", None, "my handoff")
-    ]
+    assert (r.status_code, r.json()["error"]["code"]) == (409, "not_hive")
+    assert "orchestrator_handoff_submit" in r.json()["error"]["message"]
+    async with pool.connection() as conn:
+        assert await handoffs.open_row(conn, a0["id"]) is None
     assert await requests(pool, c["id"]) == []
-    # a second one while the first is past `requested`
-    r = await post_handover(dsn, pool, c, ip=SOLO_IP, reason="again", epoch=None)
-    assert (r.status_code, r.json()["error"]["code"]) == (409, "handoff_open")
-
-
-async def test_solo_voluntary_cancels_countdown_row(pool, dsn):
-    c, a0 = await solo_session(pool)
-    await open_handoff(pool, c["id"], a0["id"])
-    r = await post_handover(dsn, pool, c, ip=SOLO_IP, reason="now", epoch=None)
-    assert r.status_code == 202, r.text
-    assert [row[:4] for row in await handoff_rows(pool, a0["id"])] == [
-        ("strong", "cancelled", "voluntary", None),
-        ("voluntary", "handed", None, "now"),
-    ]
-
-
-async def test_solo_voluntary_requires_reason_422(pool, dsn):
-    c, a0 = await solo_session(pool)
-    r = await post_handover(dsn, pool, c, ip=SOLO_IP, reason=None, epoch=None)
-    assert r.status_code == 422
-    assert await handoff_rows(pool, a0["id"]) == []
-
-
-async def test_solo_handoff_open_409(pool, dsn):
-    c, a0 = await solo_session(pool)
-    for phase in ("discussing", "clearing", "returning"):
-        async with pool.connection() as conn:
-            await conn.execute("DELETE FROM agent_handoffs WHERE agent_id = %s", (a0["id"],))
-        await open_handoff(pool, c["id"], a0["id"], phase=phase)
-        r = await post_handover(dsn, pool, c, ip=SOLO_IP, reason="x", epoch=None)
-        assert (r.status_code, r.json()["error"]["code"]) == (409, "handoff_open"), phase
 
 
 async def test_hive_leader_without_epoch_422(pool, dsn):
@@ -292,59 +207,4 @@ async def test_hive_leader_handover_unchanged(pool, dsn):
     r = await post_handover(dsn, pool, c, to=a1["pod_name"])
     assert r.status_code == 202, r.text
     body = r.json()
-    assert isinstance(body["request_id"], int) and body["deadline_at"] is None
-
-
-async def test_solo_voluntary_does_not_cancel_row_that_moved_on(pool, dsn, monkeypatch):
-    c, a0 = await solo_session(pool)
-    row = await open_handoff(pool, c["id"], a0["id"], phase="discussing")
-    real = handoffs.open_row
-
-    async def stale(conn, agent_id):
-        found = await real(conn, agent_id)
-        return replace(found, phase="requested")  # as read just before a concurrent pass
-
-    monkeypatch.setattr(handoffs, "open_row", stale)
-    r = await post_handover(dsn, pool, c, ip=SOLO_IP, reason="x", epoch=None)
-    assert (r.status_code, r.json()["error"]["code"]) == (409, "handoff_open")
-    assert [row_[:2] for row_ in await handoff_rows(pool, a0["id"])] == [("strong", "discussing")]
-    assert row.id
-
-
-async def test_solo_voluntary_insert_conflict_409_end_to_end(pool, dsn, monkeypatch):
-    # A row opened by a concurrent pass after the open_row read: the insert hits the one-open
-    # index. The route answers 409 and the row is untouched; the next call still works.
-    c, a0 = await solo_session(pool)
-    await open_handoff(pool, c["id"], a0["id"], phase="discussing")
-    real = handoffs.open_row
-
-    async def unseen(conn, agent_id):
-        return None
-
-    monkeypatch.setattr(handoffs, "open_row", unseen)
-    r = await post_handover(dsn, pool, c, ip=SOLO_IP, reason="x", epoch=None)
-    assert (r.status_code, r.json()["error"]["code"]) == (409, "handoff_open")
-    assert [row[:2] for row in await handoff_rows(pool, a0["id"])] == [("strong", "discussing")]
-    monkeypatch.setattr(handoffs, "open_row", real)
-    r = await post_handover(dsn, pool, c, ip=SOLO_IP, extend=True, reason=None, epoch=None)
-    assert (r.status_code, r.json()["error"]["code"]) == (409, "no_countdown")
-
-
-async def test_solo_insert_conflict_leaves_transaction_usable(pool, monkeypatch):
-    from agents_orchestrator.api import agent as agent_api
-    from agents_orchestrator.api.errors import ApiError
-    from agents_orchestrator.db import agents as agents_repo
-
-    c, a0 = await solo_session(pool)
-    await open_handoff(pool, c["id"], a0["id"], phase="discussing")
-
-    async def unseen(conn, agent_id):
-        return None
-
-    monkeypatch.setattr(handoffs, "open_row", unseen)
-    async with pool.connection() as conn:
-        agent = await agents_repo.get_agent(conn, a0["id"])
-        with pytest.raises(ApiError):
-            await agent_api._solo_handoff(conn, agent, "x")
-        cur = await conn.execute("SELECT 1")  # e.g. mark_handled after the conflict
-        assert await cur.fetchone() == (1,)
+    assert isinstance(body["request_id"], int) and "deadline_at" not in body

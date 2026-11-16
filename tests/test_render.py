@@ -1045,8 +1045,8 @@ def test_shutdown_handoff_block_rendered_and_valid(tmp_path, monkeypatch):
             "notice_seconds": 120,
             "handoff_seconds": 180,
             "idle_proceed_seconds": 60,
-            "notice_prompt": handoff_texts.shutdown_notice(2),
-            "handoff_prompt": handoff_texts.STRONG_REQUEST,
+            "notice_prompt": handoff_texts.SHUTDOWN_NOTICE,
+            "handoff_prompt": handoff_texts.SHUTDOWN_REQUEST,
         }
         path = tmp_path / "config.yaml"
         path.write_text(by_kind(objs)["ConfigMap"]["data"]["config.yaml"])
@@ -1059,28 +1059,23 @@ def test_shutdown_handoff_block_rendered_and_valid(tmp_path, monkeypatch):
         assert cfg.shutdown.handoff.enabled is True
 
 
+def test_shutdown_idle_proceed_rendered_from_new_setting():
+    objs = render.render_session(
+        make_session(), make_settings(agent_shutdown_idle_proceed_seconds=7), TOKENS
+    )
+    assert config_of(objs)["shutdown"]["handoff"]["idle_proceed_seconds"] == 7
+    assert "handover_idle_proceed_seconds" not in type(make_settings()).model_fields
+
+
 def test_shutdown_handoff_omitted_for_custom_image():
     objs = render.render_session(make_session(image="other/wrapper:0.8.0"), make_settings(), TOKENS)
     assert "shutdown" not in config_of(objs)
 
 
-def test_shutdown_notice_text():
-    text = handoff_texts.shutdown_notice(2)
-    assert "in about 2 minutes" in text
-    assert "There is no extension." in text
-
-
-def test_shutdown_notice_minutes_round_up_with_minimum_one():
-    for notice, minutes in ((150, 3), (90, 2), (20, 1), (0, 1), (120, 2)):
-        objs = render.render_session(
-            make_session(),
-            make_settings(
-                agent_shutdown_notice_seconds=notice, agent_termination_grace_seconds=600
-            ),
-            TOKENS,
-        )
-        prompt = config_of(objs)["shutdown"]["handoff"]["notice_prompt"]
-        assert prompt == handoff_texts.shutdown_notice(minutes), notice
+def test_shutdown_notice_text_names_no_time():
+    text = handoff_texts.SHUTDOWN_NOTICE
+    assert "minute" not in text
+    assert "You will be asked for a handoff next." in text
 
 
 def _guard_cfg(**spec) -> dict:
@@ -1096,9 +1091,9 @@ def test_guard_section_rendered_on_default_image():
 
 
 def test_guard_section_from_preset():
-    cfg = _guard_cfg(runaway={"max_stop_continuations": 3, "max_agent_spawns": 0})
+    cfg = _guard_cfg(runaway={"max_stop_continuations": 5, "max_agent_spawns": 0})
     assert cfg["guard"] == {
-        "max_stop_continuations": 3,
+        "max_stop_continuations": 5,
         "max_agent_spawns": 0,
         "tool_failure_repeats": 3,
     }
@@ -1145,3 +1140,9 @@ def test_ask_prompt_routes_permissions_to_approvals():
     text = render.ASK_VIA_DECISIONS_PROMPT
     assert "orchestrator_approval_ask" in text
     assert "Never list approvals" in text and "never relay the user's answer" in text
+
+
+def test_render_pressure_only_for_default_image():
+    assert _guard_cfg()["pressure"] == {"enabled": True}
+    assert _guard_cfg(image=IMAGE)["pressure"] == {"enabled": True}
+    assert "pressure" not in _guard_cfg(image="harbor.example/containers/ccw:0.14.0")

@@ -192,6 +192,7 @@ async def enqueue_message(
     notice: str | None = None,
     attachments: Sequence[StoredAttachment] = (),
     project_post_id: int | None = None,
+    origin_service: str | None = None,
 ) -> int:
     """Queue a message; a session message carries its sender and hop (D8), an orchestrator
     notice its kind (`notice`, e.g. `inactivity_reminder`), a project room fan-out row its post
@@ -199,6 +200,9 @@ async def enqueue_message(
 
     A `held` message is not deliverable until `release_note` clears its `not_before` (the hold
     is a day, so a note whose commands never finish still expires).
+
+    `origin_service` is the service that posted the message (null for a user or an internal
+    caller).
 
     `attachments` are stored in order in the same transaction as the message.
 
@@ -217,9 +221,10 @@ async def enqueue_message(
         row = await _one(
             conn,
             "INSERT INTO messages (session_id, text, target_agent_id, sender_session_id,"
-            " sender_slug, hop, lane, carries_start_prompt, not_before, notice, project_post_id)"
+            " sender_slug, hop, lane, carries_start_prompt, not_before, notice, project_post_id,"
+            " origin_service)"
             " VALUES (%s, %s, %s, %s, %s, %s, %s, %s,"
-            " CASE WHEN %s THEN now() + interval '1 day' END, %s, %s) RETURNING id",
+            " CASE WHEN %s THEN now() + interval '1 day' END, %s, %s, %s) RETURNING id",
             (
                 session_id,
                 text,
@@ -232,6 +237,7 @@ async def enqueue_message(
                 held,
                 notice,
                 project_post_id,
+                origin_service,
             ),
         )
         assert row is not None
@@ -486,16 +492,17 @@ async def _claim_notice(conn: psycopg.AsyncConnection, session_id: uuid.UUID) ->
 # handoff pass runs at most every few seconds, so the claim guards the rules it cannot wait for.
 # `reset`: the agent's context was compacted or cleared since the row opened.
 _HANDOFF_ROW = """
-SELECT h.phase, h.request_message_id, h.return_message_id, h.discuss_since IS NULL AS solo,
+SELECT h.phase, h.return_message_id, h.discuss_since IS NULL AS solo,
     h.trigger = 'shutdown' AS shutdown,
     EXISTS (SELECT 1 FROM events e WHERE e.agent_id = h.agent_id
         AND e.type IN ('compacted', 'session_cleared') AND e.created_at >= h.created_at) AS reset
 FROM agent_handoffs h
 WHERE h.agent_id = %s
-  AND h.phase IN ('notified', 'extended', 'requested', 'handed', 'discussing', 'clearing',
+  AND h.phase IN ('pressuring', 'submitted', 'moving', 'handed', 'discussing', 'clearing',
                   'returning')
 """
-_HANDOFF_COUNTDOWN = ("notified", "extended")
+# Removed kinds (the countdown's notice and request, T-423): never sent, cancelled at the claim.
+_HANDOFF_REMOVED = ("handoff_notice", "handoff_request")
 _HANDOFF_SOLO_HOLD = ("clearing", "returning")
 # A shutdown row holds the agent's other messages on its next pod until its clear (and, solo,
 # its return) ran: the fresh context reads nothing before them.
@@ -513,31 +520,27 @@ async def _handoff_gate(
     """`send`, `hold` or `cancel` for a message about to go to `agent_id` (`rows` caches the
     agent's open handoff row for one scan).
 
-    A `handoff_notice` or `handoff_request` goes out only while its row is still in that phase
-    (the request: it is the row's own) and the context was not reset since the row opened, so
-    neither ever reaches a compacted or cleared context; otherwise it is cancelled. While the
-    row is `requested`, or `clearing`/`returning` in the solo order, every other message for
-    the agent waits, so the handoff, the clear and the return run with nothing in between.
-    A priority message is the exception while `requested`: that phase lasts as long as the
-    agent's running turn (Q7: never interrupted by this feature), so holding a user's deliberate
-    interrupt there would have no bound; the later phases are bounded and still hold it.
+    A `handoff_nudge` goes out only while its row is `pressuring` and the context was not reset
+    since the row opened, so none ever reaches a compacted or cleared context or an agent that
+    already submitted; otherwise it is cancelled, as is any `handoff_notice` or
+    `handoff_request` (removed kinds). Messages flow while a row is `pressuring`, `submitted`,
+    `moving` or `discussing`; only while a solo row is `clearing`/`returning`, or a shutdown row
+    waits for its clear, every other message for the agent waits, so the clear and the return run
+    with nothing in between.
     """
+    if notice in _HANDOFF_REMOVED:
+        return "cancel"
     if agent_id not in rows:
         rows[agent_id] = await _one(conn, _HANDOFF_ROW, (agent_id,))
     row = rows[agent_id]
-    if notice in ("handoff_notice", "handoff_request"):
-        if row is None or row["reset"]:
+    if notice == "handoff_nudge":
+        if row is None or row["reset"] or row["phase"] != "pressuring":
             return "cancel"
-        if notice == "handoff_notice":
-            return "send" if row["phase"] in _HANDOFF_COUNTDOWN else "cancel"
-        own = row["phase"] == "requested" and row["request_message_id"] == message_id
-        return "send" if own else "cancel"
-    if row is None or message_id in (row["request_message_id"], row["return_message_id"]):
         return "send"
-    if (
-        (row["phase"] == "requested" and lane != "priority")
-        or (row["solo"] and row["phase"] in _HANDOFF_SOLO_HOLD)
-        or (row["shutdown"] and row["phase"] in _HANDOFF_SHUTDOWN_HOLD)
+    if row is None or message_id == row["return_message_id"]:
+        return "send"
+    if (row["solo"] and row["phase"] in _HANDOFF_SOLO_HOLD) or (
+        row["shutdown"] and row["phase"] in _HANDOFF_SHUTDOWN_HOLD
     ):
         return "hold"
     return "send"
@@ -1013,6 +1016,28 @@ async def complete_command(
             (status, Jsonb(result) if result is not None else None, id),
         )
         return row is not None
+
+
+async def cancel_queued_command(conn: psycopg.AsyncConnection, id: int) -> bool:
+    """Cancel a command still `queued` (status-guarded: one already claimed runs on); True when
+    it was cancelled."""
+    cur = await conn.execute(
+        "UPDATE commands SET status = 'cancelled', finished_at = now()"
+        " WHERE id = %s AND status = 'queued'",
+        (id,),
+    )
+    return cur.rowcount == 1
+
+
+async def fail_unfinished_command(conn: psycopg.AsyncConnection, id: int, result: Any) -> bool:
+    """Fail a command still `queued` or `running` (status-guarded), so it never runs after this
+    and a late completion of a running one changes nothing; True when it changed."""
+    cur = await conn.execute(
+        "UPDATE commands SET status = 'failed', result = %s, finished_at = now()"
+        " WHERE id = %s AND status IN ('queued', 'running')",
+        (Jsonb(result), id),
+    )
+    return cur.rowcount == 1
 
 
 async def release_ready_notes(conn: psycopg.AsyncConnection) -> None:

@@ -1,6 +1,30 @@
 {
   "components": {
     "schemas": {
+      "Abandon": {
+        "additionalProperties": false,
+        "description": "An in-flight item the agent deliberately drops, with the reason (reported to the\nsuccessor and in the escalation log).",
+        "properties": {
+          "item": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Item",
+            "type": "string"
+          },
+          "why": {
+            "maxLength": 2000,
+            "minLength": 10,
+            "title": "Why",
+            "type": "string"
+          }
+        },
+        "required": [
+          "item",
+          "why"
+        ],
+        "title": "Abandon",
+        "type": "object"
+      },
       "Activity": {
         "properties": {
           "lines": {
@@ -1943,6 +1967,144 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "HandoffAccepted": {
+        "properties": {
+          "applies": {
+            "default": "once you are idle: leadership moves (hive) or your context is cleared and the handoff comes back to you (solo)",
+            "title": "Applies",
+            "type": "string"
+          },
+          "handled": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Handled",
+            "type": "array"
+          },
+          "handoff_id": {
+            "title": "Handoff Id",
+            "type": "integer"
+          },
+          "phase": {
+            "const": "submitted",
+            "default": "submitted",
+            "title": "Phase",
+            "type": "string"
+          }
+        },
+        "required": [
+          "handoff_id"
+        ],
+        "title": "HandoffAccepted",
+        "type": "object"
+      },
+      "HandoffSubmitIn": {
+        "additionalProperties": false,
+        "description": "The handoff an agent submits once its work is safe to hand over (spec 5.3).",
+        "properties": {
+          "abandon": {
+            "items": {
+              "$ref": "#/components/schemas/Abandon"
+            },
+            "maxItems": 50,
+            "title": "Abandon",
+            "type": "array"
+          },
+          "doing": {
+            "default": "",
+            "maxLength": 4000,
+            "title": "Doing",
+            "type": "string"
+          },
+          "done": {
+            "items": {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Done",
+            "type": "array"
+          },
+          "epoch": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Epoch"
+          },
+          "gotchas": {
+            "items": {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Gotchas",
+            "type": "array"
+          },
+          "handled": {
+            "items": {
+              "type": "integer"
+            },
+            "maxItems": 50,
+            "title": "Handled",
+            "type": "array"
+          },
+          "in_flight": {
+            "items": {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "In Flight",
+            "type": "array"
+          },
+          "next": {
+            "items": {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Next",
+            "type": "array"
+          },
+          "open_requests": {
+            "items": {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Open Requests",
+            "type": "array"
+          },
+          "results": {
+            "items": {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Results",
+            "type": "array"
+          },
+          "to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "To"
+          }
+        },
+        "title": "HandoffSubmitIn",
+        "type": "object"
+      },
       "HandoverIn": {
         "additionalProperties": false,
         "properties": {
@@ -1957,11 +2119,6 @@
             ],
             "title": "Epoch"
           },
-          "extend": {
-            "default": false,
-            "title": "Extend",
-            "type": "boolean"
-          },
           "handled": {
             "items": {
               "type": "integer"
@@ -1971,17 +2128,10 @@
             "type": "array"
           },
           "reason": {
-            "anyOf": [
-              {
-                "maxLength": 2000,
-                "minLength": 1,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Reason"
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
           },
           "to": {
             "anyOf": [
@@ -1995,6 +2145,9 @@
             "title": "To"
           }
         },
+        "required": [
+          "reason"
+        ],
         "title": "HandoverIn",
         "type": "object"
       },
@@ -2210,18 +2363,6 @@
             "title": "Applies",
             "type": "string"
           },
-          "deadline_at": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Deadline At"
-          },
           "handled": {
             "default": [],
             "items": {
@@ -2231,15 +2372,8 @@
             "type": "array"
           },
           "request_id": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Request Id"
+            "title": "Request Id",
+            "type": "integer"
           },
           "status": {
             "const": "pending",
@@ -2248,6 +2382,9 @@
             "type": "string"
           }
         },
+        "required": [
+          "request_id"
+        ],
         "title": "LeadershipRequested",
         "type": "object"
       },
@@ -2658,6 +2795,16 @@
             "title": "Pod Name",
             "type": "string"
           },
+          "pressure": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PressureView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "project": {
             "title": "Project",
             "type": "string"
@@ -2906,7 +3053,9 @@
                   "handoff_request",
                   "handoff_return",
                   "autoclose",
-                  "runaway_parked"
+                  "runaway_parked",
+                  "handoff_nudge",
+                  "handoff_escalation"
                 ],
                 "type": "string"
               },
@@ -3935,6 +4084,118 @@
           "updated_at"
         ],
         "title": "PresetView",
+        "type": "object"
+      },
+      "PressureView": {
+        "description": "The context pressure of a solo agent or a hive leader (spec 5.3).",
+        "properties": {
+          "compact_tokens": {
+            "title": "Compact Tokens",
+            "type": "integer"
+          },
+          "context_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Pct"
+          },
+          "escalated": {
+            "title": "Escalated",
+            "type": "boolean"
+          },
+          "l1_tokens": {
+            "title": "L1 Tokens",
+            "type": "integer"
+          },
+          "l2_tokens": {
+            "title": "L2 Tokens",
+            "type": "integer"
+          },
+          "l3_tokens": {
+            "title": "L3 Tokens",
+            "type": "integer"
+          },
+          "level": {
+            "title": "Level",
+            "type": "integer"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phase"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile"
+          },
+          "rejects": {
+            "title": "Rejects",
+            "type": "integer"
+          },
+          "used_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Used Tokens"
+          },
+          "waiting_on": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Waiting On",
+            "type": "array"
+          },
+          "window_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window Tokens"
+          }
+        },
+        "required": [
+          "level",
+          "context_pct",
+          "used_tokens",
+          "window_tokens",
+          "l1_tokens",
+          "l2_tokens",
+          "l3_tokens",
+          "compact_tokens",
+          "phase",
+          "profile",
+          "waiting_on",
+          "rejects",
+          "escalated"
+        ],
+        "title": "PressureView",
         "type": "object"
       },
       "PreviewError": {
@@ -5277,6 +5538,21 @@
             "title": "Env",
             "type": "object"
           },
+          "handoff_profile": {
+            "anyOf": [
+              {
+                "enum": [
+                  "work",
+                  "chat"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Handoff Profile"
+          },
           "image": {
             "anyOf": [
               {
@@ -5625,6 +5901,21 @@
             "default": {},
             "title": "Env",
             "type": "object"
+          },
+          "handoff_profile": {
+            "anyOf": [
+              {
+                "enum": [
+                  "work",
+                  "chat"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Handoff Profile"
           },
           "image": {
             "anyOf": [
@@ -15268,6 +15559,82 @@
         ]
       }
     },
+    "/agent/v1/handoff": {
+      "post": {
+        "description": "Check order: hive leader and epoch, an open row (reused; a voluntary one is opened only\nonce the text passes), the quality of the text (422 `handoff_rejected`), then the in-flight\ngate (409 `in_flight`, the handoff stored). A gate-clear submit is accepted 202; the\ndispatcher then moves leadership (hive) or clears the context and returns the handoff (solo)\nonce the agent is idle.",
+        "operationId": "handoff_submit_agent_v1_handoff_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HandoffSubmitIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HandoffAccepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit your handoff once your work is safe to hand over",
+        "tags": [
+          "agent"
+        ]
+      }
+    },
     "/agent/v1/init-scripts": {
       "get": {
         "operationId": "init_scripts_get_agent_v1_init_scripts_get",
@@ -15408,7 +15775,7 @@
     },
     "/agent/v1/leadership/handover": {
       "post": {
-        "description": "Queue a handover, extend the strong-limit countdown, or (solo agent) hand off its context.\n\nThe checks here fail fast; the dispatcher re-checks at apply time. A hive member is refused\nin every branch; a solo agent has no leader to change, so its call is the voluntary handoff.",
+        "description": "Queue a handover. The checks here fail fast; the dispatcher re-checks at apply time. Only\nthe leader of a hive may hand leadership over; a solo agent submits a handoff instead.",
         "operationId": "handover_agent_v1_leadership_handover_post",
         "parameters": [
           {
@@ -15476,7 +15843,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Hand leadership over, extend the handoff countdown or hand a solo context off",
+        "summary": "Hand leadership over (hive leader only)",
         "tags": [
           "agent"
         ]

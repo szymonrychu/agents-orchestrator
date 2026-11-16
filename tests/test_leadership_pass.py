@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 
 import psycopg
+import pytest
 from factories import (
     insert_agent,
     insert_message,
@@ -21,7 +22,6 @@ from psycopg.rows import dict_row
 from agents_orchestrator.db import handoffs, leadership
 from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE
 from agents_orchestrator.dispatcher import Dispatcher
-from agents_orchestrator.dispatcher import hive as hive_module
 from agents_orchestrator.dispatcher.loop import CHANNELS
 from agents_orchestrator.settings import Settings
 
@@ -417,36 +417,6 @@ async def test_set_leader_records_previous(pool):
     assert change is not None and change.previous_agent_id == a0["id"]
     row = await leader_row(pool, c["id"])
     assert (row["agent_id"], row["previous_agent_id"]) == (a1["id"], a0["id"])
-
-
-async def test_note_candidates_equal_pass_pick(pool):
-    """Ping-pong regression: the note's first candidate is the agent the pass would pick."""
-    # (state, context %, background) for the leader then three peers; threshold 80
-    mixes = [
-        [("idle", 90, False), ("idle", 40, False), ("idle", 10, False), ("busy", 5, False)],
-        [("idle", 90, False), ("idle", 40, False), ("idle", 10, True), ("busy", 20, False)],
-        [("busy", 85, False), ("busy", 30, False), ("idle", None, False), ("idle", 70, False)],
-        [("idle", 95, False), ("idle", 85, False), ("busy", 50, False), ("idle", 79, True)],
-        [("idle", 82, False), ("busy", None, False), ("busy", 60, True), ("busy", 12, False)],
-    ]
-    for mix in mixes:
-        c, agents = await hive(pool, 4)
-        await set_leader(pool, c["id"], agents[0]["id"])
-        for agent, (state, ctx, bg) in zip(agents, mix, strict=True):
-            await status(pool, agent["id"], state, ctx, bg=bg)
-        async with pool.connection() as conn:
-            async with conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute(
-                    hive_module._CANDIDATES,
-                    {"session": c["id"], "leader": agents[0]["id"], "compact": 95},
-                )
-                note = await cur.fetchall()
-            pick = await leadership.successor(
-                conn, c["id"], agents[0]["id"], leadership.PassPolicy()
-            )
-        assert note, mix
-        by_pod = {a["pod_name"]: a["id"] for a in agents}
-        assert by_pod[note[0]["pod_name"]] == pick, mix
 
 
 async def test_handover_rejections(pool):
@@ -1089,10 +1059,21 @@ async def handoff_rows(pool, agent_id=None) -> list[dict]:
     )
 
 
-async def open_strong(pool, session_id, agent_id, phase: str, text: str | None = None) -> int:
+async def open_pressure_row(pool, session_id, agent_id, phase: str, text: str | None = None) -> int:
     async with pool.connection() as conn:
-        row = await handoffs.insert(conn, session_id, agent_id, "strong", phase, handoff_text=text)
+        row = await handoffs.insert(
+            conn, session_id, agent_id, "pressure", phase, handoff_text=text
+        )
     return row.id
+
+
+async def own_request(pool, row_id: int, session_id, frm, to, epoch: int) -> int:
+    """The row's own `limit` request, recorded on the row as the handoff pass does."""
+    rid = await request(pool, session_id, "handover", frm, to, "limit", epoch)
+    await run(
+        pool, "UPDATE agent_handoffs SET leadership_request_id = %s WHERE id = %s", (rid, row_id)
+    )
+    return rid
 
 
 async def test_voluntary_apply_no_longer_enqueues_clear(pool):
@@ -1128,7 +1109,9 @@ async def test_limit_request_never_expires(pool):
     c, (a0, a1, _) = await hive(pool)
     await set_leader(pool, c["id"], a0["id"], epoch=3)
     await status(pool, a0["id"], "busy", 10, bg=True)
-    rid = await request(pool, c["id"], "handover", a0["id"], None, "limit", 3)
+    # a limit request exists only for its `moving` row (row-116 class)
+    row_id = await open_pressure_row(pool, c["id"], a0["id"], "moving")
+    rid = await own_request(pool, row_id, c["id"], a0["id"], None, 3)
     await age_request(pool, rid, 1800 + 60)  # past the voluntary deadline, inside the cap
     assert await lpass(pool, c["id"]) is None
     await age_request(pool, rid, 14400 + 60)
@@ -1147,7 +1130,9 @@ async def test_limit_request_uses_rollout_deferral_cap(pool):
     c, (a0, a1, _) = await hive(pool)
     await set_leader(pool, c["id"], a0["id"], epoch=3)
     await status(pool, a0["id"], "idle", 10, bg=True)
-    rid = await request(pool, c["id"], "handover", a0["id"], None, "limit", 3)
+    # a limit request exists only for its `moving` row (row-116 class)
+    row_id = await open_pressure_row(pool, c["id"], a0["id"], "moving")
+    rid = await own_request(pool, row_id, c["id"], a0["id"], None, 3)
     await age_request(pool, rid, 1800 + 60)
     assert await lpass(pool, c["id"]) is None
     got = await rows(pool, "SELECT status FROM leadership_requests WHERE id = %s", (rid,))
@@ -1170,23 +1155,23 @@ async def test_limit_request_is_not_voluntary(pool):
     assert await rows(pool, "SELECT id FROM commands") == []
 
 
-async def test_strong_row_moves_to_discussing_on_apply(pool):
-    # 5.6: a leader handing over during its countdown, and M5: a row parked in handed while the
-    # limit request is decided, both move to discussing with the successor recorded
+async def test_pressure_row_moves_to_discussing_on_apply(pool):
+    # a leader handing over while under pressure, and a row in moving while the limit request
+    # is decided, both move to discussing with the successor recorded
     c, (a0, a1, a2) = await hive(pool)
     await set_leader(pool, c["id"], a0["id"], epoch=3)
-    row_id = await open_strong(pool, c["id"], a0["id"], "notified")
+    row_id = await open_pressure_row(pool, c["id"], a0["id"], "pressuring")
     await request(pool, c["id"], "handover", a0["id"], a1["id"], "wrapping up", 3)
     await lpass(pool, c["id"])
     (row,) = await handoff_rows(pool)
-    assert (row["id"], row["phase"], row["trigger"]) == (row_id, "discussing", "strong")
+    assert (row["id"], row["phase"], row["trigger"]) == (row_id, "discussing", "pressure")
     assert (row["handoff_text"], row["successor_agent_id"]) == ("wrapping up", a1["id"])
     assert row["discuss_since"] is not None
     assert await commands_of(pool, a0["id"]) == []
-    # parked in handed: the agent's own handoff text is kept, the limit reason never replaces it
+    # moving: the agent's own handoff text is kept, the limit reason never replaces it
     await set_leader_row(pool, c["id"], a1["id"], 4)
-    await open_strong(pool, c["id"], a1["id"], "handed", "my own handoff")
-    await request(pool, c["id"], "handover", a1["id"], a2["id"], "limit", 4)
+    row_id = await open_pressure_row(pool, c["id"], a1["id"], "moving", "my own handoff")
+    await own_request(pool, row_id, c["id"], a1["id"], a2["id"], 4)
     await lpass(pool, c["id"])
     row = (await handoff_rows(pool, a1["id"]))[-1]
     assert (row["phase"], row["handoff_text"], row["successor_agent_id"]) == (
@@ -1194,10 +1179,10 @@ async def test_strong_row_moves_to_discussing_on_apply(pool):
         "my own handoff",
         a2["id"],
     )
-    # an empty handoff: no text is invented from the request reason
+    # no text: none is invented from the request reason
     await set_leader_row(pool, c["id"], a2["id"], 5)
-    await open_strong(pool, c["id"], a2["id"], "handed")
-    await request(pool, c["id"], "handover", a2["id"], a0["id"], "limit", 5)
+    row_id = await open_pressure_row(pool, c["id"], a2["id"], "moving")
+    await own_request(pool, row_id, c["id"], a2["id"], a0["id"], 5)
     await lpass(pool, c["id"])
     row = (await handoff_rows(pool, a2["id"]))[-1]
     assert (row["phase"], row["handoff_text"]) == ("discussing", None)
@@ -1211,21 +1196,41 @@ async def set_leader_row(pool, session_id, agent_id, epoch: int) -> None:
     )
 
 
-async def test_user_make_leader_cancels_strong_row_not_leader(pool):
+async def test_user_make_leader_cancels_pressure_row_not_leader(pool):
     c, (a0, a1, a2) = await hive(pool)
     await set_leader(pool, c["id"], a0["id"], epoch=3)
-    await open_strong(pool, c["id"], a0["id"], "notified")
+    await open_pressure_row(pool, c["id"], a0["id"], "pressuring")
     await request(pool, c["id"], "user", None, a1["id"], "user", None)
     assert (await lpass(pool, c["id"])).agent_id == a1["id"]
     (row,) = await handoff_rows(pool)
     assert (row["phase"], row["close_reason"]) == ("cancelled", "not_leader")
     assert await commands_of(pool, a0["id"]) == []
-    # a lost leader closes its open strong row too; a row already past the move is left alone
-    await open_strong(pool, c["id"], a1["id"], "discussing")
+    # a lost leader closes its open pressure row too; a row already past the move is left alone
+    await open_pressure_row(pool, c["id"], a1["id"], "discussing")
     await run(pool, "UPDATE agents SET gone_at = now() WHERE id = %s", (a1["id"],))
     assert (await lpass(pool, c["id"])).reason == "leader_lost"
     (row,) = await handoff_rows(pool, a1["id"])
     assert row["phase"] == "discussing"
+
+
+@pytest.mark.parametrize("phase", ["pressuring", "submitted", "moving"])
+async def test_rollout_move_closes_a_row_it_did_not_cause(pool, phase):
+    # decision 716: a rollout move was not caused by the row's accepted submit (its own limit
+    # request), so the row closes and the ex-leader keeps its context: no discussion, no clear
+    c, (a0, a1, a2) = await hive(pool)
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
+    row_id = await open_pressure_row(pool, c["id"], a0["id"], phase)
+    nudge = await insert_message(
+        pool, c["id"], text="nudge", target_agent_id=a0["id"], notice="handoff_nudge"
+    )
+    await request(pool, c["id"], "handover", a0["id"], a1["id"], "rollout", 3)
+    assert (await lpass(pool, c["id"])).agent_id == a1["id"]
+    (row,) = await handoff_rows(pool)
+    assert (row["id"], row["phase"], row["close_reason"]) == (row_id, "cancelled", "not_leader")
+    assert row["discuss_since"] is None
+    got = await rows(pool, "SELECT status FROM messages WHERE id = %s", (nudge["id"],))
+    assert got[0]["status"] == "cancelled"
+    assert await commands_of(pool, a0["id"]) == []
 
 
 async def test_forced_and_user_moves_do_not_reset(pool):
@@ -1254,3 +1259,40 @@ async def test_scale_down_does_not_reset(pool):
     await shrink(pool, c["id"], 2)
     assert (await lpass(pool, c["id"])).reason == "scale_down"
     assert await rows(pool, "SELECT * FROM commands") == []
+
+
+async def test_foreign_limit_request_does_not_carry_a_moving_row(pool):
+    # a limit request that is not the row's own (another id) is a foreign move: not_leader
+    c, (a0, a1, a2) = await hive(pool)
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
+    row_id = await open_pressure_row(pool, c["id"], a0["id"], "moving")
+    # the request is live only through another `moving` row (row-116 class): a2's
+    other = await open_pressure_row(pool, c["id"], a2["id"], "moving")
+    own = await own_request(pool, other, c["id"], a0["id"], a1["id"], 3)
+    await run(
+        pool,
+        "UPDATE agent_handoffs SET leadership_request_id = %s WHERE id = %s",
+        (own + 1000, row_id),
+    )
+    assert (await lpass(pool, c["id"])).agent_id == a1["id"]
+    (row,) = await handoff_rows(pool, a0["id"])
+    assert (row["phase"], row["close_reason"]) == ("cancelled", "not_leader")
+    assert await commands_of(pool, a0["id"]) == []
+
+
+@pytest.mark.parametrize("reason", ["limit", "user"])
+async def test_ex_leader_leading_again_closes_its_discussing_row(pool, reason):
+    # 2-agent ping-pong: a0 discusses after its own move, then the lead comes back to it (b's
+    # own limit move or a user pick): a0's discussing row closes cancelled leader_again
+    c, (a0, a1, _) = await hive(pool)
+    await set_leader(pool, c["id"], a1["id"], epoch=3)
+    a0_row = await open_pressure_row(pool, c["id"], a0["id"], "discussing")
+    if reason == "limit":
+        a1_row = await open_pressure_row(pool, c["id"], a1["id"], "moving")
+        await own_request(pool, a1_row, c["id"], a1["id"], a0["id"], 3)
+    else:
+        await request(pool, c["id"], "user", None, a0["id"], "user", None)
+    assert (await lpass(pool, c["id"])).agent_id == a0["id"]
+    (row,) = await handoff_rows(pool, a0["id"])
+    assert (row["id"], row["phase"], row["close_reason"]) == (a0_row, "cancelled", "leader_again")
+    assert await commands_of(pool, a0["id"]) == []
