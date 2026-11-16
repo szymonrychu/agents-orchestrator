@@ -27,6 +27,8 @@ def _all_texts() -> list[str]:
         t.escalation_text("s", "agent-s-0", 3, 97.0, ["next"], ["background task bf3a"]),
         t.escalation_text("s", "agent-s-0", 2, None, [], []),
         t.escalation_title("s", "agent-s-0"),
+        t.stuck_title("s", "agent-s-0"),
+        t.stuck_text("s", "agent-s-0", "moving", "2026-11-16T10:00:00+00:00"),
         t.shutdown_successor("agent-s-0", "text"),
         t.return_text(HANDOFF, cleared=True),
         t.return_text(HANDOFF, cleared=False),

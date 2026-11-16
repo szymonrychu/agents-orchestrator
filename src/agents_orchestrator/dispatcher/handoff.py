@@ -1280,35 +1280,120 @@ async def notify_escalations(
             pending.append((row, session, text, (pod or {}).get("pod_name") or str(row.agent_id)))
     out: list[str] = []
     for row, session, text, pod in pending:
-        scope = scope_of(session)
         try:
-            key = await taskboard_client.claimed_task(
-                settings, session.id, session.slug, scope, transport=transport
+            key = await _post_user_notice(
+                settings,
+                session,
+                title=handoff_texts.escalation_title(session.slug, pod),
+                text=text,
+                client_key=f"handoff-escalation-{row.id}",
+                transport=transport,
             )
         except taskboard_client.TaskboardUnavailable as exc:
             log.warning("handoff %s: escalation notice not posted (%s); retrying", row.id, exc)
             continue
-        if key is not None:
-            ok = await taskboard_client.add_comment(
-                settings, session.id, session.slug, scope, key, text, transport=transport
-            )
-        else:
-            ok = await taskboard_client.create_notice_task(
-                settings,
-                session.id,
-                session.slug,
-                scope,
-                title=handoff_texts.escalation_title(session.slug, pod),
-                body=text,
-                client_key=f"handoff-escalation-{row.id}",
-                labels=[ESCALATION_LABEL],
-                transport=transport,
-            )
-        if not ok:
+        if key is None:
             log.warning("handoff %s: escalation notice not posted; retrying", row.id)
             continue
         async with conn.transaction():
             await handoffs.mark_escalation_notified(conn, row.id)
         log.info("handoff %s: escalation of agent %s posted (%s)", row.id, row.agent_id, key)
         out.append(f"notified:{row.agent_id}")
+    return out
+
+
+async def _post_user_notice(
+    settings: Settings,
+    session: sessions_repo.Session,
+    *,
+    title: str,
+    text: str,
+    client_key: str,
+    transport: httpx.AsyncBaseTransport | None,
+) -> str | None:
+    """Tell the user on the taskboard: a comment on the session's claimed task, or, when it has
+    none, a notice task (`client_key` makes a retry a no-op there). Returns the claimed task key
+    or `"notice"`, None when the post failed; raises `TaskboardUnavailable` when the claimed
+    task cannot be looked up."""
+    scope = scope_of(session)
+    key = await taskboard_client.claimed_task(
+        settings, session.id, session.slug, scope, transport=transport
+    )
+    if key is not None:
+        ok = await taskboard_client.add_comment(
+            settings, session.id, session.slug, scope, key, text, transport=transport
+        )
+        return key if ok else None
+    ok = await taskboard_client.create_notice_task(
+        settings,
+        session.id,
+        session.slug,
+        scope,
+        title=title,
+        body=text,
+        client_key=client_key,
+        labels=[ESCALATION_LABEL],
+        transport=transport,
+    )
+    return "notice" if ok else None
+
+
+async def watchdog(
+    conn: psycopg.AsyncConnection,
+    settings: Settings,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> list[str]:
+    """The stuck-row watchdog (spec 5.11): an open row without progress for
+    `handoff_stuck_seconds` (a `discussing` row: since `discuss_since`) gets one WARNING log
+    `handoff_stuck row=<id> session=<slug> phase=<phase> since=<ts>` and one taskboard notice to
+    the user. It only reports: nothing is cleared, moved, closed or touched but the row's
+    `stuck_reported_at` (which is no progress). Without a taskboard the log line alone is the
+    report; a failed post is retried on the next call and logs nothing yet. Returns
+    `stuck:<row id>` entries."""
+    pending = []
+    async with conn.transaction():
+        for row in await handoffs.stuck_rows(conn, settings.handoff_stuck_seconds):
+            session = await sessions_repo.get(conn, row.session_id)
+            if session is None:
+                continue
+            pod = await _one(conn, "SELECT pod_name FROM agents WHERE id = %s", (row.agent_id,))
+            since = row.discuss_since if row.phase == "discussing" else None
+            pending.append(
+                (
+                    row,
+                    session,
+                    (pod or {}).get("pod_name") or str(row.agent_id),
+                    (since or row.progress_at).isoformat(),
+                )
+            )
+    out: list[str] = []
+    for row, session, pod, since in pending:
+        if settings.taskboard_available:
+            try:
+                key = await _post_user_notice(
+                    settings,
+                    session,
+                    title=handoff_texts.stuck_title(session.slug, pod),
+                    text=handoff_texts.stuck_text(session.slug, pod, row.phase, since),
+                    client_key=f"handoff-stuck-{row.id}",
+                    transport=transport,
+                )
+            except taskboard_client.TaskboardUnavailable as exc:
+                log.debug("handoff %s: stuck notice not posted (%s); retrying", row.id, exc)
+                continue
+            if key is None:
+                log.debug("handoff %s: stuck notice not posted; retrying", row.id)
+                continue
+        async with conn.transaction():
+            if not await handoffs.mark_stuck_reported(conn, row.id):
+                continue  # closed or reported meanwhile
+        log.warning(
+            "handoff_stuck row=%s session=%s phase=%s since=%s",
+            row.id,
+            session.slug,
+            row.phase,
+            since,
+        )
+        out.append(f"stuck:{row.id}")
     return out

@@ -251,6 +251,9 @@ class Settings(BaseSettings):
     handoff_min_text_ratio: float = Field(default=0.6, ge=0, le=1)
     handoff_max_rejects: int = Field(default=3, ge=1, le=20)
     handoff_inflight_timeout_seconds: int = Field(default=15, ge=1, le=120)
+    #: An open handoff row without progress for this long is reported once to the log and to the
+    #: user's taskboard (`handoff.watchdog`); nothing is cleared or moved because of it.
+    handoff_stuck_seconds: int = Field(default=1800, ge=60, le=86400)
     #: The inbound chat messages (newest) a chat successor's package lists, those since the
     #: agents' last chat post.
     handoff_room_tail: int = Field(default=10, ge=0, le=100)

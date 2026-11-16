@@ -569,3 +569,20 @@ in the namespace, so an attached vault value is exposed to it. Decision: attach 
   `compacted` with a handoff, never delivered or returned, within an hour). It is tracked per
   agent in `HiveState.reminded` (row id) and marked after the PUT succeeds; the next policy
   has an empty `reinject_text`. A dispatcher restart may repeat it once within the hour.
+
+## 2026-11-16 - T-438: pressure observability and the stuck-row watchdog (T-423, step 15)
+
+- `orch handover-stats --pressure` is SQL over `agent_handoffs`, `events` and `messages`, not
+  Prometheus: the orchestrator has no `/metrics` and nothing scrapes `ccw_*` (a scrape config is
+  a follow-up). Gate blocks by kind come from the inventory stored with each blocked row (the
+  last one only: the row keeps a count and the latest `waiting_on`), so it is a floor, not a sum.
+  "Human message" = a message of the session with no `notice`, `origin_service` or
+  `sender_session_id`; a return resumes alone when its turn made a tool call within 10 minutes
+  and no such message came before it.
+- `handoff.watchdog` (dispatcher drain, after `notify_escalations`) only reports: one WARNING
+  `handoff_stuck ...` and one taskboard comment or notice task, `stuck_reported_at` stamped
+  after a successful post (no taskboard configured: log and stamp). `discussing` rows are judged
+  by `discuss_since`, because `store_inflight` bumps `progress_at` on every inventory change and
+  a churning ex-leader would never look stuck. Shares `_post_user_notice` with the escalation.
+- `chat_activity.prune` (hourly from the dispatcher, 30 days, newest `out` per session kept for
+  `last_out`) closes the step 8 finding; no index on `created_at`, the table is small.

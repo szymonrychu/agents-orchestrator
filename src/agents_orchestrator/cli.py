@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Callable, Sequence
+from datetime import date
 
 from agents_orchestrator import __version__
 
@@ -258,17 +259,61 @@ def _configure_handover_stats(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="derive the numbers from the existing handover notices instead of handover_log",
     )
+    parser.add_argument(
+        "--pressure",
+        action="store_true",
+        help="print the context-pressure handoff statistics (a table) instead of the JSON",
+    )
+    parser.add_argument(
+        "--since",
+        type=date.fromisoformat,
+        default=None,
+        help="with --pressure: first day (YYYY-MM-DD, UTC) of the window (default: --days ago)",
+    )
+
+
+def _pressure_table(stats) -> str:
+    def counts(label: str, values: dict[str, int]) -> list[str]:
+        return [f"{label} {name}: {n}" for name, n in sorted(values.items())] or [f"{label}: none"]
+
+    def number(value: float | None) -> str:
+        return "n/a" if value is None else f"{value:.0f}"
+
+    share = stats.pressure_seen_before_submit_share
+    lines = [
+        f"since: {stats.since.isoformat()}",
+        *counts("cycles", stats.cycles_by_close),
+        f"submits accepted: {stats.submits_accepted}",
+        *counts("rejects", stats.rejects_by_reason),
+        f"gate blocks: {stats.gate_blocks}",
+        *counts("gate blocks by kind", stats.gate_blocks_by_kind),
+        f"escalations: {stats.escalations}",
+        f"tokens l2 to submit median: {number(stats.tokens_l2_to_submit_median)}",
+        f"tokens l2 to submit p90: {number(stats.tokens_l2_to_submit_p90)}",
+        "pressure seen before submit: " + ("n/a" if share is None else f"{share:.0%}"),
+        f"returns: {stats.returns}",
+        f"resumes without a human message: {stats.resumes_without_human}",
+    ]
+    return "\n".join(lines)
 
 
 def _cmd_handover_stats(args: argparse.Namespace) -> int:
     import asyncio
     import dataclasses
     import json
-    from datetime import date
+    from datetime import UTC, datetime, time, timedelta
 
     import psycopg
 
     from agents_orchestrator.db import handover_stats
+
+    async def collect_pressure():
+        if args.since is not None:
+            since = datetime.combine(args.since, time.min, tzinfo=UTC)
+        else:
+            since = datetime.now(UTC) - timedelta(days=args.days)
+        async with await psycopg.AsyncConnection.connect(settings.database_url) as conn:
+            return await handover_stats.pressure_stats(conn, since)
 
     async def collect():
         run = handover_stats.baseline_stats if args.baseline else handover_stats.handover_stats
@@ -281,6 +326,9 @@ def _cmd_handover_stats(args: argparse.Namespace) -> int:
         raise TypeError(type(value).__name__)
 
     settings = _settings()
+    if args.pressure:
+        print(_pressure_table(asyncio.run(collect_pressure())))
+        return 0
     stats = asyncio.run(collect())
     print(json.dumps(dataclasses.asdict(stats), default=default, indent=2))
     return 0

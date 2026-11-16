@@ -2,7 +2,8 @@
 
 Writer of the table: this module. An `in` row is a message the chat connector posted to the
 session, an `out` row a chat post or reaction of an agent through the chat relay. The handoff
-profile reads it (an agent that posts to the chat is a `chat` agent).
+profile reads it (an agent that posts to the chat is a `chat` agent). `prune` keeps the table
+small: rows older than RETENTION_DAYS go, except the newest outbound post of each session.
 """
 
 from __future__ import annotations
@@ -12,6 +13,9 @@ from datetime import datetime
 from typing import Literal
 
 import psycopg
+
+# the longest a handoff cycle looks back (`seen_since`) is far shorter than this
+RETENTION_DAYS = 30
 
 
 async def record(
@@ -50,3 +54,15 @@ async def last_out(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> date
     )
     row = await cur.fetchone()
     return row[0] if row else None
+
+
+async def prune(conn: psycopg.AsyncConnection) -> int:
+    """Delete rows older than RETENTION_DAYS, keeping each session's newest `out` row (what
+    `last_out` reads); returns the number deleted."""
+    cur = await conn.execute(
+        "DELETE FROM chat_activity c WHERE c.created_at < now() - make_interval(days => %s)"
+        " AND NOT (c.direction = 'out' AND c.id = (SELECT max(o.id) FROM chat_activity o"
+        " WHERE o.session_id = c.session_id AND o.direction = 'out'))",
+        (RETENTION_DAYS,),
+    )
+    return cur.rowcount

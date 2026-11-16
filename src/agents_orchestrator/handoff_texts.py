@@ -132,6 +132,20 @@ def escalation_title(slug: str, pod: str) -> str:
     return f"Agent {pod} of session {slug} has not handed off under context pressure"
 
 
+def stuck_title(slug: str, pod: str) -> str:
+    """The title of the user's notice task for a stuck handoff when the session has no claimed
+    task."""
+    return f"Context handoff of agent {pod} of session {slug} is stuck"
+
+
+def stuck_text(slug: str, pod: str, phase: str, since: str) -> str:
+    """The human-facing report of an open handoff row that makes no progress."""
+    return (
+        f"The context handoff of agent {pod} of session {slug} is stuck in phase {phase}: "
+        f"no progress since {since}. Nothing was cleared or moved; it needs a person to look."
+    )
+
+
 def waiting_on_text() -> str:
     """Appended to the texts of a submitted-but-blocked handoff; the wrapper fills the
     `{waiting_on}` placeholder from the policy's `waiting_on` list."""

@@ -277,6 +277,21 @@ async def escalations_to_notify(conn: psycopg.AsyncConnection) -> list[Handoff]:
         return [Handoff(**row) for row in await cur.fetchall()]
 
 
+async def stuck_rows(conn: psycopg.AsyncConnection, seconds: int) -> list[Handoff]:
+    """Open rows not reported yet whose last progress is older than `seconds` (database clock),
+    oldest first. A `discussing` row is judged by `discuss_since`: `progress_at` is bumped by
+    every in-flight inventory change of the ex-leader, so a churning one would never be stuck."""
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            f"SELECT {_COLUMNS} FROM agent_handoffs WHERE phase = ANY(%s)"
+            " AND stuck_reported_at IS NULL"
+            " AND (CASE WHEN phase = 'discussing' THEN coalesce(discuss_since, progress_at)"
+            " ELSE progress_at END) < now() - make_interval(secs => %s) ORDER BY id",
+            (list(OPEN_PHASES), seconds),
+        )
+        return [Handoff(**row) for row in await cur.fetchall()]
+
+
 async def mark_nudged(conn: psycopg.AsyncConnection, row_id: int, level: int) -> bool:
     """Record a nudge sent at `level`; True only when no nudge at `level` or higher was recorded
     yet (`nudged_level` starts at 0), so each level is nudged at most once."""
