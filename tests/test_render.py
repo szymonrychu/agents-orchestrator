@@ -1141,6 +1141,7 @@ def test_ask_prompt_routes_permissions_to_approvals():
     assert "orchestrator_approval_ask" in text
     assert "Never list approvals" in text and "never relay the user's answer" in text
 
+
 def test_render_pressure_only_for_default_image():
     assert _guard_cfg()["pressure"] == {"enabled": True}
     assert _guard_cfg(image=IMAGE)["pressure"] == {"enabled": True}
