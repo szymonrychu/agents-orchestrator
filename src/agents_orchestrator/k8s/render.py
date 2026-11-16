@@ -77,6 +77,11 @@ ASK_VIA_DECISIONS_PROMPT = (
     "same decision also asks the user for the fix of that block, so one answer unblocks it. "
     "Withdraw a decision only with a reason and either superseded_by (the id of the decision "
     "that replaces it) or answered_elsewhere (where it was answered). "
+    "A yes/no permission to act (merge, deploy, apply, delete) goes through "
+    "orchestrator_approval_ask on your task instead, one approval per action; the user answers "
+    "Go or No-go and the verdict arrives as a chat message. Never list approvals, numbered or "
+    "not, in chat or a session message, and never relay the user's answer to an approval to "
+    "another session: every session asks its own. "
     "Never wait on an interactive question tool."
 )
 

@@ -1139,3 +1139,9 @@ def test_rendered_guard_config_loads_in_wrapper(tmp_path, monkeypatch):
     cfg = load_config(path)
     assert cfg.guard.max_stop_continuations == 25
     assert cfg.claude.env.claude_code_max_subagent_spawn_depth == 1
+
+
+def test_ask_prompt_routes_permissions_to_approvals():
+    text = render.ASK_VIA_DECISIONS_PROMPT
+    assert "orchestrator_approval_ask" in text
+    assert "Never list approvals" in text and "never relay the user's answer" in text
