@@ -9,19 +9,20 @@ from agents_orchestrator.preset_policy import (
     human_only_changes,
     merge_patch,
     privileged,
+    privileged_target_changes,
     strip_grants,
     tighten_changes,
 )
 from agents_orchestrator.spec import SessionSpec, WrapperSettings
 
 
-@pytest.mark.parametrize("field", ["kube_cluster_access", "session_messaging", "docker"])
+@pytest.mark.parametrize("field", ["kube_cluster_access", "docker"])
 def test_grant_turned_on_is_refused(field):
     assert human_only_changes({}, {field: True}) == [field]
     assert human_only_changes({field: False}, {field: True}) == [field]
 
 
-@pytest.mark.parametrize("field", ["kube_cluster_access", "session_messaging", "docker"])
+@pytest.mark.parametrize("field", ["kube_cluster_access", "docker"])
 def test_grant_turned_off_or_removed_is_allowed(field):
     assert human_only_changes({field: True}, {field: False}) == []
     assert human_only_changes({field: True}, {}) == []
@@ -80,10 +81,22 @@ def test_env_changes_are_not_human_only():
 
 
 def test_several_fields_sorted():
-    assert human_only_changes({}, {"session_messaging": True, "kube_cluster_access": True}) == [
+    assert human_only_changes({}, {"docker": True, "kube_cluster_access": True}) == [
+        "docker",
         "kube_cluster_access",
-        "session_messaging",
     ]
+
+
+def test_session_messaging_is_an_ordinary_field():
+    assert human_only_changes({}, {"session_messaging": True}) == []
+    assert privileged({"session_messaging": True}) == []
+    assert strip_grants({"session_messaging": True, "docker": True})[0] == {
+        "session_messaging": True
+    }
+    assert classify(["session_messaging"]) == {"session_messaging": (True, False)}
+    assert privileged_target_changes(
+        {"docker": True}, {"docker": True, "session_messaging": True}
+    ) == ["session_messaging"]
 
 
 def test_strip_grants():
@@ -97,13 +110,16 @@ def test_strip_grants():
         "replicas": 2,
     }
     out, removed = strip_grants(spec)
-    assert out == {"wrapper": {"permission_mode": "auto"}, "replicas": 2}
+    assert out == {
+        "session_messaging": True,
+        "wrapper": {"permission_mode": "auto"},
+        "replicas": 2,
+    }
     assert removed == [
         "discard_hook_url",
         "docker",
         "docker_cpu",
         "kube_cluster_access",
-        "session_messaging",
     ]
     assert spec["kube_cluster_access"] is True  # not mutated
 
@@ -130,7 +146,6 @@ def test_privileged():
         "docker",
         "kube_cluster_access",
     ]
-    assert privileged({"session_messaging": True}) == ["session_messaging"]
 
 
 def test_merge_patch_rfc7396():
@@ -410,6 +425,7 @@ def test_tighten_does_not_mutate():
 # Plan 3.1 row 2, pinned here so a new spec field fails until it is classified.
 SECURITY = frozenset(
     {
+        "session_messaging",
         "init_scripts",
         "start_prompt",
         "env",
@@ -456,7 +472,6 @@ def test_columns_are_not_spec_paths():
         ("init_scripts", (True, False)),
         ("kube_cluster_access", (True, True)),
         ("kube_namespace_access", (True, True)),
-        ("session_messaging", (True, True)),
         ("docker", (True, True)),
         ("discard_hook_url", (True, True)),
         ("wrapper.permission_mode", (True, True)),

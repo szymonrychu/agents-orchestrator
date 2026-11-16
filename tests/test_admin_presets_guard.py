@@ -31,7 +31,6 @@ M = "/api/v1/presets"
 REFUSED = [
     ("kube_cluster_access", {"kube_cluster_access": True}),
     ("kube_namespace_access", {"kube_namespace_access": {"media": ["read"]}}),
-    ("session_messaging", {"session_messaging": True}),
     ("docker", {"docker": True}),
     ("discard_hook_url", {"discard_hook_url": "https://h.example"}),
     ("wrapper.permissions.allow", {"wrapper": {"permissions": {"allow": ["Bash"]}}}),
@@ -130,7 +129,6 @@ async def test_admin_put_toward_safe_passes(call, seed):
     pid = await seed(
         {
             "kube_cluster_access": True,
-            "session_messaging": True,
             "discard_hook_url": "https://h.example",
             "wrapper": {"permissions": {"allow": ["A"], "deny": ["D"]}},
         }
@@ -267,7 +265,6 @@ COPY_SOURCE = {
 }
 GRANT_KEYS = (
     "kube_cluster_access",
-    "session_messaging",
     "docker",
     "docker_storage",
     "docker_cpu",
@@ -356,14 +353,14 @@ async def test_patch_inactivity_is_an_ordinary_editable_field(call, seed):
 
 
 async def test_patch_toward_safe_passes(call, seed):
-    pid = await seed({"session_messaging": True, "kube_cluster_access": True})
+    pid = await seed({"discard_hook_url": "https://h.example", "kube_cluster_access": True})
     r = await call(
         "PATCH",
         f"{A}/{pid}",
-        json={"spec": {"session_messaging": None, "kube_cluster_access": False}},
+        json={"spec": {"discard_hook_url": None, "kube_cluster_access": False}},
     )
     assert r.status_code == 200, r.text
-    assert not r.json()["spec"].get("session_messaging")
+    assert not r.json()["spec"].get("discard_hook_url")
     assert not r.json()["spec"].get("kube_cluster_access")
 
 
@@ -423,7 +420,6 @@ KUBE = {"kube_cluster_access": True}
 FLAGS = [
     ("kube_cluster_access", {"kube_cluster_access": True}),
     ("kube_namespace_access", {"kube_namespace_access": {"media": ["read"]}}),
-    ("session_messaging", {"session_messaging": True}),
     ("docker", {"docker": True}),
 ]
 PRIVILEGED_EDITS = [
@@ -622,7 +618,7 @@ async def test_privileged_copy_is_unprivileged_and_editable(call, human, seed):
     r = await call("PATCH", f"{A}/{cid}", json={"spec": {"init_scripts": ["echo copy"]}})
     assert r.status_code == 200, r.text
     got = (await human("GET", f"{M}/{cid}")).json()["spec"]
-    assert not got.get("kube_cluster_access") and not got.get("session_messaging")
+    assert not got.get("kube_cluster_access") and got.get("session_messaging") is True
     assert (await human("GET", f"{M}/{pid}")).json()["spec"]["init_scripts"] == ["echo stored"]
 
 
@@ -707,7 +703,7 @@ GUARDED_PRESET_WRITES: dict[tuple[str, str], str] = {
     ("PATCH", f"{A}/{{ref}}"): "guard",
     ("POST", f"{A}/{{ref}}/copy"): "strip",
 }
-GRANT_FIELDS = ("kube_cluster_access", "session_messaging")
+GRANT_FIELDS = ("kube_cluster_access",)
 QUOTA = {"usage_quota": {"five_hour_pct": 80}}
 
 
@@ -922,7 +918,7 @@ async def test_privileged_delete_fields_list_every_flag_on(call, human, seed):
     pid = await seed({"kube_cluster_access": True, "session_messaging": True})
     r = await call("DELETE", f"{A}/{pid}")
     assert_error(r, 403, "privileged_target")
-    assert r.json()["error"]["fields"] == ["kube_cluster_access", "session_messaging"]
+    assert r.json()["error"]["fields"] == ["kube_cluster_access"]
     assert (await human("GET", f"{M}/{pid}")).status_code == 200
 
 
@@ -996,3 +992,40 @@ async def test_privileged_preset_move_allowed(call, human, seed, route):
     assert r.status_code == 200, r.text
     assert r.json()["project"] == "elsewhere"
     assert (await human("GET", f"{M}/{pid}")).json()["project"] == "elsewhere"
+
+
+# ---------------------------------- session_messaging is an ordinary field (S-66 Q1 C, Q6 A)
+
+
+async def test_session_messaging_create_put_patch_pass(call, human, seed):
+    r = await call("POST", A, json={"name": "sm-new", "spec": {"session_messaging": True}})
+    assert r.status_code == 201, r.text
+    assert r.json()["spec"]["session_messaging"] is True
+    pid = await seed({})
+    r = await call(
+        "PUT", f"{A}/{pid}", json={"name": "seeded", "spec": {"session_messaging": True}}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["spec"]["session_messaging"] is True
+    r = await call("PATCH", f"{A}/{pid}", json={"spec": {"session_messaging": None}})
+    assert r.status_code == 200, r.text
+    assert "session_messaging" not in r.json()["spec"]
+    r = await call("PATCH", f"{A}/{pid}", json={"spec": {"session_messaging": True}})
+    assert r.status_code == 200, r.text
+
+
+async def test_session_messaging_only_preset_is_not_privileged(call, human, seed):
+    pid = await seed({"session_messaging": True})
+    assert (await human("GET", f"{M}/{pid}")).json()["privileged"] == []
+    r = await call("POST", f"{A}/{pid}/copy", json={"name": "sm-copy"})
+    assert r.status_code == 201, r.text
+    assert r.json()["spec"]["session_messaging"] is True
+    r = await call("DELETE", f"{A}/{pid}")
+    assert r.status_code == 204, r.text
+
+
+async def test_session_messaging_on_privileged_preset_is_refused(call, seed):
+    pid = await seed({"docker": True})
+    r = await call("PATCH", f"{A}/{pid}", json={"spec": {"session_messaging": True}})
+    assert_error(r, 403, "privileged_target")
+    assert r.json()["error"]["fields"] == ["session_messaging"]

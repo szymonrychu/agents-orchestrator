@@ -505,7 +505,7 @@ async def test_vault_list_marks_privileged_attachments(app, call, vault):
     assert [(a["preset_id"], a["privileged"]) for a in got] == [
         (plain["id"], False),
         (kube["id"], True),
-        (ns["id"], True),
+        (ns["id"], False),
     ]
 
 

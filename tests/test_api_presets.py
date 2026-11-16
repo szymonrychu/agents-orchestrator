@@ -451,7 +451,7 @@ async def test_preset_view_lists_privileged_grants(http):
     r = await http.post(P, json={"name": "granted", "spec": spec})
     assert r.status_code == 201, r.text
     granted = r.json()
-    assert granted["privileged"] == privileged(spec) == ["session_messaging"]
+    assert granted["privileged"] == privileged(spec) == []
     assert (await http.get(f"{P}/{granted['id']}")).json()["privileged"] == granted["privileged"]
     assert (await make(http, "plain"))["privileged"] == []
 

@@ -205,7 +205,7 @@ async def test_non_security_and_grant_items_are_classified(pool, kube, settings,
         pool, kube, settings, boss, patch={"replicas": 2, "session_messaging": True}
     )
     items = {i.path: (i.security, i.grant) for i in view.revisions[0].items}
-    assert items == {"replicas": (False, False), "session_messaging": (True, True)}
+    assert items == {"replicas": (False, False), "session_messaging": (True, False)}
 
 
 async def test_protected_flag_inside_patch_is_refused(pool, kube, settings, boss, preset, canary):
