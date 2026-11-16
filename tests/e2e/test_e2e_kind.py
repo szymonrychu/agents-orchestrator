@@ -3569,3 +3569,199 @@ def test_leader_pod_delete_hands_off_to_successor(api: httpx.Client, baseline: d
         row = wait_for("the successor's handover notice", notice, 120, 2)
         assert row["text"].startswith("Handoff from "), row["text"][:300]
         assert SHUTDOWN_HANDOFF_TEXT in row["text"], row["text"][:300]
+
+
+# ------------------------------------------------------- strong path, end to end (T-423, T-440)
+#
+# The fake claude moves the context gauge with `statusline` steps (e2e/agent-test.scenario.json):
+# a window of 200000 tokens puts L2 at 130000 and L3 at 165000, so "ramp to l2" reads 140000 and
+# "ramp to l3" 170000. "background watcher" ends its turn with a running background task (a
+# later Stop of the same session), "watcher done" with none, "compact now" runs an auto
+# compaction. Nothing here is forced on the agent: it submits its handoff by itself.
+
+POLICY_PUSH_SECONDS = 25  # the pressure policy reaches the wrapper on a 10 s push pass
+STRONG_TIMEOUT = 300
+HANDOFF_BODY = {
+    "doing": "Driving the parser rewrite of work item 42 and keeping the test suite green.",
+    "done": [
+        "The tokenizer of the parser was rewritten and is covered by unit tests",
+        "A watcher script for the branch pipeline was started in the background",
+    ],
+    "in_flight": ["bg1 (ci watcher): the pipeline watcher is still running, wait for its result"],
+    "next": ["Read the pipeline result of the branch and fix any failing parser test"],
+    "gotchas": ["The parser fixtures live in the shared workdir scratchpad of the session"],
+}
+COUNTDOWN_NOTICES = ("handoff_notice", "handoff_request")
+COUNTDOWN_CHECKED: list[int] = []  # messages seen by each strong-path test
+
+
+def strong_events(api: httpx.Client, cid: str, agent_id: str, etype: str) -> list[dict[str, Any]]:
+    return [e for e in events_of(api, cid, etype) if e["agent_id"] == agent_id]
+
+
+def delivered_levels(api: httpx.Client, cid: str, agent_id: str) -> set[int]:
+    return {
+        (e["data"] or {}).get("level")
+        for e in strong_events(api, cid, agent_id, "pressure_delivered")
+    }
+
+
+def wait_level_delivered(api: httpx.Client, cid: str, agent_id: str, level: int) -> None:
+    wait_for(
+        f"a pressure_delivered event of level {level}",
+        lambda: level in delivered_levels(api, cid, agent_id),
+        STRONG_TIMEOUT,
+        3,
+    )
+
+
+def pressure_of(pod: str) -> dict[str, Any] | None:
+    return agent_me(pod)["pressure"]
+
+
+def submit_handoff(pod: str, **over: Any) -> tuple[int, Any]:
+    return agent_call(pod, "POST", "/agent/v1/handoff", {**HANDOFF_BODY, **over})
+
+
+def no_countdown(api: httpx.Client, cid: str) -> None:
+    for notice in COUNTDOWN_NOTICES:
+        assert notice_messages(api, cid, notice) == [], notice
+    COUNTDOWN_CHECKED.append(len(api.get(f"/sessions/{cid}/messages").json()))
+
+
+def test_strong_path_solo_cycle(api: httpx.Client, baseline: dict) -> None:
+    with scale_session(api, "strong-solo", {"replicas": 1, "max_replicas": 1, "static": True}) as c:
+        cid = c["id"]
+        (agent,) = ready_agents(api, cid, 1)
+        pod, aid = agent["pod_name"], agent["id"]
+        time.sleep(POLICY_PUSH_SECONDS)
+        post_message(api, cid, "ramp to l2")
+        wait_level_delivered(api, cid, aid, 2)
+        wait_for("an open pressure cycle", lambda: (pressure_of(pod) or {}).get("phase"), 60, 2)
+
+        status, body = submit_handoff(pod, doing="[thumbs-up]", done=[], next=[], in_flight=[])
+        assert status == 422 and body["error"]["code"] == "handoff_rejected", (status, body)
+
+        mid = post_message(api, cid, "background watcher")
+        wait_for("the watcher turn", lambda: turn_completed(message(api, mid)), TURN_TIMEOUT, 1)
+        time.sleep(6)  # the background Stop (1 s after the turn) records the running task
+        status, body = submit_handoff(pod)
+        assert status == 409 and body["error"]["code"] == "in_flight", (status, body)
+        assert "bg1" in json.dumps(body["error"]["waiting_on"]), body
+
+        mid = post_message(api, cid, "watcher done")
+        wait_for("the done turn", lambda: turn_completed(message(api, mid)), TURN_TIMEOUT, 1)
+        status, body = submit_handoff(pod)
+        assert status == 202, (status, body)
+
+        wait_for(
+            "a session_cleared event",
+            lambda: strong_events(api, cid, aid, "session_cleared"),
+            STRONG_TIMEOUT,
+            3,
+        )
+
+        def returned() -> dict[str, Any] | None:
+            rows = notice_messages(api, cid, "handoff_return")
+            return rows[-1] if rows and rows[-1]["text"].startswith("Resume now:") else None
+
+        ret = wait_for("the handoff_return message", returned, STRONG_TIMEOUT, 3)
+        wait_for(
+            "the return turn", lambda: turn_completed(message(api, ret["id"])), TURN_TIMEOUT, 2
+        )
+        cleared = strong_events(api, cid, aid, "session_cleared")[-1]
+        tools = [e for e in strong_events(api, cid, aid, "tool_result") if e["id"] > cleared["id"]]
+        assert tools, "the return turn made no tool call"
+        later = [
+            m
+            for m in api.get(f"/sessions/{cid}/messages").json()
+            if m["id"] > ret["id"] and m["notice"] is None
+        ]
+        assert later == [], "a user message followed the return"
+        wait_for(
+            "the cycle to close", lambda: (pressure_of(pod) or {}).get("phase") is None, 120, 3
+        )
+        no_countdown(api, cid)
+
+
+def test_strong_path_hive_cycle(api: httpx.Client, baseline: dict) -> None:
+    with scale_session(api, "strong-hive", {"replicas": 2, "max_replicas": 2}) as c:
+        cid = c["id"]
+        ready_agents(api, cid, 2)
+        wait_for("the first election", lambda: leader_view(api, cid)[1] is not None, LEADER_TIMEOUT)
+        leader, epoch = leader_view(api, cid)
+        assert leader is not None and epoch is not None
+        successor = next(a for a in live_agents(api, cid) if a["id"] != leader["id"])
+        time.sleep(POLICY_PUSH_SECONDS)
+        post_message(api, cid, "ramp to l2", leader["id"])
+        wait_level_delivered(api, cid, leader["id"], 2)
+        wait_for(
+            "an open pressure cycle",
+            lambda: (pressure_of(leader["pod_name"]) or {}).get("phase"),
+            60,
+            2,
+        )
+
+        status, body = submit_handoff(leader["pod_name"], epoch=epoch, in_flight=[])
+        assert status == 202, (status, body)
+
+        def moved() -> bool:
+            now, current = leader_view(api, cid)
+            return now is not None and now["id"] == successor["id"] and current == epoch + 1
+
+        wait_for("leadership to move", moved, STRONG_TIMEOUT, 3)
+
+        def package() -> dict[str, Any] | None:
+            rows = notice_messages(api, cid, "handover")
+            return rows[-1] if rows and "Resume now:" in rows[-1]["text"] else None
+
+        wait_for("the successor's handover notice with the package", package, 120, 2)
+
+        mid = post_message(api, cid, "background watcher", leader["id"])
+        wait_for("the ex-leader turn", lambda: turn_completed(message(api, mid)), TURN_TIMEOUT, 1)
+        time.sleep(90)  # past the quiet window (60 s) of the discussion: still no clear
+        assert strong_events(api, cid, leader["id"], "session_cleared") == []
+
+        mid = post_message(api, cid, "watcher done", leader["id"])
+        wait_for("the done turn", lambda: turn_completed(message(api, mid)), TURN_TIMEOUT, 1)
+        wait_for(
+            "the ex-leader to be cleared",
+            lambda: strong_events(api, cid, leader["id"], "session_cleared"),
+            STRONG_TIMEOUT,
+            3,
+        )
+        no_countdown(api, cid)
+
+
+def test_strong_path_never_cooperates(api: httpx.Client, baseline: dict) -> None:
+    with scale_session(
+        api, "strong-never", {"replicas": 1, "max_replicas": 1, "static": True}
+    ) as c:
+        cid = c["id"]
+        (agent,) = ready_agents(api, cid, 1)
+        pod, aid = agent["pod_name"], agent["id"]
+        time.sleep(POLICY_PUSH_SECONDS)
+        post_message(api, cid, "ramp to l3")
+        wait_level_delivered(api, cid, aid, 3)
+        wait_for(
+            "the escalation",
+            lambda: (pressure_of(pod) or {}).get("escalated"),
+            STRONG_TIMEOUT,
+            3,
+        )
+        time.sleep(30)  # the agent never submits: nothing clears it
+        assert strong_events(api, cid, aid, "session_cleared") == []
+
+        mid = post_message(api, cid, "compact now")
+        wait_for("the compact turn", lambda: turn_completed(message(api, mid)), TURN_TIMEOUT, 1)
+        wait_for("a compacted event", lambda: strong_events(api, cid, aid, "compacted"), 120, 3)
+        wait_for(
+            "the cycle to close", lambda: (pressure_of(pod) or {}).get("phase") is None, 120, 3
+        )
+        assert strong_events(api, cid, aid, "session_cleared") == []
+        no_countdown(api, cid)
+
+
+def test_no_countdown_messages() -> None:
+    """Every strong-path test above saw messages and not one countdown or request notice."""
+    assert len(COUNTDOWN_CHECKED) == 3 and all(n > 0 for n in COUNTDOWN_CHECKED), COUNTDOWN_CHECKED

@@ -54,6 +54,10 @@ env:
   ORCH_AGENT_SHUTDOWN_NOTICE_SECONDS: "30"
   ORCH_AGENT_SHUTDOWN_HANDOFF_SECONDS: "60"
   ORCH_AGENT_SHUTDOWN_IDLE_PROCEED_SECONDS: "5"
+  # the strong-path e2e ramps the context by hand: no minimum tenure before a pressure cycle,
+  # and a short stuck window (the watchdog only logs and notifies)
+  ORCH_HANDOVER_MIN_TENURE_SECONDS: "0"
+  ORCH_HANDOFF_STUCK_SECONDS: "60"
   ORCH_LOG_LEVEL: INFO
 
 # Service port (other microservices): the e2e pod presents the fixed, non-secret token
