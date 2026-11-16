@@ -49,6 +49,7 @@ def test_runaway_limits_sparse_and_bounds():
     for field, bad in [
         ("max_turns_per_task", 9),
         ("max_tokens_per_task", 999999),
+        ("max_stop_continuations", 4),  # the wrapper needs more than pressure l3_stop_blocks + 1
         ("max_stop_continuations", 1001),
         ("max_agent_spawns", 100001),
         ("tool_failure_repeats", 1),

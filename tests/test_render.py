@@ -1091,9 +1091,9 @@ def test_guard_section_rendered_on_default_image():
 
 
 def test_guard_section_from_preset():
-    cfg = _guard_cfg(runaway={"max_stop_continuations": 3, "max_agent_spawns": 0})
+    cfg = _guard_cfg(runaway={"max_stop_continuations": 5, "max_agent_spawns": 0})
     assert cfg["guard"] == {
-        "max_stop_continuations": 3,
+        "max_stop_continuations": 5,
         "max_agent_spawns": 0,
         "tool_failure_repeats": 3,
     }

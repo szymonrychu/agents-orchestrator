@@ -676,11 +676,14 @@ class InactivityLimits(_Strict):
 
 
 # Bounds of the runaway-guard limits (0 = off, or the Claude default for the two subagent caps);
-# shared by the ORCH_RUNAWAY_* settings and `spec.runaway`.
+# shared by the ORCH_RUNAWAY_* settings and `spec.runaway`. `max_stop_continuations` starts at 5:
+# the wrapper (0.19.0) refuses a config whose `guard.max_stop_continuations` is not above
+# `pressure.l3_stop_blocks + 1` (3 + 1) while pressure is enabled, which every default-image
+# session has, and the pod would never start.
 RUNAWAY_BOUNDS: dict[str, tuple[int, int]] = {
     "max_turns_per_task": (10, 100000),
     "max_tokens_per_task": (1000000, 100000000000),
-    "max_stop_continuations": (1, 1000),
+    "max_stop_continuations": (5, 1000),
     "max_agent_spawns": (1, 100000),
     "tool_failure_repeats": (2, 100),
     "max_concurrent_subagents": (1, 100),

@@ -2082,7 +2082,7 @@ def test_stop_loop_parks_session(api: httpx.Client) -> None:
         "wrapper": {
             "hooks": {"onStop": [{"type": "command", "run": STOP_BLOCK, "blocking": True}]}
         },
-        "runaway": {"max_stop_continuations": 3},
+        "runaway": {"max_stop_continuations": 5},
     }
     with config_session(api, "runaway", spec) as created:
         cid = created["id"]
@@ -2094,11 +2094,11 @@ def test_stop_loop_parks_session(api: httpx.Client) -> None:
             return v if v["parked_at"] else None
 
         view = wait_for("session parked", parked, TURN_TIMEOUT)
-        assert view["parked_reason"] == "stop_loop" and view["parked_detail"]["limit"] == 3, view
+        assert view["parked_reason"] == "stop_loop" and view["parked_detail"]["limit"] == 5, view
         trips = events_of(api, cid, "guard_tripped")
         assert [e["data"]["kind"] for e in trips] == ["stop_loop"], trips
-        assert (trips[0]["data"]["count"], trips[0]["data"]["limit"]) == (3, 3)
-        assert len(events_of(api, cid, "turn_continued")) == 3
+        assert (trips[0]["data"]["count"], trips[0]["data"]["limit"]) == (5, 5)
+        assert len(events_of(api, cid, "turn_continued")) == 5
         notices = notice_messages(api, cid, "runaway_parked")
         assert len(notices) == 1 and notices[0]["status"] == "queued", notices
         notice_id = notices[0]["id"]

@@ -81,7 +81,7 @@ Every process reads `ORCH_*` variables (the contract `agents-orchestrator-settin
 | `ORCH_INACTIVITY_HANDOFF_SECONDS` | `300` | api | seconds (0 to 3600) the answer window of an orchestrator close ask (inactivity close and autoclose lifetime): the leader has this long after the notice to self-close or, for an inactivity close, post an update; the fallback discard waits for it |
 | `ORCH_RUNAWAY_MAX_TURNS_PER_TASK` | `300` | api | runaway guard: 0 (off) or 10 to 100000; turns an agent may take since the last delivered message; a session's `spec.runaway` overrides it |
 | `ORCH_RUNAWAY_MAX_TOKENS_PER_TASK` | `60000000` | api | runaway guard: 0 (off) or 1000000 to 100000000000; tokens (cache reads not counted) an agent may use since the last delivered message; a session's `spec.runaway` overrides it |
-| `ORCH_RUNAWAY_MAX_STOP_CONTINUATIONS` | `25` | api | runaway guard: 0 (off) or 1 to 1000; times a turn may be continued by a Stop hook; a session's `spec.runaway` overrides it |
+| `ORCH_RUNAWAY_MAX_STOP_CONTINUATIONS` | `25` | api | runaway guard: 0 (off) or 5 to 1000 (the wrapper needs more than its L3 stop blocks plus one); times a turn may be continued by a Stop hook; a session's `spec.runaway` overrides it |
 | `ORCH_RUNAWAY_MAX_AGENT_SPAWNS` | `300` | api | runaway guard: 0 (off) or 1 to 100000; subagent spawns allowed per task; a session's `spec.runaway` overrides it |
 | `ORCH_RUNAWAY_TOOL_FAILURE_REPEATS` | `3` | api | runaway guard: 0 (off) or 2 to 100; identical tool failures in a row before the guard acts; a session's `spec.runaway` overrides it |
 | `ORCH_HANDOVER_TRANSCRIPT_BYTES` | `16384` | api | bytes (8192 to 1048576) of the predecessor's rendered transcript attached to a handover notice; the oldest lines are dropped first |
