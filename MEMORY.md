@@ -636,3 +636,7 @@ in the namespace, so an attached vault value is exposed to it. Decision: attach 
 - The claude-root secret check (`archive.holds_secret`): a `config/` dir without a `.redacted` marker beside it (the transcripts rule) or any `.credentials.json`; the Job needs the entry's `root` in its input to apply it.
 - `presign.copy_object(settings, src, dst, client=None)` uses server-side CopyObject (spike, step 2); both keys must be archives under the cache prefix. `presign_new_version` signs a PUT for a fresh `b/<name>/<now>-<actor>-<rand>` key.
 - Job-side restore, save and resolve tests live in tests/test_cache_cli.py (the test_cache_restore/save files are reconciler DB tests and belong to step 10).
+
+## 2026-11-16 step 9 fix round 1 (restore merge safety)
+- Restore into an absent target chmods the temp dir to 0755 before the rename (mkdtemp is 0700, unreadable for the agent pod uid). An existing target is merged member-wise from a plan computed first: a symlinked directory in the way or a file-versus-directory conflict raises before any change (state `failed`, target untouched); a symlinked or file leaf is replaced as a leaf, never written through. Why: `copytree(dirs_exist_ok=True)` followed symlinks already in the target (agent-made or from earlier restores), escaping to siblings or the shared claude PVC.
+- Index is validated up front when a state dir exists, and a backup-state write error is a `warning` on a still `restored` entry, never `failed`.

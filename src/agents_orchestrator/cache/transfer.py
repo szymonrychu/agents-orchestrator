@@ -289,6 +289,7 @@ def save(env: Mapping[str, str], *, transport: httpx.BaseTransport | None = None
 
 STATE_DIR_DEFAULT = "/backup-state"
 RESTORE_TMP_PREFIX = ".restore-"
+DIR_MODE = 0o755
 
 
 def _emit_entries(entries: list[dict[str, Any]], **extra: Any) -> None:
@@ -339,13 +340,53 @@ def _report(root: Path, exclude: list[str]) -> dict[str, Any]:
     }
 
 
+def _merge_plan(temp: Path, target: Path) -> tuple[list[Path], list[tuple[Path, Path]]]:
+    """(dirs to create, (src, dest) moves) for merging `temp` into the existing `target`.
+
+    Nothing is changed here. A symlink already in the target is never followed: a symlinked
+    directory in the way, or a file-versus-directory conflict, raises before any change. A
+    symlinked or file leaf is replaced as a leaf.
+    """
+    dirs: list[Path] = []
+    moves: list[tuple[Path, Path]] = []
+    if target.is_symlink():
+        raise OSError(f"restore target {target.name!r} is a symlink")
+    stack = [(temp, target)]
+    while stack:
+        src_dir, dest_dir = stack.pop()
+        for src in sorted(src_dir.iterdir()):
+            dest = dest_dir / src.name
+            present = os.path.lexists(dest)
+            if src.is_dir() and not src.is_symlink():
+                if present and (dest.is_symlink() or not dest.is_dir()):
+                    raise OSError(f"restore conflict at {dest.relative_to(target).as_posix()!r}")
+                if not present:
+                    dirs.append(dest)
+                stack.append((src, dest))
+            else:
+                if present and dest.is_dir() and not dest.is_symlink():
+                    raise OSError(f"restore conflict at {dest.relative_to(target).as_posix()!r}")
+                moves.append((src, dest))
+    return dirs, moves
+
+
 def _merge_into(temp: Path, target: Path) -> None:
-    """Move the extracted tree to `target`; existing files are overwritten, none deleted."""
-    if not target.exists():
+    """Move the extracted tree to `target`; existing files are overwritten, none deleted.
+
+    An absent target gets the temp dir renamed into place with the normal directory mode (not
+    mkdtemp's 0700). An existing one is merged member-wise after the whole plan checked out, so
+    a symlink or conflict leaves it untouched; moves are renames within one filesystem.
+    """
+    if not os.path.lexists(target):
         target.parent.mkdir(parents=True, exist_ok=True)
+        temp.chmod(DIR_MODE)
         temp.replace(target)
         return
-    shutil.copytree(temp, target, symlinks=True, dirs_exist_ok=True)
+    dirs, moves = _merge_plan(temp, target)
+    for directory in dirs:  # parents sort before children
+        directory.mkdir(exist_ok=True)
+    for src, dest in moves:
+        os.replace(src, dest)
     shutil.rmtree(temp, ignore_errors=True)
 
 
@@ -358,6 +399,8 @@ def _restore_one(
     result: dict[str, Any] = {"index": index}
     url = str(entry.get("url") or "")
     version = entry.get("version")
+    if state_dir is not None and (not isinstance(index, int) or isinstance(index, bool)):
+        return {**result, "state": "failed", "reason": "entry index must be an integer"}
     temp: Path | None = None
     reader: _BodyReader | None = None
     try:
@@ -387,7 +430,10 @@ def _restore_one(
         if version is not None:
             result["version"] = version
         if state_dir is not None:
-            _write_state(state_dir, entry, version, report["manifest"])
+            try:
+                _write_state(state_dir, entry, version, report["manifest"])
+            except OSError as exc:  # the files are restored: a state error is only a warning
+                result["warning"] = f"backup-state not written: {_error(exc, url)}"
         return result
     except archive.ExtractError as exc:
         return {**result, "state": "unreadable", "reason": _error(exc, url)}
@@ -402,7 +448,7 @@ def _write_state(state_dir: Path, entry: Mapping[str, Any], version: Any, manife
     """`backup-state/<index>.json`: what the restore put on disk, for the dirty check later."""
     state_dir.mkdir(parents=True, exist_ok=True)
     body = {"name": entry.get("name"), "version": version, "manifest": manifest}
-    target = state_dir / f"{int(entry['index'])}.json"
+    target = state_dir / f"{entry['index']}.json"
     tmp = target.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(body))
     tmp.replace(target)
