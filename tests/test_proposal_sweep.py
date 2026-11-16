@@ -25,7 +25,7 @@ from test_proposals_service import (
     vault,  # noqa: F401  (an autouse fixture)
 )
 
-from agents_orchestrator.api import proposal_sweep
+from agents_orchestrator.api import proposal_sweep, proposals
 from agents_orchestrator.api.app import create_app
 from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.db import proposals as proposals_repo
@@ -334,3 +334,72 @@ async def test_sweeper_task_starts_ticks_and_stops_cleanly_in_the_lifespan(
         if r.name == proposal_sweep.log.name and r.levelno >= logging.WARNING
     ]
     assert failed == []  # and no pass failed
+
+
+# ---------------------------------------------------------------- preset_manageable (S-66)
+
+
+async def _manageable_request(pool, boss, preset_id) -> int:
+    """An open preset_manageable proposal on the preset, filed against `superleader_manageable`
+    false, as `proposals.create_manageable` stores it."""
+    async with pool.connection() as conn:
+        target = await presets_repo.get(conn, preset_id)
+        assert target is not None
+        return await proposals_repo.insert(
+            conn,
+            kind="preset_manageable",
+            target_id=str(target.id),
+            target_name=target.name,
+            proposer_session=boss.id,
+            proposer_slug=boss.slug,
+            proposer_superleader=True,
+            client_key=None,
+            reason="r",
+            base={"superleader_manageable": False},
+            fingerprint=proposals.fingerprint_manageable(False),
+            items=[
+                proposals_repo.Item(
+                    path="superleader_manageable",
+                    before=False,
+                    after=True,
+                    security=True,
+                    grant=True,
+                )
+            ],
+            ttl_seconds=3600,
+        )
+
+
+@pytest.fixture
+async def unmanageable(pool):
+    async with pool.connection() as conn:
+        return await presets_repo.create(conn, "locked-away", {}, superleader_manageable=False)
+
+
+async def test_manageable_request_on_an_unmanageable_preset_stays_open(
+    pool, boss, preset, unmanageable
+):
+    pid = await _manageable_request(pool, boss, unmanageable.id)
+    await _touch_preset(pool, unmanageable.id)  # an unrelated edit: the flag is the fingerprint
+    await _sweep(pool)
+    assert await _status(pool, pid) == "open"
+    assert await _notices(pool, boss.id) == []
+
+
+async def test_manageable_request_goes_stale_after_a_human_flip(pool, boss, preset, unmanageable):
+    pid = await _manageable_request(pool, boss, unmanageable.id)
+    async with pool.connection() as conn:
+        await presets_repo.set_manageable(conn, unmanageable.id, True)
+    await _sweep(pool)
+    assert await _status(pool, pid) == "stale"
+    assert len(await _notices(pool, boss.id)) == 1
+
+
+async def test_manageable_request_on_a_deleted_preset_is_target_gone(
+    pool, boss, preset, unmanageable
+):
+    pid = await _manageable_request(pool, boss, unmanageable.id)
+    async with pool.connection() as conn:
+        await conn.execute("DELETE FROM presets WHERE id = %s", (unmanageable.id,))
+    await _sweep(pool)
+    assert await _status(pool, pid) == "target_gone"

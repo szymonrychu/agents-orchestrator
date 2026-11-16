@@ -114,6 +114,16 @@ class ProjectGrantIn(BaseModel):
     client_key: str | None = Field(default=None, max_length=200)
 
 
+class ManageableRequestIn(BaseModel):
+    """A superleader's request to make a preset superleader-manageable (S-66, user answer Q2 B):
+    filed as a `preset_manageable` change proposal the human reviews."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=1, max_length=4000)
+    client_key: str | None = Field(default=None, max_length=200)
+
+
 class ExtraProjectsIn(BaseModel):
     """The human's direct set of a session's or preset's extra projects (main port, T-120)."""
 

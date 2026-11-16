@@ -2455,6 +2455,35 @@
         "title": "MakeLeaderIn",
         "type": "object"
       },
+      "ManageableRequestIn": {
+        "additionalProperties": false,
+        "description": "A superleader's request to make a preset superleader-manageable (S-66, user answer Q2 B):\nfiled as a `preset_manageable` change proposal the human reviews.",
+        "properties": {
+          "client_key": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Key"
+          },
+          "reason": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "ManageableRequestIn",
+        "type": "object"
+      },
       "Marketplace": {
         "additionalProperties": false,
         "properties": {
@@ -9383,6 +9412,100 @@
           }
         },
         "summary": "Copy Preset",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/agent/v1/admin/presets/{ref}/manageable": {
+      "post": {
+        "description": "Ask the user to make a preset (any the superleader can read) superleader-manageable: files\na `preset_manageable` proposal the user approves or denies on the Proposals page. 200 with the\nfirst proposal on a `client_key` replay.",
+        "operationId": "request_preset_manageable_agent_v1_admin_presets__ref__manageable_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ref",
+            "required": true,
+            "schema": {
+              "title": "Ref",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManageableRequestIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProposalView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader"
+          },
+          "404": {
+            "description": "not_found: no preset has that id or name"
+          },
+          "409": {
+            "description": "already_manageable: the preset is already superleader-manageable; too_many_proposals: the caller's open-proposal cap is reached"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Request Preset Manageable",
         "tags": [
           "admin"
         ]

@@ -282,6 +282,8 @@ ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
     ("DELETE", f"{ADMIN_PREFIX}/sessions/{{slug}}/projects/{{project}}"): "session",
     ("POST", f"{ADMIN_PREFIX}/presets/{{ref}}/projects"): "preset",
     ("DELETE", f"{ADMIN_PREFIX}/presets/{{ref}}/projects/{{project}}"): "preset",
+    # a manageable request targets an unmanageable preset by design (S-66): any readable preset
+    ("POST", f"{ADMIN_PREFIX}/presets/{{ref}}/manageable"): "none",
     ("POST", f"{ADMIN_PREFIX}/proposals"): "proposal",
     ("GET", f"{ADMIN_PREFIX}/proposals"): "proposal",
     ("GET", f"{ADMIN_PREFIX}/proposals/{{proposal_id}}"): "proposal",

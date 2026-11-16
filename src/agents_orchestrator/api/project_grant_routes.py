@@ -6,6 +6,10 @@ the proposal, user answer Q4 A); a revoke is direct (200 with the target's view)
 the admin write rule (`admin._writable_target`, `admin.writable_preset`: else 403
 `not_manageable`).
 
+A manageable request (S-66, user answer Q2 B) sits here too: `POST .../presets/{ref}/manageable`
+files a `preset_manageable` proposal on any preset the superleader can read (it targets an
+unmanageable preset by design); the user's approval sets `superleader_manageable`.
+
 `main_router` (main port, the human): `PUT .../extra-projects` sets the whole list directly.
 `PortGate` keeps it off the agent port.
 """
@@ -19,8 +23,8 @@ from fastapi import APIRouter, Request, Response
 from agents_orchestrator.api import presets as presets_api
 from agents_orchestrator.api import project_grants, proposals, schemas
 from agents_orchestrator.api import sessions as sessions_api
+from agents_orchestrator.api.admin import FORBIDDEN, caller_of, writable_preset
 from agents_orchestrator.api.admin import _writable_target as admin_target
-from agents_orchestrator.api.admin import caller_of, writable_preset
 from agents_orchestrator.api.admin import router as admin_router
 from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.sessions import Cfg, Pool
@@ -107,6 +111,40 @@ async def grant_preset_project(
     """File a grant of an extra project to a preset as a `preset_projects` proposal; sessions
     created from the preset after the approval get it."""
     return await _file(request, response, pool, settings, "preset_projects", ref, body)
+
+
+@admin_router.post(
+    "/presets/{ref}/manageable",
+    status_code=202,
+    response_model=schemas.ProposalView,
+    responses={
+        403: FORBIDDEN,
+        404: {"description": "not_found: no preset has that id or name"},
+        409: {
+            "description": "already_manageable: the preset is already superleader-manageable; "
+            "too_many_proposals: the caller's open-proposal cap is reached"
+        },
+    },
+)
+async def request_preset_manageable(
+    ref: str,
+    body: schemas.ManageableRequestIn,
+    request: Request,
+    response: Response,
+    pool: Pool,
+    settings: Cfg,
+) -> schemas.ProposalView:
+    """Ask the user to make a preset (any the superleader can read) superleader-manageable: files
+    a `preset_manageable` proposal the user approves or denies on the Proposals page. 200 with the
+    first proposal on a `client_key` replay."""
+    _, caller = caller_of(request)
+    async with pool.connection() as conn:
+        view, created = await proposals.create_manageable(
+            request, conn, settings, ref=ref, body=body, caller=caller
+        )
+    if not created:
+        response.status_code = 200
+    return view
 
 
 @admin_router.delete("/presets/{ref}/projects/{project}", response_model=schemas.PresetView)
