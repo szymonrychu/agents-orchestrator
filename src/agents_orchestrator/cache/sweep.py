@@ -15,7 +15,8 @@ delete's re-check. Per backup name:
 - An object under `<prefix>b/` that no version row owns is an orphan (a save the reconciler
   never recorded, or an object left after a failed delete): deleted by age (retention and
   grace). Any other key outside `b/` and `sessions/` (the legacy flat archives the migration
-  imports) is never planned for deletion, dry run or not. Transcripts (`<prefix>sessions/<slug>.tar.zst`) are one object per session, deleted by
+  imports) is never planned for deletion, dry run or not.
+  Transcripts (`<prefix>sessions/<slug>.tar.zst`) are one object per session, deleted by
   age alone while no session references them.
 
 The executor deletes the database row inside a transaction (re-checking references under the
