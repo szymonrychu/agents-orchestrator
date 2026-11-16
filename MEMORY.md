@@ -531,3 +531,4 @@ in the namespace, so an attached vault value is exposed to it. Decision: attach 
 - 2026-11-16: plugins pin moved to v0.52.0 (ships approval_ask and approval_list); PLUGIN_PENDING keeps only the chat tools v0.52.0 does not ship (S-63).
 - 2026-11-16: plugins pin moved to v0.53.0 (ships approval_ask, approval_list and the chat tools); PLUGIN_PENDING emptied (S-63).
 - 2026-11-16: plugins pin moved to v0.54.1 (patch release of the plugins bucket; no tool surface change in the orchestrator).
+- 2026-11-16 CI: raised the e2e job timeout-minutes from 60 to 90 because test:e2e (~55 min, 60 tests) plus test:integration in the same job exceeded 60 (main run 43869393926 was cancelled during integration, so images and release were skipped).
