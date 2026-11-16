@@ -338,4 +338,4 @@ fi
 log "pytest -m e2e tests/e2e"
 # -rA: a "PASSED <node id>" line per test whatever the verbosity (pyproject's addopts -q
 # cancels a -v), so the output names every test and none has to be re-run alone to prove it
-env "${E2E_ENV[@]}" uv run pytest -m e2e tests/e2e -p no:cacheprovider -rA -k "stop_loop or pod_delete or strong_path"
+env "${E2E_ENV[@]}" uv run pytest -m e2e tests/e2e -p no:cacheprovider -rA
