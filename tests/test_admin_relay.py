@@ -19,6 +19,7 @@ from fakes import fake_upstream as fu
 from fakes.fake_kube import FakeKube
 from fakes.fake_taskboard import FakeTaskboard
 from psycopg.types.json import Jsonb
+from test_admin_audit_detail import admin_rows
 from test_agent_session_messaging import alone
 from test_api_agent import KEY, client_for, headers, make_settings
 from test_api_sessions import assert_error
@@ -1034,3 +1035,43 @@ async def test_chain_targets_with_schedule_upstream_unconfigured_503(pool, dsn):
         )
     assert_error(r, 503, "upstream_unconfigured")
     assert not any(c.method == "POST" for c in fake.calls)
+
+
+# ------------------------------------------------------------ room history (chat-history, T-420)
+HISTORY_TEMPLATE = "/rooms/{room_id}/messages"
+
+
+async def test_room_history_read_any_room(rig):
+    url = ADMIN_PREFIX + "/chats/rooms/!r%3Ax/messages?before=m9&limit=5"
+    r = await rig.call("GET", url)
+    assert r.status_code == 200, r.text
+    (call,) = [c for c in rig.fakes["connector"].calls if c.path.endswith("/messages")]
+    assert call.method == "GET"
+    assert call.path == "/chat/v1/admin/rooms/!r:x/messages"
+    assert call.query == "before=m9&limit=5"
+    assert call.headers["authorization"] == f"Bearer {rig.tokens['connector']}"
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
+async def test_room_history_only_get(rig, method):
+    r = await rig.call(method, relay_url("connector", HISTORY_TEMPLATE, 9))
+    assert r.status_code == 405, r.text
+    assert r.headers["allow"] == "GET"
+    assert rig.fakes["connector"].calls == []
+
+
+async def test_room_history_needs_superleader(rig):
+    plain = await alone(rig.pool, "rh-plain")
+    async with client_for(rig.app, plain.leader_ip) as http:
+        r = await http.get(relay_url("connector", HISTORY_TEMPLATE, 9), headers=headers(plain.id))
+    assert_error(r, 403, "not_superleader")
+    assert rig.fakes["connector"].calls == []
+
+
+async def test_room_history_is_audited(rig):
+    url = relay_url("connector", HISTORY_TEMPLATE, 9)
+    r = await rig.call("GET", url + "?before=m9")
+    assert r.status_code == 200, r.text
+    (row,) = await admin_rows(rig.pool)
+    assert row["method"] == "GET" and row["path"] == url and row["status"] == 200
+    assert "before" not in json.dumps(row)

@@ -189,6 +189,7 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("GET", f"{_ADMIN}/schedules/schedules/{{schedule_id}}/runs"): "superleader",
     ("GET", f"{_ADMIN}/chats/rooms"): "superleader",
     ("GET", f"{_ADMIN}/chats/rooms/{{room_id}}"): "superleader",
+    ("GET", f"{_ADMIN}/chats/rooms/{{room_id}}/messages"): "superleader",
     ("PUT", f"{_ADMIN}/chats/rooms/{{room_id}}/settings"): "superleader",
     ("POST", f"{_ADMIN}/chats/rooms/{{room_id}}/allow"): "superleader",
     ("GET", f"{_ADMIN}/chats/users"): "superleader",
