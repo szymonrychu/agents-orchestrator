@@ -707,6 +707,10 @@ GRANT_FIELDS = ("kube_cluster_access",)
 QUOTA = {"usage_quota": {"five_hour_pct": 80}}
 
 
+# The one manageable request route: it files a proposal and takes no spec (exact match, so a
+# future spec-taking route that merely ends in "/manageable" is still classified).
+MANAGEABLE_ROUTE = f"{A}/{{ref}}/manageable"
+
 # Routes that can move a preset to another project (a column, not a spec path).
 MOVING_WRITES: tuple[tuple[str, str], ...] = (("PUT", f"{A}/{{ref}}"), ("PATCH", f"{A}/{{ref}}"))
 
@@ -720,7 +724,8 @@ def _admin_preset_writes() -> set[tuple[str, str]]:
         for route in admin.router.routes
         if route.path.startswith(A)
         and "/vault/" not in route.path
-        and not route.path.endswith(("/projects", "/manageable"))
+        and not route.path.endswith("/projects")
+        and route.path != MANAGEABLE_ROUTE
         for method in route.methods & {"POST", "PUT", "PATCH"}
     }
 
