@@ -1,6 +1,6 @@
-"""GET /agent/v1/admin/meta, /archives, /archives/settings and /archives/cleanup/preview: the
-superleader reads the deploy settings and the cache archives, with the same answers and errors as
-the main port. The presigned download is not exposed (a credential-bearing URL)."""
+"""GET /agent/v1/admin/meta and the /backups mirrors (list, versions, manifest, copy, cleanup
+settings and preview): the superleader reads the deploy settings and the backups, with the same
+answers and errors as the main port. The presigned download and the deletes are not exposed."""
 
 from __future__ import annotations
 
@@ -10,13 +10,13 @@ import pytest
 from test_admin_audit_detail import admin_rows
 from test_agent_session_messaging import alone
 from test_api_agent import AGENT_PORT, KEY, client_for, headers
-from test_api_archives import NO_CREDS, PRE, client, obj, s3, settings_for  # noqa: F401
+from test_api_backups import NO_CREDS, add_version, client, s3, settings_for  # noqa: F401
 from test_api_sessions import assert_error
 
 from agents_orchestrator.api.admin import ADMIN_PREFIX
 from agents_orchestrator.api.app import create_app
 
-A = f"{ADMIN_PREFIX}/archives"
+A = f"{ADMIN_PREFIX}/backups"
 
 
 def agent_settings(dsn, **kw):
@@ -51,38 +51,40 @@ async def test_meta_carries_no_credential(pool, dsn):
         assert secret not in r.text
 
 
-async def test_archives_list_equals_the_main_port(pool, dsn, s3):  # noqa: F811
-    s3.objects = [obj(f"proj/{i:02d}") for i in range(4)]
+async def test_backups_reads_equal_the_main_port(pool, dsn, s3):  # noqa: F811
+    for i in range(4):
+        await add_version(pool, f"proj/{i:02d}")
+    v = await add_version(pool, "proj/00", manifest=[{"path": "a", "size": 1}])
     params = {"limit": 3}
     admin = await admin_get(pool, dsn, A, params=params)
-    main = await main_get(pool, dsn, "/api/v1/cache/archives", params)
+    main = await main_get(pool, dsn, "/api/v1/backups", params)
     assert admin.status_code == 200, admin.text
-    assert admin.json() == main.json()
-    assert admin.json()["next_cursor"]
+    assert admin.json() == main.json() and admin.json()["next_cursor"]
     nxt = {"limit": 3, "cursor": admin.json()["next_cursor"]}
-    admin2 = await admin_get(pool, dsn, A, params=nxt)
-    main2 = await main_get(pool, dsn, "/api/v1/cache/archives", nxt)
-    assert admin2.json() == main2.json()
-
-
-async def test_archives_list_rejects_a_bad_prefix(pool, dsn, s3):  # noqa: F811
-    r = await admin_get(pool, dsn, A, params={"prefix": "../x"})
-    assert_error(r, 400, "bad_request")
-
-
-async def test_settings_and_preview_equal_the_main_port(pool, dsn, s3):  # noqa: F811
-    s3.objects = [obj("proj/a"), obj("proj/b")]
-    for admin_path, main_path in (
-        (f"{A}/settings", "/api/v1/cache/cleanup/settings"),
-        (f"{A}/cleanup/preview", "/api/v1/cache/cleanup/preview"),
-    ):
-        admin = await admin_get(pool, dsn, admin_path)
-        main = await main_get(pool, dsn, main_path)
+    assert (await admin_get(pool, dsn, A, params=nxt)).json() == (
+        await main_get(pool, dsn, "/api/v1/backups", nxt)
+    ).json()
+    for suffix in ("/proj/00/versions", f"/proj/00/versions/{v.id}/manifest"):
+        admin = await admin_get(pool, dsn, f"{A}{suffix}")
+        main = await main_get(pool, dsn, f"/api/v1/backups{suffix}")
         assert admin.status_code == 200, admin.text
         assert admin.json() == main.json()
 
 
-@pytest.mark.parametrize("path", [A, f"{A}/cleanup/preview"])
+async def test_backups_list_rejects_a_bad_cursor(pool, dsn, s3):  # noqa: F811
+    assert_error(await admin_get(pool, dsn, A, params={"cursor": "a b"}), 400, "bad_request")
+
+
+async def test_settings_and_preview_equal_the_main_port(pool, dsn, s3):  # noqa: F811
+    await add_version(pool, "proj/a")
+    for suffix in ("/cleanup/settings", "/cleanup/preview"):
+        admin = await admin_get(pool, dsn, f"{A}{suffix}")
+        main = await main_get(pool, dsn, f"/api/v1/backups{suffix}")
+        assert admin.status_code == 200, admin.text
+        assert admin.json() == main.json()
+
+
+@pytest.mark.parametrize("path", [A, f"{A}/cleanup/preview", f"{A}/proj/a/versions"])
 async def test_503_without_the_s3_pair(pool, dsn, s3, path):  # noqa: F811
     r = await admin_get(pool, dsn, path, **NO_CREDS)
     assert_error(r, 503, "unavailable")
@@ -90,18 +92,48 @@ async def test_503_without_the_s3_pair(pool, dsn, s3, path):  # noqa: F811
 
 
 @pytest.mark.parametrize(
-    "suffix", ["/meta", "/archives", "/archives/settings", "/archives/cleanup/preview"]
+    "suffix", ["/meta", "/backups", "/backups/cleanup/settings", "/backups/cleanup/preview"]
 )
 async def test_regular_leader_is_refused(pool, dsn, s3, suffix):  # noqa: F811
     r = await admin_get(pool, dsn, f"{ADMIN_PREFIX}{suffix}", superleader=False)
     assert r.status_code == 403, r.text
 
 
-async def test_download_is_not_exposed(pool, dsn, s3):  # noqa: F811
-    s3.objects = [obj("proj/a")]
-    r = await admin_get(pool, dsn, f"{A}/download", params={"key": f"{PRE}proj/a.tar.zst"})
+async def test_download_and_deletes_are_not_exposed(pool, dsn, s3):  # noqa: F811
+    v = await add_version(pool, "proj/a")
+    r = await admin_get(pool, dsn, f"{A}/proj/a/versions/{v.id}/download")
     assert r.status_code in (404, 405)
     assert "location" not in r.headers
+    boss = await alone(pool, f"md-{uuid.uuid4().hex[:8]}", superleader=True)
+    app = create_app(agent_settings(dsn), pool)
+    async with client_for(app, boss.leader_ip) as http:
+        for path in (f"{A}/proj/a", f"{A}/proj/a/versions/{v.id}"):
+            r = await http.delete(path, headers=headers(boss.id))
+            assert r.status_code in (404, 405), path
+    assert s3.deleted == []
+
+
+async def admin_copy(pool, dsn, body, *, superleader=True, **kw):
+    boss = await alone(pool, f"mc-{uuid.uuid4().hex[:8]}", superleader=superleader)
+    app = create_app(agent_settings(dsn, **kw), pool)
+    async with client_for(app, boss.leader_ip) as http:
+        return await http.post(f"{A}/copy", headers=headers(boss.id), json=body), boss
+
+
+async def test_admin_copy_guard(pool, dsn, s3):  # noqa: F811
+    await add_version(pool, "proj/a")
+    body = {"source": "proj/a", "target": "proj/b"}
+    r, _ = await admin_copy(pool, dsn, body, superleader=False)
+    assert_error(r, 403, "not_superleader")
+    assert s3.copied == []
+    r, boss = await admin_copy(pool, dsn, body)
+    assert r.status_code == 201, r.text
+    assert r.json()["created_by"] == f"superleader {boss.slug}"
+    assert len(s3.copied) == 1
+    r, _ = await admin_copy(pool, dsn, {"source": "proj/none", "target": "proj/b"})
+    assert_error(r, 404, "backup_not_found")
+    row = [x for x in await admin_rows(pool) if x["method"] == "POST"][-1]
+    assert row["path"] == f"{A}/copy" and row["status"] == 404
 
 
 POLICY = {
@@ -118,7 +150,7 @@ async def admin_put(pool, dsn, body, *, superleader=True, **kw):
     boss = await alone(pool, f"mp-{uuid.uuid4().hex[:8]}", superleader=superleader)
     app = create_app(agent_settings(dsn, **kw), pool)
     async with client_for(app, boss.leader_ip) as http:
-        return await http.put(f"{A}/settings", headers=headers(boss.id), json=body)
+        return await http.put(f"{A}/cleanup/settings", headers=headers(boss.id), json=body)
 
 
 async def stored_policy(pool):
@@ -133,7 +165,7 @@ async def test_admin_put_cleanup_settings_200(pool, dsn):
     assert r.headers["cache-control"] == "no-store"
     assert r.json()["policy"] == POLICY
     assert r.json()["source"] == "database"
-    main = await main_get(pool, dsn, "/api/v1/cache/cleanup/settings")
+    main = await main_get(pool, dsn, "/api/v1/backups/cleanup/settings")
     assert main.json()["policy"] == POLICY
 
 

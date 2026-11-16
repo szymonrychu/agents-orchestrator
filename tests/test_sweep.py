@@ -1,37 +1,55 @@
-"""The cleanup planner, the protected set from the database and the executor."""
+"""The backup cleanup planner, the references from the database and the executor."""
 
 from __future__ import annotations
 
 import logging
-import random
+import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from backup_helpers import workspace_entries
+from test_api_backups import PRE, add_version, settings_for
 
 from agents_orchestrator.cache import sweep
 from agents_orchestrator.cache.policy import SweepPolicy
 from agents_orchestrator.cache.presign import ArchiveObject, DeleteFailure
-from agents_orchestrator.cache.sweep import plan_sweep, protected_keys, referenced_keys, run_sweep
-from agents_orchestrator.db import sessions
-from agents_orchestrator.settings import Settings
+from agents_orchestrator.cache.sweep import References, plan_sweep, references, run_sweep
+from agents_orchestrator.db import backups, sessions
 from agents_orchestrator.spec import SessionSpec
 
-PRE = "workspace-cache/"
 NOW = datetime(2026, 10, 31, 12, tzinfo=UTC)
 DAY = timedelta(days=1)
 
 
-def obj(name: str, age_days: float, size: int = 100) -> ArchiveObject:
-    return ArchiveObject(f"{PRE}{name}.tar.zst", size, NOW - timedelta(days=age_days))
+def ver(name, age_days, *, state="superseded", vid=None, size=100):
+    vid = vid or uuid.uuid4()
+    return backups.Version(
+        id=vid,
+        name=name,
+        object_key=f"{PRE}b/{name}/{vid.hex[:8]}.tar.zst",
+        size=size,
+        digest=vid.hex,
+        manifest=None,
+        base_version=None,
+        origin="save",
+        session_slug=None,
+        preset_id=None,
+        project=None,
+        created_by="a",
+        created_at=NOW - timedelta(days=age_days),
+        state=state,
+    )
 
 
-def plan(objects, protected=(), *, days=30, keep=3, grace=600):
+def plan(versions, *, objects=(), refs=None, activity=None, days=30, keep=3, grace=600):
+    activity = activity if activity is not None else {}
     return plan_sweep(
-        objects,
-        protected,
-        NOW,
+        versions=versions,
+        activity=activity,
+        objects=objects,
+        refs=refs or References(),
+        now=NOW,
         retention_days=days,
         keep_newest=keep,
         grace_seconds=grace,
@@ -39,242 +57,158 @@ def plan(objects, protected=(), *, days=30, keep=3, grace=600):
     )
 
 
-def keys_of(p):
-    return set(p.keys)
-
-
-def versions(group: str, ages: list[float]) -> list[ArchiveObject]:
-    out = []
-    for age in ages:
-        stamp = (NOW - timedelta(days=age)).strftime("%Y%m%dt%H%M%Sz")
-        out.append(obj(f"{group}/{stamp}", age))
-    return out
+def history(name, ages):
+    """Versions of `name`, `ages` newest first; the first is current."""
+    return [
+        ver(name, age, state="current" if i == 0 else "superseded") for i, age in enumerate(ages)
+    ]
 
 
 # ------------------------------------------------------------------ planner
 
 
-def test_old_versions_beyond_the_newest_k_are_deleted():
-    objs = versions("proj", [1, 40, 50, 60, 70])
-    p = plan(objs, keep=3)
-    assert keys_of(p) == {objs[3].key, objs[4].key}  # the 4th and 5th newest, both older than 30d
+def test_sweep_keeps_current_and_referenced():
+    vs = history("proj/a", [1, 40, 50, 60, 70])
+    refs = References(versions={vs[3].id: ["alpha"]})
+    p = plan(vs, keep=1, activity={"proj/a": NOW - DAY}, refs=refs)
+    assert set(p.keys) == {vs[2].object_key, vs[4].object_key}
+    assert p.reason(vs[0].object_key) == "kept: the current version"
+    assert p.reason(vs[3].object_key).startswith("protected")
+    assert p.reason(vs[1].object_key).startswith("kept: among the newest")
 
 
-def test_age_alone_does_not_delete_the_newest_k():
-    objs = versions("proj", [100, 200, 300])
-    assert plan(objs, keep=3).keys == []
+def test_ancient_current_is_kept_while_the_name_is_active():
+    vs = history("proj/a", [400])
+    assert plan(vs, activity={"proj/a": NOW - DAY}).keys == []
 
 
-def test_count_alone_does_not_delete_young_objects():
-    objs = versions("proj", [1, 2, 3, 4, 5])
-    assert plan(objs, keep=3).keys == []
+def test_sweep_deletes_stale_name():
+    vs = history("proj/a", [40, 50, 60]) + history("proj/b", [2])
+    p = plan(vs, activity={"proj/a": NOW - 45 * DAY, "proj/b": NOW - DAY})
+    assert set(p.keys) == {v.object_key for v in vs[:3]}
+    assert all(d.whole_name for d in p.deletes)
+    assert p.deletes[0].reason.startswith("name not restored or saved")
 
 
-def test_grace_period_keeps_objects_that_may_be_mid_save():
-    objs = [obj("proj/a", 2), obj("proj/b", 3), obj("proj/c", 4)]
-    p = plan_sweep(
-        objs, [], NOW, retention_days=1, keep_newest=1, grace_seconds=10 * 86400, prefix=PRE
-    )
-    assert p.keys == []
-    assert "grace" in p.reason(objs[1].key)
-    late = plan_sweep(objs, [], NOW, retention_days=1, keep_newest=1, grace_seconds=60, prefix=PRE)
-    assert keys_of(late) == {objs[1].key}  # c is the greatest key, a the most recent
+def test_a_stale_name_with_a_referenced_version_or_spec_name_is_kept():
+    vs = history("proj/a", [40, 50])
+    act = {"proj/a": NOW - 45 * DAY}
+    assert plan(vs, activity=act, refs=References(versions={vs[1].id: ["x"]}), keep=5).keys == []
+    assert plan(vs, activity=act, refs=References(names={"proj/a": ["x"]}), keep=5).keys == []
 
 
-def test_never_deletes_a_protected_key_and_says_why():
-    objs = versions("proj", [1, 40, 50, 60, 70])
-    p = plan(objs, [objs[4].key], keep=1)
-    assert objs[4].key not in keys_of(p)
-    assert "protected" in p.reason(objs[4].key)
-    assert keys_of(p) == {objs[1].key, objs[2].key, objs[3].key}
+def test_a_stale_name_with_a_young_version_is_kept():
+    vs = history("proj/a", [0.0001, 50])
+    assert plan(vs, activity={"proj/a": NOW - 45 * DAY}, keep=5).keys == []
 
 
-def test_never_deletes_the_newest_of_a_group_even_when_ancient():
-    only_version = versions("proj", [400])
-    assert plan(only_version, keep=1).keys == []
+def test_count_alone_and_age_alone_do_not_delete():
+    vs = history("proj/a", [1, 2, 3, 4, 5])
+    assert plan(vs, keep=1, activity={"proj/a": NOW}).keys == []  # all young
+    old = history("proj/b", [100, 110, 120])
+    assert plan(old, keep=5, activity={"proj/b": NOW}).keys == []  # within the newest K
 
 
-def test_flat_names_are_age_deleted_when_unreferenced_old_and_past_grace():
-    flat = [obj("preset-0123456789abcdef", 400), obj("migrated", 31), obj("fresh", 5)]
-    p = plan(flat)
-    assert keys_of(p) == {flat[0].key, flat[1].key}  # keep-last-N does not apply to flat names
+def test_grace_period_keeps_a_version_that_may_be_mid_save():
+    vs = history("proj/a", [0, 0.001, 50])
+    vs[1] = replace(vs[1], created_at=NOW - timedelta(seconds=30))
+    p = plan(vs, keep=0, activity={"proj/a": NOW})
+    assert p.reason(vs[1].object_key) == "kept: younger than the grace period"
+    assert p.keys == [vs[2].object_key]
 
 
-def test_flat_names_are_kept_when_referenced_or_inside_grace():
-    flat = [obj("pinned", 400), obj("racing", 400)]
-    p = plan(flat, {flat[0].key}, grace=10**9)
-    assert p.keys == []
-    p = plan(flat, {flat[0].key})
-    assert keys_of(p) == {flat[1].key}
-    assert p.reason(flat[0].key) == "protected: a session references it"
-
-
-def test_greatest_key_is_kept_even_when_its_mtime_is_old():
-    # names that are not timestamps: the greatest key is what a prefix restore would pick
-    objs = [obj("proj/zzz", 400), obj("proj/aaa", 1), obj("proj/bbb", 40), obj("proj/ccc", 50)]
-    p = plan(objs, keep=1)
-    assert objs[0].key not in keys_of(p)
-    assert keys_of(p) == {objs[2].key, objs[3].key}
-
-
-def test_groups_are_independent_and_nested_groups_are_separate():
-    a = versions("a", [1, 40, 50])
-    b = versions("a/b", [1, 40, 50])
-    p = plan(a + b, keep=1)
-    assert keys_of(p) == {a[1].key, a[2].key, b[1].key, b[2].key}
-
-
-def test_prefix_similar_groups_do_not_mix():
-    foo = versions("foo", [1, 2])
-    bar = versions("foo-bar", [100, 200])
-    p = plan(foo + bar, keep=1)
-    assert keys_of(p) == {bar[1].key}  # foo-bar keeps its own newest; foo untouched
+def test_orphan_objects_are_deleted_by_age_only():
+    owned = ver("proj/a", 1, state="current")
+    objs = [
+        ArchiveObject(owned.object_key, 1, NOW - 100 * DAY),
+        ArchiveObject(f"{PRE}b/proj/a/orphan-old.tar.zst", 5, NOW - 40 * DAY),
+        ArchiveObject(f"{PRE}b/proj/a/orphan-fresh.tar.zst", 5, NOW - 5 * DAY),
+        ArchiveObject(f"{PRE}b/proj/a/orphan-grace.tar.zst", 5, NOW - timedelta(seconds=5)),
+        ArchiveObject(f"{PRE}b/proj/a/readme.txt", 5, NOW - 400 * DAY),
+    ]
+    p = plan([owned], objects=objs, activity={"proj/a": NOW})
+    assert p.keys == [f"{PRE}b/proj/a/orphan-old.tar.zst"]
 
 
 def test_transcripts_are_deleted_by_age_only_and_respect_protection():
-    old = obj("sessions/old", 90)
-    young = obj("sessions/young", 2)
-    live = obj("sessions/live", 90)
-    p = plan([old, young, live], [live.key], keep=1)
-    assert keys_of(p) == {old.key}
-    assert "transcripts" in p.reason(old.key)
-
-
-def test_foreign_objects_are_ignored():
-    stray = ArchiveObject(f"{PRE}proj/readme.txt", 1, NOW - 500 * DAY)
-    assert plan([stray]).decisions == ()
-
-
-def test_reasons_cover_every_archive_and_the_plan_is_deterministic():
-    objs = versions("a", [1, 40, 50, 60]) + versions("b", [3, 90]) + [obj("sessions/x", 99)]
-    first = plan(objs, keep=2)
-    assert {d.key for d in first.decisions} == {o.key for o in objs}
-    assert all(d.reason for d in first.decisions)
-    for seed in range(5):
-        shuffled = random.Random(seed).sample(objs, len(objs))
-        assert plan(shuffled, keep=2) == first
-    assert list(first.keys) == sorted(first.keys)
-    assert first.bytes == 100 * len(first.deletes)
+    key = f"{PRE}sessions/old.tar.zst"
+    kept = f"{PRE}sessions/live.tar.zst"
+    objs = [ArchiveObject(key, 1, NOW - 90 * DAY), ArchiveObject(kept, 1, NOW - 90 * DAY)]
+    p = plan([], objects=objs, refs=References(transcripts={kept}))
+    assert p.keys == [key]
+    assert p.reason(kept).startswith("protected")
 
 
 @pytest.mark.parametrize("seed", range(20))
 def test_invariants_on_random_listings(seed):
+    import random
+
     rng = random.Random(seed)
-    objs = [
-        obj(f"g{rng.randrange(4)}/{n:04d}", rng.uniform(0, 120))
-        for n in range(rng.randrange(1, 40))
-    ] + [obj(f"flat{n}", rng.uniform(0, 120)) for n in range(rng.randrange(0, 5))]
-    protected = {o.key for o in rng.sample(objs, k=min(len(objs), 3))}
-    keep = rng.randrange(1, 5)
-    p = plan(objs, protected, keep=keep)
-    deleted = keys_of(p)
-    assert not deleted & protected
-    by_group: dict[str, list[ArchiveObject]] = {}
-    for o in objs:
-        by_group.setdefault(
-            o.key.rsplit("/", 1)[0] if "/" in o.key[len(PRE) :] else o.key, []
-        ).append(o)
-    for group, members in by_group.items():
-        if group.endswith(".tar.zst"):
-            continue  # flat names: age-deleted unless protected, no keep-last-N
-        survivors = [o for o in members if o.key not in deleted]
-        assert survivors, "a group is never emptied"
-        assert max(o.key for o in members) not in deleted
-        assert len(survivors) >= min(keep, len(members))
+    vs: list[backups.Version] = []
+    for n in range(4):
+        ages = sorted(rng.uniform(0, 120) for _ in range(rng.randint(1, 6)))
+        vs += history(f"n/{n}", ages)
+    refs = References(versions={v.id: ["s"] for v in rng.sample(vs, 3)})
+    act = {f"n/{n}": NOW - rng.uniform(0, 100) * DAY for n in range(4)}
+    p = plan(vs, refs=refs, activity=act, keep=rng.randint(0, 3))
+    deleted = {d.version_id for d in p.deletes}
+    assert not deleted & set(refs.versions)
+    for name in {v.name for v in vs}:
+        group = [v for v in vs if v.name == name]
+        gone = {v.id for v in group} & deleted
+        current = next(v for v in group if v.state == "current")
+        if current.id in deleted:  # only a whole-name delete takes the current version
+            assert gone == {v.id for v in group}
+    assert [d.key for d in p.decisions] == sorted(d.key for d in p.decisions)
 
 
-# ------------------------------------------------------------------ protected set (database)
+# ------------------------------------------------------------------ references
 
 
-def settings_for(dsn=None, **kw):
-    return Settings(
-        database_url=dsn or "postgresql://x/y",
-        agent_image="img:1",
-        cache_s3_bucket="b",
-        cache_s3_access_key_id="a",
-        cache_s3_secret_access_key="s",
-        cache_image="c:1",
-        **kw,
-    )
-
-
-async def make(conn, slug, restore="", save_key="", **cache_status):
-    spec = SessionSpec(backup=workspace_entries(restore, save_key) or workspace_entries("k"))
-    c = await sessions.create(conn, slug, spec)
-    if cache_status:
-        await sessions.set_status(conn, c.id, {"cache": cache_status}, c.observed_generation)
-    return c
-
-
-async def test_protected_set_covers_resolved_keys_and_transcripts(pool):
+async def test_references_cover_versions_spec_names_and_transcripts(pool, dsn):
+    v = await add_version(pool, "proj/a")
     async with pool.connection() as conn:
-        await make(
-            conn,
-            "alpha",
-            restore_resolved=f"{PRE}proj/20260101t000000z.tar.zst",
-            save_resolved=f"{PRE}proj/20261031t100000z.tar.zst",
+        s = await sessions.create(
+            conn, "alpha", SessionSpec(backup=workspace_entries("proj/a", "fixed"))
         )
-        got = await protected_keys(conn, settings_for())
-    assert got == {
-        f"{PRE}proj/20260101t000000z.tar.zst",
-        f"{PRE}proj/20261031t100000z.tar.zst",
-        f"{PRE}sessions/alpha.tar.zst",
-        f"{PRE}k.tar.zst",  # the entry the helper adds so the session has a workspace entry
-    }
+        await conn.execute(
+            "UPDATE sessions SET status = jsonb_build_object('backup', jsonb_build_array("
+            "jsonb_build_object('version', %s::text, 'base_version', %s::text))) WHERE id = %s",
+            (str(v.id), str(uuid.uuid4()), s.id),
+        )
+        await sessions.create(conn, "plain", SessionSpec())
+        refs = await references(conn, settings_for(dsn))
+    assert refs.versions == {v.id: ["alpha"]}  # the unknown base_version is not a reference
+    assert refs.names == {"proj/a": ["alpha"], "fixed": ["alpha"]}
+    assert refs.transcripts == {f"{PRE}sessions/alpha.tar.zst"}
 
 
-async def test_protected_set_includes_spec_names_before_the_reconciler_resolves_them(pool):
+async def test_spec_names_render_before_the_reconciler_resolves_them(pool, dsn):
     async with pool.connection() as conn:
-        await make(conn, "beta", restore="shared/{{ session_slug }}", save_key="fixed")
-        refs = await referenced_keys(conn, settings_for())
-    assert refs[f"{PRE}shared/beta.tar.zst"] == ["beta"]
-    assert refs[f"{PRE}fixed.tar.zst"] == ["beta"]
+        await sessions.create(
+            conn, "beta", SessionSpec(backup=workspace_entries("shared/{{ session_slug }}"))
+        )
+        refs = await references(conn, settings_for(dsn))
+    assert refs.names == {"shared/beta": ["beta"]}
 
 
-async def test_deleting_session_stays_protected_and_a_deleted_one_is_not(pool):
+async def test_a_deleted_session_references_nothing(pool, dsn):
     async with pool.connection() as conn:
-        live = await make(conn, "live", restore_resolved=f"{PRE}a.tar.zst")
-        gone = await make(conn, "gone", restore_resolved=f"{PRE}b.tar.zst")
-        dying = await make(conn, "dying", save_resolved=f"{PRE}c.tar.zst")
-        await sessions.request_delete(conn, dying.id)
+        gone = await sessions.create(conn, "gone", SessionSpec(backup=workspace_entries("a")))
         await sessions.request_delete(conn, gone.id)
         await sessions.purge(conn, gone.id)
-        got = await protected_keys(conn, settings_for())
-        refs = await referenced_keys(conn, settings_for())
-    assert f"{PRE}a.tar.zst" in got and f"{PRE}c.tar.zst" in got
-    assert f"{PRE}b.tar.zst" not in got and f"{PRE}sessions/gone.tar.zst" not in got
-    assert f"{PRE}sessions/dying.tar.zst" in got
-    assert refs[f"{PRE}a.tar.zst"] == [live.slug]
-
-
-async def test_in_flight_cache_run_keys_are_protected(pool):
-    async with pool.connection() as conn:
-        await make(
-            conn,
-            "flight",
-            save_key="v/{{ now }}",
-            save_resolved=f"{PRE}v/20261031t115900z.tar.zst",
-            save={"state": "running", "job": "agent-flight-cache-save"},
-        )
-        got = await protected_keys(conn, settings_for())
-    assert f"{PRE}v/20261031t115900z.tar.zst" in got
-
-
-async def test_a_session_without_a_cache_protects_nothing(pool):
-    async with pool.connection() as conn:
-        await sessions.create(conn, "plain", SessionSpec())
-        assert await protected_keys(conn, settings_for()) == set()
+        refs = await references(conn, settings_for(dsn))
+    assert refs.names == {} and refs.transcripts == set()
 
 
 # ------------------------------------------------------------------ executor
 
 
 class Fake:
-    def __init__(self, objects, protected_calls):
-        self.objects = objects
+    def __init__(self, objects=()):
+        self.objects = list(objects)
         self.deleted: list[list[str]] = []
         self.fail: dict[str, DeleteFailure] = {}
-        self.protected_calls = list(protected_calls)
 
     def list(self, settings, prefix, **kw):
         assert prefix == PRE
@@ -284,101 +218,129 @@ class Fake:
         self.deleted.append(list(keys))
         return [self.fail[k] for k in keys if k in self.fail]
 
-    async def protected(self):
-        return set(
-            self.protected_calls.pop(0)
-            if len(self.protected_calls) > 1
-            else self.protected_calls[0]
-        )
-
-    async def now(self):
-        return NOW
-
 
 def wire(monkeypatch, fake):
     monkeypatch.setattr(sweep, "list_archives", fake.list)
     monkeypatch.setattr(sweep, "delete_keys", fake.delete)
 
 
-def policy_for(settings, *, dry_run):
-    return replace(SweepPolicy.from_settings(settings), dry_run=dry_run)
+def policy_for(settings, *, dry_run, **kw):
+    return replace(SweepPolicy.from_settings(settings), dry_run=dry_run, grace_seconds=0, **kw)
 
 
-def stale() -> list[ArchiveObject]:
-    return versions("proj", [1, 40, 50, 60])
+async def stale_name(pool):
+    """proj/a: current (1 day) plus three old versions; returns them newest first."""
+    out = []
+    for age in (60, 50, 40, 1):
+        out.append(await add_version(pool, "proj/a", age=datetime.now(UTC) - timedelta(days=age)))
+    return out[::-1]
 
 
-async def test_dry_run_plans_but_never_deletes(monkeypatch):
-    fake = Fake(stale(), [set()])
+async def rows(pool, name="proj/a"):
+    async with pool.connection() as conn:
+        return {v.id for v in await backups.name_versions(conn, name)}
+
+
+async def test_dry_run_plans_but_never_deletes(pool, dsn, monkeypatch):
+    vs = await stale_name(pool)
+    fake = Fake()
     wire(monkeypatch, fake)
-    s = settings_for(cache_keep_newest=1)
-    res = await run_sweep(s, fake.protected, fake.now, policy=policy_for(s, dry_run=True))
-    assert fake.deleted == []
-    assert (res.dry_run, res.listed, res.planned, res.deleted) == (True, 4, 3, 0)
-    assert res.planned_bytes == 300 and res.error is None
+    s = settings_for(dsn)
+    res = await run_sweep(s, pool, policy=policy_for(s, dry_run=True, keep_newest=1))
+    assert fake.deleted == [] and await rows(pool) == {v.id for v in vs}
+    assert (res.dry_run, res.planned, res.deleted, res.error) == (True, 2, 0, None)
+    assert res.planned_bytes == 200
 
 
-async def test_run_sweep_plans_with_the_policy_not_the_settings(monkeypatch):
-    fake = Fake(stale(), [set()])
+async def test_real_run_deletes_rows_then_objects_and_keeps_current(pool, dsn, monkeypatch):
+    vs = await stale_name(pool)
+    fake = Fake()
     wire(monkeypatch, fake)
-    s = settings_for(cache_keep_newest=3)
-    res = await run_sweep(
-        s,
-        fake.protected,
-        fake.now,
-        policy=replace(SweepPolicy.from_settings(s), keep_newest=1, dry_run=True),
+    s = settings_for(dsn)
+    res = await run_sweep(s, pool, policy=policy_for(s, dry_run=False, keep_newest=1))
+    assert await rows(pool) == {vs[0].id, vs[1].id}  # current and the newest non-current
+    assert sorted(k for b in fake.deleted for k in b) == sorted(
+        [vs[2].object_key, vs[3].object_key]
     )
-    assert (res.dry_run, res.planned) == (True, 3)
+    assert (res.deleted, res.deleted_bytes, len(res.failures)) == (2, 200, 0)
+    assert res.to_dict()["finished_at"]
 
 
-async def test_real_run_deletes_the_plan_and_summarises(monkeypatch):
-    fake = Fake(stale(), [set()])
+async def test_a_stale_name_goes_whole_and_the_name_row_too(pool, dsn, monkeypatch):
+    vs = await stale_name(pool)
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE backups SET updated_at = now() - interval '45 days'")
+    fake = Fake()
     wire(monkeypatch, fake)
-    s = settings_for(cache_keep_newest=1)
-    res = await run_sweep(s, fake.protected, fake.now, policy=policy_for(s, dry_run=False))
-    assert sorted(k for batch in fake.deleted for k in batch) == sorted(o.key for o in stale()[1:])
-    assert (res.deleted, res.deleted_bytes, len(res.failures)) == (3, 300, 0)
-    assert res.to_dict()["deleted"] == 3 and res.to_dict()["finished_at"]
+    s = settings_for(dsn)
+    res = await run_sweep(s, pool, policy=policy_for(s, dry_run=False))
+    assert res.deleted == 4 and await rows(pool) == set()
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT count(*) FROM backups")
+        assert (await cur.fetchone())[0] == 0
+    assert {k for b in fake.deleted for k in b} == {v.object_key for v in vs}
 
 
-async def test_protection_is_rechecked_right_before_deleting(monkeypatch):
-    objs = stale()
-    fake = Fake(objs, [set(), {objs[1].key}])  # the second read sees a new reference
+async def test_a_reference_made_after_the_plan_stops_the_delete(pool, dsn, monkeypatch):
+    vs = await stale_name(pool)
+    fake = Fake()
     wire(monkeypatch, fake)
-    s = settings_for(cache_keep_newest=1)
-    res = await run_sweep(s, fake.protected, fake.now, policy=policy_for(s, dry_run=False))
-    assert objs[1].key not in {k for batch in fake.deleted for k in batch}
-    assert res.skipped_protected == 1 and res.deleted == 2
+    real = sweep.references
+    calls = []
+
+    async def late(conn, settings):
+        refs = await real(conn, settings)
+        calls.append(1)
+        if len(calls) > 1:  # the re-read right before deleting
+            refs.versions[vs[2].id] = ["racer"]
+        return refs
+
+    monkeypatch.setattr(sweep, "references", late)
+    s = settings_for(dsn)
+    res = await run_sweep(s, pool, policy=policy_for(s, dry_run=False, keep_newest=1))
+    assert vs[2].id in await rows(pool) and vs[3].id not in await rows(pool)
+    assert (res.deleted, res.skipped_protected) == (1, 1)
 
 
-async def test_per_key_errors_are_logged_and_counted(monkeypatch, caplog):
-    objs = stale()
-    fake = Fake(objs, [set()])
-    fake.fail[objs[2].key] = DeleteFailure(objs[2].key, "AccessDenied", "nope")
+async def test_orphans_are_swept_and_a_recorded_object_is_not(pool, dsn, monkeypatch):
+    vs = await stale_name(pool)
+    orphan = ArchiveObject(f"{PRE}b/proj/a/lost.tar.zst", 7, NOW - 400 * DAY)
+    real = ArchiveObject(vs[0].object_key, 100, NOW - 400 * DAY)
+    fake = Fake([orphan, real])
     wire(monkeypatch, fake)
+    s = settings_for(dsn)
+    res = await run_sweep(s, pool, policy=policy_for(s, dry_run=False, keep_newest=9))
+    assert [k for b in fake.deleted for k in b] == [orphan.key]
+    assert res.deleted == 1 and vs[0].id in await rows(pool)
+
+
+async def test_per_key_errors_are_logged_and_counted(pool, dsn, monkeypatch, caplog):
+    vs = await stale_name(pool)
+    fake = Fake()
+    fake.fail[vs[3].object_key] = DeleteFailure(vs[3].object_key, "AccessDenied", "no")
+    wire(monkeypatch, fake)
+    s = settings_for(dsn)
     with caplog.at_level(logging.WARNING):
-        s = settings_for(cache_keep_newest=1)
-        res = await run_sweep(s, fake.protected, fake.now, policy=policy_for(s, dry_run=False))
-    assert res.deleted == 2 and [f.key for f in res.failures] == [objs[2].key]
-    assert res.to_dict()["failed"] == 1
-    assert "AccessDenied" in caplog.text
+        res = await run_sweep(s, pool, policy=policy_for(s, dry_run=False, keep_newest=1))
+    assert (res.deleted, len(res.failures)) == (1, 1)
+    assert any("AccessDenied" in m for m in caplog.messages)
+    assert vs[3].id not in await rows(pool)  # the row is gone: the object is a later orphan
 
 
-async def test_a_listing_failure_is_recorded_not_raised(monkeypatch):
-    fake = Fake([], [set()])
-
-    def boom(*a, **kw):
+async def test_a_listing_failure_is_recorded_not_raised(pool, dsn, monkeypatch):
+    def boom(*a, **k):
         raise RuntimeError("s3 down")
 
     monkeypatch.setattr(sweep, "list_archives", boom)
-    s = settings_for()
-    res = await run_sweep(s, fake.protected, fake.now, policy=policy_for(s, dry_run=False))
-    assert res.error and "s3 down" in res.error and res.finished_at is not None
+    s = settings_for(dsn)
+    res = await run_sweep(s, pool, policy=policy_for(s, dry_run=False))
+    assert res.error and "s3 down" in res.error and res.finished_at
 
 
-async def test_nothing_planned_calls_no_delete(monkeypatch):
-    fake = Fake(versions("proj", [1, 2]), [set()])
+async def test_nothing_planned_calls_no_delete(pool, dsn, monkeypatch):
+    await add_version(pool, "proj/a", age=datetime.now(UTC))
+    fake = Fake()
     wire(monkeypatch, fake)
-    s = settings_for()
-    res = await run_sweep(s, fake.protected, fake.now, policy=policy_for(s, dry_run=False))
+    s = settings_for(dsn)
+    res = await run_sweep(s, pool, policy=policy_for(s, dry_run=False))
     assert fake.deleted == [] and res.planned == 0

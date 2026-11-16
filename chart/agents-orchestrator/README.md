@@ -99,7 +99,7 @@ renders no `ORCH_CACHE_*` setting and the cache stays off.
 | `cache.image` | `""` (the chart image, `image.repository:image.tag`) | `ORCH_CACHE_IMAGE` |
 | `cache.maxBytes` | `5368709120` (5 GiB, the maximum) | `ORCH_CACHE_MAX_BYTES` |
 | `cache.timeoutSeconds` | `1800` | `ORCH_CACHE_TIMEOUT_SECONDS` |
-| `cache.s3.api.existingSecret` | `""` (the archives routes answer 503) | - |
+| `cache.s3.api.existingSecret` | `""` (the backups routes answer 503) | - |
 | `cache.s3.api.accessKeyIdKey` | `AWS_ACCESS_KEY_ID` | `ORCH_CACHE_S3_API_ACCESS_KEY_ID` |
 | `cache.s3.api.secretAccessKeyKey` | `AWS_SECRET_ACCESS_KEY` | `ORCH_CACHE_S3_API_SECRET_ACCESS_KEY` |
 | `cache.sweep.enabled` | `true` | `ORCH_CACHE_SWEEP_ENABLED` |
@@ -115,12 +115,12 @@ and reaches the reconciler container only, as `secretKeyRef` env: the api, dispa
 ingester, the migrate init containers and the agent pods never see it, and each cache Job gets
 one presigned URL instead. A bucket without `cache.s3.existingSecret` fails the render.
 The api container alone reads its own pair from `cache.s3.api.existingSecret` (same key
-options), used for the archives list, download, cleanup preview and delete routes; the code
+options), used for the backups list, versions, manifest, download, copy, delete and cleanup preview routes; the code
 only lists, gets and deletes with it. It may name the same Secret as `cache.s3.existingSecret`
 when the store has one identity. Without it those routes answer 503. The cleanup sweep starts in
-dry-run: read `GET /api/v1/cache/cleanup/preview`, then set `cache.sweep.dryRun: false`.
+dry-run: read `GET /api/v1/backups/cleanup/preview`, then set `cache.sweep.dryRun: false`.
 The `cache.sweep.*` values are only the seed: they apply until a policy is saved in Settings > Backups
-(or with `PUT /api/v1/cache/cleanup/settings`), and from then on the database row wins and later
+(or with `PUT /api/v1/backups/cleanup/settings`), and from then on the database row wins and later
 changes to these values have no effect.
 The reconciler Role allows create, get and delete on `batch` Jobs in the release
 namespace (Kubernetes RBAC cannot restrict verbs by label).

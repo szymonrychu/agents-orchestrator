@@ -40,8 +40,9 @@ class Spy:
         self.calls: list[SweepPolicy] = []
         self.error = error
 
-    async def __call__(self, settings, protected, now, *, policy, credentials=None):
-        stamp = await now()  # read before the call is visible, like run_sweep's started_at
+    async def __call__(self, settings, pool, *, policy, credentials=None):
+        async with pool.connection() as conn:  # read before the call is visible, like run_sweep
+            stamp = (await (await conn.execute("SELECT now()")).fetchone())[0]
         self.calls.append(policy)
         await self.during()
         if self.error:

@@ -1,37 +1,43 @@
-"""Archive cleanup: a pure planner, the protected set read from the database, an executor.
+"""Backup cleanup: a pure planner over name and version rows, the references read from the
+database, and an executor that deletes the rows first and the objects after.
 
-`plan_sweep` decides from a listing, the protected keys and the clock alone, so the same function
-serves the periodic sweep, the dry-run preview and the manual delete's re-check. It never returns a
-protected key and never the newest object of a versioned group; it deletes an object only when it
-is beyond the newest K of its group AND older than N days AND older than the grace period (an
-archive younger than the grace may still be mid-save).
+`plan_sweep` decides from the version rows, the references, the object listing and the clock
+alone, so the same function serves the periodic sweep, the dry-run preview and the manual
+delete's re-check. Per backup name:
 
-Groups follow `keys.group_of`: everything up to the last `/` of the key below the cache prefix
-(`proj/20261031t120000z.tar.zst` groups under `proj/`). Keep-newest-K applies only to these
-versioned groups. A flat name (one object per group, e.g. `preset-<sha16>`) is deleted by age alone
-when no session references it and it is past the grace period. Transcripts
-(`<prefix>sessions/<slug>.tar.zst`) are one object per session: they are deleted by age alone, still
-never while protected.
+- The current version is never deleted, nor any version a stored session status references
+  (`status.backup[*].version` / `base_version`), nor a version younger than the grace period (a
+  save may still be recording it).
+- A name not restored or saved for the retention period, with no referenced version, no session
+  spec rendering to it and nothing inside the grace period, is deleted whole (every version).
+- Otherwise the newest K non-current versions stay and older non-current ones go once past the
+  retention period.
+- An object under the cache prefix that no version row owns is an orphan (a save the reconciler
+  never recorded, or an object left after a failed delete): deleted by age (retention and
+  grace). Transcripts (`<prefix>sessions/<slug>.tar.zst`) are one object per session, deleted by
+  age alone while no session references them.
 
-Newest means most recent `last_modified`, ties broken by key; the greatest key of a group (what a
-prefix-form restore picks) is additionally never deleted, so the two notions of newest cannot
-disagree into deleting the object a restore would pick.
+The executor deletes the database row inside a transaction (re-checking references under the
+`backups` row lock), then the object; an object whose delete fails is an orphan the next sweep
+removes.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from collections import defaultdict
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
 import psycopg
+from psycopg_pool import AsyncConnectionPool
 
 from agents_orchestrator import rendering
-from agents_orchestrator.cache.keys import ArchiveNameError, group_of, object_name_for
+from agents_orchestrator.cache.keys import ArchiveNameError, validate_name
 from agents_orchestrator.cache.policy import SweepPolicy
 from agents_orchestrator.cache.presign import (
     SUFFIX,
@@ -41,6 +47,7 @@ from agents_orchestrator.cache.presign import (
     delete_keys,
     list_archives,
 )
+from agents_orchestrator.db import backups as backups_repo
 from agents_orchestrator.db import sessions as sessions_repo
 from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.settings import Settings
@@ -58,11 +65,14 @@ class Decision:
     size: int
     delete: bool
     reason: str
+    name: str | None = None
+    version_id: uuid.UUID | None = None
+    whole_name: bool = False
 
 
 @dataclass(frozen=True)
 class SweepPlan:
-    """One decision per archive in the listing, sorted by key."""
+    """One decision per object, sorted by key."""
 
     decisions: tuple[Decision, ...]
 
@@ -82,124 +92,143 @@ class SweepPlan:
         return next((d.reason for d in self.decisions if d.key == key), None)
 
 
+@dataclass
+class References:
+    """What stored sessions point at: version ids and names (with the slugs) and transcripts."""
+
+    versions: dict[uuid.UUID, list[str]] = field(default_factory=dict)
+    names: dict[str, list[str]] = field(default_factory=dict)
+    transcripts: set[str] = field(default_factory=set)
+
+    def slugs_of(self, name: str, ids: Iterable[uuid.UUID]) -> list[str]:
+        found = set(self.names.get(name, ()))
+        for vid in ids:
+            found.update(self.versions.get(vid, ()))
+        return sorted(found)
+
+
 def plan_sweep(
-    objects: Iterable[ArchiveObject],
-    protected: Iterable[str],
-    now: datetime,
     *,
+    versions: Iterable[backups_repo.Version],
+    activity: dict[str, datetime],
+    objects: Iterable[ArchiveObject],
+    refs: References,
+    now: datetime,
     retention_days: int,
     keep_newest: int,
     grace_seconds: int,
     prefix: str,
 ) -> SweepPlan:
-    """Which of `objects` to delete, each with the reason it is kept or deleted."""
-    protect = frozenset(protected)
+    """Which versions and objects to delete, each with the reason it is kept or deleted."""
     old = now - timedelta(days=retention_days)
     fresh = now - timedelta(seconds=grace_seconds)
-    groups: dict[str, list[ArchiveObject]] = defaultdict(list)
-    for obj in objects:
-        if obj.key.endswith(SUFFIX):  # anything else in the bucket is not ours to delete
-            groups[
-                SESSIONS_GROUP if _is_transcript(obj.key, prefix) else group_of(obj.key, prefix)
-            ].append(obj)
+    by_name: dict[str, list[backups_repo.Version]] = defaultdict(list)
+    for version in versions:
+        by_name[version.name].append(version)
     decisions: list[Decision] = []
-    for group, members in groups.items():
-        members.sort(key=lambda o: (o.last_modified, o.key), reverse=True)
-        keep_newest_keys: set[str] = set()
-        if group.endswith("/") and group != SESSIONS_GROUP:  # versioned groups only
-            keep_newest_keys = {o.key for o in members[:keep_newest]}
-            keep_newest_keys.add(max(o.key for o in members))
-        for obj in members:
-            decisions.append(
-                _decide(obj, protect, keep_newest_keys, group == SESSIONS_GROUP, old, fresh)
-            )
+    for name, group in by_name.items():
+        group.sort(key=lambda v: (v.created_at, str(v.id)), reverse=True)
+        decisions += _plan_name(name, group, activity.get(name), refs, old, fresh, keep_newest)
+    owned = {v.object_key for vs in by_name.values() for v in vs}
+    for obj in objects:
+        if not obj.key.endswith(SUFFIX) or obj.key in owned:  # not ours to delete, or planned
+            continue
+        if obj.key.startswith(f"{prefix}{SESSIONS_GROUP}"):
+            if obj.key in refs.transcripts:
+                decisions.append(Decision(obj.key, obj.size, False, "protected: a session uses it"))
+                continue
+            what = "transcripts older than the retention period"
+        else:
+            what = "object no backup version owns, older than the retention period"
+        decisions.append(_aged(obj, old, fresh, what))
     return SweepPlan(tuple(sorted(decisions, key=lambda d: d.key)))
 
 
-def _is_transcript(key: str, prefix: str) -> bool:
-    return key.startswith(f"{prefix}{SESSIONS_GROUP}")
+def _aged(obj: ArchiveObject, old: datetime, fresh: datetime, what: str) -> Decision:
+    if obj.last_modified > fresh:
+        return Decision(obj.key, obj.size, False, "kept: younger than the grace period")
+    if obj.last_modified > old:
+        return Decision(obj.key, obj.size, False, "kept: younger than the retention period")
+    return Decision(obj.key, obj.size, True, what)
 
 
-def _decide(
-    obj: ArchiveObject,
-    protect: frozenset[str],
-    newest: set[str],
-    transcript: bool,
+def _plan_name(
+    name: str,
+    group: list[backups_repo.Version],
+    activity: datetime | None,
+    refs: References,
     old: datetime,
     fresh: datetime,
-) -> Decision:
-    def verdict(delete: bool, reason: str) -> Decision:
-        return Decision(obj.key, obj.size, delete, reason)
+    keep_newest: int,
+) -> list[Decision]:
+    def verdict(v: backups_repo.Version, delete: bool, reason: str, *, whole: bool = False):
+        return Decision(v.object_key, v.size, delete, reason, name, v.id, whole)
 
-    if obj.key in protect:
-        return verdict(False, "protected: a session references it")
-    if obj.key in newest:
-        return verdict(False, "kept: among the newest of its group")
-    if obj.last_modified > fresh:
-        return verdict(False, "kept: younger than the grace period")
-    if obj.last_modified > old:
-        return verdict(False, "kept: younger than the retention period")
-    what = (
-        "transcripts older than the retention period"
-        if transcript
-        else ("beyond the newest of its group and older than the retention period")
-    )
-    return verdict(True, what)
+    last = activity or max(v.created_at for v in group)
+    pinned = name in refs.names or any(v.id in refs.versions for v in group)
+    if last <= old and not pinned and all(v.created_at <= fresh for v in group):
+        why = "name not restored or saved for longer than the retention period"
+        return [verdict(v, True, why, whole=True) for v in group]
+    out: list[Decision] = []
+    rank = 0
+    for v in group:
+        if v.id in refs.versions:
+            out.append(verdict(v, False, "protected: a session references it"))
+        elif v.state == "current":
+            out.append(verdict(v, False, "kept: the current version"))
+        else:
+            rank += 1
+            if rank <= keep_newest:
+                out.append(verdict(v, False, "kept: among the newest non-current versions"))
+            elif v.created_at > fresh:
+                out.append(verdict(v, False, "kept: younger than the grace period"))
+            elif v.created_at > old:
+                out.append(verdict(v, False, "kept: younger than the retention period"))
+            else:
+                out.append(
+                    verdict(v, True, "beyond the newest non-current versions and past retention")
+                )
+    return out
 
 
-# ------------------------------------------------------------------ the protected set
+# ------------------------------------------------------------------ the references
 
 
-def _spec_objects(session: Session, prefix: str) -> set[str]:
-    """Objects a session will touch that its status does not record yet.
-
-    A restore name that renders exactly is protected before the reconciler resolves it; a save
-    name is rendered at save time, so rendering it with the creation time protects only a fixed
-    (unversioned) save target. Blocking (the sandbox is a child process): run in a thread.
-    """
+def _spec_names(session: Session) -> set[str]:
+    """Names a session's spec entries render to before the reconciler resolves them (an exact
+    render only; a template needing save-time values renders no name). Blocking (the sandbox is
+    a child process): run in a thread."""
     ctx = rendering.session_context("archive_name", session)
     found: set[str] = set()
     for entry in session.spec.backup or []:
         try:
-            found.add(object_name_for(prefix, rendering.render_name(entry.name, ctx, dry=True)))
+            found.add(
+                validate_name(rendering.render_name(entry.name, ctx, dry=True), allow_prefix=False)
+            )
         except ArchiveNameError:
             continue
     return found
 
 
-def _session_keys(session: Session, prefix: str) -> set[str]:
-    if not has_workspace_entry(session.spec):
-        return set()
-    cache = session.status.get("cache")
-    cache = cache if isinstance(cache, dict) else {}
-    keys = {f"{prefix}{SESSIONS_GROUP}{session.slug}{SUFFIX}"}
-    for field_name in ("restore_resolved", "save_resolved"):
-        value = cache.get(field_name)
-        if isinstance(value, str) and value:
-            keys.add(value)
-    return keys | _spec_objects(session, prefix)
-
-
-async def referenced_keys(
-    conn: psycopg.AsyncConnection, settings: Settings
-) -> dict[str, list[str]]:
-    """Every object a stored session references, with the slugs that reference it.
-
-    A session row exists from create until the discard finished (its save included), so "present
-    in the table" is non-terminal: live, deleting with a save in flight, or restoring.
-    """
+async def references(conn: psycopg.AsyncConnection, settings: Settings) -> References:
+    """Everything a stored session references. A session row exists from create until its
+    discard finished (its save included), so "present in the table" is non-terminal."""
     found = await sessions_repo.list_sessions(conn)
     prefix = settings.cache_s3_prefix
-    per_session = await asyncio.to_thread(lambda: [_session_keys(s, prefix) for s in found])
-    refs: dict[str, list[str]] = defaultdict(list)
-    for session, keys in zip(found, per_session, strict=True):
-        for key in keys:
-            refs[key].append(session.slug)
-    return {k: sorted(v) for k, v in refs.items()}
-
-
-async def protected_keys(conn: psycopg.AsyncConnection, settings: Settings) -> set[str]:
-    return set(await referenced_keys(conn, settings))
+    per_session = await asyncio.to_thread(lambda: [_spec_names(s) for s in found])
+    refs = References()
+    versions: dict[uuid.UUID, set[str]] = defaultdict(set)
+    for vid, _name, slug in await backups_repo.referencing(conn):
+        versions[vid].add(slug)
+    refs.versions = {vid: sorted(slugs) for vid, slugs in versions.items()}
+    names: dict[str, list[str]] = defaultdict(list)
+    for session, rendered in zip(found, per_session, strict=True):
+        if has_workspace_entry(session.spec):
+            refs.transcripts.add(f"{prefix}{SESSIONS_GROUP}{session.slug}{SUFFIX}")
+        for name in rendered:
+            names[name].append(session.slug)
+    refs.names = {n: sorted(s) for n, s in names.items()}
+    return refs
 
 
 # ------------------------------------------------------------------ the executor
@@ -241,68 +270,140 @@ class SweepResult:
         }
 
 
+async def build_plan(
+    settings: Settings,
+    pool: AsyncConnectionPool,
+    objects: list[ArchiveObject],
+    policy: SweepPolicy,
+) -> tuple[SweepPlan, References, datetime]:
+    """Read the rows and references and plan with `policy`; also returns the database clock."""
+    async with pool.connection() as conn:
+        now = (await (await conn.execute("SELECT now()")).fetchone())[0]
+        versions = await backups_repo.all_versions(conn)
+        activity = await backups_repo.name_activity(conn)
+        refs = await references(conn, settings)
+    plan = plan_sweep(
+        versions=versions,
+        activity=activity,
+        objects=objects,
+        refs=refs,
+        now=now,
+        retention_days=policy.retention_days,
+        keep_newest=policy.keep_newest,
+        grace_seconds=policy.grace_seconds,
+        prefix=settings.cache_s3_prefix,
+    )
+    return plan, refs, now
+
+
+async def _drop_rows(
+    pool: AsyncConnectionPool, plan: SweepPlan, late: References, result: SweepResult
+) -> list[Decision]:
+    """Delete the planned rows (each name in its own transaction, references re-checked) and
+    return the decisions whose object may now be deleted."""
+    whole: dict[str, list[Decision]] = defaultdict(list)
+    singles: list[Decision] = []
+    orphans: list[Decision] = []
+    for d in plan.deletes:
+        if d.whole_name and d.name:
+            whole[d.name].append(d)
+        elif d.version_id is not None:
+            singles.append(d)
+        else:
+            orphans.append(d)
+    gone: list[Decision] = []
+    async with pool.connection() as conn:
+        for name, ds in whole.items():
+            async with conn.transaction():
+                rows = await backups_repo.name_versions(conn, name)
+                planned = {d.version_id for d in ds}
+                if (
+                    {v.id for v in rows} != planned
+                    or name in late.names
+                    or planned & late.versions.keys()
+                ):
+                    result.skipped_protected += len(ds)
+                    continue
+                await backups_repo.delete_name(conn, name)
+            gone += ds
+        for d in singles:
+            assert d.name is not None and d.version_id is not None
+            async with conn.transaction():
+                row = await backups_repo.get_version(conn, d.name, d.version_id)
+                if (
+                    row is None
+                    or row.state == "current"
+                    or row.id in late.versions
+                    or not await backups_repo.delete_version(conn, d.name, d.version_id)
+                ):
+                    result.skipped_protected += 1
+                    continue
+            gone.append(d)
+        owned = await backups_repo.known_keys(conn, [d.key for d in orphans])
+    for d in orphans:
+        if d.key in owned or d.key in late.transcripts:
+            result.skipped_protected += 1
+        else:
+            gone.append(d)
+    return gone
+
+
 async def delete_planned(
     settings: Settings,
+    pool: AsyncConnectionPool,
     plan: SweepPlan,
+    late: References,
     result: SweepResult,
     *,
     credentials: S3Credentials | None = None,
 ) -> SweepResult:
-    """Delete the planned keys (batches of 1000), recording failures and continuing past them."""
-    keys = plan.keys
+    """Delete the planned rows, then their objects (batches of 1000), recording failures and
+    continuing past them."""
+    gone = await _drop_rows(pool, plan, late, result)
+    keys = [d.key for d in gone]
     failures = await asyncio.to_thread(delete_keys, settings, keys, credentials=credentials)
     failed = {f.key for f in failures}
-    sizes = {d.key: d.size for d in plan.deletes}
+    sizes = {d.key: d.size for d in gone}
     result.failures += failures
     result.deleted_keys = [k for k in keys if k not in failed]
     result.deleted = len(result.deleted_keys)
     result.deleted_bytes = sum(sizes[k] for k in result.deleted_keys)
     for f in failures:
-        log.warning("cache sweep could not delete %s: %s %s", f.key, f.code, f.message)
+        log.warning("backup sweep could not delete %s: %s %s", f.key, f.code, f.message)
     return result
 
 
 async def run_sweep(
     settings: Settings,
-    protected: Callable[[], Awaitable[set[str]]],
-    now: Callable[[], Awaitable[datetime]],
+    pool: AsyncConnectionPool,
     *,
     policy: SweepPolicy,
     credentials: S3Credentials | None = None,
 ) -> SweepResult:
-    """List, plan with `policy`, re-check protection right before deleting, delete (unless dry-run).
+    """List, plan with `policy`, re-read the references right before deleting, delete (unless
+    dry-run).
 
-    `protected` is called twice: for the plan, and again after it so a key a session started to
-    reference in between is dropped from the deletes. Never raises for S3 or DB trouble on the
-    way: the failure is recorded in `error` and the next sweep retries.
+    Never raises for S3 or DB trouble on the way: the failure is recorded in `error` and the
+    next sweep retries.
     """
-    result = SweepResult(dry_run=policy.dry_run, started_at=await now())
+    result = SweepResult(dry_run=policy.dry_run, started_at=await _db_now(pool))
     try:
         objects = await asyncio.to_thread(
             list_archives, settings, settings.cache_s3_prefix, credentials=credentials
         )
         result.listed = len(objects)
-        plan = plan_sweep(
-            objects,
-            await protected(),
-            await now(),
-            retention_days=policy.retention_days,
-            keep_newest=policy.keep_newest,
-            grace_seconds=policy.grace_seconds,
-            prefix=settings.cache_s3_prefix,
-        )
+        plan, _refs, _now = await build_plan(settings, pool, objects, policy)
         result.planned, result.planned_bytes = len(plan.deletes), plan.bytes
         if not policy.dry_run and plan.deletes:
-            late = await protected()
-            safe = SweepPlan(tuple(d for d in plan.decisions if d.delete and d.key not in late))
-            result.skipped_protected = len(plan.deletes) - len(safe.decisions)
-            await delete_planned(settings, safe, result, credentials=credentials)
+            async with pool.connection() as conn:
+                late = await references(conn, settings)
+            await delete_planned(settings, pool, plan, late, result, credentials=credentials)
     except Exception as exc:
-        log.exception("cache sweep failed")
+        log.exception("backup sweep failed")
         result.error = f"{type(exc).__name__}: {exc}"[:500]
-    result.finished_at = await now()
+    result.finished_at = await _db_now(pool)
     log.info(
-        "cache sweep %s: listed %d, planned %d (%d bytes), deleted %d, failed %d, error %s",
+        "backup sweep %s: listed %d, planned %d (%d bytes), deleted %d, failed %d, error %s",
         "dry-run" if policy.dry_run else "done",
         result.listed,
         result.planned,
@@ -312,3 +413,8 @@ async def run_sweep(
         result.error,
     )
     return result
+
+
+async def _db_now(pool: AsyncConnectionPool) -> datetime:
+    async with pool.connection() as conn:
+        return (await (await conn.execute("SELECT now()")).fetchone())[0]
