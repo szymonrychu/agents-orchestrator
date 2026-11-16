@@ -362,6 +362,8 @@ ALONE_SESSION_TOOLS = [
     "task_comment",
     "decision_ask",
     "decision_withdraw",
+    "approval_ask",
+    "approval_list",
     "todo_set",
     "todo_update",
     "session_labels_set",
