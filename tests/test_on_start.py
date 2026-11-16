@@ -42,7 +42,8 @@ CHAT_TOOLS = [
 ]  # fmt: skip
 TASK_TOOLS = [
     "task_create", "task_update", "task_list", "task_get", "task_comment",
-    "decision_ask", "decision_withdraw", "todo_set", "todo_update", "session_labels_set",
+    "decision_ask", "decision_withdraw", "approval_ask", "approval_list",
+    "todo_set", "todo_update", "session_labels_set",
 ]  # fmt: skip
 PROJECT_TOOLS = ["project_list", "project_summary"]
 SPEC_TOOLS = [
@@ -68,12 +69,7 @@ TAIL_TOOLS = [
 # Allowed before the pinned plugin ships them; add a name here when the allow-list leads the
 # plugin pin and remove it when the pin offers the tool (project room T-117 O9; project grants
 # T-120).
-PLUGIN_PENDING: set[str] = {
-    "chat_history",
-    "chat_attachment_fetch",
-    "chat_attachment_status",
-    "chat_admin_history",
-}
+PLUGIN_PENDING: set[str] = set()
 ALONE_TOOLS = ["me", "leadership_handover", *TAIL_TOOLS]
 PROPOSAL = [
     "proposal_create",
@@ -599,7 +595,8 @@ def test_alone_session_allow_is_the_literal_e2e_list():
         "chat_notes_get", "chat_notes_update", "chat_skills_list", "chat_skills_get",
         "chat_skills_save", "chat_skills_delete",
         "task_create", "task_update", "task_list", "task_get", "task_comment",
-        "decision_ask", "decision_withdraw", "todo_set", "todo_update", "session_labels_set",
+        "decision_ask", "decision_withdraw", "approval_ask", "approval_list",
+        "todo_set", "todo_update", "session_labels_set",
         "project_list", "project_summary",
         "spec_list", "spec_get", "spec_create", "spec_update", "spec_versions", "spec_comment",
         "spec_comments", "spec_comment_resolve", "spec_pull", "spec_push",

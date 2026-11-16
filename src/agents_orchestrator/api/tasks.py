@@ -6,8 +6,9 @@ every route runs `require_agent`, then requires the taskboard upstream configure
 call to `{ORCH_TASKBOARD_URL}/taskboard/api/v1/tasks/...`. There is no trigger-session refusal and
 no leader check (leader decision 2026-11-02): trigger-created sessions may use the relay, they still
 cannot answer decisions because answering exists only on the web listener, so the relay does not
-forward `.../answer` (nor `/stream`): any path outside the allowed set is 404 `not_found` here. The
-forwarded request carries only the taskboard bearer (`ORCH_TASKBOARD_TOKEN`), `X-Orch-Session` and
+forward `.../answer` (decisions, approvals) nor `/stream`: any path outside the allowed set is 404
+`not_found` here. The forwarded request carries only the taskboard bearer
+(`ORCH_TASKBOARD_TOKEN`), `X-Orch-Session` and
 `X-Orch-Slug` of the caller (slug read from the sessions repo), `X-Orch-Projects` (the caller's
 project scope, `scope.scope_of`: `*` for a superleader, else its project, read live), and for a body
 `Content-Type: application/json`; no inbound header and never the agent token. On `GET tasks` a
@@ -37,6 +38,7 @@ from agents_orchestrator.taskboard_client import UPSTREAM_PREFIX
 
 router = APIRouter(prefix="/agent/v1/tasks", tags=["agent"])
 summary_router = APIRouter(prefix="/agent/v1/projects", tags=["agent"])
+approvals_router = APIRouter(prefix="/agent/v1/approvals", tags=["agent"])
 
 MAX_BODY_BYTES = forward_core.MAX_BODY_BYTES
 TIMEOUT_SECONDS = forward_core.TIMEOUT_SECONDS
@@ -45,8 +47,10 @@ STATE_ATTR = "taskboard_http"
 _ID = r"[A-Za-z0-9_-]+"
 _KEY = r"T-[0-9]+"
 _ALLOWED = re.compile(
-    rf"/tasks(?:|/{_KEY}(?:|/comments|/todo|/todo/{_ID}|/deps|/decisions|/decisions/{_ID}/withdraw))"
+    rf"/tasks(?:|/{_KEY}(?:|/comments|/todo|/todo/{_ID}|/deps|/decisions"
+    rf"|/decisions/{_ID}/withdraw|/approvals))"
 )
+_APPROVALS = re.compile(r"/approvals")
 _SUMMARY = re.compile(r"/projects/summary")
 
 
@@ -234,6 +238,26 @@ async def projects_summary(request: Request, agent: Caller, pool: Pool, settings
         settings,
         "/projects/summary",
         _SUMMARY,
+        target=taskboard_target(settings),
+        available=settings.taskboard_available,
+        unconfigured="taskboard_unconfigured",
+        mine=False,
+    )
+
+
+@approvals_router.get(
+    "",
+    summary="The caller's own taskboard approvals (taskboard relay)",
+    responses=_RESPONSES,
+)
+async def approvals(request: Request, agent: Caller, pool: Pool, settings: Cfg) -> Response:
+    return await relay(
+        request,
+        agent,
+        pool,
+        settings,
+        "/approvals",
+        _APPROVALS,
         target=taskboard_target(settings),
         available=settings.taskboard_available,
         unconfigured="taskboard_unconfigured",
