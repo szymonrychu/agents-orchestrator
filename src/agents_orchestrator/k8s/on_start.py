@@ -120,9 +120,49 @@ ADMIN_TOOLS = [
     "usage_history", "usage_sessions",
     "session_labels_update", "session_scale", "session_lock_reassign", "session_message_cancel",
     "project_update", "backups_cleanup_set", "spec_delete", "spec_suggestion_dismiss",
-    "spec_queue_move",
+    "spec_queue_move", "handoffs_list", "handoff_get", "chat_admin_notes_get",
+    "chat_admin_notes_update",
     *PROPOSAL_TOOLS,
 ]  # fmt: skip
+# Retrospective sessions (S-68, decisions 769, 770, 775): the read set over histories, handoffs,
+# chats, presets, usage and backups, plus two writes, the backup copy and the room notes update
+# (scoped to rooms bound to a project the session holds). The API gates are `require_reader` and
+# `require_notes_writer` (api/admin.py); mind map, spec and task writes come from the normal
+# groups and the session's own and granted projects. No session patch or discard of others, no
+# preset write.
+RETRO_READ_TOOLS = [
+    "history_search", "history_get", "history_records", "sessions_admin_list", "session_get",
+    "session_activity", "session_events", "session_messages", "handoffs_list", "handoff_get",
+    "chat_admin_rooms", "chat_admin_room", "chat_admin_history", "chat_admin_notes_get",
+    "presets_list", "preset_get", "usage_get", "usage_history", "backups_list",
+    "backup_versions", "backup_manifest",
+]  # fmt: skip
+RETRO_TOOLS = [*RETRO_READ_TOOLS, "backups_copy", "chat_admin_notes_update"]
+# Tools a subagent may call although every orchestrator tool is main-agent only (user decision
+# m1223): reads of notes, mind maps, tasks, specs, plans, projects, chats, sessions, locks,
+# approvals, proposals, backups and handoffs; every route behind them is a GET. Rendered for every
+# session as `claude.subagent_allowed_tools`, intersected with its own allow list (k8s/render.py).
+# spec_pull and plan_export write files only in the working copy and call GET routes only.
+READ_ONLY_TOOLS: frozenset[str] = frozenset(
+    {
+        *RETRO_READ_TOOLS,
+        "me", "activity", "lock_list", "sessions_list", "chat_rooms", "chat_status",
+        "chat_history", "chat_attachment_status", "chat_notes_get", "task_list", "task_get",
+        "approval_list", "project_list", "project_summary", "project_chat_read", "spec_list",
+        "spec_get", "spec_versions", "spec_comments", "spec_queue_list", "spec_section",
+        "spec_pull", "plan_get", "plan_steps", "plan_step_get", "plan_gate", "plan_export",
+        "proposals_list", "proposal_get", "mindmap_map_list", "mindmap_map_get",
+        "mindmap_node_get", "mindmap_node_history", "mindmap_search", "mindmap_traverse",
+        "mindmap_task_nodes", "mindmap_direction_list",
+    }
+)  # fmt: skip
+
+
+def _regular_tools(spec: SessionSpec) -> list[str]:
+    """The tail of a session without `session_messaging`: the retrospective set when flagged,
+    then its own spec and proposal tools, and `self_close` last."""
+    retro = RETRO_TOOLS if spec.retrospective else []
+    return [*retro, *SESSION_EDIT_TOOLS, CLOSE_TOOL]
 
 
 def orchestrator_allow(spec: SessionSpec, *, mindmap: bool = False) -> list[str]:
@@ -135,8 +175,9 @@ def orchestrator_allow(spec: SessionSpec, *, mindmap: bool = False) -> list[str]
     tools are listed exactly when `session_messaging` is enabled, whoever
     created the session; every other session gets `SESSION_EDIT_TOOLS` (its spec and its
     proposals) and `self_close` last instead (a superleader is never offered `self_close`; it has
-    the edit tools as admin tools). A tool in two groups (`leadership_withdraw`, a hive and an
-    admin tool) is listed once.
+    the edit tools as admin tools). A `retrospective` session that is no superleader also gets
+    `RETRO_TOOLS` right before its edit tools. A tool in two groups (`leadership_withdraw`, a hive
+    and an admin tool; `session_get`, a retrospective and an edit tool) is listed once.
     """
     shared = [
         *SESSION_TOOLS,
@@ -148,10 +189,10 @@ def orchestrator_allow(spec: SessionSpec, *, mindmap: bool = False) -> list[str]
         *PLAN_TOOLS,
         *PROJECT_CHAT_TOOLS,
         *(MINDMAP_TOOLS if mindmap else []),
-        *(ADMIN_TOOLS if spec.session_messaging else [*SESSION_EDIT_TOOLS, CLOSE_TOOL]),
+        *(ADMIN_TOOLS if spec.session_messaging else _regular_tools(spec)),
     ]
     if not spec.hive:
-        return ["me", *HANDOFF_TOOLS, *shared]
+        return list(dict.fromkeys(["me", *HANDOFF_TOOLS, *shared]))
     scale = [SCALE_TOOL] if spec.scalable else []
     return list(dict.fromkeys([*HIVE_TOOLS, *scale, *shared]))
 

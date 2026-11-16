@@ -25,7 +25,7 @@ from agents_orchestrator.k8s.labels import (
     session_labels,
     workspace_pvc,
 )
-from agents_orchestrator.k8s.on_start import render_on_start
+from agents_orchestrator.k8s.on_start import READ_ONLY_TOOLS, orchestrator_allow, render_on_start
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import (
     KUBE_TIERS,
@@ -475,6 +475,22 @@ def _system_append(spec: SessionSpec, settings: Settings) -> str:
     return f"{ask}\n\n{room}"
 
 
+ORCHESTRATOR_TOOL_PREFIX = "mcp__any-mcp__orchestrator_"
+ORCHESTRATOR_TOOL_GLOB = ORCHESTRATOR_TOOL_PREFIX + "*"
+
+
+def subagent_allowed_tools(spec: SessionSpec, settings: Settings) -> list[str]:
+    """The read-only orchestrator tools a subagent may call (user decision m1223), as the
+    wrapper's exact tool names: `READ_ONLY_TOOLS` within this session's own allow list, so every
+    session gets its own reads and never a write. Empty without the orchestrator plugin (no
+    agent API url) or on an image other than the default: the wrapper config is strict and only
+    the default image is known to take the key (wrapper 0.20.0)."""
+    if not settings.agent_api_url or not runs_default_image(spec, settings):
+        return []
+    allowed = set(orchestrator_allow(spec, mindmap=settings.mindmap_available))
+    return [ORCHESTRATOR_TOOL_PREFIX + t for t in sorted(READ_ONLY_TOOLS & allowed)]
+
+
 def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
     spec, slug = session.spec, session.slug
     kube_env = KUBE_PASSTHROUGH_ENV if kube_granted(spec, settings) else ()
@@ -500,7 +516,9 @@ def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
         claude["model"] = model
     if effort:
         claude["effort"] = effort
-    claude["main_agent_only_tools"] = ["mcp__any-mcp__orchestrator_*"]
+    claude["main_agent_only_tools"] = [ORCHESTRATOR_TOOL_GLOB]
+    if subagent_tools := subagent_allowed_tools(spec, settings):
+        claude["subagent_allowed_tools"] = subagent_tools
     claude["permissions"] = {"deny": ["EnterPlanMode", "ExitPlanMode", "AskUserQuestion"]}
     claude["mcp_servers"] = {
         "any-mcp": {
