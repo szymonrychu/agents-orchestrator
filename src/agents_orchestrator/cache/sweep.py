@@ -102,6 +102,7 @@ class References:
     versions: dict[uuid.UUID, list[str]] = field(default_factory=dict)
     names: dict[str, list[str]] = field(default_factory=dict)
     transcripts: set[str] = field(default_factory=set)
+    planned_keys: set[str] = field(default_factory=set)  # in-flight saves: no version row yet
 
     def slugs_of(self, name: str, ids: Iterable[uuid.UUID]) -> list[str]:
         found = set(self.names.get(name, ()))
@@ -135,6 +136,9 @@ def plan_sweep(
     owned = {v.object_key for vs in by_name.values() for v in vs}
     for obj in objects:
         if not obj.key.endswith(SUFFIX) or obj.key in owned:  # not ours to delete, or planned
+            continue
+        if obj.key in refs.planned_keys:
+            decisions.append(Decision(obj.key, obj.size, False, "protected: a backup run plans it"))
             continue
         if obj.key.startswith(f"{prefix}{SESSIONS_GROUP}"):
             if obj.key in refs.transcripts:
@@ -215,6 +219,22 @@ def _spec_names(session: Session) -> set[str]:
     return found
 
 
+def _run_plan_keys(status: dict[str, Any]) -> set[str]:
+    """Object keys in `status.backup.runs[*].plan[].key`: saves in flight that have no version
+    row yet."""
+    backup = status.get("backup")
+    runs = backup.get("runs") if isinstance(backup, dict) else None
+    if not isinstance(runs, dict):
+        return set()
+    return {
+        item["key"]
+        for run in runs.values()
+        if isinstance(run, dict)
+        for item in run.get("plan") or []
+        if isinstance(item, dict) and isinstance(item.get("key"), str)
+    }
+
+
 async def references(conn: psycopg.AsyncConnection, settings: Settings) -> References:
     """Everything a stored session references. A session row exists from create until its
     discard finished (its save included), so "present in the table" is non-terminal."""
@@ -228,6 +248,7 @@ async def references(conn: psycopg.AsyncConnection, settings: Settings) -> Refer
     refs.versions = {vid: sorted(slugs) for vid, slugs in versions.items()}
     names: dict[str, list[str]] = defaultdict(list)
     for session, rendered in zip(found, per_session, strict=True):
+        refs.planned_keys |= _run_plan_keys(session.status)
         if has_workspace_entry(session.spec):
             refs.transcripts.add(f"{prefix}{SESSIONS_GROUP}{session.slug}{SUFFIX}")
         for name in rendered:

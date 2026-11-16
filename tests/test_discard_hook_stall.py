@@ -356,8 +356,8 @@ async def test_discard_skips_deletion_while_the_hook_budget_is_spent(stub_export
     async def quiesce(session):
         return True
 
-    async def save_step(session, kind="workdir"):
-        return True
+    async def save_step(session):
+        return session, True
 
     async def reload(session):
         return session

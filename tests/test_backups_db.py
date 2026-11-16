@@ -156,7 +156,8 @@ async def test_referenced_versions_reads_session_status(pool):
     async with pool.connection() as conn:
         await conn.execute(
             "UPDATE sessions SET status = status || jsonb_build_object('backup',"
-            " jsonb_build_array(jsonb_build_object('version', %s::text, 'base_version', %s::text)))"
+            " jsonb_build_object('entries', jsonb_build_array(jsonb_build_object("
+            "'version', %s::text, 'base_version', %s::text))))"
             " WHERE id = %s",
             (str(v.id), str(base), session["id"]),
         )

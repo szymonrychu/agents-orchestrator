@@ -36,40 +36,40 @@
       app.kubernetes.io/managed-by: agents-orchestrator
   data:
     config.yaml: "server:\n  auth_token: ${CCW_AUTH_TOKEN}\npaths:\n  workdir_root:\
-      \ /workdir\n  sessions_root: /sessions\nclaude:\n  passthrough_env:\n  - ORCH_AGENT_TOKEN\n\
-      \  - ORCH_AGENT_URL\n  - ORCH_SESSION_ID\n  - POD_NAME\n  secret_env: []\n \
-      \ env:\n    claude_code_oauth_token: ${CLAUDE_CODE_OAUTH_TOKEN}\n    disable_autoupdater:\
-      \ true\n    claude_autocompact_pct_override: 95\n  model: sonnet\n  main_agent_only_tools:\n\
-      \  - mcp__any-mcp__orchestrator_*\n  permissions:\n    deny:\n    - EnterPlanMode\n\
-      \    - ExitPlanMode\n    - AskUserQuestion\n  mcp_servers:\n    any-mcp:\n \
-      \     type: stdio\n      command: /opt/any-mcp/bin/any-mcp\n      args:\n  \
-      \    - --config\n      - /opt/any-mcp/etc/any-mcp.yaml\nhooks:\n  onStart:\n\
-      \  - type: command\n    run: sh /etc/ccw/on-start.sh\n    blocking: true\n \
-      \   on_error: allow\n    timeout_seconds: 600.0\nsessions:\n  max_sessions:\
+      \ /workdir\n  sessions_root: /sessions\n  shared_claude_dir: /claude\nclaude:\n\
+      \  passthrough_env:\n  - ORCH_AGENT_TOKEN\n  - ORCH_AGENT_URL\n  - ORCH_SESSION_ID\n\
+      \  - POD_NAME\n  secret_env: []\n  env:\n    claude_code_oauth_token: ${CLAUDE_CODE_OAUTH_TOKEN}\n\
+      \    disable_autoupdater: true\n    claude_autocompact_pct_override: 95\n  model:\
+      \ sonnet\n  main_agent_only_tools:\n  - mcp__any-mcp__orchestrator_*\n  permissions:\n\
+      \    deny:\n    - EnterPlanMode\n    - ExitPlanMode\n    - AskUserQuestion\n\
+      \  mcp_servers:\n    any-mcp:\n      type: stdio\n      command: /opt/any-mcp/bin/any-mcp\n\
+      \      args:\n      - --config\n      - /opt/any-mcp/etc/any-mcp.yaml\nhooks:\n\
+      \  onStart:\n  - type: command\n    run: sh /etc/ccw/on-start.sh\n    blocking:\
+      \ true\n    on_error: allow\n    timeout_seconds: 600.0\nsessions:\n  max_sessions:\
       \ 1\n  resume_on_start: true\n  idle_timeout_seconds: 0\n  ask_user_question:\
       \ deny\n  restart_continue_prompt: Claude was restarted. Continue the task where\
       \ you left\n    off.\n  interrupt_settle_seconds: 20.0\n  commands:\n    client:\n\
-      \    - compact\n    - clear\n    permission_hold_seconds: 1800.0\n    dialog_auto_dismiss_seconds:\
-      \ 300.0\nprompts:\n  system_append: 'The AskUserQuestion tool is disabled and\
-      \ nobody answers interactive\n    questions. When you need a decision or information\
-      \ from the user, ask in writing\n    in your reply: write a numbered list of\
-      \ questions, and after each question give\n    your recommended answer, worded\
-      \ so that replying \"yes\" accepts it. Then stop and\n    wait for the reply.\
-      \ Never wait on an interactive question tool.'\nlimits:\n  shutdown_timeout_seconds:\
-      \ 90\nnotes:\n  enabled: true\nguard:\n  max_stop_continuations: 25\n  max_agent_spawns:\
-      \ 300\n  tool_failure_repeats: 3\nshutdown:\n  handoff:\n    enabled: true\n\
-      \    notice_seconds: 120\n    handoff_seconds: 180\n    idle_proceed_seconds:\
-      \ 60\n    notice_prompt: 'This pod is shutting down. Finish or park your current\
-      \ step now:\n      commit and push, update your task and todo. You will be asked\
-      \ for a handoff\n      next. Persist any scratch file you still need into the\
-      \ shared workdir scratchpad\n      (.scratchpad/<name>/); do not leave it under\
-      \ /tmp or anywhere else on the pod.'\n    handoff_prompt: 'Write your handoff\
-      \ now as your reply: what you were doing, what\n      is done (commits, PRs),\
-      \ what is next and in which order, open decisions and\n      gotchas. Your reply\
-      \ text is the handoff; do not start new work. Persist any\n      scratch file\
-      \ you still need into the shared workdir scratchpad (.scratchpad/<name>/);\n\
-      \      do not leave it under /tmp or anywhere else on the pod.'\npressure:\n\
-      \  enabled: true\n"
+      \    - compact\n    - clear\n    - reload-skills\n    permission_hold_seconds:\
+      \ 1800.0\n    dialog_auto_dismiss_seconds: 300.0\nprompts:\n  system_append:\
+      \ 'The AskUserQuestion tool is disabled and nobody answers interactive\n   \
+      \ questions. When you need a decision or information from the user, ask in writing\n\
+      \    in your reply: write a numbered list of questions, and after each question\
+      \ give\n    your recommended answer, worded so that replying \"yes\" accepts\
+      \ it. Then stop and\n    wait for the reply. Never wait on an interactive question\
+      \ tool.'\nlimits:\n  shutdown_timeout_seconds: 90\nnotes:\n  enabled: true\n\
+      guard:\n  max_stop_continuations: 25\n  max_agent_spawns: 300\n  tool_failure_repeats:\
+      \ 3\nshutdown:\n  handoff:\n    enabled: true\n    notice_seconds: 120\n   \
+      \ handoff_seconds: 180\n    idle_proceed_seconds: 60\n    notice_prompt: 'This\
+      \ pod is shutting down. Finish or park your current step now:\n      commit\
+      \ and push, update your task and todo. You will be asked for a handoff\n   \
+      \   next. Persist any scratch file you still need into the shared workdir scratchpad\n\
+      \      (.scratchpad/<name>/); do not leave it under /tmp or anywhere else on\
+      \ the pod.'\n    handoff_prompt: 'Write your handoff now as your reply: what\
+      \ you were doing, what\n      is done (commits, PRs), what is next and in which\
+      \ order, open decisions and\n      gotchas. Your reply text is the handoff;\
+      \ do not start new work. Persist any\n      scratch file you still need into\
+      \ the shared workdir scratchpad (.scratchpad/<name>/);\n      do not leave it\
+      \ under /tmp or anywhere else on the pod.'\npressure:\n  enabled: true\n"
     on-start.sh: "#!/bin/sh\nset -eu\nREF=v0.5.0\nok=1\ninstall() {\n  step=$1\n \
       \ shift\n  [ \"$ok\" = 1 ] || return 0\n  \"$@\" && return 0\n  echo \"on-start:\
       \ $step failed (exit $?)\" >&2\n  ok=0\n}\nif ! grep -qxF -- \"$REF\" /opt/any-mcp/.ref\
@@ -123,7 +123,7 @@
           agents.szymonrichert.pl/session: solo
           app.kubernetes.io/managed-by: agents-orchestrator
         annotations:
-          agents.szymonrichert.pl/config-hash: af9913eac462e70ede219637731ac1e3fefb6e84ed7151a71724ff465d263fbc
+          agents.szymonrichert.pl/config-hash: 1a9d3e901259ba84f78a4e9e3671ec1a0dfc83755ba4a9de124b2fa30f296937
       spec:
         imagePullSecrets:
         - name: regcred
@@ -192,6 +192,9 @@
           - name: workspace
             mountPath: /sessions
             subPathExpr: sessions/$(POD_NAME)
+          - name: workspace
+            mountPath: /claude
+            subPath: claude
           - name: mise
             mountPath: /opt/mise
           - name: any-mcp

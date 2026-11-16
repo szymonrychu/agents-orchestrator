@@ -809,7 +809,7 @@ def test_wrapper_settings_mapped():
     assert s["max_restarts"] == 3
     assert s["restart_continue_prompt"] == "continue please"
     assert s["commands"] == {
-        "client": ["compact", "clear"],
+        "client": ["compact", "clear", "reload-skills"],
         "agent": ["compact", "context"],
         "permission_hold_seconds": 1800,
         "dialog_auto_dismiss_seconds": 300,
@@ -857,7 +857,7 @@ def test_no_wrapper_block_renders_unchanged():
         "restart_continue_prompt": "Claude was restarted. Continue the task where you left off.",
         "interrupt_settle_seconds": 20,
         "commands": {
-            "client": ["compact", "clear"],
+            "client": ["compact", "clear", "reload-skills"],
             "permission_hold_seconds": 1800,
             "dialog_auto_dismiss_seconds": 300,
         },
@@ -923,14 +923,14 @@ def test_hive_with_agent_commands_validates(tmp_path, monkeypatch):
     path.write_text(by_kind(objs)["ConfigMap"]["data"]["config.yaml"])
     commands = load_config(path).sessions.commands
     assert commands.agent == ["compact"]
-    assert commands.client == ["compact", "clear"]
+    assert commands.client == ["compact", "clear", "reload-skills"]
 
 
 def test_client_commands_rendered_without_agent_commands():
     # the orchestrator's own `compact` and `clear` commands need the client allowlist
     cfg = wrapper_cfg({})
     assert cfg["sessions"]["commands"] == {
-        "client": ["compact", "clear"],
+        "client": ["compact", "clear", "reload-skills"],
         "permission_hold_seconds": 1800,
         "dialog_auto_dismiss_seconds": 300,
     }
@@ -1186,3 +1186,44 @@ def test_subagent_allowed_absent_without_plugin_or_on_another_image():
     assert "subagent_allowed_tools" not in no_url["claude"]
     other = config_of(_render(make_session(image="other.example/agent:1.0.0")))
     assert "subagent_allowed_tools" not in other["claude"]
+
+
+def test_render_claude_mount_and_wrapper_option():
+    objs = render.render_session(make_session(), make_settings(), TOKENS)
+    mounts = container_of(objs)["volumeMounts"]
+    assert {
+        "name": render.WORKSPACE_VOLUME,
+        "mountPath": "/claude",
+        "subPath": "claude",
+    } in mounts  # read-write: the agent edits skills in place
+    cfg = config_of(objs)
+    assert cfg["paths"]["shared_claude_dir"] == "/claude"
+    # the wrapper validates the option (it links <config>/skills and rules to it)
+    assert render.CLAUDE_ROOT == "/claude"
+
+
+def test_shared_claude_dir_is_distinct_from_the_session_config_dirs():
+    """The wrapper has no guard: a shared dir equal to, or containing or inside, the sessions
+    root (where each session config dir lives) would wipe or loop the skills links."""
+    cfg = config_of(render.render_session(make_session(), make_settings(), TOKENS))
+    shared = Path(cfg["paths"]["shared_claude_dir"])
+    for other in (cfg["paths"]["sessions_root"], cfg["paths"]["workdir_root"]):
+        other_path = Path(other)
+        assert shared != other_path
+        assert other_path not in shared.parents and shared not in other_path.parents
+    # and no volume mount of the agent container nests with the claude mount
+    mounts = [
+        Path(m["mountPath"])
+        for m in container_of(render.render_session(make_session(), make_settings(), TOKENS))[
+            "volumeMounts"
+        ]
+        if m["mountPath"] != "/claude"
+    ]
+    for path in mounts:
+        assert shared not in path.parents and path not in shared.parents and path != shared
+
+
+def test_client_commands_include_reload_skills():
+    assert render.CLIENT_COMMANDS == ("compact", "clear", "reload-skills")
+    cfg = config_of(render.render_session(make_session(), make_settings(), TOKENS))
+    assert "reload-skills" in cfg["sessions"]["commands"]["client"]

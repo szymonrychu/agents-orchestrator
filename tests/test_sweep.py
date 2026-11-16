@@ -130,6 +130,12 @@ def test_orphan_objects_are_deleted_by_age_only():
     assert p.keys == [f"{PRE}b/proj/a/orphan-old.tar.zst"]
 
 
+def test_an_object_in_a_run_plan_is_protected_and_without_it_is_planned():
+    obj = ArchiveObject(f"{PRE}b/proj/a/inflight.tar.zst", 5, NOW - 400 * DAY)
+    assert plan([], objects=[obj]).keys == [obj.key]
+    assert plan([], objects=[obj], refs=References(planned_keys={obj.key})).keys == []
+
+
 def test_legacy_flat_archives_are_never_planned_for_deletion():
     legacy = [
         ArchiveObject(f"{PRE}proj-a.tar.zst", 5, NOW - 400 * DAY),
@@ -321,6 +327,24 @@ async def test_orphans_are_swept_and_a_recorded_object_is_not(pool, dsn, monkeyp
     res = await run_sweep(s, pool, policy=policy_for(s, dry_run=False, keep_newest=9))
     assert [k for b in fake.deleted for k in b] == [orphan.key]
     assert res.deleted == 1 and vs[0].id in await rows(pool)
+
+
+async def test_an_object_in_a_run_plan_survives_a_real_sweep(pool, dsn, monkeypatch):
+    planned = ArchiveObject(f"{PRE}b/proj/a/inflight.tar.zst", 7, NOW - 400 * DAY)
+    bare = ArchiveObject(f"{PRE}b/proj/a/lost.tar.zst", 7, NOW - 400 * DAY)
+    async with pool.connection() as conn:
+        s = await sessions.create(conn, "saver", SessionSpec())
+        await conn.execute(
+            "UPDATE sessions SET status = jsonb_build_object('backup', jsonb_build_object("
+            "'runs', jsonb_build_object('save', jsonb_build_object('plan', jsonb_build_array("
+            "jsonb_build_object('name', 'proj/a', 'key', %s::text)))))) WHERE id = %s",
+            (planned.key, s.id),
+        )
+    fake = Fake([planned, bare])
+    wire(monkeypatch, fake)
+    st = settings_for(dsn)
+    await run_sweep(st, pool, policy=policy_for(st, dry_run=False))
+    assert [k for b in fake.deleted for k in b] == [bare.key]
 
 
 async def test_a_legacy_flat_archive_survives_a_real_sweep(pool, dsn, monkeypatch):
