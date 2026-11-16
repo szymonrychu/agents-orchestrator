@@ -698,6 +698,17 @@ async def test_relay_safe_preset_still_forwarded(rig, service, method, template)
     assert _sent(rig, service, method, template)
 
 
+@pytest.mark.parametrize(("service", "method", "template"), PRIV_BODY)
+async def test_relay_session_messaging_preset_is_not_privileged(rig, service, method, template):
+    """`session_messaging` is no grant: a manageable preset carrying only it is not a privileged
+    target, so the relay forwards it like any safe preset."""
+    plain = str(await add_preset(rig.pool, True, {"session_messaging": True}))
+    body = _body_for(rig, service, method, template, plain)
+    r = await rig.call(method, relay_url(service, template), json=body)
+    assert r.status_code == _success(service, method, template), r.text
+    assert _sent(rig, service, method, template)
+
+
 async def test_relay_hidden_privileged_is_403(rig):
     hidden = str(await add_preset(rig.pool, False, {"kube_cluster_access": True}))
     body = _body_for(rig, "webhook", "POST", "/endpoints", hidden)
