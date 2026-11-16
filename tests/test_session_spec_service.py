@@ -697,6 +697,31 @@ async def test_race_session_messaging_turned_off_applies_leader_rules(pool, sett
     assert after["spec"]["session_messaging"] is False
 
 
+async def test_race_session_messaging_turned_off_refuses_self_promotion(
+    pool, settings, monkeypatch
+):
+    """A superleader re-sends `session_messaging: true` while a human turns it off: the guards
+    on the fresh row see a regular leader promoting itself and refuse."""
+    me = await alone(pool, "svc-race-promote", superleader=True)
+    await _seed(pool, settings, me, {})
+
+    async def demote():
+        await _exec(
+            pool,
+            "UPDATE sessions SET spec = spec || '{\"session_messaging\": false}'::jsonb"
+            " WHERE id = %s",
+            (me.id,),
+        )
+
+    _between_read_and_write(monkeypatch, demote)
+    request = _request()
+    with pytest.raises(ApiError) as caught:
+        await _patch(pool, settings, me, me, {"session_messaging": True}, request=request)
+    assert (caught.value.status, caught.value.code) == (403, "human_only_field")
+    assert caught.value.extra["fields"] == ["session_messaging"]
+    assert (await _row(pool, me.id))["spec"]["session_messaging"] is False
+
+
 async def test_spec_changed_three_times_is_a_conflict(pool, settings, monkeypatch):
     me = await alone(pool, "svc-race-conflict")
     await _seed(pool, settings, me, {})
