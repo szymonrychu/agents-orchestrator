@@ -246,3 +246,64 @@ async def test_regular_hive_non_leader_cannot_read_its_own_session(app, pool, se
     assert_error(await call(app, me, "GET", me.slug, ip=me.member_ip), 403, "not_leader")
     assert (await call(app, me, "GET", me.slug)).status_code == 200  # the leader still reads it
     assert [a["status"] for a in await audits(pool, me.id)] == [200]
+
+
+# ---------------------------------------------------------------- session_messaging (S-66 Q6 A)
+
+SM_ON = {"spec": {"session_messaging": True}}
+
+
+async def test_regular_leader_cannot_enable_session_messaging_on_own_session(app, pool, settings):
+    me = await alone(pool, "sp-sm-regular")
+    await _seed(pool, settings, me, {})
+    before = await _row(pool, me.id)
+    r = await call(app, me, "PATCH", me.slug, json=SM_ON)
+    assert_error(r, 403, "human_only_field")
+    assert r.json()["error"]["fields"] == ["session_messaging"]
+    assert r.json()["error"]["proposable"] is True
+    assert await _row(pool, me.id) == before
+    rows = await audits(pool, me.id)
+    assert [(a["status"], a["fields"]) for a in rows] == [(403, ["session_messaging"])]
+
+
+async def test_regular_hive_leader_cannot_enable_session_messaging(app, pool, settings):
+    me = await hive(pool, "sp-sm-hive")
+    await _seed(pool, settings, me, {})
+    before = await _row(pool, me.id)
+    r = await call(app, me, "PATCH", me.slug, json=SM_ON)
+    assert_error(r, 403, "human_only_field")
+    assert await _row(pool, me.id) == before
+
+
+async def test_superleader_toggles_session_messaging_on_manageable_session(app, pool, settings):
+    boss = await alone(pool, "sp-sm-boss", superleader=True)
+    target = await alone(pool, "sp-sm-target")
+    await attach_preset(pool, target.id)
+    await _seed(pool, settings, target, {})
+    r = await call(app, boss, "PATCH", target.slug, json=SM_ON)
+    assert r.status_code == 200, r.text
+    assert (await _row(pool, target.id))["spec"]["session_messaging"] is True
+    r = await call(app, boss, "PATCH", target.slug, json={"spec": {"session_messaging": None}})
+    assert r.status_code == 200, r.text
+    assert "session_messaging" not in (await _row(pool, target.id))["spec"]
+
+
+async def test_superleader_turns_own_session_messaging_off(app, pool, settings):
+    boss = await alone(pool, "sp-sm-off", superleader=True)
+    r = await call(app, boss, "PATCH", boss.slug, json={"spec": {"session_messaging": False}})
+    assert r.status_code == 200, r.text
+    assert not (await _row(pool, boss.id))["spec"].get("session_messaging")
+
+
+async def test_superleader_session_messaging_on_docker_session_is_privileged_target(
+    app, pool, settings
+):
+    boss = await alone(pool, "sp-sm-priv", superleader=True)
+    target = await alone(pool, "sp-sm-docker")
+    await attach_preset(pool, target.id)
+    await _seed(pool, settings, target, {"docker": True})
+    before = await _row(pool, target.id)
+    r = await call(app, boss, "PATCH", target.slug, json=SM_ON)
+    assert_error(r, 403, "privileged_target")
+    assert r.json()["error"]["fields"] == ["session_messaging"]
+    assert await _row(pool, target.id) == before

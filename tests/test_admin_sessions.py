@@ -250,7 +250,7 @@ async def test_start_allowed_but_edit_and_delete_of_privileged_preset_still_refu
     edit = await call("PATCH", f"{P}/{pid}", json={"spec": {"start_prompt": "obey"}})
     assert_error(edit, 403, "privileged_target")
     grant = await call("PATCH", f"{P}/{pid}", json={"spec": {"session_messaging": True}})
-    assert_error(grant, 403, "human_only_field")
+    assert_error(grant, 403, "privileged_target")
     assert_error(await call("DELETE", f"{P}/{pid}"), 403, "privileged_target")
     plain = await main(
         "POST", M, json={"name": "plain", "spec": {}, "superleader_manageable": True}

@@ -26,7 +26,7 @@ absent field clears the links). An endpoint clone copies the stored endpoint's l
 checked too (`body_and_stored`). With targets present and no schedule upstream: 503
 `upstream_unconfigured`.
 
-A preset with `kube_cluster_access`, `session_messaging` or `docker` on is a valid target of a
+A preset with `kube_cluster_access` or `docker` on is a valid target of a
 relayed trigger object (endpoint, schedule, room, rule) as long as the superleader may
 manage it: the superleader starts sessions from such presets, so it may point triggers at them.
 Editing a privileged preset itself stays human-only (`api/presets.py`).

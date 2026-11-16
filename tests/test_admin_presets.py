@@ -346,3 +346,15 @@ async def test_admin_preset_writes_refuse_reserved_project_label(call):
         assert "'project:' prefix is reserved" in r.text
     got = await main_call(call.app, "GET", f"{M}/{made['id']}")
     assert got.json()["labels"] == ["x"]
+
+
+async def test_session_messaging_only_preset_view_and_delete(call):
+    r = await call("POST", A, json={"name": "sm-only", "spec": {"session_messaging": True}})
+    assert r.status_code == 201, r.text
+    assert r.json()["privileged"] == []
+    pid = r.json()["id"]
+    r = await call("POST", f"{A}/{pid}/copy", json={"name": "sm-only-copy"})
+    assert r.status_code == 201, r.text
+    assert r.json()["spec"]["session_messaging"] is True
+    r = await call("DELETE", f"{A}/{pid}")
+    assert r.status_code == 204, r.text

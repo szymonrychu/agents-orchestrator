@@ -166,6 +166,8 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("DELETE", f"{_ADMIN}/sessions/{{slug}}/projects/{{project}}"): "superleader",
     ("POST", f"{_ADMIN}/presets/{{ref}}/projects"): "superleader",
     ("DELETE", f"{_ADMIN}/presets/{{ref}}/projects/{{project}}"): "superleader",
+    # manageable request (S-66): files a preset_manageable proposal
+    ("POST", f"{_ADMIN}/presets/{{ref}}/manageable"): "superleader",
     # admin relay (`admin_relay`): superleader-only forwards, sent with X-Orch-Projects: *
     ("GET", f"{_ADMIN}/webhooks/endpoints"): "superleader",
     ("POST", f"{_ADMIN}/webhooks/endpoints"): "superleader",

@@ -36,7 +36,7 @@ def privileged_edit_refused(paths: list[str]) -> ApiError:
         403,
         "privileged_target",
         "only a human can change these fields of a preset with kube_cluster_access, "
-        f"kube_namespace_access, session_messaging or docker on: {', '.join(paths)}{_PROPOSE}",
+        f"kube_namespace_access or docker on: {', '.join(paths)}{_PROPOSE}",
         extra={"fields": paths, "proposable": True},
     )
 
