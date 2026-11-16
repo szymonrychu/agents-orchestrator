@@ -89,7 +89,9 @@ async def test_concurrent_saves_one_current(pool):
     assert cur is not None
     assert [r for r in await _states(pool, "n")].count("current") == 1
     async with pool.connection() as conn:
-        rows = await conn.execute("SELECT id FROM backup_versions WHERE name='n' AND state='current'")
+        rows = await conn.execute(
+            "SELECT id FROM backup_versions WHERE name='n' AND state='current'"
+        )
         assert [r[0] for r in await rows.fetchall()] == [cur.id]
 
 
