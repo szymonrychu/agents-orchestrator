@@ -8,15 +8,15 @@ from datetime import datetime, timedelta
 
 import httpx
 import pytest
-from test_api_archives import NO_CREDS, NOW, PRE, A, client, obj, s3, settings_for  # noqa: F401
+from test_api_backups import NO_CREDS, NOW, A, add_version, client, s3, settings_for  # noqa: F401
 from test_api_sessions import assert_error
 
 from agents_orchestrator.api.app import create_app
 from agents_orchestrator.db import cache_sweeps
 
-S = "/api/v1/cache/cleanup/settings"
-RUN = "/api/v1/cache/cleanup/run"
-PREVIEW = "/api/v1/cache/cleanup/preview"
+S = "/api/v1/backups/cleanup/settings"
+RUN = "/api/v1/backups/cleanup/run"
+PREVIEW = "/api/v1/backups/cleanup/preview"
 GOOD = {
     "enabled": True,
     "dry_run": False,
@@ -129,31 +129,32 @@ async def test_run_pending_clears_once_a_later_sweep_started(pool, dsn):
 
 
 async def test_preview_uses_the_stored_policy(pool, dsn, s3):  # noqa: F811
-    stamps = [NOW - timedelta(days=d) for d in (1, 40, 50, 60)]
-    s3.objects = [obj(f"proj/{n}", when) for n, when in zip("abcd", stamps, strict=True)]
+    ages = [NOW - timedelta(days=d) for d in (1, 40, 50, 60)]
+    versions = [await add_version(pool, "proj/a", age=when) for when in ages]
     stored = {**GOOD, "keep_newest": 1, "retention_days": 30, "enabled": False}
     async with client(pool, dsn, cache_keep_newest=3) as c:
         assert (await c.put(S, json=stored)).status_code == 200
         body = (await c.get(PREVIEW)).json()
-    assert [i["key"] for i in body["would_delete"]] == [
-        f"{PRE}proj/b.tar.zst",
-        f"{PRE}proj/c.tar.zst",
-    ]
+        assert (await c.post(PREVIEW)).json() == body
+    # the last saved (age 60) is current; of the others the newest 1 stays, the older go
+    assert {i["version"] for i in body["would_delete"]} == {
+        str(versions[1].id),
+        str(versions[2].id),
+    }
     assert (body["retention_days"], body["keep_newest"]) == (30, 1)
     assert body["grace_seconds"] == 0
     assert body["sweep_dry_run"] is False and body["sweep_enabled"] is False
 
 
 async def test_delete_uses_the_stored_grace(pool, dsn, s3):  # noqa: F811
-    fresh = f"{PRE}proj/new.tar.zst"
-    s3.objects = [obj("proj/new", NOW - timedelta(seconds=5))]
+    young = await add_version(pool, "proj/new", age=NOW - timedelta(seconds=5))
+    await add_version(pool, "proj/new", age=NOW)
     async with client(pool, dsn) as c:
-        r = await c.request("DELETE", A, json={"keys": [fresh]})
-        assert r.json()["refused"] == [{"key": fresh, "reason": "younger than the grace period"}]
-        assert s3.deleted == []
+        r = await c.delete(f"{A}/proj/new/versions/{young.id}")
+        assert_error(r, 409, "too_young")
         await c.put(S, json={**GOOD, "grace_seconds": 0})
-        r = await c.request("DELETE", A, json={"keys": [fresh]})
-    assert r.json()["deleted"] == [fresh] and s3.deleted == [[fresh]]
+        r = await c.delete(f"{A}/proj/new/versions/{young.id}")
+    assert r.status_code == 204 and s3.deleted == [[young.object_key]]
 
 
 async def test_settings_routes_need_no_api_s3_pair(pool, dsn):

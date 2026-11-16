@@ -22,7 +22,7 @@ from datetime import datetime
 
 from psycopg_pool import AsyncConnectionPool
 
-from agents_orchestrator.cache.sweep import SweepResult, protected_keys, run_sweep
+from agents_orchestrator.cache.sweep import SweepResult, run_sweep
 from agents_orchestrator.db import cache_sweep_settings, cache_sweeps
 from agents_orchestrator.db.pool import listen
 from agents_orchestrator.settings import Settings
@@ -49,7 +49,7 @@ class CacheSweeper:
             due = policy.enabled and (since is None or since >= policy.interval_seconds)
             if not (pending or due):
                 return None
-            result = await run_sweep(self.settings, self._protected, self._now, policy=policy)
+            result = await run_sweep(self.settings, self.pool, policy=policy)
             self.last = result
             async with self.pool.connection() as conn:
                 await cache_sweeps.record(
@@ -96,10 +96,6 @@ class CacheSweeper:
             stop_wait.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await listener_task
-
-    async def _protected(self) -> set[str]:
-        async with self.pool.connection() as conn:
-            return await protected_keys(conn, self.settings)
 
     async def _now(self) -> datetime:
         async with self.pool.connection() as conn:

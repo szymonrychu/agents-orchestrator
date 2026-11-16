@@ -455,149 +455,6 @@
         "title": "AgentView",
         "type": "object"
       },
-      "ArchiveDeleteError": {
-        "properties": {
-          "code": {
-            "title": "Code",
-            "type": "string"
-          },
-          "key": {
-            "title": "Key",
-            "type": "string"
-          },
-          "message": {
-            "title": "Message",
-            "type": "string"
-          }
-        },
-        "required": [
-          "key",
-          "code",
-          "message"
-        ],
-        "title": "ArchiveDeleteError",
-        "type": "object"
-      },
-      "ArchiveDeleteResult": {
-        "properties": {
-          "deleted": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Deleted",
-            "type": "array"
-          },
-          "errors": {
-            "items": {
-              "$ref": "#/components/schemas/ArchiveDeleteError"
-            },
-            "title": "Errors",
-            "type": "array"
-          },
-          "refused": {
-            "items": {
-              "$ref": "#/components/schemas/ArchiveRefusal"
-            },
-            "title": "Refused",
-            "type": "array"
-          }
-        },
-        "required": [
-          "deleted",
-          "refused",
-          "errors"
-        ],
-        "title": "ArchiveDeleteResult",
-        "type": "object"
-      },
-      "ArchivePage": {
-        "properties": {
-          "items": {
-            "items": {
-              "$ref": "#/components/schemas/ArchiveView"
-            },
-            "title": "Items",
-            "type": "array"
-          },
-          "next_cursor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Next Cursor"
-          }
-        },
-        "required": [
-          "items",
-          "next_cursor"
-        ],
-        "title": "ArchivePage",
-        "type": "object"
-      },
-      "ArchiveRefusal": {
-        "properties": {
-          "key": {
-            "title": "Key",
-            "type": "string"
-          },
-          "reason": {
-            "title": "Reason",
-            "type": "string"
-          }
-        },
-        "required": [
-          "key",
-          "reason"
-        ],
-        "title": "ArchiveRefusal",
-        "type": "object"
-      },
-      "ArchiveView": {
-        "properties": {
-          "key": {
-            "title": "Key",
-            "type": "string"
-          },
-          "last_modified": {
-            "format": "date-time",
-            "title": "Last Modified",
-            "type": "string"
-          },
-          "name": {
-            "title": "Name",
-            "type": "string"
-          },
-          "protected": {
-            "title": "Protected",
-            "type": "boolean"
-          },
-          "referenced_by": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Referenced By",
-            "type": "array"
-          },
-          "size": {
-            "title": "Size",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "key",
-          "name",
-          "size",
-          "last_modified",
-          "referenced_by",
-          "protected"
-        ],
-        "title": "ArchiveView",
-        "type": "object"
-      },
       "AutoCompact": {
         "additionalProperties": false,
         "properties": {
@@ -638,6 +495,79 @@
           }
         },
         "title": "AutoCompact",
+        "type": "object"
+      },
+      "BackupCopyIn": {
+        "additionalProperties": false,
+        "properties": {
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "source_version": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Version"
+          },
+          "target": {
+            "title": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "target"
+        ],
+        "title": "BackupCopyIn",
+        "type": "object"
+      },
+      "BackupCurrentView": {
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "origin": {
+            "title": "Origin",
+            "type": "string"
+          },
+          "saved_at": {
+            "format": "date-time",
+            "title": "Saved At",
+            "type": "string"
+          },
+          "session_slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Slug"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "size",
+          "saved_at",
+          "session_slug",
+          "origin"
+        ],
+        "title": "BackupCurrentView",
         "type": "object"
       },
       "BackupEntry": {
@@ -695,6 +625,111 @@
           "name"
         ],
         "title": "BackupEntry",
+        "type": "object"
+      },
+      "BackupManifestView": {
+        "properties": {
+          "files": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Files"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "version": {
+            "format": "uuid",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "version",
+          "files"
+        ],
+        "title": "BackupManifestView",
+        "type": "object"
+      },
+      "BackupNamePage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/BackupNameView"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "title": "BackupNamePage",
+        "type": "object"
+      },
+      "BackupNameView": {
+        "properties": {
+          "current": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BackupCurrentView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "protected": {
+            "title": "Protected",
+            "type": "boolean"
+          },
+          "referenced_by": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Referenced By",
+            "type": "array"
+          },
+          "version_count": {
+            "title": "Version Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "current",
+          "version_count",
+          "referenced_by",
+          "protected"
+        ],
+        "title": "BackupNameView",
         "type": "object"
       },
       "BackupRun": {
@@ -758,6 +793,114 @@
           "path"
         ],
         "title": "BackupSaveIn",
+        "type": "object"
+      },
+      "BackupVersionPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/BackupVersionView"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "title": "BackupVersionPage",
+        "type": "object"
+      },
+      "BackupVersionView": {
+        "properties": {
+          "created_by": {
+            "title": "Created By",
+            "type": "string"
+          },
+          "current": {
+            "title": "Current",
+            "type": "boolean"
+          },
+          "digest": {
+            "title": "Digest",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "origin": {
+            "title": "Origin",
+            "type": "string"
+          },
+          "protected": {
+            "title": "Protected",
+            "type": "boolean"
+          },
+          "referenced_by": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Referenced By",
+            "type": "array"
+          },
+          "saved_at": {
+            "format": "date-time",
+            "title": "Saved At",
+            "type": "string"
+          },
+          "session_slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Slug"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "size",
+          "digest",
+          "saved_at",
+          "origin",
+          "state",
+          "current",
+          "session_slug",
+          "created_by",
+          "referenced_by",
+          "protected"
+        ],
+        "title": "BackupVersionView",
         "type": "object"
       },
       "BootstrapFailure": {
@@ -899,6 +1042,17 @@
             "title": "Key",
             "type": "string"
           },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
           "reason": {
             "title": "Reason",
             "type": "string"
@@ -906,6 +1060,18 @@
           "size": {
             "title": "Size",
             "type": "integer"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
           }
         },
         "required": [
@@ -1404,25 +1570,6 @@
           }
         },
         "title": "CreateTerminal",
-        "type": "object"
-      },
-      "DeleteArchives": {
-        "additionalProperties": false,
-        "properties": {
-          "keys": {
-            "items": {
-              "type": "string"
-            },
-            "maxItems": 1000,
-            "minItems": 1,
-            "title": "Keys",
-            "type": "array"
-          }
-        },
-        "required": [
-          "keys"
-        ],
-        "title": "DeleteArchives",
         "type": "object"
       },
       "DialogAnswer": {
@@ -8024,18 +8171,25 @@
         ]
       }
     },
-    "/agent/v1/admin/archives": {
+    "/agent/v1/admin/backups": {
       "get": {
-        "operationId": "list_archives_agent_v1_admin_archives_get",
+        "operationId": "list_backups_agent_v1_admin_backups_get",
         "parameters": [
           {
             "in": "query",
-            "name": "prefix",
+            "name": "q",
             "required": false,
             "schema": {
-              "default": "",
-              "title": "Prefix",
-              "type": "string"
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Q"
             }
           },
           {
@@ -8061,7 +8215,7 @@
             "required": false,
             "schema": {
               "default": 200,
-              "maximum": 1000,
+              "maximum": 200,
               "minimum": 1,
               "title": "Limit",
               "type": "integer"
@@ -8105,14 +8259,14 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ArchivePage"
+                  "$ref": "#/components/schemas/BackupNamePage"
                 }
               }
             },
             "description": "Successful Response"
           },
           "400": {
-            "description": "bad_request: invalid prefix or cursor"
+            "description": "bad_request: invalid name or cursor"
           },
           "403": {
             "description": "not_superleader: the caller is not a superleader"
@@ -8128,18 +8282,18 @@
             "description": "Validation Error"
           },
           "503": {
-            "description": "unavailable: the cache archives are not configured for the api"
+            "description": "unavailable: backups are not configured for the api"
           }
         },
-        "summary": "List Archives",
+        "summary": "List Backups",
         "tags": [
           "admin"
         ]
       }
     },
-    "/agent/v1/admin/archives/cleanup/preview": {
+    "/agent/v1/admin/backups/cleanup/preview": {
       "get": {
-        "operationId": "archives_cleanup_preview_agent_v1_admin_archives_cleanup_preview_get",
+        "operationId": "backups_cleanup_preview_agent_v1_admin_backups_cleanup_preview_get",
         "parameters": [
           {
             "in": "header",
@@ -8199,18 +8353,18 @@
             "description": "Validation Error"
           },
           "503": {
-            "description": "unavailable: the cache archives are not configured for the api"
+            "description": "unavailable: backups are not configured for the api"
           }
         },
-        "summary": "Archives Cleanup Preview",
+        "summary": "Backups Cleanup Preview",
         "tags": [
           "admin"
         ]
       }
     },
-    "/agent/v1/admin/archives/settings": {
+    "/agent/v1/admin/backups/cleanup/settings": {
       "get": {
-        "operationId": "archives_settings_agent_v1_admin_archives_settings_get",
+        "operationId": "backups_cleanup_settings_agent_v1_admin_backups_cleanup_settings_get",
         "parameters": [
           {
             "in": "header",
@@ -8268,19 +8422,16 @@
               }
             },
             "description": "Validation Error"
-          },
-          "503": {
-            "description": "unavailable: the cache archives are not configured for the api"
           }
         },
-        "summary": "Archives Settings",
+        "summary": "Backups Cleanup Settings",
         "tags": [
           "admin"
         ]
       },
       "put": {
         "description": "Replace the whole cleanup policy (every field required, same bounds as the main port).\nPostgres only: it needs no api S3 key pair. The audit row lists the field names, no values.",
-        "operationId": "put_archives_settings_agent_v1_admin_archives_settings_put",
+        "operationId": "put_backups_cleanup_settings_agent_v1_admin_backups_cleanup_settings_put",
         "parameters": [
           {
             "in": "header",
@@ -8350,7 +8501,309 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Put Archives Settings",
+        "summary": "Put Backups Cleanup Settings",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/agent/v1/admin/backups/copy": {
+      "post": {
+        "description": "Copy a version to a target name; the copy becomes the target's current version (replace\nonly, no merge). The audit row names source and target, never content.",
+        "operationId": "copy_backup_agent_v1_admin_backups_copy_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupCopyIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupVersionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "description": "bad_request: invalid name or cursor"
+          },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader"
+          },
+          "404": {
+            "description": "backup_not_found or version_not_found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "502": {
+            "description": "storage_error: the object store refused the copy"
+          },
+          "503": {
+            "description": "unavailable: backups are not configured for the api"
+          }
+        },
+        "summary": "Copy Backup",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/agent/v1/admin/backups/{name}/versions": {
+      "get": {
+        "operationId": "backup_versions_agent_v1_admin_backups__name__versions_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 1024,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupVersionPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "description": "bad_request: invalid name or cursor"
+          },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader"
+          },
+          "404": {
+            "description": "backup_not_found or version_not_found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "unavailable: backups are not configured for the api"
+          }
+        },
+        "summary": "Backup Versions",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/agent/v1/admin/backups/{name}/versions/{version_id}/manifest": {
+      "get": {
+        "operationId": "backup_manifest_agent_v1_admin_backups__name__versions__version_id__manifest_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Version Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupManifestView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "description": "bad_request: invalid name or cursor"
+          },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader"
+          },
+          "404": {
+            "description": "backup_not_found or version_not_found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "unavailable: backups are not configured for the api"
+          }
+        },
+        "summary": "Backup Manifest",
         "tags": [
           "admin"
         ]
@@ -19604,54 +20057,25 @@
         "summary": "Delete Terminal"
       }
     },
-    "/api/v1/cache/archives": {
-      "delete": {
-        "operationId": "delete_archives_api_v1_cache_archives_delete",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/DeleteArchives"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ArchiveDeleteResult"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Delete Archives"
-      },
+    "/api/v1/backups": {
       "get": {
-        "operationId": "list_archives_api_v1_cache_archives_get",
+        "operationId": "list_names_route_api_v1_backups_get",
         "parameters": [
           {
             "in": "query",
-            "name": "prefix",
+            "name": "q",
             "required": false,
             "schema": {
-              "default": "",
-              "title": "Prefix",
-              "type": "string"
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Q"
             }
           },
           {
@@ -19677,7 +20101,7 @@
             "required": false,
             "schema": {
               "default": 200,
-              "maximum": 1000,
+              "maximum": 200,
               "minimum": 1,
               "title": "Limit",
               "type": "integer"
@@ -19689,7 +20113,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ArchivePage"
+                  "$ref": "#/components/schemas/BackupNamePage"
                 }
               }
             },
@@ -19706,44 +20130,12 @@
             "description": "Validation Error"
           }
         },
-        "summary": "List Archives"
+        "summary": "List Names Route"
       }
     },
-    "/api/v1/cache/archives/download": {
+    "/api/v1/backups/cleanup/preview": {
       "get": {
-        "operationId": "download_archive_api_v1_cache_archives_download_get",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "key",
-            "required": true,
-            "schema": {
-              "title": "Key",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "302": {
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Download Archive"
-      }
-    },
-    "/api/v1/cache/cleanup/preview": {
-      "get": {
-        "operationId": "cleanup_preview_api_v1_cache_cleanup_preview_get",
+        "operationId": "cleanup_preview_route_api_v1_backups_cleanup_preview_get",
         "responses": {
           "200": {
             "content": {
@@ -19756,12 +20148,29 @@
             "description": "Successful Response"
           }
         },
-        "summary": "Cleanup Preview"
+        "summary": "Cleanup Preview Route"
+      },
+      "post": {
+        "description": "Same read-only answer as the GET (the plugin reads GET, the web may POST).",
+        "operationId": "cleanup_preview_post_route_api_v1_backups_cleanup_preview_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CleanupPreview"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Cleanup Preview Post Route"
       }
     },
-    "/api/v1/cache/cleanup/run": {
+    "/api/v1/backups/cleanup/run": {
       "post": {
-        "operationId": "request_cleanup_run_api_v1_cache_cleanup_run_post",
+        "operationId": "request_cleanup_run_api_v1_backups_cleanup_run_post",
         "responses": {
           "202": {
             "content": {
@@ -19777,9 +20186,9 @@
         "summary": "Request Cleanup Run"
       }
     },
-    "/api/v1/cache/cleanup/settings": {
+    "/api/v1/backups/cleanup/settings": {
       "get": {
-        "operationId": "get_cleanup_settings_api_v1_cache_cleanup_settings_get",
+        "operationId": "get_cleanup_settings_api_v1_backups_cleanup_settings_get",
         "responses": {
           "200": {
             "content": {
@@ -19795,7 +20204,7 @@
         "summary": "Get Cleanup Settings"
       },
       "put": {
-        "operationId": "put_cleanup_settings_api_v1_cache_cleanup_settings_put",
+        "operationId": "put_cleanup_settings_api_v1_backups_cleanup_settings_put",
         "requestBody": {
           "content": {
             "application/json": {
@@ -19829,6 +20238,277 @@
           }
         },
         "summary": "Put Cleanup Settings"
+      }
+    },
+    "/api/v1/backups/copy": {
+      "post": {
+        "operationId": "copy_route_api_v1_backups_copy_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupCopyIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupVersionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Copy Route"
+      }
+    },
+    "/api/v1/backups/{name}": {
+      "delete": {
+        "operationId": "delete_backup_route_api_v1_backups__name__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Backup Route"
+      }
+    },
+    "/api/v1/backups/{name}/versions": {
+      "get": {
+        "operationId": "versions_route_api_v1_backups__name__versions_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 1024,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupVersionPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Versions Route"
+      }
+    },
+    "/api/v1/backups/{name}/versions/{version_id}": {
+      "delete": {
+        "operationId": "delete_version_route_api_v1_backups__name__versions__version_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Version Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Version Route"
+      }
+    },
+    "/api/v1/backups/{name}/versions/{version_id}/download": {
+      "get": {
+        "operationId": "download_route_api_v1_backups__name__versions__version_id__download_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Version Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download Route"
+      }
+    },
+    "/api/v1/backups/{name}/versions/{version_id}/manifest": {
+      "get": {
+        "operationId": "manifest_route_api_v1_backups__name__versions__version_id__manifest_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Version Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupManifestView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Manifest Route"
       }
     },
     "/api/v1/checks/{check_id}": {

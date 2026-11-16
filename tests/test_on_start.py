@@ -71,8 +71,19 @@ TAIL_TOOLS = [
 ]
 # Allowed before the pinned plugin ships them; add a name here when the allow-list leads the
 # plugin pin and remove it when the pin offers the tool (project room T-117 O9; project grants
-# T-120). Empty while the pin (v0.53.0) offers every allowed tool.
-PLUGIN_PENDING: set[str] = {"backup_save", "backup_status"}  # plugins release A (S-68)
+# T-120). The backups admin tools wait for the plugins release of PR #61 (S-68 step 12);
+# backup_save and backup_status wait for plugins release A (S-68).
+PLUGIN_PENDING: set[str] = {
+    "backup_save",
+    "backup_status",
+    "backups_list",
+    "backup_versions",
+    "backup_manifest",
+    "backups_copy",
+    "backups_cleanup_get",
+    "backups_cleanup_preview",
+    "backups_cleanup_set",
+}
 ALONE_TOOLS = ["me", "handoff_submit", *TAIL_TOOLS]
 PROPOSAL = [
     "proposal_create",
@@ -102,10 +113,11 @@ ADMIN_TOOLS = [
     "session_projects_grant", "session_projects_revoke", "preset_projects_grant",
     "preset_projects_revoke", "preset_manageable_request",
     "sessions_admin_list", "session_activity", "session_events", "session_messages",
-    "session_locks", "session_commands", "meta_get", "archives_list", "archives_settings_get",
-    "archives_cleanup_preview", "usage_history", "usage_sessions",
+    "session_locks", "session_commands", "meta_get", "backups_list", "backup_versions",
+    "backup_manifest", "backups_copy", "backups_cleanup_get", "backups_cleanup_preview",
+    "usage_history", "usage_sessions",
     "session_labels_update", "session_scale", "session_lock_reassign", "session_message_cancel",
-    "project_update", "archives_settings_set", "spec_delete", "spec_suggestion_dismiss",
+    "project_update", "backups_cleanup_set", "spec_delete", "spec_suggestion_dismiss",
     "spec_queue_move",
     *PROPOSAL,
 ]  # fmt: skip

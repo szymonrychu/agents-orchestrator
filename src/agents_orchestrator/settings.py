@@ -998,7 +998,7 @@ class Settings(BaseSettings):
 
     @property
     def api_s3_configured(self) -> bool:
-        """The bucket and the api pod's own key pair are set (archives endpoints answer 503
+        """The bucket and the api pod's own key pair are set (backups endpoints answer 503
         otherwise)."""
         return self.cache_available and bool(
             self.cache_s3_api_access_key_id and self.cache_s3_api_secret_access_key

@@ -1,0 +1,19 @@
+{
+  "preset": {
+    "id": null,
+    "name": "Gone Preset"
+  },
+  "is_preset": false,
+  "cache": {
+    "restore_key": "preset-995c4f1073ca9427",
+    "save_key": "preset-995c4f1073ca9427"
+  },
+  "expected": [
+    {
+      "root": "workspace",
+      "path": ".",
+      "mode": "both",
+      "name": "preset-995c4f1073ca9427"
+    }
+  ]
+}

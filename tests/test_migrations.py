@@ -987,6 +987,51 @@ def _to_0014(empty_dsn, tmp_path):
     run_migrations(empty_dsn, tmp_path)
 
 
+def test_cache_keys_migration_0015_alone_splits_the_single_key(empty_dsn, tmp_path):
+    """0015 on its own (a partial run: the backup data step needs the complete schema)."""
+    _to_0014(empty_dsn, tmp_path)
+    keyed = {"replicas": 2, "cache": {"key": "k1", "exclude": ["tmp"]}}
+    derived = {"cache": {"exclude": ["x"]}}
+    nocache = {"replicas": 1}
+    nullkey = {"cache": {"key": None}}
+    rows = {"keyed": keyed, "derived": derived, "nocache": nocache, "nullkey": nullkey}
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        for slug, spec in rows.items():
+            c.execute(
+                "INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), %s, %s)",
+                (slug, json.dumps(spec)),
+            )
+            c.execute(
+                "INSERT INTO presets (id, name, spec) VALUES (gen_random_uuid(), %s, %s)",
+                (slug, json.dumps(spec)),
+            )
+    shutil.copy(MIGRATIONS_DIR / "0015_cache_keys.sql", tmp_path)
+    assert run_migrations(empty_dsn, tmp_path) == ["0015"]
+    expected = {
+        "keyed": {
+            "replicas": 2,
+            "cache": {"restore_key": "k1", "save_key": "k1", "exclude": ["tmp"]},
+        },
+        "derived": derived,
+        "nocache": nocache,
+        "nullkey": {"cache": {}},
+    }
+
+    def stored():
+        with psycopg.connect(empty_dsn) as c:
+            sessions = dict(c.execute("SELECT slug, spec FROM sessions").fetchall())
+            presets = dict(
+                c.execute("SELECT name, spec FROM presets WHERE name = ANY(%s)", (list(rows),))
+            )
+        return sessions, presets
+
+    assert stored() == (expected, expected)
+    # idempotent: a second run of the file changes nothing
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        c.execute((MIGRATIONS_DIR / "0015_cache_keys.sql").read_text())
+    assert stored() == (expected, expected)
+
+
 def test_cache_keys_migration_splits_the_single_key(empty_dsn, tmp_path):
     _to_0014(empty_dsn, tmp_path)
     keyed = {"replicas": 2, "cache": {"key": "k1", "exclude": ["tmp"]}}
@@ -1000,9 +1045,12 @@ def test_cache_keys_migration_splits_the_single_key(empty_dsn, tmp_path):
             ("nocache", nocache),
             ("nullkey", nullkey),
         ):
+            # preset_name lets the backup data migration (the python step that runs after the
+            # SQL files) name the default workspace backup of a session whose preset is gone
             c.execute(
-                "INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), %s, %s)",
-                (slug, json.dumps(spec)),
+                "INSERT INTO sessions (id, slug, spec, preset_name)"
+                " VALUES (gen_random_uuid(), %s, %s, %s)",
+                (slug, json.dumps(spec), slug),
             )
             c.execute(
                 "INSERT INTO presets (id, name, spec) VALUES (gen_random_uuid(), %s, %s)",
@@ -1048,14 +1096,13 @@ def test_cache_keys_migration_splits_the_single_key(empty_dsn, tmp_path):
         "0053",
         "0054",
     ]
+    # 0015 splits the key; the backup data migration then rewrites the result to spec.backup
+    entry = {"root": "workspace", "path": ".", "mode": "both"}
     expected = {
-        "keyed": {
-            "replicas": 2,
-            "cache": {"restore_key": "k1", "save_key": "k1", "exclude": ["tmp"]},
-        },
-        "derived": derived,
+        "keyed": {"replicas": 2, "backup": [{**entry, "name": "k1", "exclude": ["tmp"]}]},
+        "derived": {"backup": [{**entry, "name": "derived/workspace", "exclude": ["x"]}]},
         "nocache": nocache,
-        "nullkey": {"cache": {}},
+        "nullkey": {"backup": [{**entry, "name": "nullkey/workspace"}]},
     }
 
     def stored():
@@ -1074,8 +1121,6 @@ def test_cache_keys_migration_splits_the_single_key(empty_dsn, tmp_path):
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         c.execute(sql)
     assert stored() == (sessions, presets)
-    # the stored `cache` shape is no longer a SessionSpec field (spec.backup replaced it), so the
-    # row is checked as plain JSON above, not parsed
 
 
 def test_self_restart_migration_adds_nullable_column_idempotently(empty_dsn, tmp_path):
