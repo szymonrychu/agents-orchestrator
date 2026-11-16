@@ -85,3 +85,10 @@ def test_scratch_abandoned_with_reason_clears():
 def test_scratch_moved_to_shared_workdir_clears():
     # the re-scan no longer reports a file moved under the shared workdir
     assert handoff_gate.evaluate(Inflight(scratch=[]), []).clear
+
+
+def test_subagent_abandoned_by_bare_word_whatever_the_count():
+    inflight = Inflight(subagents=3)
+    abandon = [Abandon(item="subagent", why="its result is not needed any more")]
+    got = handoff_gate.evaluate(inflight, abandon)
+    assert got.clear and got.abandoned[0]["item"] == "subagent:3 running"

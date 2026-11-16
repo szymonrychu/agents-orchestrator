@@ -50,8 +50,6 @@ def check(
         if handoff_gate.abandon_for(item, abandon) is not None:
             continue
         names = (item.id, *item.keys, *([item.path] if item.path else []))
-        if item.kind == "subagent":
-            names = ("subagent",)
         mentioned = with_results if item.kind == "scratch" else in_flight
         if not any(n.lower() in mentioned for n in names if n):
             reasons.append(f"unreferenced:{item.id}")

@@ -73,7 +73,7 @@ def items(inflight: Inflight | None) -> list[Item]:
         return [Item(UNREACHABLE)]
     out: list[Item] = []
     if inflight.subagents:
-        out.append(Item(f"subagent:{inflight.subagents} running", kind="subagent"))
+        out.append(Item(f"subagent:{inflight.subagents} running", ("subagent",), kind="subagent"))
     out.extend(_task(t) for t in inflight.background_tasks)
     for w in inflight.worktrees:
         out.extend(_worktree(w))
