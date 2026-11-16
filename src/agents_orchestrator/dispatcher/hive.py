@@ -171,7 +171,7 @@ def levels(spec: dict[str, Any], start_tokens: int | None, settings: Settings) -
 
 
 def strong_tokens(lv: Levels, window_tokens: int) -> int:
-    """The context size from which the strong limit applies: the smaller of the percent margin
+    """The context size from which level 2 (strong) applies: the smaller of the percent margin
     below compaction and the headroom in tokens below it, floored at 0."""
     return max(
         0,
@@ -805,9 +805,11 @@ async def _pressure_targets(
         cached = state.steering.get(session_id)
         task_ids, todo = (cached.task_ids, cached.todo) if cached else ((), ())
         steer = row if row is not None else reminder
-        profile = steer.profile if steer is not None and steer.profile == "chat" else "work"
-        compact = handoff_texts.compact_instructions(row, task_ids, profile, todo=todo)  # type: ignore[arg-type]
-        reinject = handoff_texts.reinject_text(steer, task_ids, todo, profile)  # type: ignore[arg-type]
+        profile: handoff_texts.Profile = (
+            "chat" if steer is not None and steer.profile == "chat" else "work"
+        )
+        compact = handoff_texts.compact_instructions(row, task_ids, profile, todo=todo)
+        reinject = handoff_texts.reinject_text(steer, task_ids, todo, profile)
         if row is None or row.phase != "returning" or row.handoff is None:
             return pressure_policy.PolicyExtras(
                 resubmit=resubmit, compact_instructions=compact, reinject_text=reinject
@@ -838,8 +840,11 @@ async def _pressure_targets(
             and reminder is None
         ):
             continue
-        profile = row.profile if row is not None else None
-        if profile not in ("work", "chat"):
+        known = row.profile if row is not None else None
+        profile: handoff_texts.Profile
+        if known == "work" or known == "chat":
+            profile = known
+        else:
             tenure = float(subject["tenure"] or 0)  # 0: the tenure start is unknown
             tenure_start = await _since(conn, tenure) if tenure > 0 else None
             profile = await handoff_profile.detect(
@@ -852,7 +857,7 @@ async def _pressure_targets(
             lv,
             subject["context_window_tokens"],
             l1_on,
-            profile,  # type: ignore[arg-type]
+            profile,
             row,
             hive=not subject["solo"],
             version=0,

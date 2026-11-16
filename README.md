@@ -87,8 +87,8 @@ Every process reads `ORCH_*` variables (the contract `agents-orchestrator-settin
 | `ORCH_HANDOVER_TRANSCRIPT_BYTES` | `16384` | api | bytes (8192 to 1048576) of the predecessor's rendered transcript attached to a handover notice; the oldest lines are dropped first |
 | `ORCH_HANDOVER_BUDGET_TOKENS` | `150000` | dispatcher | tokens (10000 to 2000000) a leader may work on top of its context at the start of its leadership before context pressure (L1) starts; L2 and L3 always apply |
 | `ORCH_HANDOVER_MIN_TENURE_SECONDS` | `1200` | dispatcher | seconds (0 to 86400) a leader must have led before context pressure (L1) starts; L2, L3, a rollout or a pod stop override it |
-| `ORCH_HANDOVER_STRONG_MARGIN_PCT` | `10` | dispatcher | percent points (1 to 50) below the compaction point where the strong limit sits (with the token headroom, the smaller of the two applies) |
-| `ORCH_HANDOVER_STRONG_HEADROOM_TOKENS` | `60000` | dispatcher | tokens (0 to 500000) below the compaction point where the strong limit sits (floored at 0) |
+| `ORCH_HANDOVER_STRONG_MARGIN_PCT` | `10` | dispatcher | percent points (1 to 50) below the compaction point where level 2 (strong) sits (with the token headroom, the smaller of the two applies) |
+| `ORCH_HANDOVER_STRONG_HEADROOM_TOKENS` | `60000` | dispatcher | tokens (0 to 500000) below the compaction point where level 2 (strong) sits (floored at 0) |
 | `ORCH_HANDOVER_CRITICAL_MARGIN_PCT` | `5` | dispatcher | percent points (1 to 50) below the compaction point where level 3 (critical) sits (with the token headroom, the smaller of the two applies; never below the strong point) |
 | `ORCH_HANDOVER_CRITICAL_HEADROOM_TOKENS` | `25000` | dispatcher | tokens (0 to 500000) below the compaction point where level 3 (critical) sits |
 | `ORCH_HANDOFF_CHAT_SERVICES` | `agents-matrix-connector` | api | comma-separated service names (the names in `ORCH_SERVICE_TOKENS`) whose messages on the service port count as inbound chat activity of the session; with the outbound chat posts of the relay it tells a chat agent from a work agent for the context-pressure handoff |

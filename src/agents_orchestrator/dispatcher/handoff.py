@@ -132,10 +132,10 @@ log = logging.getLogger(__name__)
 LIMIT_REASON = handoffs.LIMIT_REASON
 MAX_CLEAR_ATTEMPTS = 5
 BEFORE_MOVING = ("pressuring", "submitted")
-# A context reset before `moving` closes the row, with this reason. `compacting` alone is not
-# one: a PreCompact whose compaction then fails leaves the context as it was.
 # How long the claimed tasks cached for the compaction steering stay current.
 STEERING_REFRESH_SECONDS = 60.0
+# A context reset before `moving` closes the row, with this reason. `compacting` alone is not
+# one: a PreCompact whose compaction then fails leaves the context as it was.
 RESET_EVENTS = {"compacted": "compacted", "session_cleared": "cleared"}
 # The phases whose pass reads the wrapper's in-flight inventory.
 GATED = ("submitted", "moving", "discussing", "clearing")

@@ -414,7 +414,7 @@ async def handover(
     return schemas.LeadershipRequested(request_id=request_id, handled=handled)
 
 
-async def _check_epoch(leader: Any, epoch: int | None) -> None:
+def _check_epoch(leader: Any, epoch: int | None) -> None:
     if epoch is None:
         raise ApiError(422, "epoch_required", "a hive leader's handover needs the leader epoch")
     if epoch != leader.epoch:
@@ -424,7 +424,7 @@ async def _check_epoch(leader: Any, epoch: int | None) -> None:
 async def _hive_handover(
     conn: Any, agent: agents_repo.Agent, leader: Any, body: schemas.HandoverIn
 ) -> int:
-    await _check_epoch(leader, body.epoch)
+    _check_epoch(leader, body.epoch)
     to_id = await member_id(conn, agent.session_id, body.to) if body.to is not None else None
     assert body.epoch is not None
     return await leadership.insert_request(
@@ -481,7 +481,7 @@ async def handoff_submit(
             leader = await leadership.current_leader(conn, agent.session_id)
             if leader is None or leader.agent_id != agent.id:
                 raise ApiError(409, "not_leader", "only the current leader can submit a handoff")
-            await _check_epoch(leader, body.epoch)
+            _check_epoch(leader, body.epoch)
             if body.to is not None:
                 await member_id(conn, agent.session_id, body.to)
         row = await handoffs.open_row(conn, agent.id)
