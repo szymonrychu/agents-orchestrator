@@ -1067,6 +1067,15 @@ async def open_pressure_row(pool, session_id, agent_id, phase: str, text: str | 
     return row.id
 
 
+async def own_request(pool, row_id: int, session_id, frm, to, epoch: int) -> int:
+    """The row's own `limit` request, recorded on the row as the handoff pass does."""
+    rid = await request(pool, session_id, "handover", frm, to, "limit", epoch)
+    await run(
+        pool, "UPDATE agent_handoffs SET leadership_request_id = %s WHERE id = %s", (rid, row_id)
+    )
+    return rid
+
+
 async def test_voluntary_apply_no_longer_enqueues_clear(pool):
     # m890: the ex-leader is no longer cleared in the apply transaction (this replaces the T-103
     # assertion); a discussion window comes first and the handoff pass clears it later
@@ -1157,8 +1166,8 @@ async def test_pressure_row_moves_to_discussing_on_apply(pool):
     assert await commands_of(pool, a0["id"]) == []
     # moving: the agent's own handoff text is kept, the limit reason never replaces it
     await set_leader_row(pool, c["id"], a1["id"], 4)
-    await open_pressure_row(pool, c["id"], a1["id"], "moving", "my own handoff")
-    await request(pool, c["id"], "handover", a1["id"], a2["id"], "limit", 4)
+    row_id = await open_pressure_row(pool, c["id"], a1["id"], "moving", "my own handoff")
+    await own_request(pool, row_id, c["id"], a1["id"], a2["id"], 4)
     await lpass(pool, c["id"])
     row = (await handoff_rows(pool, a1["id"]))[-1]
     assert (row["phase"], row["handoff_text"], row["successor_agent_id"]) == (
@@ -1168,8 +1177,8 @@ async def test_pressure_row_moves_to_discussing_on_apply(pool):
     )
     # no text: none is invented from the request reason
     await set_leader_row(pool, c["id"], a2["id"], 5)
-    await open_pressure_row(pool, c["id"], a2["id"], "moving")
-    await request(pool, c["id"], "handover", a2["id"], a0["id"], "limit", 5)
+    row_id = await open_pressure_row(pool, c["id"], a2["id"], "moving")
+    await own_request(pool, row_id, c["id"], a2["id"], a0["id"], 5)
     await lpass(pool, c["id"])
     row = (await handoff_rows(pool, a2["id"]))[-1]
     assert (row["phase"], row["handoff_text"]) == ("discussing", None)
@@ -1246,3 +1255,38 @@ async def test_scale_down_does_not_reset(pool):
     await shrink(pool, c["id"], 2)
     assert (await lpass(pool, c["id"])).reason == "scale_down"
     assert await rows(pool, "SELECT * FROM commands") == []
+
+
+async def test_foreign_limit_request_does_not_carry_a_moving_row(pool):
+    # a limit request that is not the row's own (another id) is a foreign move: not_leader
+    c, (a0, a1, a2) = await hive(pool)
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
+    row_id = await open_pressure_row(pool, c["id"], a0["id"], "moving")
+    own = await request(pool, c["id"], "handover", a0["id"], a1["id"], "limit", 3)
+    await run(
+        pool,
+        "UPDATE agent_handoffs SET leadership_request_id = %s WHERE id = %s",
+        (own + 1000, row_id),
+    )
+    assert (await lpass(pool, c["id"])).agent_id == a1["id"]
+    (row,) = await handoff_rows(pool)
+    assert (row["phase"], row["close_reason"]) == ("cancelled", "not_leader")
+    assert await commands_of(pool, a0["id"]) == []
+
+
+@pytest.mark.parametrize("reason", ["limit", "user"])
+async def test_ex_leader_leading_again_closes_its_discussing_row(pool, reason):
+    # 2-agent ping-pong: a0 discusses after its own move, then the lead comes back to it (b's
+    # own limit move or a user pick): a0's discussing row closes cancelled leader_again
+    c, (a0, a1, _) = await hive(pool)
+    await set_leader(pool, c["id"], a1["id"], epoch=3)
+    a0_row = await open_pressure_row(pool, c["id"], a0["id"], "discussing")
+    if reason == "limit":
+        a1_row = await open_pressure_row(pool, c["id"], a1["id"], "moving")
+        await own_request(pool, a1_row, c["id"], a1["id"], a0["id"], 3)
+    else:
+        await request(pool, c["id"], "user", None, a0["id"], "user", None)
+    assert (await lpass(pool, c["id"])).agent_id == a0["id"]
+    (row,) = await handoff_rows(pool, a0["id"])
+    assert (row["id"], row["phase"], row["close_reason"]) == (a0_row, "cancelled", "leader_again")
+    assert await commands_of(pool, a0["id"]) == []

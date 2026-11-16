@@ -425,6 +425,15 @@ _PRE_DISCUSSION = ("pressuring", "submitted", "moving", "handed")
 FORCED_REASONS = ("rollout", "limit")
 
 
+async def _close_leader_again(conn: psycopg.AsyncConnection, agent_id: uuid.UUID) -> None:
+    row = await open_row(conn, agent_id)
+    if row is None or row.phase not in ("discussing", "moving"):
+        return
+    if await close(conn, row.id, "cancelled", "leader_again", ("discussing", "moving")):
+        for message_id in await queued_messages(conn, row.id):
+            await queue.cancel_message(conn, message_id)
+
+
 async def on_leader_moved(
     conn: psycopg.AsyncConnection,
     session_id: uuid.UUID,
@@ -442,14 +451,25 @@ async def on_leader_moved(
     recorded, the agent's own handoff text kept, else the voluntary reason), or, with no row and
     a voluntary reason, opens a `voluntary` row already in `discussing` with the reason as its
     text. The ex-leader is cleared by the handoff pass after the discussion, never here (m890).
-    A shutdown row belongs to the shutdown path and is left alone."""
+    A shutdown row belongs to the shutdown path and is left alone.
+
+    The successor's own `discussing` or `moving` row (an ex-leader leading again, as in a
+    2-agent hive's ping-pong) closes `cancelled leader_again`: it is never cleared as an
+    ex-leader while it leads, and the unique open-row index lets it open its own cycle."""
+    await _close_leader_again(conn, successor)
     row = await open_row(conn, previous)
     if row is not None and row.trigger == "shutdown":
         return
     # decision 716: only the row's own `limit` request (queued for its accepted, gate-clear
     # submit, phase `moving`) or the leader's own voluntary handover leads to a discussion and
     # a clear; any other move (user, rollout, scale-down, lost leader) leaves the context alone
-    own_limit = row is not None and row.phase == "moving" and req.get("reason") == "limit"
+    own_limit = (
+        row is not None
+        and row.phase == "moving"
+        and req.get("reason") == "limit"
+        and req.get("id") is not None
+        and req.get("id") == row.leadership_request_id
+    )
     voluntary = req["kind"] == "handover" and req["reason"] not in FORCED_REASONS
     if not (own_limit or voluntary):
         closed = (

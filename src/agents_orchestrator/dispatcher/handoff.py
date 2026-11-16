@@ -38,7 +38,9 @@ The pressure itself is the policy the push loop puts to the wrapper (`hive._push
    ex-leader's own: past the cap it is still cleared only once idle) AND its own in-flight gate
    is clear; until then it keeps its policy (`accepted`, with `waiting_on`). Only the row's own
    `limit` move or the leader's voluntary handover reaches this phase: a rollout or user move
-   closes the row before it (`handoffs.on_leader_moved`), so it is never cleared.
+   closes the row before it (`handoffs.on_leader_moved`), so it is never cleared. An ex-leader
+   that leads again (a 2-agent hive's ping-pong) has its row closed `cancelled leader_again` in
+   that move, so it is never cleared while it leads.
 6. clearing: a `session_cleared` after the clear closes the row `done cleared` (hive order) or,
    solo, queues the accepted handoff back (`handoff_texts.return_text`) with the move to
    `returning`, exactly once. A clear refused with `subagents_running` or lost (no

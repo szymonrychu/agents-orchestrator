@@ -279,3 +279,68 @@ async def test_seen_submit_guards_advance_and_start_clear(pool):
         latest = (await handoffs.open_row(conn, agent_id)).submitted_at
         assert latest != seen
         assert await handoffs.start_clear(conn, row.id, ["submitted"], 1, seen_submit=latest)
+
+
+async def _two_agents(pool):
+    session = await insert_session(pool)
+    a = await insert_agent(pool, session["id"], ordinal=0)
+    b = await insert_agent(pool, session["id"], ordinal=1)
+    return session["id"], a["id"], b["id"]
+
+
+async def test_own_limit_is_the_rows_own_request_id(pool):
+    # only the row's own limit request (by id) carries a moving row to the discussion; another
+    # limit request applied for the same agent is a foreign move and closes it not_leader
+    session_id, a, b = await _two_agents(pool)
+    async with pool.connection() as conn:
+        row = await handoffs.insert(conn, session_id, a, "pressure", "moving")
+        assert await handoffs.advance(conn, row.id, ["moving"], "moving", leadership_request_id=7)
+        await handoffs.on_leader_moved(
+            conn, session_id, a, b, {"id": 8, "kind": "handover", "reason": "limit"}
+        )
+        assert await handoffs.open_row(conn, a) is None
+        (closed,) = await (
+            await conn.execute(
+                "SELECT phase, close_reason, discuss_since FROM agent_handoffs WHERE id = %s",
+                (row.id,),
+            )
+        ).fetchall()
+    assert closed == ("cancelled", "not_leader", None)
+    async with pool.connection() as conn:
+        row = await handoffs.insert(conn, session_id, a, "pressure", "moving")
+        assert await handoffs.advance(conn, row.id, ["moving"], "moving", leadership_request_id=9)
+        await handoffs.on_leader_moved(
+            conn, session_id, a, b, {"id": 9, "kind": "handover", "reason": "limit"}
+        )
+        after = await handoffs.open_row(conn, a)
+    assert (after.phase, after.successor_agent_id) == ("discussing", b)
+
+
+@pytest.mark.parametrize("phase", ["discussing", "moving"])
+async def test_successor_leading_again_closes_its_own_row(pool, phase):
+    # the ex-leader becomes leader again: its own discussing (or moving) row closes cancelled
+    # leader_again in the move's transaction, so it is never cleared as an ex-leader and can
+    # open its own pressure cycle
+    session_id, a, b = await _two_agents(pool)
+    async with pool.connection() as conn:
+        own = await handoffs.insert(conn, session_id, a, "pressure", phase)
+        await handoffs.on_leader_moved(conn, session_id, b, a, {"kind": "user"})
+        assert await handoffs.open_row(conn, a) is None
+        (closed,) = await (
+            await conn.execute(
+                "SELECT phase, close_reason FROM agent_handoffs WHERE id = %s", (own.id,)
+            )
+        ).fetchall()
+        assert closed == ("cancelled", "leader_again")
+        fresh = await handoffs.open_pressure(conn, session_id, a, 1, "work")
+    assert fresh is not None and fresh.phase == "pressuring"
+
+
+@pytest.mark.parametrize("phase", ["clearing", "returning", "handed"])
+async def test_successor_leading_again_leaves_other_phases(pool, phase):
+    session_id, a, b = await _two_agents(pool)
+    async with pool.connection() as conn:
+        trigger = "shutdown" if phase == "handed" else "pressure"
+        await handoffs.insert(conn, session_id, a, trigger, phase)
+        await handoffs.on_leader_moved(conn, session_id, b, a, {"kind": "user"})
+        assert (await handoffs.open_row(conn, a)).phase == phase

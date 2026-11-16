@@ -49,6 +49,7 @@ EVENTS = (
     "rollout_moved",
     "request_rejected",
     "time_passes",
+    "other_busy",
 )
 
 
@@ -203,6 +204,13 @@ class Run:
                     )
             async with self.pool.connection() as conn:
                 await leadership.leadership_pass(conn, sid)
+        elif name == "other_busy" and self.hive:
+            # the agent that does not lead (an ex-leader in discussion) keeps working
+            other = next(a["id"] for a in self.agents if a["id"] != agent_id)
+            await self.q(
+                "UPDATE agent_status SET state = 'busy', current_turn_id = 't' WHERE agent_id = %s",
+                (other,),
+            )
         elif name == "time_passes":
             # past the discussion's quiet window and cap: a discussing ex-leader may be cleared
             await self.q(
@@ -256,8 +264,10 @@ class Run:
             )
             assert self.clear_submit.get(row["id"]) is True, self.fail(f"clear {cmd}")
             if row["discuss_since"] is not None:
-                # an ex-leader is cleared only after a move by its own limit request
+                # an ex-leader is cleared only after a move by its own limit request, and
+                # never while it leads again (the 2-agent ping-pong)
                 assert row["moved"] == "applied", self.fail(f"clear after a foreign move {cmd}")
+                assert cmd["agent_id"] != await self.subject(), self.fail(f"leader cleared {cmd}")
             assert not self.bg[cmd["agent_id"]], self.fail(f"clear with work in flight {cmd}")
         for req in await self.q(
             "SELECT id, from_agent_id FROM leadership_requests"
@@ -286,6 +296,14 @@ class Run:
             (sid, list(handoffs.OPEN_PHASES)),
         )
         assert many == [], self.fail("two open rows")
+        if self.hive:
+            leading = await self.q(
+                "SELECT h.id FROM agent_handoffs h JOIN session_leaders l"
+                " ON l.session_id = h.session_id AND l.agent_id = h.agent_id"
+                " WHERE h.session_id = %s AND h.phase = 'discussing'",
+                (sid,),
+            )
+            assert leading == [], self.fail(f"the leader discusses its own move {leading}")
         removed = await self.q(
             "SELECT id FROM messages WHERE session_id = %s"
             " AND notice IN ('handoff_notice', 'handoff_request')",
@@ -297,7 +315,7 @@ class Run:
 async def test_no_clear_without_accepted_submit(pool, dsn):
     settings = Settings(database_url=dsn, master_key=KEY)
     rng = random.Random(716)
-    proceeded = 0
+    proceeded = ping_pong = 0
     for _ in range(RUNS):
         run = Run(pool, settings, rng)
         await run.setup()
@@ -306,4 +324,12 @@ async def test_no_clear_without_accepted_submit(pool, dsn):
             await run.event(rng.choice(EVENTS))
             await run.step()
         proceeded += len(run.seen_commands) + len(run.seen_requests)
+        ping_pong += len(
+            await run.q(
+                "SELECT id FROM agent_handoffs WHERE session_id = %s"
+                " AND close_reason = 'leader_again'",
+                (run.session["id"],),
+            )
+        )
     assert proceeded > 0  # the property is not vacuous: some cycles did clear or move
+    assert ping_pong > 0  # some ex-leaders led again (the 2-agent ping-pong)

@@ -729,6 +729,50 @@ async def test_ex_leader_policy_removed_once_its_row_closed(env):
 # ---------------------------------------------------------------- closing before moving
 
 
+async def test_two_agent_ping_pong_closes_the_returning_leaders_row(env):
+    # a 2-agent hive: A hands to B and stays busy (discussing), then B's limit move goes back
+    # to A. A's discussing row closes cancelled leader_again in the move: A is never cleared
+    # as an ex-leader while it leads (B's handoff would be lost) and opens its own cycle
+    c, (a, b) = await env.hive(n=2)
+    assert await env.step(c["id"]) == [f"pressuring:{a['id']}"]
+    assert await env.submit(a)
+    assert await env.step(c["id"]) == [f"moving:{a['id']}"]
+    assert (await env.lpass(c["id"])).agent_id == b["id"]
+    a_row = await env.row(a["id"])
+    assert a_row.phase == "discussing"
+    await env.busy(a["id"])
+    await env.gauge(b["id"], STRONG)
+    assert await env.step(c["id"]) == [f"pressuring:{b['id']}"]
+    assert await env.submit(b)
+    assert await env.step(c["id"]) == [f"moving:{b['id']}"]
+    (_, lr) = await env.requests(c["id"])
+    assert (lr["from_agent_id"], lr["reason"]) == (b["id"], handoff.LIMIT_REASON)
+    assert (await env.lpass(c["id"])).agent_id == a["id"]
+    last = await env.last_row(a["id"])
+    assert (last["id"], last["phase"], last["close_reason"]) == (
+        a_row.id,
+        "cancelled",
+        "leader_again",
+    )
+    assert (await env.row(b["id"])).phase == "discussing"
+    # A idle and the session quiet past the cap: only B, the ex-leader now, is cleared
+    for agent in (a, b):
+        await env.idle_for(agent["id"], 700)
+    await env.run(
+        "UPDATE sessions SET created_at = now() - interval '1 day',"
+        " last_update_at = now() - interval '1 day' WHERE id = %s",
+        (c["id"],),
+    )
+    await env.run("UPDATE agent_handoffs SET discuss_since = now() - interval '700 seconds'")
+    await env.gauge(a["id"], STRONG)
+    await env.idle_for(a["id"], 700)
+    assert sorted(await env.step(c["id"])) == sorted(
+        [f"clearing:{b['id']}", f"pressuring:{a['id']}"]
+    )
+    assert await env.commands(a["id"]) == []
+    assert (await env.row(a["id"])).phase == "pressuring"
+
+
 async def test_compaction_closes_pressuring_and_submitted_compacted(env):
     c, a = await env.solo()
     await env.step(c["id"])
