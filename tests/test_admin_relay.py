@@ -554,6 +554,24 @@ async def test_room_settings_any_preset_forwarded(rig, n):
     assert _sent(rig, "connector", "PUT", template, n)
 
 
+async def test_notes_relay_paths(rig):
+    """GET and PUT of a room's notes reach the connector's admin notes routes unchanged."""
+    template = "/rooms/{room_id}/notes"
+    got = await rig.call("GET", relay_url("connector", template, 7))
+    assert got.status_code == 200, got.text
+    put_key = ("PUT", UPSTREAM_PREFIX["connector"] + template)
+    body = fu.sample(DOCS["connector"], _body_schema(rig.fakes["connector"], put_key))
+    put = await rig.call("PUT", relay_url("connector", template, 7), json=body)
+    assert put.status_code == 200, put.text
+    calls = [(c.method, c.path) for c in rig.fakes["connector"].calls if c.path.endswith("/notes")]
+    assert calls == [
+        ("GET", "/chat/v1/admin/rooms/7/notes"),
+        ("PUT", "/chat/v1/admin/rooms/7/notes"),
+    ]
+    sent = [c for c in rig.fakes["connector"].calls if c.method == "PUT"][-1]
+    assert json.loads(sent.body) == body
+
+
 # ------------------------------------------------------------------------------ the history
 
 

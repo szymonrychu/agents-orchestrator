@@ -16,6 +16,7 @@ from agents_orchestrator import __version__
 from agents_orchestrator.api import (
     admin,
     admin_archives,  # noqa: F401  (registers its routes on admin.router)
+    admin_handoffs,  # noqa: F401  (registers its routes on admin.router)
     admin_relay,
     admin_specs,  # noqa: F401  (registers its routes on admin.router)
     agent,

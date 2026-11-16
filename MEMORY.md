@@ -615,3 +615,9 @@ in the namespace, so an attached vault value is exposed to it. Decision: attach 
 - Plain versioning (decision 766): the origin CHECK has no `merge`; an equal digest to the current version is a no-op (caller deletes the fresh object), an orphan save inserts an `orphan` row and leaves the pointer. A copy goes through `record_save(origin="copy")`, there is no promote.
 - `backups.current_version -> backup_versions(id)` is DEFERRABLE INITIALLY DEFERRED so deleting a name (cascade to versions) is one statement. `delete_version` of the current version is refused unless it is the only version, then the name is deleted.
 - `referenced_versions` reads `sessions.status.backup`, a list of entry records with `version` (restore source) and `base_version`; the status writer (later steps) must use those two keys.
+
+## 2026-11-16 handoff reads, handoff export, room notes relay (S-68, T-522, step 14)
+- `agent_handoffs` has no `kind` column: the admin handoff views expose `trigger` (strong, shutdown, voluntary) as `kind`, and `size` is the character count of `handoff_text`. The export record (`SELECT *`) keeps the column name `trigger`; `_line` stamps `kind: handoff` itself.
+- The `handoff` export query runs last in `export.QUERIES`; the discard hook streams the export before the cascade delete, so handoff rows reach agents-history (decision 771).
+- Admin handoff routes take `session` as a UUID or a slug (the plugin tool says id or slug); an unknown slug is 404 `not_found`, an unknown handoff id 404 `handoff_not_found`. Guard is the router-level `require_superleader`; step 13 swaps it for `require_reader`.
+- The notes relay rows (`GET` and `PUT /chats/rooms/{room_id}/notes`) ride the generic relay with plain `Guard()`; the finer guards (reader for GET, notes writer for PUT) arrive with step 13. The connector fixtures (`connector_openapi.json`, `chat_openapi.json`) were re-vendored at agents-matrix-connector 59002ac, which adds the admin notes routes.
