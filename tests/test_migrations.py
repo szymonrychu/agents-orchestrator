@@ -987,6 +987,51 @@ def _to_0014(empty_dsn, tmp_path):
     run_migrations(empty_dsn, tmp_path)
 
 
+def test_cache_keys_migration_0015_alone_splits_the_single_key(empty_dsn, tmp_path):
+    """0015 on its own (a partial run: the backup data step needs the complete schema)."""
+    _to_0014(empty_dsn, tmp_path)
+    keyed = {"replicas": 2, "cache": {"key": "k1", "exclude": ["tmp"]}}
+    derived = {"cache": {"exclude": ["x"]}}
+    nocache = {"replicas": 1}
+    nullkey = {"cache": {"key": None}}
+    rows = {"keyed": keyed, "derived": derived, "nocache": nocache, "nullkey": nullkey}
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        for slug, spec in rows.items():
+            c.execute(
+                "INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), %s, %s)",
+                (slug, json.dumps(spec)),
+            )
+            c.execute(
+                "INSERT INTO presets (id, name, spec) VALUES (gen_random_uuid(), %s, %s)",
+                (slug, json.dumps(spec)),
+            )
+    shutil.copy(MIGRATIONS_DIR / "0015_cache_keys.sql", tmp_path)
+    assert run_migrations(empty_dsn, tmp_path) == ["0015"]
+    expected = {
+        "keyed": {
+            "replicas": 2,
+            "cache": {"restore_key": "k1", "save_key": "k1", "exclude": ["tmp"]},
+        },
+        "derived": derived,
+        "nocache": nocache,
+        "nullkey": {"cache": {}},
+    }
+
+    def stored():
+        with psycopg.connect(empty_dsn) as c:
+            sessions = dict(c.execute("SELECT slug, spec FROM sessions").fetchall())
+            presets = dict(
+                c.execute("SELECT name, spec FROM presets WHERE name = ANY(%s)", (list(rows),))
+            )
+        return sessions, presets
+
+    assert stored() == (expected, expected)
+    # idempotent: a second run of the file changes nothing
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        c.execute((MIGRATIONS_DIR / "0015_cache_keys.sql").read_text())
+    assert stored() == (expected, expected)
+
+
 def test_cache_keys_migration_splits_the_single_key(empty_dsn, tmp_path):
     _to_0014(empty_dsn, tmp_path)
     keyed = {"replicas": 2, "cache": {"key": "k1", "exclude": ["tmp"]}}

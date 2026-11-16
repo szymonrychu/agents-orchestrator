@@ -28,7 +28,9 @@ SECRET = "placeholder-secret-value"
 
 
 def _preset(raw):
-    return None if raw is None else SimpleNamespace(id=uuid.UUID(raw["id"]), name=raw["name"])
+    if raw is None:
+        return None
+    return SimpleNamespace(id=raw["id"] and uuid.UUID(raw["id"]), name=raw["name"])
 
 
 @pytest.mark.parametrize("path", CASES, ids=lambda p: p.stem)
@@ -57,6 +59,63 @@ def test_map_status():
     }
     assert bm.map_status(None) is None
     assert bm.map_status({}) == {"entries": [], "runs": {}, "transcripts": {}}
+
+
+WS = {"root": "workspace", "path": ".", "mode": "both", "name": "proj/workspace"}
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("restored", "restored"),
+        ("miss", "missing"),
+        ("reset", "unreadable"),
+        ("failed", "failed"),
+        ("running", "running"),
+    ],
+)
+def test_map_status_seeds_the_restore_of_each_restored_entry(old, new):
+    run = {"state": old, "finished_at": "2026-11-01T10:00:00+00:00", "reason": None}
+    split = [{**WS, "mode": "restore"}, {**WS, "mode": "backup", "name": "other"}]
+    got = bm.map_status({"restore": run}, split)
+    first, second = got["entries"]
+    assert first["index"] == 0 and first["root"] == "workspace" and first["path"] == "."
+    assert first["restore"]["state"] == new
+    assert first["restore"]["name"] == "proj/workspace"
+    assert first["restore"]["at"] == "2026-11-01T10:00:00+00:00"
+    assert first["save"] is None and first["version"] is None
+    assert second["restore"] is None  # a backup-only entry never restored
+
+
+def test_map_status_leaves_a_skipped_or_absent_restore_pending():
+    # the old rule never saved after a skipped or absent workdir restore; the new one keeps that
+    for cache in ({"restore": {"state": "skipped", "reason": "not_configured"}}, {}):
+        assert bm.map_status(cache, [WS])["entries"][0]["restore"] is None
+
+
+def test_live_session_keeps_its_discard_save(dsn):
+    """A session running across the deploy, discarded later, still saves its workspace."""
+    from test_cache_jobs_render import make_session
+
+    from agents_orchestrator.cache.save_rule import save_plan
+
+    pid = _preset_row(dsn, "Live", {"cache": {}})
+    derived = bm.legacy_cache_key(pid)
+    restore = {"state": "restored", "finished_at": "2026-11-01T10:00:00+00:00"}
+    sid = _session_row(
+        dsn,
+        {"cache": {"restore_key": derived, "save_key": derived}},
+        pid,
+        {"replicas": 1, "init": {"state": "succeeded"}, "cache": {"restore": restore}},
+    )
+    with psycopg.connect(dsn) as conn:
+        bm.apply(conn)
+    spec = _spec_of(dsn, "sessions", sid)
+    status = _sql(dsn, "SELECT status FROM sessions WHERE id = %s", (sid,))[0][0]
+    session = make_session(backup=spec["backup"])
+    session.status.update(status)
+    plan = save_plan(session)
+    assert [(p.index, p.action, p.reason) for p in plan] == [(0, "save", None)]
 
 
 # ---------------------------------------------------------------------- stored specs
@@ -148,6 +207,29 @@ def test_dry_run_reports_unmapped_exit_1(dsn, monkeypatch, capsys):
     assert cli.main(["backup", "migrate", "--dry-run"]) == 1
     out = capsys.readouterr().out
     assert f"UNMAPPED session {bad} " in out
+
+
+def test_dry_run_excludes_the_writing_modes(dsn, monkeypatch, capsys):
+    _cli_settings(monkeypatch, dsn)
+    for extra in (["--delete-old"], ["--add-entries", "--preset", "x=p"]):
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["backup", "migrate", "--dry-run", *extra])
+        assert exc.value.code == 2
+
+
+def test_deleted_preset_derived_key_maps_spec_and_object_alike(dsn, s3, monkeypatch):
+    """The preset is gone: spec and object keep the literal `preset-<hash>`, so they still meet."""
+    _s3_settings(s3, dsn, monkeypatch)
+    derived = bm.legacy_cache_key(uuid.uuid4())
+    sid = _session_row(
+        dsn, {"cache": {"restore_key": derived, "save_key": derived}}, None, name="Gone"
+    )
+    _put(s3, f"{P}{derived}.tar.zst")
+    with psycopg.connect(dsn) as conn:
+        bm.apply(conn)
+    assert _spec_of(dsn, "sessions", sid)["backup"][0]["name"] == derived
+    assert cli.main(["backup", "migrate"]) == 0
+    assert _current(dsn, derived) == f"{P}{derived}.tar.zst"
 
 
 def test_dry_run_flags_any_spec_the_strict_model_refuses(dsn, monkeypatch, capsys):
@@ -376,3 +458,7 @@ def test_apply_withdraws_open_proposals_that_patch_cache(dsn):
         bm.apply(conn)
     got = dict(_sql(dsn, "SELECT id, status FROM change_proposals"))
     assert got[ids[0]] == "withdrawn" and got[ids[1]] == "open"
+    outcomes = dict(_sql(dsn, "SELECT proposal_id, outcome FROM change_proposal_revisions"))
+    assert outcomes == {ids[0]: "withdrawn", ids[1]: None}
+    notes = dict(_sql(dsn, "SELECT proposal_id, note FROM change_proposal_items"))
+    assert "spec.backup" in notes[ids[0]] and notes[ids[1]] is None

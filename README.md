@@ -758,6 +758,16 @@ The Claude transcripts of a cache-enabled session (the PVC subtree `sessions`, e
 
 `orch migrate` also rewrites stored `spec.cache` blocks (presets and sessions) to `spec.backup` and `status.cache` to `status.backup`, in one transaction, and refuses to finish (so the api does not start) when a row to rewrite does not map. `orch backup migrate --dry-run` prints one line `<kind> <id> <old> -> <new>` per stored spec and `UNMAPPED <kind> <id> <reason>` for every spec the strict model refuses after the rewrite; it exits 1 when any is unmapped and changes nothing. `orch backup migrate` (a one-off Job with the reconciler's S3 identity) copies the legacy flat archives into the `b/` layout as `origin=migration` versions (a group `x/<ts>` becomes versions of `x`; skipping names already migrated); `--delete-old` then deletes the legacy objects that have a migration row (never transcripts); `--add-entries --preset <id|name>=<project> [--root claude|workspace]` adds the skills, rules and scripts entries of a project to a preset, skipping an existing root and path.
 
+Release run order (the archives must be in the `b/` layout before a reconciler with the new model restores anything, else a session restoring a name finds it missing, starts empty, and its discard save becomes current over the legacy data):
+
+1. With the new image: `orch backup migrate --dry-run` against the production database; it must exit 0.
+2. Scale the old `api` and `reconciler` Deployments to 0 replicas (agent pods keep running; the old model cannot read rewritten specs, so neither may serve in between).
+3. One-off Job with the new image and the reconciler's S3 identity: `orch migrate` (SQL, spec and status rewrite), then `orch backup migrate` (objects). Its summary line counts `orphaned` versions: names that already had a current version from a save; expect 0.
+4. Apply the release (its `migrate` init containers find nothing to do; the replicas come back).
+5. `orch backup migrate --add-entries ...` per preset, verify restores, then `orch backup migrate --delete-old`.
+
+A live session keeps its discard save across the rewrite: each restoring workspace entry records the old workdir restore outcome (`restored`, `miss` as `missing`, `reset` as `unreadable`, `failed`, `running`); a `skipped` or absent old restore leaves the entry restore-pending, as the old rule skipped that save. A session whose preset was deleted keeps the literal `preset-<hash>` name, which is also the name its legacy archive is migrated under.
+
 ### Job CLI
 
 The Jobs run `orch cache restore|save|resolve` with only these variables (no `ORCH_*`):

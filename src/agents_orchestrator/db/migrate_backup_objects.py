@@ -36,12 +36,15 @@ from agents_orchestrator.settings import Settings
 TIMESTAMP = re.compile(r"\d{8}t\d{6}z")
 ACTOR = "migration"
 RESERVED = ("b/", "sessions/")
+# one object migration at a time: a second run waits, then skips what the first recorded
+LOCK_KEY = 0x6F72636842616B4D  # "orchBakM"
 
 
 @dataclass
 class Result:
     copied: int = 0
     skipped: int = 0  # already migrated
+    orphaned: int = 0  # copied, but the name already had a current version from a save
     invalid: list[str] = field(default_factory=list)
     deleted: int = 0
     failures: list[str] = field(default_factory=list)
@@ -113,6 +116,16 @@ async def migrate_objects(conn: psycopg.AsyncConnection, settings: Settings) -> 
     """Copy every legacy archive not yet migrated; one transaction per backup name."""
     res = Result()
     prefix = settings.cache_s3_prefix
+    await conn.execute("SELECT pg_advisory_lock(%s)", (LOCK_KEY,))
+    try:
+        return await _migrate(conn, settings, prefix, res)
+    finally:
+        await conn.execute("SELECT pg_advisory_unlock(%s)", (LOCK_KEY,))
+
+
+async def _migrate(
+    conn: psycopg.AsyncConnection, settings: Settings, prefix: str, res: Result
+) -> Result:
     done = await migrated_keys(conn)
     plan = _plan(list_archives(settings, prefix), prefix, await _presets(conn), res)
     names: dict[str, list[Legacy]] = {}
@@ -144,6 +157,7 @@ async def migrate_objects(conn: psycopg.AsyncConnection, settings: Settings) -> 
                     orphan=orphan,
                 )
                 res.copied += 1
+                res.orphaned += orphan
     return res
 
 

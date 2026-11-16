@@ -256,12 +256,13 @@ def _configure_backup(parser: argparse.ArgumentParser) -> None:
     migrate = sub.add_parser(
         "migrate", help="move cache specs and archives to versioned backups (one-off)"
     )
-    migrate.add_argument(
+    mode = migrate.add_mutually_exclusive_group()
+    mode.add_argument(
         "--dry-run",
         action="store_true",
         help="print one line per stored spec and UNMAPPED rows; exit 1 when any is unmapped",
     )
-    migrate.add_argument(
+    mode.add_argument(
         "--add-entries",
         action="store_true",
         help="add the skills, rules and scripts entries to each --preset",
@@ -279,7 +280,7 @@ def _configure_backup(parser: argparse.ArgumentParser) -> None:
         default="claude",
         help="with --add-entries: the root of the entries (default claude, live)",
     )
-    migrate.add_argument(
+    mode.add_argument(
         "--delete-old",
         action="store_true",
         help="delete the legacy objects that have a migration row (never transcripts)",
@@ -334,7 +335,8 @@ def _cmd_backup(args: argparse.Namespace) -> int:
 
     result = asyncio.run(run())
     print(
-        f"copied {result.copied}, already migrated {result.skipped}, deleted {result.deleted},"
+        f"copied {result.copied}, already migrated {result.skipped}, orphaned {result.orphaned},"
+        f" deleted {result.deleted},"
         f" invalid {len(result.invalid)}, failed {len(result.failures)}"
     )
     for key in result.invalid:

@@ -35,6 +35,10 @@ from agents_orchestrator.spec import SessionSpec, _backup_problems, legacy_conte
 HASH_KEY = re.compile(r"preset-[0-9a-f]{16}")
 NOW_ONLY = re.compile(r"\{\{\s*now\s*\}\}")
 ERROR_MAX = 300
+WITHDRAWN_NOTE = (
+    "withdrawn by the backup data migration: spec.cache was replaced by spec.backup;"
+    " re-file the change against backup"
+)
 
 
 class Unmapped(ValueError):
@@ -66,12 +70,19 @@ def preset_backup_name(preset: PresetLike) -> str:
 
 
 def _resolve(key: str, preset: PresetLike | None) -> str:
-    """A key that is the old derived `preset-<hash>` becomes the preset's backup name."""
+    """A key that is the old derived `preset-<hash>` becomes the preset's backup name.
+
+    When the preset is gone (no id) the hash cannot be matched to a live preset, and the object
+    migration keeps an archive of an unknown hash under its own name: the literal key stays, so
+    spec and archive still meet.
+    """
     if not HASH_KEY.fullmatch(key):
         return key
     if preset is None:
         raise Unmapped(f"derived key {key} without a preset to name it")
-    if preset.id is not None and key != legacy_cache_key(preset.id):
+    if preset.id is None:
+        return key
+    if key != legacy_cache_key(preset.id):
         raise Unmapped(f"derived key {key} is not the derived key of preset {preset.name!r}")
     return preset_backup_name(preset)
 
@@ -116,11 +127,59 @@ def map_cache(
     return [_entry("restore", restore_name, exclude), _entry("backup", save, exclude)]
 
 
-def map_status(status_cache: dict[str, Any] | None) -> dict[str, Any] | None:
+# old workdir restore outcome -> the entry restore state the save rule reads; a `skipped` or
+# absent restore has none, so the entry stays restore-pending (the old rule skipped that save too)
+RESTORE_STATES = {
+    "restored": "restored",
+    "miss": "missing",
+    "reset": "unreadable",
+    "failed": "failed",
+    "running": "running",
+}
+
+
+def _entry_records(
+    restore: dict[str, Any] | None, backup: list[dict[str, Any]] | None
+) -> list[dict[str, Any]]:
+    """One record per entry, shaped as the reconciler writes them (`_entry_record`).
+
+    A workspace entry that restores takes the old workdir restore outcome: a session live across
+    the deploy has already restored it, so its discard save is not held as restore-pending.
+    """
+    run = restore or {}
+    state = RESTORE_STATES.get(run.get("state"))
+    out = []
+    for index, entry in enumerate(backup or []):
+        record: dict[str, Any] = {
+            "index": index,
+            "root": entry.get("root"),
+            "path": entry.get("path"),
+            "version": None,
+            "base_version": None,
+            "restore": None,
+            "save": None,
+        }
+        if state and entry.get("root") == "workspace" and entry.get("mode") in ("restore", "both"):
+            record["restore"] = {
+                "state": state,
+                "name": entry.get("name"),
+                "version": None,
+                "at": run.get("finished_at") or run.get("started_at"),
+            }
+            if run.get("reason"):
+                record["restore"]["reason"] = str(run["reason"])[:ERROR_MAX]
+        out.append(record)
+    return out
+
+
+def map_status(
+    status_cache: dict[str, Any] | None, backup: list[dict[str, Any]] | None = None
+) -> dict[str, Any] | None:
     """`status.cache` as `status.backup`: the old run records move to their new keys.
 
     The workdir restore is the `restore_pre` run, the workdir save is the `save` run, the
-    transcripts runs keep their place under `transcripts`; per-entry state starts empty.
+    transcripts runs keep their place under `transcripts`. `backup` is the session's rewritten
+    entry list: each restoring workspace entry records the old workdir restore outcome.
     """
     if status_cache is None:
         return None
@@ -134,7 +193,8 @@ def map_status(status_cache: dict[str, Any] | None) -> dict[str, Any] | None:
         for old, new in (("sessions_restore", "restore"), ("sessions_save", "save"))
         if status_cache.get(old) is not None
     }
-    return {"entries": [], "runs": runs, "transcripts": transcripts}
+    entries = _entry_records(status_cache.get("restore"), backup)
+    return {"entries": entries, "runs": runs, "transcripts": transcripts}
 
 
 # ---------------------------------------------------------------------- stored rows
@@ -231,7 +291,7 @@ def collect(conn: psycopg.Connection, *, only_cache: bool) -> Report:
                 finding.spec = spec
             if "cache" in status:
                 finding.status = {k: v for k, v in status.items() if k != "cache"}
-                mapped = map_status(status["cache"])
+                mapped = map_status(status["cache"], spec.get("backup"))
                 if mapped is not None:
                     finding.status["backup"] = mapped
                 finding.changed = True
@@ -296,12 +356,22 @@ def apply(conn: psycopg.Connection) -> int:
                     f.id,
                 ),
             )
-    # A proposal that patches `cache` can no longer apply: close it, the proposer re-files it.
+    # A proposal that patches `cache` can no longer apply: close it as migration 0041 does
+    # (status and the revision outcome) and leave the proposer a note on the item.
     conn.execute(
-        "UPDATE change_proposals p SET status = 'withdrawn', closed_at = now(), updated_at = now()"
+        "WITH closed AS ("
+        " UPDATE change_proposals p SET status = 'withdrawn', closed_at = now(), updated_at = now()"
         " WHERE p.status IN ('open', 'rework', 'stale') AND EXISTS ("
         "   SELECT 1 FROM change_proposal_items i WHERE i.proposal_id = p.id"
         "   AND i.revision = p.revision AND i.path = 'cache')"
+        " RETURNING p.id, p.revision"
+        "), outcome AS ("
+        " UPDATE change_proposal_revisions r SET outcome = 'withdrawn' FROM closed"
+        " WHERE r.proposal_id = closed.id AND r.revision = closed.revision AND r.outcome IS NULL"
+        ")"
+        " UPDATE change_proposal_items i SET note = %s FROM closed"
+        " WHERE i.proposal_id = closed.id AND i.revision = closed.revision AND i.path = 'cache'",
+        (WITHDRAWN_NOTE,),
     )
     return len(found.findings)
 
