@@ -571,3 +571,146 @@ def test_sessions_target_always_requires_redacted_marker(tmp_path):
     assert transfer._require_redacted("/sessions") is True
     assert transfer._require_redacted("/sessions/") is True
     assert transfer._require_redacted(str(tmp_path / "work")) is False
+
+
+# ------------------------------------------------------------- per-entry jobs
+
+
+def _entries_env(tmp_path: Path, entries: list[dict], **extra: str) -> dict[str, str]:
+    env = {
+        "CACHE_ENTRIES": json.dumps(entries),
+        "CACHE_SCRATCH": str(tmp_path / "scratch"),
+        "CACHE_STATE_DIR": str(tmp_path / "state"),
+    }
+    env.update(extra)
+    return env
+
+
+def _entries_out(capsys) -> list[dict]:
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    return json.loads(lines[-1])["entries"]
+
+
+def _entry(tmp_path: Path, **kw) -> dict:
+    return {
+        "index": 0,
+        "root_dir": str(tmp_path / "root"),
+        "path": "work",
+        "exclude": [],
+        "url": URL,
+        **kw,
+    }
+
+
+def test_restore_missing_leaves_dir(tmp_path, capsys):
+    work = tmp_path / "root" / "work"
+    work.mkdir(parents=True)
+    (work / "keep.txt").write_text("mine")
+    rec = _Recorder(lambda request: httpx.Response(404))
+    env = _entries_env(tmp_path, [_entry(tmp_path)])
+    assert transfer.restore_entries(env, transport=rec.transport) == 0
+    assert _entries_out(capsys) == [{"index": 0, "state": "missing"}]
+    assert _tree(work) == {"keep.txt": "mine"}
+
+
+def test_restore_unreadable_leaves_dir(tmp_path, capsys):
+    work = tmp_path / "root" / "work"
+    work.mkdir(parents=True)
+    (work / "keep.txt").write_text("mine")
+    before = sorted(p.name for p in (tmp_path / "root").iterdir())
+    rec = _Recorder(lambda request: httpx.Response(200, content=b"not a zstd stream at all"))
+    env = _entries_env(tmp_path, [_entry(tmp_path)])
+    assert transfer.restore_entries(env, transport=rec.transport) == 0
+    out = _entries_out(capsys)
+    assert out[0]["state"] == "unreadable"
+    assert _tree(work) == {"keep.txt": "mine"}
+    assert sorted(p.name for p in (tmp_path / "root").iterdir()) == before
+    assert not (tmp_path / "state").exists()
+
+
+def test_restore_writes_backup_state(tmp_path, capsys):
+    body = _archive_of(_make_src(tmp_path / "src"))
+    rec = _Recorder(lambda request: httpx.Response(200, content=body))
+    (tmp_path / "state").mkdir()
+    entry = _entry(tmp_path, index=3, name="proj-skills", version=7)
+    env = _entries_env(tmp_path, [entry])
+    assert transfer.restore_entries(env, transport=rec.transport) == 0
+    out = _entries_out(capsys)[0]
+    assert out["state"] == "restored" and out["version"] == 7
+    assert _tree(tmp_path / "root" / "work") == {"a.txt": "alpha", "sub/b.txt": "beta"}
+    state = json.loads((tmp_path / "state" / "3.json").read_text())
+    assert state["name"] == "proj-skills" and state["version"] == 7
+    assert state["manifest"] == out["manifest"]
+    assert out["digest"] == archive.digest(archive.manifest(tmp_path / "root" / "work", []))
+
+
+def test_save_reports_manifest_and_digest(tmp_path, capsys):
+    work = tmp_path / "root" / "work"
+    _make_src(work)
+    rec = _Recorder(lambda request: httpx.Response(200))
+    env = _entries_env(tmp_path, [_entry(tmp_path)])
+    assert transfer.save_entries(env, transport=rec.transport) == 0
+    out = _entries_out(capsys)[0]
+    assert out["state"] == "uploaded"
+    assert out["digest"] == archive.digest(archive.manifest(work, []))
+    assert [m["path"] for m in out["manifest"]] == ["a.txt", "sub/b.txt"]
+    assert out["size"] == len(rec.requests[0].content)
+    assert rec.requests[0].method == "PUT"
+    assert not list((tmp_path / "scratch").iterdir())
+
+
+def test_save_manifest_null_above_cap(tmp_path, capsys, monkeypatch):
+    work = tmp_path / "root" / "work"
+    _make_src(work)
+    monkeypatch.setattr(archive, "MANIFEST_MAX_FILES", 1)
+    rec = _Recorder(lambda request: httpx.Response(200))
+    assert (
+        transfer.save_entries(_entries_env(tmp_path, [_entry(tmp_path)]), transport=rec.transport)
+        == 0
+    )
+    out = _entries_out(capsys)[0]
+    assert out["manifest"] is None and len(out["digest"]) == 64
+
+
+def test_claude_entry_with_secret_refused(tmp_path, capsys):
+    work = tmp_path / "root" / "work"
+    (work / "s1" / "config").mkdir(parents=True)
+    rec = _Recorder(lambda request: httpx.Response(200))
+    env = _entries_env(tmp_path, [_entry(tmp_path, root="claude")])
+    assert transfer.save_entries(env, transport=rec.transport) == 0
+    assert _entries_out(capsys) == [{"index": 0, "state": "refused_secret"}]
+    assert rec.requests == []
+
+
+def test_resolve_outputs_digests(tmp_path, capsys):
+    import hashlib
+
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "f.txt").write_text("alpha")
+    env = {
+        "CACHE_RESOLVE": json.dumps(
+            [
+                {"root_dir": str(root), "path": "f.txt", "length": 8, "exclude": []},
+                {"root_dir": str(root), "path": "gone", "length": 8, "exclude": []},
+            ]
+        )
+    }
+    assert transfer.resolve(env) == 0
+    digests = json.loads(capsys.readouterr().out.splitlines()[-1])["digests"]
+    assert digests == {
+        "f.txt:8": hashlib.sha256(b"alpha").hexdigest()[:8],
+        "gone:8": "none",
+    }
+
+
+def test_cli_dispatches_entries_and_resolve(tmp_path, capsys, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "f.txt").write_text("alpha")
+    monkeypatch.setenv(
+        "CACHE_RESOLVE",
+        json.dumps([{"root_dir": str(root), "path": "f.txt", "length": 4, "exclude": []}]),
+    )
+    assert cli.main(["cache", "resolve"]) == 0
+    assert "f.txt:4" in capsys.readouterr().out

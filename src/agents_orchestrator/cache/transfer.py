@@ -19,6 +19,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 from collections.abc import Buffer, Iterator, Mapping
 from pathlib import Path
 from typing import Any, BinaryIO, cast
@@ -280,3 +281,244 @@ def save(env: Mapping[str, str], *, transport: httpx.BaseTransport | None = None
         return EXIT_OK
     finally:
         path.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------------------------
+# Per-entry backup jobs (S-68): one Job carries a JSON list of entries; every entry has its own
+# outcome, and a missing or unreadable restore is a state, never an error.
+
+STATE_DIR_DEFAULT = "/backup-state"
+RESTORE_TMP_PREFIX = ".restore-"
+
+
+def _emit_entries(entries: list[dict[str, Any]], **extra: Any) -> None:
+    sys.stderr.flush()
+    print(json.dumps({"entries": entries, **extra}), file=sys.stdout, flush=True)
+
+
+def _load_list(env: Mapping[str, str], name: str) -> list[dict[str, Any]]:
+    raw = env.get(name, "")
+    if not raw:
+        raise _BadEnv(f"{name} is not set")
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        raise _BadEnv(f"{name} is not JSON") from None
+    if not isinstance(value, list) or not all(isinstance(v, dict) for v in value):
+        raise _BadEnv(f"{name} is not a JSON list of objects")
+    return value
+
+
+def _entry_target(entry: Mapping[str, Any]) -> tuple[Path, Path]:
+    """(root, target) of an entry; the path must be relative with no `..` segment."""
+    root_dir = entry.get("root_dir")
+    path = entry.get("path", ".")
+    if not isinstance(root_dir, str) or not root_dir or not isinstance(path, str) or not path:
+        raise _BadEnv("entry needs root_dir and path")
+    parts = path.split("/")
+    if path.startswith("/") or ".." in parts or (path != "." and "" in parts):
+        raise _BadEnv("entry path must be relative with no '..' segment")
+    root = Path(root_dir)
+    return root, (root if path == "." else root / path)
+
+
+def _entry_exclude(entry: Mapping[str, Any]) -> list[str]:
+    value = entry.get("exclude") or []
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise _BadEnv("entry exclude is not a list of strings")
+    return value
+
+
+def _report(root: Path, exclude: list[str]) -> dict[str, Any]:
+    files = archive.manifest(root, exclude)
+    return {
+        "digest": archive.digest(files),
+        "manifest": (
+            [f.as_dict() for f in files] if len(files) <= archive.MANIFEST_MAX_FILES else None
+        ),
+    }
+
+
+def _merge_into(temp: Path, target: Path) -> None:
+    """Move the extracted tree to `target`; existing files are overwritten, none deleted."""
+    if not target.exists():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temp.replace(target)
+        return
+    shutil.copytree(temp, target, symlinks=True, dirs_exist_ok=True)
+    shutil.rmtree(temp, ignore_errors=True)
+
+
+def _restore_one(
+    entry: Mapping[str, Any],
+    client: httpx.Client,
+    state_dir: Path | None,
+) -> dict[str, Any]:
+    index = entry.get("index")
+    result: dict[str, Any] = {"index": index}
+    url = str(entry.get("url") or "")
+    version = entry.get("version")
+    temp: Path | None = None
+    reader: _BodyReader | None = None
+    try:
+        root, target = _entry_target(entry)
+        exclude = _entry_exclude(entry)
+        if not url:
+            raise _BadEnv("entry has no url")
+        with client.stream("GET", url) as response:
+            if response.status_code == 404:
+                return {**result, "state": "missing"}
+            if response.status_code != 200:
+                return {**result, "state": "failed", "reason": f"HTTP {response.status_code}"}
+            # A sibling temp dir (inside the root for the root itself): the target is touched
+            # only after the whole archive extracted.
+            parent = root if target == root else target.parent
+            parent.mkdir(parents=True, exist_ok=True)
+            temp = Path(tempfile.mkdtemp(prefix=RESTORE_TMP_PREFIX, dir=parent))
+            reader = _BodyReader(response.iter_bytes())
+            archive.unpack(cast(BinaryIO, reader), temp)
+            while reader.read(io.DEFAULT_BUFFER_SIZE):
+                pass
+            size = reader.delivered
+        _merge_into(temp, target)
+        temp = None
+        report = _report(target, exclude)
+        result = {**result, "state": "restored", "size": size, **report}
+        if version is not None:
+            result["version"] = version
+        if state_dir is not None:
+            _write_state(state_dir, entry, version, report["manifest"])
+        return result
+    except archive.ExtractError as exc:
+        return {**result, "state": "unreadable", "reason": _error(exc, url)}
+    except Exception as exc:  # noqa: BLE001 - every failure becomes this entry's outcome
+        return {**result, "state": "failed", "reason": _error(exc, url)}
+    finally:
+        if temp is not None:
+            shutil.rmtree(temp, ignore_errors=True)
+
+
+def _write_state(state_dir: Path, entry: Mapping[str, Any], version: Any, manifest: Any) -> None:
+    """`backup-state/<index>.json`: what the restore put on disk, for the dirty check later."""
+    state_dir.mkdir(parents=True, exist_ok=True)
+    body = {"name": entry.get("name"), "version": version, "manifest": manifest}
+    target = state_dir / f"{int(entry['index'])}.json"
+    tmp = target.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(body))
+    tmp.replace(target)
+
+
+def _state_dir(env: Mapping[str, str]) -> Path | None:
+    raw = env.get("CACHE_STATE_DIR", STATE_DIR_DEFAULT)
+    return Path(raw) if raw and Path(raw).is_dir() else None
+
+
+def restore_entries(env: Mapping[str, str], *, transport: httpx.BaseTransport | None = None) -> int:
+    """Restore every entry of `CACHE_ENTRIES`; print `{"entries": [...]}`; exit 1 on a failure.
+
+    Each entry ends `restored`, `missing` (404, nothing touched), `unreadable` (extraction failed
+    in a temp dir that is removed, nothing touched) or `failed`. Missing and unreadable are
+    warnings for the caller: the exit code stays 0.
+    """
+    try:
+        entries = _load_list(env, "CACHE_ENTRIES")
+        verify = _verify_tls(env)
+    except _BadEnv as exc:
+        _emit_entries([], reason=f"bad_env: {exc}")
+        return EXIT_FAILED
+    state_dir = _state_dir(env)
+    with httpx.Client(transport=transport, timeout=TIMEOUT, verify=verify) as client:
+        results = [_restore_one(e, client, state_dir) for e in entries]
+    _emit_entries(results)
+    return EXIT_FAILED if any(r["state"] == "failed" for r in results) else EXIT_OK
+
+
+def _save_one(
+    entry: Mapping[str, Any],
+    client: httpx.Client,
+    scratch: Path,
+    max_bytes: int,
+) -> dict[str, Any]:
+    index = entry.get("index")
+    result: dict[str, Any] = {"index": index}
+    url = str(entry.get("url") or "")
+    path = scratch / f"{index}-{ARCHIVE_NAME}"
+    try:
+        _, target = _entry_target(entry)
+        exclude = _entry_exclude(entry)
+        if not url:
+            raise _BadEnv("entry has no url")
+        if not target.is_dir():
+            return {**result, "state": "skipped", "reason": "no_dir"}
+        if entry.get("root") == "claude" and archive.holds_secret(target, exclude):
+            return {**result, "state": "refused_secret"}
+        scratch.mkdir(parents=True, exist_ok=True)
+        try:
+            with path.open("wb") as out:
+                packed = archive.pack(target, out, exclude=exclude, max_bytes=max_bytes)
+        except archive.TooLarge:
+            return {**result, "state": "failed", "reason": "too_large"}
+        report = _report(target, exclude)
+        with path.open("rb") as body:
+            response = client.put(
+                url,
+                content=body,
+                headers={
+                    "Content-Length": str(packed.compressed_bytes),
+                    "Content-Type": CONTENT_TYPE,
+                },
+            )
+        if not response.is_success:
+            return {**result, "state": "failed", "reason": f"HTTP {response.status_code}"}
+        return {**result, "state": "uploaded", "size": packed.compressed_bytes, **report}
+    except Exception as exc:  # noqa: BLE001
+        return {**result, "state": "failed", "reason": _error(exc, url)}
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def save_entries(env: Mapping[str, str], *, transport: httpx.BaseTransport | None = None) -> int:
+    """Save every entry of `CACHE_ENTRIES` to its own URL; print `{"entries": [...]}`.
+
+    A `claude` root entry holding unredacted session config or a credentials file is
+    `refused_secret` and sends nothing. Each upload goes to a fresh immutable object.
+    """
+    try:
+        entries = _load_list(env, "CACHE_ENTRIES")
+        verify = _verify_tls(env)
+        max_bytes = _max_bytes(env)
+    except _BadEnv as exc:
+        _emit_entries([], reason=f"bad_env: {exc}")
+        return EXIT_FAILED
+    scratch = Path(env.get("CACHE_SCRATCH") or DEFAULT_SCRATCH)
+    with httpx.Client(transport=transport, timeout=TIMEOUT, verify=verify) as client:
+        results = [_save_one(e, client, scratch, max_bytes) for e in entries]
+    _emit_entries(results)
+    return EXIT_FAILED if any(r["state"] == "failed" for r in results) else EXIT_OK
+
+
+def resolve(env: Mapping[str, str]) -> int:
+    """Digest the paths a name template asks for (`CACHE_RESOLVE`, PVC mounted read-only).
+
+    Input `[{root_dir, path, length, exclude}]`; output `{"digests": {"<path>:<length>": hex}}`
+    where hex is the first `length` characters of `archive.dir_sha256` (`none` stays `none`).
+    No URL, no write.
+    """
+    try:
+        entries = _load_list(env, "CACHE_RESOLVE")
+        digests: dict[str, str] = {}
+        for entry in entries:
+            root, _ = _entry_target(entry)
+            path = entry["path"]
+            length = entry.get("length", 16)
+            if not isinstance(length, int) or isinstance(length, bool) or length < 1:
+                raise _BadEnv("entry length is a positive integer")
+            full = archive.dir_sha256(root, path, _entry_exclude(entry))
+            digests[f"{path}:{length}"] = full if full == archive.NO_PATH_DIGEST else full[:length]
+    except (_BadEnv, KeyError) as exc:
+        sys.stderr.flush()
+        print(json.dumps({"digests": {}, "reason": f"bad_env: {exc}"}), flush=True)
+        return EXIT_FAILED
+    sys.stderr.flush()
+    print(json.dumps({"digests": digests}), flush=True)
+    return EXIT_OK

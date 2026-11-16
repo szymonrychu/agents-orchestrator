@@ -11,12 +11,14 @@ and never deletes or empties what is already in the workdir.
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import io
+import json
 import logging
 import os
 import stat
 import tarfile
-from collections.abc import Buffer
+from collections.abc import Buffer, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -243,3 +245,128 @@ def unpack(src: BinaryIO, workdir: Path, *, max_bytes: int = UNPACK_MAX_BYTES) -
     except (tarfile.TarError, zstandard.ZstdError) as exc:
         raise ExtractError(str(exc)) from exc
     return count
+
+
+# A manifest above this many files is not reported (the digest still is).
+MANIFEST_MAX_FILES = 10_000
+NO_PATH_DIGEST = "none"
+CREDENTIALS_FILE = ".credentials.json"
+
+
+@dataclass(frozen=True, slots=True)
+class ManifestEntry:
+    """One regular file of a backed-up tree: relative path, content sha256, size, normalised mode.
+
+    `mode` is 0o755 for a file with any exec bit and 0o644 otherwise, so the umask and the
+    tar `data` filter do not move the digest between a save and the restore that follows.
+    """
+
+    path: str
+    sha256: str
+    size: int
+    mode: int
+
+    def as_dict(self) -> dict[str, str | int]:
+        return {"path": self.path, "sha256": self.sha256, "size": self.size, "mode": self.mode}
+
+
+def _file_sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while chunk := fh.read(1024 * 1024):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _walk_files(root: Path, exclude: Sequence[str]) -> list[tuple[str, str]]:
+    """(relative path, absolute path) of every regular file under `root`, sorted by path.
+
+    Symlinks are not followed and not listed. `.agent-init` and each `exclude` glob are left out
+    (an excluded directory prunes its subtree), exactly as `pack` does.
+    """
+    base = os.fspath(root)
+    patterns = [*CACHE_ALWAYS_EXCLUDE, *exclude]
+    found: list[tuple[str, str]] = []
+    for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
+        rel_dir = os.path.relpath(dirpath, base)
+        keep = []
+        for name in dirnames:
+            rel = name if rel_dir == "." else f"{rel_dir}/{name}"
+            if not _excluded(rel, patterns):
+                keep.append(name)
+        dirnames[:] = sorted(keep)
+        for name in filenames:
+            rel = name if rel_dir == "." else f"{rel_dir}/{name}"
+            full = os.path.join(dirpath, name)
+            if _excluded(rel, patterns) or os.path.islink(full) or not os.path.isfile(full):
+                continue
+            found.append((rel, full))
+    found.sort()
+    return found
+
+
+def _norm_mode(path: str) -> int:
+    return 0o755 if os.stat(path).st_mode & 0o111 else 0o644
+
+
+def manifest(root: Path, exclude: Sequence[str]) -> list[ManifestEntry]:
+    """The manifest of `root`: every regular file, sorted by path; mtime is never read."""
+    entries = []
+    for rel, full in _walk_files(root, exclude):
+        try:
+            entries.append(
+                ManifestEntry(rel, _file_sha256(full), os.stat(full).st_size, _norm_mode(full))
+            )
+        except FileNotFoundError:
+            continue  # removed while walked
+    return entries
+
+
+def digest(entries: Sequence[ManifestEntry]) -> str:
+    """sha256 hex over the canonical JSON of the manifest."""
+    canonical = json.dumps(
+        [e.as_dict() for e in entries], sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    )
+    return hashlib.sha256(canonical.encode("ascii")).hexdigest()
+
+
+def dir_sha256(root: Path, path: str, exclude: Sequence[str]) -> str:
+    """The digest a name template's `sha256(path)` uses: `none` for a missing path.
+
+    A file is the sha256 of its bytes; a directory is the sha256 over its sorted
+    `(relpath, exec bit, file sha256)` triples.
+    """
+    target = root if path in ("", ".") else root / path
+    if target.is_symlink() or not target.exists():
+        return NO_PATH_DIGEST
+    if target.is_file():
+        return _file_sha256(os.fspath(target))
+    triples = [
+        [rel, bool(os.stat(full).st_mode & 0o111), _file_sha256(full)]
+        for rel, full in _walk_files(target, exclude)
+    ]
+    canonical = json.dumps(triples, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("ascii")).hexdigest()
+
+
+def holds_secret(root: Path, exclude: Sequence[str] = ()) -> bool:
+    """True when packing `root` would carry session material that is not redacted.
+
+    The same rule the transcripts target applies: a `config/` subdir whose parent has no
+    `.redacted` marker, or a `.credentials.json` file anywhere (excluded paths are not looked at).
+    """
+    base = os.fspath(root)
+    patterns = [*CACHE_ALWAYS_EXCLUDE, *exclude]
+    for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
+        rel_dir = os.path.relpath(dirpath, base)
+
+        def rel_of(name: str, rel_dir: str = rel_dir) -> str:
+            return name if rel_dir == "." else f"{rel_dir}/{name}"
+
+        config_in = SESSION_CONFIG in dirnames and not _excluded(rel_of(SESSION_CONFIG), patterns)
+        if config_in and _holds_unmarked_config(dirpath):
+            return True
+        dirnames[:] = [d for d in dirnames if not _excluded(rel_of(d), patterns)]
+        if any(n == CREDENTIALS_FILE and not _excluded(rel_of(n), patterns) for n in filenames):
+            return True
+    return False

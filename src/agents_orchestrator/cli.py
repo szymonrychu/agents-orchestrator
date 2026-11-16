@@ -232,7 +232,11 @@ def _cmd_bench(args: argparse.Namespace) -> int:
 
 
 def _configure_cache(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("action", choices=["restore", "save"], help="direction of the transfer")
+    parser.add_argument(
+        "action",
+        choices=["restore", "save", "resolve"],
+        help="direction of the transfer, or resolve digests",
+    )
 
 
 def _cmd_cache(args: argparse.Namespace) -> int:
@@ -241,6 +245,11 @@ def _cmd_cache(args: argparse.Namespace) -> int:
 
     from agents_orchestrator.cache import transfer
 
+    if args.action == "resolve":
+        return transfer.resolve(os.environ)
+    if "CACHE_ENTRIES" in os.environ:
+        entry_run = transfer.restore_entries if args.action == "restore" else transfer.save_entries
+        return entry_run(os.environ)
     run = transfer.restore if args.action == "restore" else transfer.save
     return run(os.environ)
 
@@ -359,7 +368,7 @@ register(
 register(
     "cache",
     _cmd_cache,
-    "restore or save the session workspace through CACHE_URL (cache Job)",
+    "restore or save backup entries (CACHE_ENTRIES) or resolve digests (cache Job)",
     _configure_cache,
 )
 
