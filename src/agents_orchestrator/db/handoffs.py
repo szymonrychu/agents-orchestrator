@@ -5,15 +5,20 @@ Writer of both tables: this module. A row follows an agent under context pressur
 (`moving`, `discussing`) and the ex-leader is cleared after an accepted submit only. Shutdown
 rows (the pod-shutdown path) open at `handed` and keep their own flow. Every change is a
 status-guarded update, so a row moves exactly once whichever caller commits first, and every
-update stamps `progress_at` (except `mark_stuck_reported`). At most one open row exists per agent
-(partial unique index `agent_handoffs_one_open`).
+update stamps `progress_at` (except `mark_stuck_reported` and `mark_escalation_notified`). At
+most one open row exists per agent (partial unique index `agent_handoffs_one_open`).
+
+A `limit` leadership request exists only for a `moving` row (row-116 class): a row that leaves
+`moving` other than through `on_leader_moved` (closed, or cleared after the request was
+rejected) rejects a still-queued request `superseded` in the same transaction
+(`leadership.supersede_request`, the writer of `leadership_requests` decisions).
 """
 
 from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 
@@ -49,7 +54,8 @@ _COLUMNS = (
     " reject_reasons, inflight, gate_blocks, submitted_at, escalated_at, nudged_level,"
     " l2_tokens_at, submit_tokens, progress_at, stuck_reported_at, leadership_request_id,"
     " successor_agent_id, delivered_at, discuss_since, clear_command_id, clear_attempts,"
-    " cleared_at, return_message_id, created_at, closed_at, close_reason"
+    " cleared_at, return_message_id, created_at, closed_at, close_reason,"
+    " escalation_message_ids, escalation_notified_at"
 )
 # A `shutdown_handoff` event (alias `e`) that carries a handoff: the routine's turn completed
 # with a non-blank reply. Anything else leaves today's resume and transcript notice alone.
@@ -107,6 +113,10 @@ class Handoff:
     created_at: datetime
     closed_at: datetime | None
     close_reason: str | None
+    # the superleader escalation messages of the cycle and when the user's taskboard notice of
+    # it was posted (`handoff.notify_escalations`)
+    escalation_message_ids: list[int] = field(default_factory=list)
+    escalation_notified_at: datetime | None = None
 
 
 async def _fetch(
@@ -230,14 +240,41 @@ async def record_gate_block(
     )
 
 
-async def mark_escalated(conn: psycopg.AsyncConnection, row_id: int) -> bool:
-    """Stamp the escalation once; True only for the first caller."""
+async def mark_escalated(
+    conn: psycopg.AsyncConnection, row_id: int, message_ids: Sequence[int] = ()
+) -> bool:
+    """Stamp the escalation once per cycle with the superleader messages it queued; True only
+    for the first caller."""
     cur = await conn.execute(
-        "UPDATE agent_handoffs SET escalated_at = now(), progress_at = now()"
+        "UPDATE agent_handoffs SET escalated_at = now(), progress_at = now(),"
+        " escalation_message_ids = %s"
         " WHERE id = %s AND escalated_at IS NULL AND phase = ANY(%s)",
+        (list(message_ids), row_id, list(OPEN_PHASES)),
+    )
+    return cur.rowcount == 1
+
+
+async def mark_escalation_notified(conn: psycopg.AsyncConnection, row_id: int) -> bool:
+    """Record that the user's taskboard notice of the escalation was posted; True only for the
+    first caller (a still open, escalated row)."""
+    cur = await conn.execute(
+        "UPDATE agent_handoffs SET escalation_notified_at = now()"
+        " WHERE id = %s AND escalated_at IS NOT NULL AND escalation_notified_at IS NULL"
+        " AND phase = ANY(%s)",
         (row_id, list(OPEN_PHASES)),
     )
     return cur.rowcount == 1
+
+
+async def escalations_to_notify(conn: psycopg.AsyncConnection) -> list[Handoff]:
+    """Open escalated rows whose user notice is not posted yet, oldest first."""
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            f"SELECT {_COLUMNS} FROM agent_handoffs WHERE phase = ANY(%s)"
+            " AND escalated_at IS NOT NULL AND escalation_notified_at IS NULL ORDER BY id",
+            (list(OPEN_PHASES),),
+        )
+        return [Handoff(**row) for row in await cur.fetchall()]
 
 
 async def mark_nudged(conn: psycopg.AsyncConnection, row_id: int, level: int) -> bool:
@@ -284,10 +321,28 @@ async def advance(
     values = [Jsonb(v) if k in _JSON_FIELDS and v is not None else v for k, v in fields.items()]
     cur = await conn.execute(
         f"UPDATE agent_handoffs SET phase = %s, progress_at = now(){sets}"
-        f" WHERE id = %s AND phase = ANY(%s){_SUBMIT_GUARD if seen_submit else ''}",
+        f" WHERE id = %s AND phase = ANY(%s){_SUBMIT_GUARD if seen_submit else ''}"
+        " RETURNING leadership_request_id",
         (to_phase, *values, row_id, list(from_phases), *([seen_submit] if seen_submit else [])),
     )
-    return cur.rowcount == 1
+    return await _left_moving(conn, cur, to_phase)
+
+
+async def _left_moving(
+    conn: psycopg.AsyncConnection, cur: psycopg.AsyncCursor, to_phase: str
+) -> bool:
+    """After a guarded UPDATE ... RETURNING leadership_request_id: True when a row changed. A
+    row now in any phase but `moving` keeps no queued `limit` request: a still-queued one is
+    rejected `superseded` in the same transaction (an applied or decided one is left alone)."""
+    got = await cur.fetchone()
+    if got is None:
+        return False
+    if to_phase != "moving" and got[0] is not None:
+        # leadership imports this module; the decision belongs to db/leadership.py
+        from agents_orchestrator.db import leadership
+
+        await leadership.supersede_request(conn, got[0])
+    return True
 
 
 async def start_clear(
@@ -306,10 +361,11 @@ async def start_clear(
     cur = await conn.execute(
         "UPDATE agent_handoffs SET phase = 'clearing', clear_command_id = %s,"
         " clear_attempts = clear_attempts + 1, progress_at = now()"
-        f" WHERE id = %s AND phase = ANY(%s){_SUBMIT_GUARD if seen_submit else ''}",
+        f" WHERE id = %s AND phase = ANY(%s){_SUBMIT_GUARD if seen_submit else ''}"
+        " RETURNING leadership_request_id",
         (command_id, row_id, list(from_phases), *([seen_submit] if seen_submit else [])),
     )
-    return cur.rowcount == 1
+    return await _left_moving(conn, cur, "clearing")
 
 
 async def close(
@@ -319,13 +375,14 @@ async def close(
     reason: str,
     from_phases: Sequence[str] = OPEN_PHASES,
 ) -> bool:
-    """Close a row still in one of `from_phases` (any open phase by default); True when closed."""
+    """Close a row still in one of `from_phases` (any open phase by default); True when closed.
+    Its `limit` request, when still queued, is rejected `superseded` with it."""
     cur = await conn.execute(
         "UPDATE agent_handoffs SET phase = %s, close_reason = %s, closed_at = now(),"
-        " progress_at = now() WHERE id = %s AND phase = ANY(%s)",
+        " progress_at = now() WHERE id = %s AND phase = ANY(%s) RETURNING leadership_request_id",
         (phase, reason, row_id, list(from_phases)),
     )
-    return cur.rowcount == 1
+    return await _left_moving(conn, cur, phase)
 
 
 async def mark_delivered(conn: psycopg.AsyncConnection, row_id: int) -> bool:
@@ -385,14 +442,16 @@ async def queued_messages(
     conn: psycopg.AsyncConnection, row_id: int, *, notices_only: bool = False
 ) -> list[int]:
     """The row's notice, nudge, escalation and return messages still queued (or its notices,
-    nudges and escalations only), written since the row opened."""
+    nudges and escalations only), written since the row opened. Its escalations went to
+    superleader sessions (`escalation_message_ids`)."""
     async with conn.cursor() as cur:
         await cur.execute(
             "SELECT m.id FROM messages m, agent_handoffs h WHERE h.id = %s"
-            " AND m.status = 'queued' AND m.target_agent_id = h.agent_id"
+            " AND m.status = 'queued' AND (m.id = ANY(h.escalation_message_ids)"
+            " OR (m.target_agent_id = h.agent_id"
             " AND ((NOT %s AND m.id = h.return_message_id)"
             "  OR (m.notice IN ('handoff_notice', 'handoff_nudge', 'handoff_escalation')"
-            "      AND m.created_at >= h.created_at))",
+            "      AND m.created_at >= h.created_at))))",
             (row_id, notices_only),
         )
         return [r[0] for r in await cur.fetchall()]
@@ -423,6 +482,8 @@ _PRE_DISCUSSION = ("pressuring", "submitted", "moving", "handed")
 # Reasons of the forced handover requests (the reconciler's rollout, the pressure handoff's
 # limit): no leader's judgment, so no handoff text from them and they never expire.
 FORCED_REASONS = ("rollout", "limit")
+# The reason of the handoff pass's own handover request (one per `moving` row).
+LIMIT_REASON = "limit"
 
 
 async def _close_leader_again(conn: psycopg.AsyncConnection, agent_id: uuid.UUID) -> None:

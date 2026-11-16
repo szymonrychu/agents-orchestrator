@@ -192,7 +192,8 @@ class Dispatcher:
         """Right after the leadership passes: the context-pressure handoff pass for every session
         with a limit subject or an open row (`handoff.handoff_sessions`), at most once per
         HANDOFF_INTERVAL_SECONDS. One failing session is logged and never holds up the others;
-        any transition wakes the push loop, so the changed pressure policy goes out at once."""
+        any transition wakes the push loop, so the changed pressure policy goes out at once.
+        Then the user's taskboard notices of new escalations (`handoff.notify_escalations`)."""
         now = time.monotonic()
         if self._handoff_at is not None and now - self._handoff_at < HANDOFF_INTERVAL_SECONDS:
             return
@@ -215,6 +216,14 @@ class Dispatcher:
             if moved:
                 self._push_wake.set()
                 log.info("session %s handoff: %s", session_id, ", ".join(moved))
+        try:
+            notified = await handoff.notify_escalations(conn, self.settings)
+        except Exception:
+            log.exception("handoff escalation notices failed")  # retried on the next drain
+            await conn.rollback()
+            return
+        if notified:
+            log.info("handoff escalation notices: %s", ", ".join(notified))
 
     async def verify_pending(self) -> int:
         """Check verifying messages against their wrappers, once per wake and poll (D24)."""

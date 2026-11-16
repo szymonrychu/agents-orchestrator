@@ -125,6 +125,11 @@ def escalation_text(
     return " ".join(lines)
 
 
+def escalation_title(slug: str, pod: str) -> str:
+    """The title of the user's notice task when the session has no claimed task."""
+    return f"Agent {pod} of session {slug} has not handed off under context pressure"
+
+
 def waiting_on_text() -> str:
     """Appended to the texts of a submitted-but-blocked handoff; the wrapper fills the
     `{waiting_on}` placeholder from the policy's `waiting_on` list."""

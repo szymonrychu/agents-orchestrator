@@ -17,7 +17,12 @@ The pressure itself is the policy the push loop puts to the wrapper (`hive._push
 1. No open row, level >= L1, agent live and not stopping: `open_pressure` (`pressuring`, the
    profile detected). While a row is open before `moving` its level follows the gauge up
    (`set_level`).
-2. pressuring: nothing is forced.
+2. pressuring: nothing is forced. An idle agent (no turn, no background subagent, no running
+   background task in its inventory) gets one regular-lane nudge per level >= 2 (`nudge`). At
+   L3 (pressuring; or submitted with `handoff_max_rejects` rejects or a blocked gate) the row is
+   escalated once per cycle (`escalate`): a session message to every live superleader session
+   and, through `notify_escalations`, a taskboard notice to the user. Neither clears, moves or
+   interrupts anything.
 3. submitted: the wrapper's in-flight inventory is fetched on every pass before the lock
    (bounded by `handoff_inflight_timeout_seconds`; on a timeout the session is skipped this
    pass) and judged by `handoff_gate.evaluate` with the submit's `abandon` list.
@@ -57,6 +62,9 @@ A transition of a `submitted` row is guarded on the `submitted_at` the pass read
 (`seen_submit`): a resubmit committed since, blocked or accepted, makes it lose, so neither a
 move nor a clear follows a refused submit, and a fresh accepted submit is never overwritten.
 
+A `moving` row (its `limit` request not applied yet) closes on a context reset like the
+phases before it, its queued request rejected `superseded` with it (row-116 class).
+
 Before `moving`: a `compacted` event since the row opened, or the gauge back below L1, closes
 the row `done compacted` (a voluntary row is not judged by the gauge); a `session_cleared` by
 anyone `cancelled cleared`; no longer a limit subject `cancelled not_leader`; a voluntary row
@@ -83,11 +91,14 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import psycopg
 from psycopg.rows import dict_row
 
-from agents_orchestrator import handoff_gate, handoff_profile, handoff_texts
+from agents_orchestrator import handoff_gate, handoff_profile, handoff_texts, taskboard_client
+from agents_orchestrator.api.scope import scope_of
 from agents_orchestrator.db import handoffs, leadership, queue
+from agents_orchestrator.db import sessions as sessions_repo
 from agents_orchestrator.db.eligibility import (
     BACKGROUND_BUSY,
     ELIGIBLE,
@@ -109,7 +120,7 @@ from agents_orchestrator.wrapper.models import (
 
 log = logging.getLogger(__name__)
 
-LIMIT_REASON = "limit"
+LIMIT_REASON = handoffs.LIMIT_REASON
 MAX_CLEAR_ATTEMPTS = 5
 BEFORE_MOVING = ("pressuring", "submitted")
 # A context reset before `moving` closes the row, with this reason. `compacting` alone is not
@@ -210,6 +221,29 @@ JOIN agents a ON a.id = h.agent_id
 WHERE h.session_id = %s AND h.phase = ANY(%s) AND h.trigger <> 'shutdown'
   AND a.gone_at IS NULL
 """
+
+# Pressuring rows of a session that may get an idle nudge this pass (level 2 or more, not nudged
+# at it yet, the agent idle by its status): their agent's inventory is read for background
+# tasks. A failed or slow read only skips the nudge, never the pass.
+_NUDGE_AGENTS = f"""
+SELECT h.agent_id, a.url, a.wrapper_session_id FROM agent_handoffs h
+JOIN agents a ON a.id = h.agent_id
+LEFT JOIN agent_status s ON s.agent_id = a.id
+WHERE h.session_id = %s AND h.phase = 'pressuring' AND h.trigger <> 'shutdown'
+  AND h.level >= 2 AND h.nudged_level < h.level AND a.gone_at IS NULL
+  AND coalesce(s.state = 'idle' AND s.current_turn_id IS NULL AND NOT {BACKGROUND_BUSY}, false)
+"""
+
+# The live superleader sessions (`spec.session_messaging`) besides `%s`, the escalated
+# session. A superleader's scope is every project (`api/scope.scope_of`), so each covers it.
+_SUPERLEADERS = """
+SELECT c.id FROM sessions c
+WHERE c.desired = 'active' AND c.id <> %s
+  AND COALESCE((c.spec->>'session_messaging')::boolean, false)
+  AND EXISTS (SELECT 1 FROM agents a WHERE a.session_id = c.id AND a.gone_at IS NULL)
+ORDER BY c.id
+"""
+ESCALATION_LABEL = "context-pressure"
 
 # What the pass needs to know about one agent. `idle`: idle, no turn, no background subagent.
 # `compact_stale`: a compaction event newer than the last `agent_status` write (the gauge still
@@ -316,6 +350,37 @@ async def _one(conn: psycopg.AsyncConnection, query: str, params: Any) -> dict |
         return await cur.fetchone()
 
 
+async def _all(conn: psycopg.AsyncConnection, query: str, params: Any) -> list[dict]:
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(query, params)
+        return await cur.fetchall()
+
+
+def _reasons(row: handoffs.Handoff) -> list[str]:
+    """The row's reject reasons, each once, in first-seen order."""
+    return list(dict.fromkeys(str(r) for r in row.reject_reasons or []))
+
+
+async def escalation_text(
+    conn: psycopg.AsyncConnection,
+    row: handoffs.Handoff,
+    level: int,
+    pct: float | None,
+    waiting_on: list[str],
+) -> str:
+    """`handoff_texts.escalation_text` for the row: session slug, agent pod, level, context %,
+    reject reasons and what it waits on."""
+    got = await _one(
+        conn,
+        "SELECT c.slug, a.pod_name FROM agents a JOIN sessions c ON c.id = a.session_id"
+        " WHERE a.id = %s",
+        (row.agent_id,),
+    )
+    slug = got["slug"] if got else str(row.session_id)
+    pod = (got["pod_name"] if got else None) or str(row.agent_id)
+    return handoff_texts.escalation_text(slug, pod, level, pct, _reasons(row), waiting_on)
+
+
 async def handoff_sessions(conn: psycopg.AsyncConnection) -> list[uuid.UUID]:
     """The sessions the dispatcher runs `handoff_pass` for on this wake (one query)."""
     async with conn.cursor() as cur:
@@ -335,12 +400,15 @@ class _Pass:
         policy: HandoffPolicy,
         settings: Settings,
         inflight: dict[uuid.UUID, Inflight | None],
+        nudge_inflight: dict[uuid.UUID, Inflight | None] | None = None,
     ) -> None:
         self.conn = conn
         self.session = session
         self.policy = policy
         self.settings = settings
         self.inflight = inflight
+        # the inventories read for idle-nudge candidates (absent: not read or not in time)
+        self.nudge_inflight = nudge_inflight or {}
         self.out: list[str] = []
 
     @property
@@ -456,6 +524,7 @@ class _Pass:
             return  # a row opened since the pass read them (the submit route's voluntary row)
         log.info("handoff %s: agent %s under pressure (level %s)", row.id, agent_id, level)
         self.out.append(f"pressuring:{agent_id}")
+        await self.escalate(row, level, subject)  # opened right at L3
 
     async def _now(self) -> Any:
         row = await _one(self.conn, "SELECT now() AS t", ())
@@ -513,6 +582,13 @@ class _Pass:
             return "cancelled", "session_closing"
         if facts["gone"] or self._sigterm_since(row, facts):
             return "cancelled", "shutdown"
+        if row.phase == "moving":
+            # its limit request still waits (or was rejected): a reset first makes the handoff
+            # stale, so the row closes and the request is rejected `superseded` with it
+            reset = await self._reset_since(row)
+            if reset is None:
+                return None
+            return ("done", "compacted") if reset == "compacted" else ("cancelled", reset)
         if row.phase not in BEFORE_MOVING:
             return None
         if subject is None:
@@ -558,6 +634,9 @@ class _Pass:
                 self.conn, row.id, level, subject["context_used_tokens"]
             ):
                 self.out.append(f"level:{row.agent_id}:{level}")
+            level = max(level, row.level)
+            await self.escalate(row, level, subject)
+            await self.nudge(row, level, facts)
         if row.phase == "submitted":
             await self.submitted(row, subject, facts)
         elif row.phase == "moving":
@@ -568,6 +647,73 @@ class _Pass:
             await self.clearing(row, facts)
         elif row.phase == "returning":
             await self.returning(row)
+
+    # ------------------------------------------------------------ escalation and nudge
+
+    async def escalate(self, row: handoffs.Handoff, level: int, subject: dict) -> None:
+        """Decision 717: an agent at L3 that does not hand off is reported once per cycle
+        (`mark_escalated`) to every live superleader session (a regular-lane session message,
+        notice `handoff_escalation`) and, through `notify_escalations`, to the user on the
+        taskboard. Due at L3 while `pressuring`, or `submitted` with `handoff_max_rejects`
+        rejects or the gate blocked. Nothing is cleared, moved or interrupted: at the compact
+        point the steered auto-compaction is the fallback."""
+        if row.escalated_at is not None or level < 3 or row.trigger == "shutdown":
+            return
+        waiting_on = list((row.inflight or {}).get("waiting_on") or [])
+        if row.phase == "submitted":
+            gate = self.gate(row)
+            if gate.clear and row.rejects < self.settings.handoff_max_rejects:
+                return  # accepted and still clear: the move or the clear follows
+            waiting_on = gate.waiting_on
+        elif row.phase != "pressuring":
+            return
+        text = await escalation_text(self.conn, row, level, subject["context_pct"], waiting_on)
+        targets = await _all(self.conn, _SUPERLEADERS, (self.session["id"],))
+
+        async def send() -> bool:
+            ids = []
+            for target in targets:
+                try:
+                    ids.append(
+                        await queue.enqueue_message(
+                            self.conn,
+                            target["id"],
+                            text,
+                            lane="regular",
+                            notice="handoff_escalation",
+                        )
+                    )
+                except queue.SessionBeingDeleted:
+                    continue  # that superleader is going away; the others and the user remain
+            return await handoffs.mark_escalated(self.conn, row.id, ids)
+
+        if await self.guarded(send):
+            log.info(
+                "handoff %s: agent %s escalated to %d superleader session(s)",
+                row.id,
+                row.agent_id,
+                len(targets),
+            )
+
+    async def nudge(self, row: handoffs.Handoff, level: int, facts: dict) -> None:
+        """One regular-lane message per level >= 2 (`mark_nudged`) to an idle agent whose row is
+        `pressuring`: no turn, no background subagent and no running background task in the
+        inventory read this pass. A busy agent gets its pressure from the wrapper; an idle
+        context does not grow, so one message per level is all."""
+        if row.phase != "pressuring" or level < 2 or row.nudged_level >= level:
+            return
+        if row.trigger == "shutdown" or not facts["idle"]:
+            return
+        inventory = self.nudge_inflight.get(row.agent_id)
+        if inventory is None or inventory.background_tasks:
+            return  # not read, unusable or background work running: no nudge this pass
+
+        async def send() -> bool:
+            await self.message(handoff_texts.nudge_text(level), row.agent_id, "handoff_nudge")
+            return await handoffs.mark_nudged(self.conn, row.id, level)
+
+        if await self.guarded(send):
+            log.info("handoff %s: idle agent %s nudged at level %s", row.id, row.agent_id, level)
 
     async def submitted(self, row: handoffs.Handoff, subject: dict | None, facts: dict) -> None:
         gate = self.gate(row)
@@ -913,21 +1059,34 @@ class _Pass:
 
 async def _inventories(
     conn: psycopg.AsyncConnection, session_id: uuid.UUID, fetch: InflightFetch | None
-) -> dict[uuid.UUID, Inflight | None]:
-    """The in-flight inventory of every agent with a gated row, read with no transaction or
-    lock held across the wrapper calls. Raises TimeoutError when one did not answer in time."""
-    async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(_GATED_AGENTS, (session_id, list(GATED)))
-        agents = await cur.fetchall()
-    out: dict[uuid.UUID, Inflight | None] = {a["agent_id"]: None for a in agents}
-    asked = [a for a in agents if fetch is not None and a["url"] and a["wrapper_session_id"]]
-    if fetch is None or not asked:
-        return out
-    got = await asyncio.gather(
-        *(fetch(session_id, a["url"], a["wrapper_session_id"]) for a in asked)
+) -> tuple[dict[uuid.UUID, Inflight | None], dict[uuid.UUID, Inflight | None]]:
+    """The in-flight inventory of every agent with a gated row, and of every idle-nudge
+    candidate, read with no transaction or lock held across the wrapper calls. Raises
+    TimeoutError when a gated one did not answer in time; a nudge candidate that did not is
+    left out (no nudge this pass)."""
+    async with conn.transaction():
+        gated = await _all(conn, _GATED_AGENTS, (session_id, list(GATED)))
+        nudges = await _all(conn, _NUDGE_AGENTS, (session_id,))
+    out: dict[uuid.UUID, Inflight | None] = {a["agent_id"]: None for a in gated}
+    if fetch is None:
+        return out, {}
+
+    def usable(agents: list[dict]) -> list[dict]:
+        return [a for a in agents if a["url"] and a["wrapper_session_id"]]
+
+    async def nudge_read(a: dict) -> tuple[uuid.UUID, Inflight | None] | None:
+        try:
+            return a["agent_id"], await fetch(session_id, a["url"], a["wrapper_session_id"])
+        except TimeoutError:
+            return None
+
+    asked = usable(gated)
+    got, nudged = await asyncio.gather(
+        asyncio.gather(*(fetch(session_id, a["url"], a["wrapper_session_id"]) for a in asked)),
+        asyncio.gather(*(nudge_read(a) for a in usable(nudges))),
     )
     out.update({a["agent_id"]: inv for a, inv in zip(asked, got, strict=True)})
-    return out
+    return out, dict(n for n in nudged if n is not None)
 
 
 async def handoff_pass(
@@ -943,7 +1102,7 @@ async def handoff_pass(
     skipped this pass) or nothing changed. `fetch` reads the wrapper's in-flight inventory;
     without it every gate reads as blocked."""
     try:
-        inflight = await _inventories(conn, session_id, fetch)
+        inflight, nudge_inflight = await _inventories(conn, session_id, fetch)
     except TimeoutError:
         log.info("handoff pass for session %s skipped: in-flight inventory timed out", session_id)
         return []
@@ -958,7 +1117,7 @@ async def handoff_pass(
         session = await _one(conn, "SELECT id, desired FROM sessions WHERE id = %s", (session_id,))
         if session is None:
             return []
-        run = _Pass(conn, session, policy, settings, inflight)
+        run = _Pass(conn, session, policy, settings, inflight, nudge_inflight)
         subjects = await hive._subject_rows(conn, session_id=session_id) if run.active else []
         by_agent = {s["agent_id"]: s for s in subjects}
         touched: set[uuid.UUID] = set()
@@ -978,3 +1137,74 @@ async def handoff_pass(
             if subject["agent_id"] not in touched:
                 await run.open(subject)
         return run.out
+
+
+async def notify_escalations(
+    conn: psycopg.AsyncConnection,
+    settings: Settings,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> list[str]:
+    """The user's side of an escalation (decision 717): for every open escalated row whose
+    notice is not posted yet, a comment on the session's claimed task, or, when it has none, a
+    notice task (`client_key` per row, so a retry is a no-op on the taskboard). Marked
+    `escalation_notified_at` once posted, so a dispatcher restart never posts it twice; a
+    failed post is retried on the next call. No transaction is held across the HTTP calls. A
+    row that closed meanwhile is not notified (the cycle ended). Returns `notified:<agent>`
+    entries."""
+    if not settings.taskboard_available:
+        return []
+    async with conn.transaction():
+        pending = []
+        for row in await handoffs.escalations_to_notify(conn):
+            session = await sessions_repo.get(conn, row.session_id)
+            if session is None:
+                continue
+            pct = await _one(
+                conn,
+                "SELECT context_pct FROM agent_status WHERE agent_id = %s",
+                (row.agent_id,),
+            )
+            text = await escalation_text(
+                conn,
+                row,
+                row.level,
+                pct["context_pct"] if pct else None,
+                list((row.inflight or {}).get("waiting_on") or []),
+            )
+            pod = await _one(conn, "SELECT pod_name FROM agents WHERE id = %s", (row.agent_id,))
+            pending.append((row, session, text, (pod or {}).get("pod_name") or str(row.agent_id)))
+    out: list[str] = []
+    for row, session, text, pod in pending:
+        scope = scope_of(session)
+        try:
+            key = await taskboard_client.claimed_task(
+                settings, session.id, session.slug, scope, transport=transport
+            )
+        except taskboard_client.TaskboardUnavailable as exc:
+            log.warning("handoff %s: escalation notice not posted (%s); retrying", row.id, exc)
+            continue
+        if key is not None:
+            ok = await taskboard_client.add_comment(
+                settings, session.id, session.slug, scope, key, text, transport=transport
+            )
+        else:
+            ok = await taskboard_client.create_notice_task(
+                settings,
+                session.id,
+                session.slug,
+                scope,
+                title=handoff_texts.escalation_title(session.slug, pod),
+                body=text,
+                client_key=f"handoff-escalation-{row.id}",
+                labels=[ESCALATION_LABEL],
+                transport=transport,
+            )
+        if not ok:
+            log.warning("handoff %s: escalation notice not posted; retrying", row.id)
+            continue
+        async with conn.transaction():
+            await handoffs.mark_escalation_notified(conn, row.id)
+        log.info("handoff %s: escalation of agent %s posted (%s)", row.id, row.agent_id, key)
+        out.append(f"notified:{row.agent_id}")
+    return out

@@ -1,9 +1,11 @@
-"""Open decisions of a session from the taskboard, for the generated leader state.
+"""Small taskboard calls of the orchestrator itself: open decisions of a session (the generated
+leader state), owner notice tasks (runaway park, credential expiry, context-pressure escalation),
+a session's claimed task and a comment on it.
 
-One short, best-effort GET with the same identity headers the taskboard relay sends. It never
-raises: an unconfigured, slow, failing or malformed taskboard gives `None` and the caller prints a
-fallback line, so a handover notice is never blocked on it. Log lines carry the status only,
-never the token or a body.
+Short, best-effort calls with the same identity headers the taskboard relay sends. Only
+`claimed_task` raises (`TaskboardUnavailable`), so an outage is never read as "no task"; the
+others give `None` or False and the caller falls back or retries. Log lines carry the status
+only, never the token or a body.
 """
 
 from __future__ import annotations
@@ -30,6 +32,10 @@ NOTICE_SLUG = "orchestrator"
 NOTICE_LABEL = "credential"
 
 
+class TaskboardUnavailable(Exception):
+    """The taskboard could not be read (no body, no token in the message)."""
+
+
 @dataclass(frozen=True)
 class OpenDecision:
     task_key: str
@@ -49,12 +55,7 @@ async def open_decisions(
     if not settings.taskboard_available:
         return None
     url = settings.taskboard_url.rstrip("/") + UPSTREAM_PREFIX + "/tasks"
-    headers = {
-        "Authorization": f"Bearer {settings.taskboard_token}",
-        "X-Orch-Session": str(session_id),
-        "X-Orch-Slug": slug,
-        PROJECTS_HEADER: projects,
-    }
+    headers = _session_headers(settings, session_id, slug, projects)
     params = {"session": str(session_id), "waiting": "true"}
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS, transport=transport) as http:
@@ -77,20 +78,23 @@ async def create_notice_task(
     title: str,
     body: str,
     client_key: str,
+    labels: list[str] | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> bool:
-    """Create the owner notice task of a runaway park; `client_key` makes a retry a no-op on the
-    taskboard. True when the task exists (201 or 200), False when it could not be created."""
+    """Create an owner notice task as the session (a runaway park, a context-pressure
+    escalation); `client_key` makes a retry a no-op on the taskboard, `labels` default to the
+    runaway guard's. True when the task exists (201 or 200), False when it could not be
+    created."""
     if not settings.taskboard_available:
         return False
     url = settings.taskboard_url.rstrip("/") + UPSTREAM_PREFIX + "/tasks"
-    headers = {
-        "Authorization": f"Bearer {settings.taskboard_token}",
-        "X-Orch-Session": str(session_id),
-        "X-Orch-Slug": slug,
-        PROJECTS_HEADER: projects,
+    headers = _session_headers(settings, session_id, slug, projects)
+    payload = {
+        "title": title,
+        "body": body,
+        "labels": [TASK_LABEL] if labels is None else labels,
+        "client_key": client_key,
     }
-    payload = {"title": title, "body": body, "labels": [TASK_LABEL], "client_key": client_key}
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS, transport=transport) as http:
             response = await http.post(url, json=payload, headers=headers)
@@ -99,6 +103,68 @@ async def create_notice_task(
         return False
     if response.status_code not in (200, 201):
         log.warning("taskboard notice task: status %s", response.status_code)
+        return False
+    return True
+
+
+def _session_headers(
+    settings: Settings, session_id: uuid.UUID, slug: str, projects: str
+) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {settings.taskboard_token}",
+        "X-Orch-Session": str(session_id),
+        "X-Orch-Slug": slug,
+        PROJECTS_HEADER: projects,
+    }
+
+
+async def claimed_task(
+    settings: Settings,
+    session_id: uuid.UUID,
+    slug: str,
+    projects: str,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> str | None:
+    """The key of an active task the session is the assignee of (its claimed task), the first
+    the taskboard lists; None when it has none. Raises `TaskboardUnavailable` when the list
+    cannot be read, so a caller never mistakes an outage for "no task"."""
+    url = settings.taskboard_url.rstrip("/") + UPSTREAM_PREFIX + "/tasks"
+    headers = _session_headers(settings, session_id, slug, projects)
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS, transport=transport) as http:
+            response = await http.get(url, params={"session": str(session_id)}, headers=headers)
+        if not response.is_success:
+            raise TaskboardUnavailable(f"status {response.status_code}")
+        for task in response.json()["items"]:
+            if task.get("assignee_session") == str(session_id):
+                return str(task["key"])
+        return None
+    except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise TaskboardUnavailable(type(exc).__name__) from None
+
+
+async def add_comment(
+    settings: Settings,
+    session_id: uuid.UUID,
+    slug: str,
+    projects: str,
+    task_key: str,
+    body: str,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> bool:
+    """Comment on `task_key` as the session; True on 201 (or 200), never raises."""
+    url = settings.taskboard_url.rstrip("/") + UPSTREAM_PREFIX + f"/tasks/{task_key}/comments"
+    headers = _session_headers(settings, session_id, slug, projects)
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS, transport=transport) as http:
+            response = await http.post(url, json={"body": body}, headers=headers)
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning("taskboard comment unavailable: %s", type(exc).__name__)
+        return False
+    if response.status_code not in (200, 201):
+        log.warning("taskboard comment: status %s", response.status_code)
         return False
     return True
 

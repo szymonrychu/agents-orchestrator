@@ -23,7 +23,9 @@ than `rollout` and `limit`) opens a `discussing` row for the ex-leader in the sa
 and a strong row moves to `discussing` (`handoffs.on_leader_moved`); the handoff pass clears the
 ex-leader after the discussion window (m890, Q13), never the apply. The forced `limit` request is
 like `rollout`: never expires, never withdrawn into a clear. Forced moves and user overrides
-close a strong row still before its discussion `not_leader`.
+close a strong row still before its discussion `not_leader`. A queued `limit` request whose own
+handoff row is not `moving` is rejected `superseded` before anything else (row-116 class: a
+compaction or clear closed the row while the request waited for the leader's boundary).
 """
 
 from __future__ import annotations
@@ -337,6 +339,22 @@ async def _decide(
     return cur.rowcount == 1
 
 
+async def supersede_request(conn: psycopg.AsyncConnection, request_id: int) -> bool:
+    """Reject a still-queued request `superseded` (status-guarded): a `limit` request whose
+    handoff row left `moving` (closed by a compaction, a clear or the agent's shutdown) must
+    never move the lead later with a stale handoff (row-116 class). Called by
+    `handoffs` in the transaction that moves the row; False when it was no longer queued."""
+    return await _decide(conn, request_id, "superseded")
+
+
+# A queued `limit` request is live only while its own handoff row is `moving` (the handoff pass
+# queued it for an accepted, gate-clear submit); any other is a leftover (row-116 class).
+_LIMIT_LIVE = (
+    "EXISTS (SELECT 1 FROM agent_handoffs h WHERE h.leadership_request_id = %s"
+    " AND h.phase = 'moving')"
+)
+
+
 async def _judge(
     conn: psycopg.AsyncConnection,
     session_id: uuid.UUID,
@@ -452,6 +470,11 @@ async def leadership_pass(
                 session_id,
             ),
         ):
+            if req["kind"] == "handover" and req["reason"] == handoffs.LIMIT_REASON:
+                live = await _one(conn, f"SELECT {_LIMIT_LIVE} AS live", (req["id"],))
+                if not (live and live["live"]):
+                    await _decide(conn, req["id"], "superseded")
+                    continue
             if _waits_for_boundary(req, leader):
                 if _expired(req):
                     await _decide(conn, req["id"], "expired")

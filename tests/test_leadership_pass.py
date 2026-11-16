@@ -1109,7 +1109,9 @@ async def test_limit_request_never_expires(pool):
     c, (a0, a1, _) = await hive(pool)
     await set_leader(pool, c["id"], a0["id"], epoch=3)
     await status(pool, a0["id"], "busy", 10, bg=True)
-    rid = await request(pool, c["id"], "handover", a0["id"], None, "limit", 3)
+    # a limit request exists only for its `moving` row (row-116 class)
+    row_id = await open_pressure_row(pool, c["id"], a0["id"], "moving")
+    rid = await own_request(pool, row_id, c["id"], a0["id"], None, 3)
     await age_request(pool, rid, 1800 + 60)  # past the voluntary deadline, inside the cap
     assert await lpass(pool, c["id"]) is None
     await age_request(pool, rid, 14400 + 60)
@@ -1128,7 +1130,9 @@ async def test_limit_request_uses_rollout_deferral_cap(pool):
     c, (a0, a1, _) = await hive(pool)
     await set_leader(pool, c["id"], a0["id"], epoch=3)
     await status(pool, a0["id"], "idle", 10, bg=True)
-    rid = await request(pool, c["id"], "handover", a0["id"], None, "limit", 3)
+    # a limit request exists only for its `moving` row (row-116 class)
+    row_id = await open_pressure_row(pool, c["id"], a0["id"], "moving")
+    rid = await own_request(pool, row_id, c["id"], a0["id"], None, 3)
     await age_request(pool, rid, 1800 + 60)
     assert await lpass(pool, c["id"]) is None
     got = await rows(pool, "SELECT status FROM leadership_requests WHERE id = %s", (rid,))
@@ -1262,14 +1266,16 @@ async def test_foreign_limit_request_does_not_carry_a_moving_row(pool):
     c, (a0, a1, a2) = await hive(pool)
     await set_leader(pool, c["id"], a0["id"], epoch=3)
     row_id = await open_pressure_row(pool, c["id"], a0["id"], "moving")
-    own = await request(pool, c["id"], "handover", a0["id"], a1["id"], "limit", 3)
+    # the request is live only through another `moving` row (row-116 class): a2's
+    other = await open_pressure_row(pool, c["id"], a2["id"], "moving")
+    own = await own_request(pool, other, c["id"], a0["id"], a1["id"], 3)
     await run(
         pool,
         "UPDATE agent_handoffs SET leadership_request_id = %s WHERE id = %s",
         (own + 1000, row_id),
     )
     assert (await lpass(pool, c["id"])).agent_id == a1["id"]
-    (row,) = await handoff_rows(pool)
+    (row,) = await handoff_rows(pool, a0["id"])
     assert (row["phase"], row["close_reason"]) == ("cancelled", "not_leader")
     assert await commands_of(pool, a0["id"]) == []
 

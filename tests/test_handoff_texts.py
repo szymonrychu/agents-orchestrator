@@ -26,6 +26,7 @@ def _all_texts() -> list[str]:
         t.waiting_on_text(),
         t.escalation_text("s", "agent-s-0", 3, 97.0, ["next"], ["background task bf3a"]),
         t.escalation_text("s", "agent-s-0", 2, None, [], []),
+        t.escalation_title("s", "agent-s-0"),
         t.shutdown_successor("agent-s-0", "text"),
         t.return_text(HANDOFF, cleared=True),
         t.return_text(HANDOFF, cleared=False),

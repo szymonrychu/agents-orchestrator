@@ -41,6 +41,8 @@ ALTER TABLE agent_handoffs
     ADD COLUMN IF NOT EXISTS gate_blocks int NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS submitted_at timestamptz,
     ADD COLUMN IF NOT EXISTS escalated_at timestamptz,
+    ADD COLUMN IF NOT EXISTS escalation_message_ids bigint[] NOT NULL DEFAULT '{}',
+    ADD COLUMN IF NOT EXISTS escalation_notified_at timestamptz,
     ADD COLUMN IF NOT EXISTS nudged_level smallint NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS l2_tokens_at int,
     ADD COLUMN IF NOT EXISTS submit_tokens int,

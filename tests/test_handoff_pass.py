@@ -350,7 +350,11 @@ async def test_level_rises_to_l3_no_clear_no_message(env):
     for _ in range(3):
         assert await env.step(c["id"]) == []
     assert await env.commands(a["id"]) == []
-    assert await env.messages(a["id"]) == []
+    # an idle agent gets its one nudge of the level (spec 5.2), nothing else
+    got = await env.messages(a["id"])
+    assert [(m["notice"], m["text"]) for m in got] == [
+        ("handoff_nudge", handoff_texts.nudge_text(3))
+    ]
     assert await env.rows("SELECT * FROM commands WHERE agent_id = %s", (a["id"],)) == []
 
 
@@ -1791,3 +1795,77 @@ async def test_ex_leader_mid_turn_not_cleared_after_quiet_cap(env):
     assert (await env.row(a0["id"])).phase == "discussing"
     await env.idle_for(a0["id"], 1)
     assert await env.step(c["id"]) == [f"clearing:{a0['id']}"]
+
+
+# ---------------------------------------------------------------- idle nudge (spec 5.2)
+
+
+async def nudges(env, agent_id) -> list[dict]:
+    return await env.messages(agent_id, "handoff_nudge")
+
+
+async def test_idle_l2_nudged_once(env):
+    c, a = await env.solo(used=STRONG)
+    assert await env.step(c["id"]) == [f"pressuring:{a['id']}"]
+    for _ in range(3):
+        await env.step(c["id"])
+    (msg,) = await nudges(env, a["id"])
+    assert (msg["lane"], msg["status"], msg["text"]) == (
+        "regular",
+        "queued",
+        handoff_texts.nudge_text(2),
+    )
+    row = await env.row(a["id"])
+    assert row.nudged_level == 2 and row.phase == "pressuring"
+    assert await env.commands(a["id"]) == []  # a nudge is a message, never a command
+
+
+async def test_busy_agent_not_nudged(env):
+    c, a = await env.solo(used=STRONG)
+    await env.busy(a["id"])
+    for _ in range(3):
+        await env.step(c["id"])
+    assert await nudges(env, a["id"]) == []  # the wrapper pressures a busy agent
+    await env.idle_for(a["id"], 5)
+    await env.step(c["id"])
+    assert len(await nudges(env, a["id"])) == 1
+
+
+async def test_background_task_running_not_nudged(env):
+    c, a = await env.solo(used=STRONG)
+    env.inflight(a, background_tasks=[TASK])
+    for _ in range(3):
+        await env.step(c["id"])
+    assert await nudges(env, a["id"]) == []  # its task wakes it when it reports
+    env.inflight(a, background_tasks=[])
+    await env.step(c["id"])
+    assert len(await nudges(env, a["id"])) == 1
+
+
+async def test_l3_nudged_again_once(env):
+    c, a = await env.solo(used=STRONG)
+    for _ in range(2):
+        await env.step(c["id"])
+    assert len(await nudges(env, a["id"])) == 1
+    await env.gauge(a["id"], CRITICAL)
+    for _ in range(4):
+        await env.step(c["id"])
+    got = await nudges(env, a["id"])
+    assert [m["text"] for m in got] == [handoff_texts.nudge_text(2), handoff_texts.nudge_text(3)]
+    assert (await env.row(a["id"])).nudged_level == 3
+
+
+async def test_nudge_inventory_timeout_skips_only_the_nudge(env):
+    c, a = await env.solo(used=STRONG)
+    assert await env.step(c["id"]) == [f"pressuring:{a['id']}"]
+
+    async def slow(session_id, url, wsid):
+        raise TimeoutError
+
+    async with env.pool.connection() as conn:
+        await handoff.handoff_pass(conn, c["id"], env.policy, env.settings, slow)
+    assert await nudges(env, a["id"]) == []
+    await env.gauge(a["id"], LOW)
+    async with env.pool.connection() as conn:
+        out = await handoff.handoff_pass(conn, c["id"], env.policy, env.settings, slow)
+    assert out == [f"done:{a['id']}:compacted"]  # the pass itself still ran
