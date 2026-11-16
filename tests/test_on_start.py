@@ -69,12 +69,7 @@ TAIL_TOOLS = [
 # Allowed before the pinned plugin ships them; add a name here when the allow-list leads the
 # plugin pin and remove it when the pin offers the tool (project room T-117 O9; project grants
 # T-120).
-PLUGIN_PENDING: set[str] = {
-    "chat_history",
-    "chat_attachment_fetch",
-    "chat_attachment_status",
-    "chat_admin_history",
-}
+PLUGIN_PENDING: set[str] = set()
 ALONE_TOOLS = ["me", "leadership_handover", *TAIL_TOOLS]
 PROPOSAL = [
     "proposal_create",
