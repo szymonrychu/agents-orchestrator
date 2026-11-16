@@ -1613,6 +1613,47 @@
         "title": "DialogView",
         "type": "object"
       },
+      "EntryPlanView": {
+        "description": "What the discard does with one backup entry (`index` -1: the workspace root itself).\n\n`action` is `save`, `discard` (the directory goes with the session) or `skip` (with `reason`).",
+        "properties": {
+          "action": {
+            "enum": [
+              "save",
+              "discard",
+              "skip"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "index": {
+            "title": "Index",
+            "type": "integer"
+          },
+          "name_template": {
+            "title": "Name Template",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "required": [
+          "index",
+          "name_template",
+          "action",
+          "reason"
+        ],
+        "title": "EntryPlanView",
+        "type": "object"
+      },
       "EnvVar-Input": {
         "additionalProperties": false,
         "description": "One session env variable, GitLab CI style: `{value, expand}`, or a vault reference.\n\nA plain variable carries its value; `expand` gates `$` handling of it. A vault reference\n`{vault, env}` names an agents-vault entry and its env; the entry's value is resolved by the\nvault at session create. A reference carries nothing else.",
@@ -5362,8 +5403,16 @@
         "type": "object"
       },
       "SessionBackup": {
-        "description": "What a discard would save now; each flag is true only when that save would really run.\n\n`reason` is null when both run, else `no_session_cache` (no workspace backup entry),\n`cache_not_configured` (no S3 cache configured) or the save's skip reason, the workdir's first.",
+        "description": "What a discard would save now; each flag is true only when that save would really run.\n\n`reason` is null when both run, else `no_session_cache` (no workspace backup entry),\n`cache_not_configured` (no S3 cache configured) or the save's skip reason, the workdir's first.\n`entries` is the per-entry plan the discard dialog shows.",
         "properties": {
+          "entries": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/EntryPlanView"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
           "last_transcripts_backup": {
             "anyOf": [
               {

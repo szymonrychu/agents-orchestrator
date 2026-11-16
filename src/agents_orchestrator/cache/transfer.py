@@ -1,10 +1,10 @@
-"""Job-side workspace transfer: `orch cache restore|save` (contract orch-cache-job-cli; D1, D11).
+"""Job-side backup transfer: `orch cache restore|save|resolve` (contract orch-cache-job-cli).
 
-Runs in the hardened cache Job with only the `CACHE_*` env: `CACHE_URL` (one presigned GET or
-PUT URL), `CACHE_DIR` (the workdir), `CACHE_MAX_BYTES`, `CACHE_EXCLUDE` (a JSON list of globs),
-`CACHE_SCRATCH` (where the save writes its archive) and `CACHE_VERIFY_TLS` (`false` turns off
-certificate checks for a private-CA endpoint; unset is `true`). It never builds `Settings` or
-reads `ORCH_*`. The last stdout line is one JSON object `{"outcome", "bytes", "reason"}` that the
+Runs in the hardened cache Job with only the `CACHE_*` env: `CACHE_ENTRIES` (a JSON list of
+entries, each with its own presigned URL), `CACHE_MAX_BYTES`, `CACHE_SCRATCH` (where a save writes
+its archive), `CACHE_STATE_DIR` and `CACHE_VERIFY_TLS` (`false` turns off certificate checks for a
+private-CA endpoint; unset is `true`). It never builds `Settings` or reads `ORCH_*`. The last
+stdout line is one JSON object `{"entries": [...]}` (or `{"digests": {...}}` for resolve) that the
 reconciler reads from the pod log tail; nothing is printed after it.
 
 Restore streams the GET body straight into `archive.unpack`; save packs into a scratch file and
@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import io
 import json
-import os
 import shutil
 import sys
 import tempfile
@@ -58,31 +57,9 @@ def redact(text: str, url: str) -> str:
     return text
 
 
-def _emit(
-    outcome: str, *, nbytes: int | None = None, reason: str | None = None, **extra: Any
-) -> None:
-    line = {"outcome": outcome, "bytes": nbytes, "reason": reason, **extra}
-    sys.stderr.flush()
-    print(json.dumps(line), file=sys.stdout, flush=True)
-
-
 def _error(exc: BaseException, url: str) -> str:
     detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
     return redact(detail, url)
-
-
-def _url(env: Mapping[str, str]) -> str:
-    url = env.get("CACHE_URL", "")
-    if not url:
-        raise _BadEnv("CACHE_URL is not set")
-    return url
-
-
-def _workdir(env: Mapping[str, str]) -> Path:
-    workdir = env.get("CACHE_DIR", "")
-    if not workdir:
-        raise _BadEnv("CACHE_DIR is not set")
-    return Path(workdir)
 
 
 def _verify_tls(env: Mapping[str, str]) -> bool:
@@ -104,27 +81,6 @@ def _max_bytes(env: Mapping[str, str]) -> int:
         raise _BadEnv(f"CACHE_MAX_BYTES is not an integer: {raw!r}") from None
     if not 1 <= value <= archive.MAX_ARCHIVE_BYTES:
         raise _BadEnv(f"CACHE_MAX_BYTES must be 1 to {archive.MAX_ARCHIVE_BYTES}")
-    return value
-
-
-SESSIONS_DIR = "/sessions"
-
-
-def _require_redacted(workdir_text: str) -> bool:
-    """The sessions target (the `/sessions` mount) always gates `config/` on the marker."""
-    return os.path.realpath(workdir_text) == SESSIONS_DIR
-
-
-def _exclude(env: Mapping[str, str]) -> list[str]:
-    raw = env.get("CACHE_EXCLUDE", "")
-    if not raw:
-        return []
-    try:
-        value = json.loads(raw)
-    except json.JSONDecodeError:
-        raise _BadEnv("CACHE_EXCLUDE is not JSON") from None
-    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
-        raise _BadEnv("CACHE_EXCLUDE is not a JSON list of strings")
     return value
 
 
@@ -152,135 +108,6 @@ class _BodyReader(io.RawIOBase):
         self._pending = self._pending[size:]
         self.delivered += size
         return size
-
-
-def _clear_dir(path: Path) -> None:
-    """Empty `path` but keep it; symlinks are unlinked, never followed."""
-    for entry in path.iterdir():
-        if entry.is_symlink() or not entry.is_dir():
-            entry.unlink()
-        else:
-            shutil.rmtree(entry)
-
-
-def restore(env: Mapping[str, str], *, transport: httpx.BaseTransport | None = None) -> int:
-    """GET `CACHE_URL` and unpack it into `CACHE_DIR`; print the outcome, return the exit code.
-
-    200 restores, 404 is a miss that leaves the workdir untouched. Another status, or an error
-    before any body byte reached the extractor, is `download_failed`; any failure once extraction
-    began is `extract_failed`. An ExtractError means the archive itself is unreadable or untrusted:
-    the workdir is emptied and the outcome is `reset` (exit 0), so the save that follows replaces
-    the bad object. Any other failure leaves the workdir alone: the stored archive may be good.
-    """
-    url = env.get("CACHE_URL", "")
-    try:
-        url = _url(env)
-        workdir = _workdir(env)
-        verify = _verify_tls(env)
-    except _BadEnv as exc:
-        _emit("failed", reason=f"download_failed: {exc}")
-        return EXIT_FAILED
-    reader: _BodyReader | None = None
-    try:
-        with (
-            httpx.Client(transport=transport, timeout=TIMEOUT, verify=verify) as client,
-            client.stream("GET", url) as response,
-        ):
-            if response.status_code == 404:
-                _emit("miss", nbytes=0)
-                return EXIT_OK
-            if response.status_code != 200:
-                _emit("failed", reason=f"download_failed: HTTP {response.status_code}")
-                return EXIT_FAILED
-            reader = _BodyReader(response.iter_bytes())
-            archive.unpack(cast(BinaryIO, reader), workdir)
-            while reader.read(io.DEFAULT_BUFFER_SIZE):
-                pass  # the zstd epilogue past the tar end: count the whole object
-            delivered = reader.delivered
-    except archive.ExtractError as exc:
-        reason = f"extract_failed: {_error(exc, url)}"
-        try:
-            _clear_dir(workdir)
-        except Exception as wipe:  # noqa: BLE001
-            _emit("failed", reason=f"{reason}; reset failed: {_error(wipe, url)}")
-            return EXIT_FAILED
-        _emit("reset", reason=reason)
-        return EXIT_OK
-    except Exception as exc:  # noqa: BLE001 - every failure becomes the one outcome line
-        stage = "extract_failed" if reader is not None and reader.delivered else "download_failed"
-        _emit("failed", reason=f"{stage}: {_error(exc, url)}")
-        return EXIT_FAILED
-    _emit("restored", nbytes=delivered)
-    return EXIT_OK
-
-
-def save(env: Mapping[str, str], *, transport: httpx.BaseTransport | None = None) -> int:
-    """Pack `CACHE_DIR` into the scratch dir and PUT it once to `CACHE_URL`; print the outcome.
-
-    No workdir is `skipped` `no_workdir` and an archive past `CACHE_MAX_BYTES` is `too_large`,
-    both without a request. A non-2xx answer or a transport error is `upload_failed`. The
-    archive file is removed in every case.
-    """
-    url = env.get("CACHE_URL", "")
-    workdir_text = env.get("CACHE_DIR", "")
-    if not workdir_text or not os.path.isdir(workdir_text):
-        _emit("skipped", reason="no_workdir")
-        return EXIT_OK
-    try:
-        url = _url(env)
-        max_bytes = _max_bytes(env)
-        verify = _verify_tls(env)
-        exclude = _exclude(env)
-    except _BadEnv as exc:
-        _emit("failed", reason=f"upload_failed: {exc}")
-        return EXIT_FAILED
-    scratch = Path(env.get("CACHE_SCRATCH") or DEFAULT_SCRATCH)
-    path = scratch / ARCHIVE_NAME
-    try:
-        scratch.mkdir(parents=True, exist_ok=True)
-        try:
-            with path.open("wb") as out:
-                packed = archive.pack(
-                    Path(workdir_text),
-                    out,
-                    exclude=exclude,
-                    max_bytes=max_bytes,
-                    require_redacted=_require_redacted(workdir_text),
-                )
-        except archive.TooLarge:
-            _emit("failed", reason="too_large")
-            return EXIT_FAILED
-        except Exception as exc:  # noqa: BLE001
-            _emit("failed", reason=f"upload_failed: archive: {_error(exc, url)}")
-            return EXIT_FAILED
-        size = packed.compressed_bytes
-        skipped_links = packed.skipped_links
-        try:
-            with (
-                path.open("rb") as body,
-                httpx.Client(transport=transport, timeout=TIMEOUT, verify=verify) as client,
-            ):
-                response = client.put(
-                    url,
-                    content=body,
-                    headers={"Content-Length": str(size), "Content-Type": CONTENT_TYPE},
-                )
-        except Exception as exc:  # noqa: BLE001
-            _emit(
-                "failed", reason=f"upload_failed: {_error(exc, url)}", skipped_links=skipped_links
-            )
-            return EXIT_FAILED
-        if not response.is_success:
-            _emit(
-                "failed",
-                reason=f"upload_failed: HTTP {response.status_code}",
-                skipped_links=skipped_links,
-            )
-            return EXIT_FAILED
-        _emit("saved", nbytes=size, skipped_links=skipped_links)
-        return EXIT_OK
-    finally:
-        path.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -455,7 +282,13 @@ def _save_one(
         scratch.mkdir(parents=True, exist_ok=True)
         try:
             with path.open("wb") as out:
-                packed = archive.pack(target, out, exclude=exclude, max_bytes=max_bytes)
+                packed = archive.pack(
+                    target,
+                    out,
+                    exclude=exclude,
+                    max_bytes=max_bytes,
+                    require_redacted=entry.get("root") == "sessions",
+                )
         except archive.TooLarge:
             return {**result, "state": "failed", "reason": "too_large"}
         report = _report(target, exclude)

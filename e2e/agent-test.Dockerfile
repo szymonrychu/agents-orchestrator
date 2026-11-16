@@ -5,7 +5,7 @@
 # Run it with e2e/agent-test.config.yaml mounted at /etc/ccw/config.yaml.
 ARG BASE_IMAGE=harbor.szymonrichert.pl/containers/claude-code-wrapper:0.19.0
 # Wrapper commit whose tests/fake_claude is copied; keep it equal to the BASE_IMAGE sha.
-ARG WRAPPER_SHA=1c5ce877f131e8f0a863cd8b7933e02feb2b2b9f
+ARG WRAPPER_SHA=f0897d2de544bb88beea4825822ed49291b45f47
 
 FROM ${BASE_IMAGE}
 ARG WRAPPER_SHA
