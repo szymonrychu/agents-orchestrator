@@ -19,20 +19,44 @@ def _cap(spec, value):
     return {**spec, "runaway": {"max_stop_continuations": value}}
 
 
-CASES = {"low": 3, "edge4": 4, "one": 1, "five": 5, "high": 25, "off": 0, "null": None, "absent": "absent"}
-EXPECTED = {"low": 5, "edge4": 5, "one": 5, "five": 5, "high": 25, "off": 0, "null": None, "absent": "absent"}
+CASES = {
+    "low": 3,
+    "edge4": 4,
+    "one": 1,
+    "five": 5,
+    "high": 25,
+    "off": 0,
+    "null": None,
+    "absent": "absent",
+}
+EXPECTED = {
+    "low": 5,
+    "edge4": 5,
+    "one": 5,
+    "five": 5,
+    "high": 25,
+    "off": 0,
+    "null": None,
+    "absent": "absent",
+}
 
 
 def _seed(c):
     for name, v in CASES.items():
         spec = json.dumps(_cap({"replicas": 1}, v))
-        c.execute("INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), %s, %s)", (f"s-{name}", spec))
+        c.execute(
+            "INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), %s, %s)",
+            (f"s-{name}", spec),
+        )
         c.execute(
             "INSERT INTO presets (id, name, spec) VALUES (gen_random_uuid(), %s, %s)",
             (f"p-{name}", spec),
         )
     c.execute("INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), 's-none', '{}')")
-    c.execute("INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), 's-str', %s)", ('{"runaway": "x"}',))
+    c.execute(
+        "INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), 's-str', %s)",
+        ('{"runaway": "x"}',),
+    )
 
 
 def _read(c, table, key, name):
@@ -41,7 +65,7 @@ def _read(c, table, key, name):
 
 def _val(spec):
     r = spec["runaway"]
-    return "absent" if "max_stop_continuations" not in r else r["max_stop_continuations"]
+    return r.get("max_stop_continuations", "absent")
 
 
 def test_stored_caps_1_to_4_raised_to_5_others_untouched(empty_dsn, tmp_path):
@@ -69,7 +93,8 @@ def test_proposal_base_and_items_clamped(empty_dsn, tmp_path):
             " RETURNING id"
         ).fetchone()[0]
         c.execute(
-            "INSERT INTO change_proposal_revisions (proposal_id, revision, reason, base, fingerprint)"
+            "INSERT INTO change_proposal_revisions"
+            " (proposal_id, revision, reason, base, fingerprint)"
             " VALUES (%s, 1, 'r', %s, 'f')",
             (pid, json.dumps({"runaway": {"max_stop_continuations": 2}})),
         )
