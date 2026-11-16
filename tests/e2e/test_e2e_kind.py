@@ -3719,7 +3719,7 @@ def test_strong_path_hive_cycle(api: httpx.Client, baseline: dict) -> None:
 
         mid = post_message(api, cid, "background watcher", leader["id"])
         wait_for("the ex-leader turn", lambda: turn_completed(message(api, mid)), TURN_TIMEOUT, 1)
-        time.sleep(90)  # past the quiet window (60 s) of the discussion: still no clear
+        time.sleep(45)  # past the quiet window (10 s) of the discussion: still no clear
         assert strong_events(api, cid, leader["id"], "session_cleared") == []
 
         mid = post_message(api, cid, "watcher done", leader["id"])
