@@ -12,9 +12,10 @@ delete's re-check. Per backup name:
   spec rendering to it and nothing inside the grace period, is deleted whole (every version).
 - Otherwise the newest K non-current versions stay and older non-current ones go once past the
   retention period.
-- An object under the cache prefix that no version row owns is an orphan (a save the reconciler
+- An object under `<prefix>b/` that no version row owns is an orphan (a save the reconciler
   never recorded, or an object left after a failed delete): deleted by age (retention and
-  grace). Transcripts (`<prefix>sessions/<slug>.tar.zst`) are one object per session, deleted by
+  grace). Any other key outside `b/` and `sessions/` (the legacy flat archives the migration
+  imports) is never planned for deletion, dry run or not. Transcripts (`<prefix>sessions/<slug>.tar.zst`) are one object per session, deleted by
   age alone while no session references them.
 
 The executor deletes the database row inside a transaction (re-checking references under the
@@ -56,6 +57,7 @@ from agents_orchestrator.spec import has_workspace_entry
 log = logging.getLogger(__name__)
 
 SESSIONS_GROUP = "sessions/"
+VERSIONS_GROUP = "b/"
 RESULT_KEYS_MAX = 200
 
 
@@ -138,8 +140,10 @@ def plan_sweep(
                 decisions.append(Decision(obj.key, obj.size, False, "protected: a session uses it"))
                 continue
             what = "transcripts older than the retention period"
-        else:
+        elif obj.key.startswith(f"{prefix}{VERSIONS_GROUP}"):
             what = "object no backup version owns, older than the retention period"
+        else:  # a legacy flat archive: the migration still imports it, never ours to delete
+            continue
         decisions.append(_aged(obj, old, fresh, what))
     return SweepPlan(tuple(sorted(decisions, key=lambda d: d.key)))
 

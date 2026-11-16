@@ -103,6 +103,12 @@ def _caller(request: Request) -> str:
     return calling_service(request) or (request.client.host if request.client else "unknown")
 
 
+def _created_by(request: Request) -> str:
+    """Who a user copy is recorded as: the main port has no user identity (the source allowlist
+    is the auth), so a fixed label, never the peer address."""
+    return calling_service(request) or "user"
+
+
 async def _db_now(pool: AsyncConnectionPool) -> datetime:
     async with pool.connection() as conn:
         return (await (await conn.execute("SELECT now()")).fetchone())[0]
@@ -411,11 +417,9 @@ async def list_names_route(
 
 @router.post("/backups/copy", response_model=schemas.BackupVersionView, status_code=201)
 async def copy_route(
-    body: schemas.BackupCopyIn, request: Request, pool: Pool, settings: Cfg, response: Response
+    body: schemas.BackupCopyIn, request: Request, pool: Pool, settings: Cfg
 ) -> schemas.BackupVersionView:
-    view, created = await copy_backup(pool, settings, body, _caller(request))
-    if not created:
-        response.status_code = 200
+    view, _created = await copy_backup(pool, settings, body, _created_by(request))
     return view
 
 

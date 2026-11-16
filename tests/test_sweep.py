@@ -130,6 +130,15 @@ def test_orphan_objects_are_deleted_by_age_only():
     assert p.keys == [f"{PRE}b/proj/a/orphan-old.tar.zst"]
 
 
+def test_legacy_flat_archives_are_never_planned_for_deletion():
+    legacy = [
+        ArchiveObject(f"{PRE}proj-a.tar.zst", 5, NOW - 400 * DAY),
+        ArchiveObject(f"{PRE}proj/a.tar.zst", 5, NOW - 400 * DAY),
+        ArchiveObject(f"{PRE}preset-0123456789abcdef.tar.zst", 5, NOW - 400 * DAY),
+    ]
+    assert plan([], objects=legacy).keys == []
+
+
 def test_transcripts_are_deleted_by_age_only_and_respect_protection():
     key = f"{PRE}sessions/old.tar.zst"
     kept = f"{PRE}sessions/live.tar.zst"
@@ -312,6 +321,16 @@ async def test_orphans_are_swept_and_a_recorded_object_is_not(pool, dsn, monkeyp
     res = await run_sweep(s, pool, policy=policy_for(s, dry_run=False, keep_newest=9))
     assert [k for b in fake.deleted for k in b] == [orphan.key]
     assert res.deleted == 1 and vs[0].id in await rows(pool)
+
+
+async def test_a_legacy_flat_archive_survives_a_real_sweep(pool, dsn, monkeypatch):
+    legacy = ArchiveObject(f"{PRE}proj-a.tar.zst", 7, NOW - 400 * DAY)
+    orphan = ArchiveObject(f"{PRE}b/proj/a/lost.tar.zst", 7, NOW - 400 * DAY)
+    fake = Fake([legacy, orphan])
+    wire(monkeypatch, fake)
+    s = settings_for(dsn)
+    await run_sweep(s, pool, policy=policy_for(s, dry_run=False))
+    assert [k for b in fake.deleted for k in b] == [orphan.key]
 
 
 async def test_per_key_errors_are_logged_and_counted(pool, dsn, monkeypatch, caplog):

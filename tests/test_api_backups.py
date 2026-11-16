@@ -133,7 +133,7 @@ async def test_old_archive_routes_404(pool, dsn, s3):
             ("POST", "/api/v1/cache/cleanup/run"),
         ):
             r = await c.request(method, path)
-            assert r.status_code in (404, 405), (method, path, r.status_code)
+            assert r.status_code == 404, (method, path, r.status_code)
 
 
 # ------------------------------------------------------------------ list and versions
@@ -259,7 +259,7 @@ async def test_copy_same_content_records_nothing(pool, dsn, s3):
     cur = await add_version(pool, "proj/a", digest="d1")
     async with client(pool, dsn) as c:
         r = await c.post(f"{A}/copy", json={"source": "proj/a", "target": "proj/a"})
-    assert r.status_code == 200 and r.json()["id"] == str(cur.id)
+    assert r.status_code == 201 and r.json()["id"] == str(cur.id)
     assert s3.deleted == [[s3.copied[0][1]]]  # the fresh object is dropped
 
 

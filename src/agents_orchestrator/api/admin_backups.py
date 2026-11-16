@@ -53,15 +53,13 @@ async def list_backups(
     },
 )
 async def copy_backup(
-    body: schemas.BackupCopyIn, request: Request, pool: Pool, settings: Cfg, response: Response
+    body: schemas.BackupCopyIn, request: Request, pool: Pool, settings: Cfg
 ) -> schemas.BackupVersionView:
     """Copy a version to a target name; the copy becomes the target's current version (replace
     only, no merge). The audit row names source and target, never content."""
     _, caller = caller_of(request)
-    view, created = await backups.copy_backup(pool, settings, body, f"superleader {caller.slug}")
+    view, _created = await backups.copy_backup(pool, settings, body, f"superleader {caller.slug}")
     note_detail(request, source=body.source, target=body.target)
-    if not created:
-        response.status_code = 200
     return view
 
 
