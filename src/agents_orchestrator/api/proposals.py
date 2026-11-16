@@ -3,7 +3,9 @@ and the human review that applies the approved items.
 
 It handles `kind: "preset"`, `kind: "schedule"` (stage B), `kind: "session"` (stage C) and the
 project grants `kind: "session_projects"` and `kind: "preset_projects"` (T-120: one item
-`projects.<slug>` per granted project, filed by `project_grant_routes`, never revised); the
+`projects.<slug>` per granted project, filed by `project_grant_routes`, never revised) and the
+manageable request `kind: "preset_manageable"` (S-66: one item `superleader_manageable` false to
+true on a preset the superleader may only read, filed by `project_grant_routes`, never revised); the
 routes and gates live in `proposal_routes`. A proposal never runs the agent guards (human-only,
 privileged): it may carry any path, security, grant or not, for a human to decide; only `review`
 (a human) writes the target.
@@ -16,11 +18,14 @@ schedule proposal reads `stale: false` until a review compares.
 A session's fingerprint is its stored spec plus `secret_versions` (its vault pins); the review
 writes through `db.sessions.replace_spec` (generation + 1). A grant's fingerprint is the
 target's home project plus its extra projects; the review writes the extra projects under the
-row lock (no spec change, no generation bump: scope is read live). A proposal never carries a
-value: a preset proposal may carry vault references (`{"vault": <entry id>, "env": <entry
-env>}`), which the vault checks at create and revise (early 422) and again when the review saves
-the preset; a session proposal refuses reference changes (422 `vault_ref_not_allowed`), refs
-enter and leave a live session only through its preset.
+row lock (no spec change, no generation bump: scope is read live). A manageable request's
+fingerprint is the preset's `superleader_manageable` flag; the review sets the column.
+
+A proposal never carries a value: a preset proposal may carry vault references
+(`{"vault": <entry id>, "env": <entry env>}`), which the vault checks at create and revise
+(early 422) and again when the review saves the preset; a session proposal refuses reference
+changes (422 `vault_ref_not_allowed`), refs enter and leave a live session only through its
+preset.
 
 Every write runs in a real transaction (the connection is idle when it starts, `_idle`).
 """
@@ -75,8 +80,10 @@ SCHEDULE_FIELDS = tuple(schemas.ScheduleIn.model_fields)
 
 # project grants (T-120): the target is a session or a preset, the items `projects.<slug>`
 PROJECT_KINDS = ("session_projects", "preset_projects")
+# the manageable request (S-66): its target is an unmanageable preset by design
+MANAGEABLE_KIND = "preset_manageable"
 # the target a kind names, for texts
-_NOUN = {"session_projects": "session", "preset_projects": "preset"}
+_NOUN = {"session_projects": "session", "preset_projects": "preset", MANAGEABLE_KIND: "preset"}
 
 
 @dataclass(frozen=True)
@@ -132,6 +139,22 @@ async def live_projects_fingerprint(conn, kind: str, target_id: str) -> str | No
     if preset is None or not preset.superleader_manageable:
         return None
     return fingerprint_projects(preset.project, preset.extra_projects)
+
+
+def fingerprint_manageable(flag: bool) -> str:
+    """A manageable request's target as its revision was based on it: the preset's
+    `superleader_manageable` flag (any other preset edit leaves the request current)."""
+    canonical = json.dumps({"superleader_manageable": flag}, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+async def live_manageable_fingerprint(conn, target_id: str) -> str | None:
+    """The live fingerprint of a manageable request's preset; None only when it is deleted (the
+    preset is unmanageable by design, so that is no reason to hide or close the request)."""
+    preset = await presets_repo.get(conn, uuid.UUID(target_id))
+    if preset is None:
+        return None
+    return fingerprint_manageable(preset.superleader_manageable)
 
 
 def _not_open() -> ApiError:
@@ -428,6 +451,53 @@ async def create_projects(
     return await get_view(conn, settings, proposal_id, proposer=caller.id), True
 
 
+async def create_manageable(
+    request: Request,
+    conn,
+    settings: Settings,
+    *,
+    ref: str,
+    body: schemas.ManageableRequestIn,
+    caller: Session,
+) -> tuple[schemas.ProposalView, bool]:
+    """File a request to make the preset `ref` (id or name, any preset the superleader may read)
+    superleader-manageable as a `preset_manageable` proposal (S-66, user answer Q2 B); the bool
+    is False on a `client_key` replay. 409 `already_manageable` when it already is; the review
+    checks the flag again."""
+    _idle(conn)
+    filed = _Filed(kind=MANAGEABLE_KIND, reason=body.reason, client_key=body.client_key)
+    if body.client_key is not None:
+        async with conn.transaction():
+            first = await repo.by_client_key(conn, caller.id, body.client_key)
+        if first is not None:
+            view = await get_view(conn, settings, first, proposer=caller.id, visible_only=True)
+            return view, False
+    note_fields(request, ["superleader_manageable"])
+    try:
+        async with conn.transaction():
+            found = await admin.readable_preset(conn, ref)
+            preset = await presets_repo.get_for_update(conn, found.id)
+            if preset is None:
+                raise not_found("preset")
+            if preset.superleader_manageable:
+                raise ApiError(
+                    409, "already_manageable", "the preset is already superleader-manageable"
+                )
+            item = repo.Item(
+                path="superleader_manageable", before=False, after=True, security=True, grant=True
+            )
+            plan = _Plan({"superleader_manageable": False}, fingerprint_manageable(False), [item])
+            proposal_id = await _insert(
+                conn, settings, filed, caller, True, str(preset.id), preset.name, plan
+            )
+    except repo.ProposalExists as exc:  # a concurrent replay won the insert
+        view = await get_view(
+            conn, settings, exc.proposal_id, proposer=caller.id, visible_only=True
+        )
+        return view, False
+    return await get_view(conn, settings, proposal_id, proposer=caller.id), True
+
+
 async def revise(
     request: Request,
     conn,
@@ -453,6 +523,12 @@ async def revise(
                 422,
                 "not_revisable",
                 "a project grant is not revised; withdraw it and file the grant again",
+            )
+        if current.kind == MANAGEABLE_KIND:
+            raise ApiError(
+                422,
+                "not_revisable",
+                "a manageable request is not revised; withdraw it and file the request again",
             )
         if current.status not in repo.ACTIVE:
             raise _not_open()
@@ -516,6 +592,8 @@ async def _stale(conn, proposal: repo.Proposal) -> bool:
     if proposal.kind in PROJECT_KINDS:
         live = await live_projects_fingerprint(conn, proposal.kind, proposal.target_id)
         return live != current.fingerprint
+    if proposal.kind == MANAGEABLE_KIND:
+        return await live_manageable_fingerprint(conn, proposal.target_id) != current.fingerprint
     if proposal.kind == "session":
         found = await live_session(conn, uuid.UUID(proposal.target_id))
         if found is None:
@@ -986,6 +1064,8 @@ async def _review_locked(
         return await _review_session(conn, settings, p, decisions)
     if p.kind in PROJECT_KINDS:
         return await _review_projects(conn, p, decisions)
+    if p.kind == MANAGEABLE_KIND:
+        return await _review_manageable(conn, p, decisions)
     to = _outcome(decisions)
     preset = await _locked_target(conn, uuid.UUID(p.target_id), hold=to == "applied")
     if preset is None:
@@ -1165,6 +1245,24 @@ async def _review_projects(conn, p: repo.Proposal, decisions: Decisions) -> _Don
                 await project_grants.notify(conn, target_id, text)
         else:
             await presets_repo.set_extra_projects(conn, target_id, wanted)
+    return await _record(conn, p, decisions, to, _Done())
+
+
+async def _review_manageable(conn, p: repo.Proposal, decisions: Decisions) -> _Done:
+    """Plan 3.5 for a manageable request (S-66): the preset locked FOR UPDATE; deleted is
+    `target_gone`; a changed flag (a human made it manageable meanwhile) is `stale`; an approval
+    sets the column (bumping `updated_at`, so open preset proposals re-base). A deny records
+    only."""
+    current = p.revisions[0]
+    to = _outcome(decisions)
+    preset = await presets_repo.get_for_update(conn, uuid.UUID(p.target_id))
+    if preset is None:
+        return await _close(conn, p, "target_gone", _gone_error("preset"))
+    live = fingerprint_manageable(preset.superleader_manageable)
+    if p.status == "open" and live != current.fingerprint:
+        return await _close(conn, p, "stale", _stale_error("preset"))
+    if to == "applied":
+        await presets_repo.set_manageable(conn, preset.id, True)
     return await _record(conn, p, decisions, to, _Done())
 
 

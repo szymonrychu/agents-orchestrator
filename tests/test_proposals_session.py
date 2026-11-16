@@ -463,7 +463,7 @@ async def test_human_review_runs_no_agent_guard_on_a_grant(
 ):
     view = await _filed(pool, kube, settings, boss, patch={"session_messaging": True})
     [item] = view.revisions[0].items
-    assert (item.path, item.grant) == ("session_messaging", True)
+    assert (item.path, item.grant) == ("session_messaging", False)
     await _review(pool, kube, settings, view.id, 1, {"session_messaging": "approve"})
     spec, _, _, _ = await _row(pool, target.id)
     assert spec["session_messaging"] is True

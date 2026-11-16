@@ -107,6 +107,14 @@ async def patch(
             note_fields(request, [f"env.{e}" for e in exc.extra["envs"]])
             raise
         guard_agent_edit(base, new, request, privileged=not own)
+        if (
+            not as_superleader(base)
+            and new.get("session_messaging")
+            and not base.get("session_messaging")
+        ):
+            # A regular leader must never promote its own session to a superleader (Q6 A).
+            note_fields(request, ["session_messaging"])
+            raise human_only_refused(["session_messaging"])
         if not as_superleader(base) and (
             looser := tighten_changes(
                 base,

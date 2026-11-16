@@ -4,7 +4,7 @@ An agent (the superleader) may change these preset fields only toward safe;
 anything else is refused. Compared against the stored spec, with absent, None
 and false equal:
 
-- kube_cluster_access, session_messaging, docker: may be turned off or removed, never on.
+- kube_cluster_access, docker: may be turned off or removed, never on.
 - kube_namespace_access (namespace -> tiers map): may shrink or be removed, never grow: no
   namespace or tier may appear that the stored map lacks.
 - discard_hook_url: may be removed, never set to a value other than the stored one.
@@ -34,7 +34,6 @@ from agents_orchestrator.spec import parse_quantity
 GRANTS: tuple[str, ...] = (
     "kube_cluster_access",
     "kube_namespace_access",
-    "session_messaging",
     "docker",
     "discard_hook_url",
 )
@@ -43,7 +42,6 @@ DOCKER_SIZES: tuple[str, ...] = ("docker_storage", "docker_cpu", "docker_memory"
 PRIVILEGED: tuple[str, ...] = (
     "kube_cluster_access",
     "kube_namespace_access",
-    "session_messaging",
     "docker",
 )
 # The human-only fields in the `changed_paths` spelling (one level under `wrapper`): marked

@@ -248,7 +248,6 @@ HUMAN_ONLY = [
         {"kube_namespace_access": {"media": ["read"]}},
         {"kube_namespace_access": {"media": ["read"], "games": ["read"]}},
     ),
-    ("session_messaging", {}, {"session_messaging": True}),
     ("docker", {}, {"docker": True}),
     ("discard_hook_url", {}, {"discard_hook_url": "https://h.example/hook"}),
     (
@@ -319,7 +318,7 @@ async def test_toward_safe_passes(pool, settings, boss, own, stored, patch):
 
 # ---------------------------------------------------------------- privileged target
 
-FLAGS = ["kube_cluster_access", "session_messaging", "docker"]
+FLAGS = ["kube_cluster_access", "docker"]
 
 
 @pytest.mark.parametrize("flag", FLAGS)

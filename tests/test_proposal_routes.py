@@ -645,7 +645,7 @@ async def test_regular_leader_proposes_a_grant_for_its_own_session(
     assert view["proposer_superleader"] is False
     items = {i["path"]: i for i in view["revisions"][0]["items"]}
     assert sorted(items) == ["env.PLAIN", "session_messaging"]
-    assert items["session_messaging"]["grant"] is True
+    assert items["session_messaging"]["grant"] is False
     assert kube.names("Secret") == []  # filing writes nothing to Kubernetes
     after = await _rows(pool, q, (lead.id,))
     assert "session_messaging" not in after[0][0]  # filing applies nothing

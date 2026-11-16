@@ -98,7 +98,7 @@ ADMIN_TOOLS = [
     "history_search", "history_get",
     "history_records", "usage_get", "project_create",
     "session_projects_grant", "session_projects_revoke", "preset_projects_grant",
-    "preset_projects_revoke",
+    "preset_projects_revoke", "preset_manageable_request",
     "sessions_admin_list", "session_activity", "session_events", "session_messages",
     "session_locks", "session_commands", "meta_get", "archives_list", "archives_settings_get",
     "archives_cleanup_preview", "usage_history", "usage_sessions",
