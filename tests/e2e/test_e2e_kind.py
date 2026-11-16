@@ -3507,10 +3507,15 @@ def test_kube_cluster_access_per_session_sa(api: httpx.Client, baseline: dict) -
 # Deleting a pod by hand runs the wrapper's shutdown routine (SIGTERM): the fake claude answers
 # the notice turn and the handoff turn (e2e/agent-test.scenario.json), and the orchestrator
 # delivers the handoff text to the next pod (a solo agent) or the successor (a leader). The
-# strong-limit path is not covered here: it needs a context gauge (statusLine context tokens)
-# the fake claude cannot emit, so the DB-level tests cover it (see MEMORY.md, 2026-11-13).
+# text must pass the handoff quality check (at least ORCH_HANDOFF_MIN_CHARS characters), or the
+# package says it was rejected. The pressure path is covered by the strong-path tests below.
 
-SHUTDOWN_HANDOFF_TEXT = "E2E-HANDOFF: resume work item 42 at the parser, tests are green."
+SHUTDOWN_HANDOFF_TEXT = (
+    "E2E-HANDOFF: resume work item 42 at the parser. The tokenizer rewrite is finished and its"
+    " unit tests are green, the grammar tables are regenerated, and the one step left is to wire"
+    " the new parser into the command loader and rerun the whole suite. Nothing is in flight and"
+    " no job is running. The branch is pushed and the pull request description is current."
+)
 SHUTDOWN_TIMEOUT = 420  # notice + handoff windows (30 s + 60 s), the pod stop and the new pod
 
 

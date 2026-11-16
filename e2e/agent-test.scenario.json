@@ -42,7 +42,7 @@
     ]},
     {"match": "marathon", "steps": [{"text": "Working through the marathon."}, {"sleep": 300}, {"text": "Marathon work done."}]},
     {"match": "This pod is shutting down", "steps": [{"text": "Parked my step for the shutdown."}]},
-    {"match": "Write your handoff now", "steps": [{"text": "E2E-HANDOFF: resume work item 42 at the parser, tests are green."}]},
+    {"match": "Write your handoff now", "steps": [{"text": "E2E-HANDOFF: resume work item 42 at the parser. The tokenizer rewrite is finished and its unit tests are green, the grammar tables are regenerated, and the one step left is to wire the new parser into the command loader and rerun the whole suite. Nothing is in flight and no job is running. The branch is pushed and the pull request description is current."}]},
     {"match": "self-initiated", "steps": [{"text": "Noted the self-restart."}]},
     {"match": "Continue the task where you left off", "steps": [{"text": "Resumed after the restart and finished."}]}
   ]
