@@ -640,6 +640,63 @@
         "title": "AutoCompact",
         "type": "object"
       },
+      "BackupEntry": {
+        "additionalProperties": false,
+        "description": "One named directory of a session that is restored at start and or saved at discard.\n\n`root` picks the tree (`workspace` is the session workdir, `claude` the session PVC subPath\nshared by all pods); `path` is relative to it (`.` is the whole root). `name` is a Jinja\ntemplate (surface `archive_name`) naming the backup in the object store.",
+        "properties": {
+          "after_init": {
+            "default": false,
+            "title": "After Init",
+            "type": "boolean"
+          },
+          "exclude": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Exclude",
+            "type": "array"
+          },
+          "live": {
+            "default": false,
+            "title": "Live",
+            "type": "boolean"
+          },
+          "mode": {
+            "enum": [
+              "backup",
+              "restore",
+              "both"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "root": {
+            "enum": [
+              "workspace",
+              "claude"
+            ],
+            "title": "Root",
+            "type": "string"
+          }
+        },
+        "required": [
+          "root",
+          "path",
+          "mode",
+          "name"
+        ],
+        "title": "BackupEntry",
+        "type": "object"
+      },
       "BackupRun": {
         "description": "A finished transcripts save: when it finished and the archive size.",
         "properties": {
@@ -5305,7 +5362,7 @@
         "type": "object"
       },
       "SessionBackup": {
-        "description": "What a discard would save now; each flag is true only when that save would really run.\n\n`reason` is null when both run, else `no_session_cache` (no `spec.cache`),\n`cache_not_configured` (no S3 cache configured) or the save's skip reason, the workdir's first.",
+        "description": "What a discard would save now; each flag is true only when that save would really run.\n\n`reason` is null when both run, else `no_session_cache` (no workspace backup entry),\n`cache_not_configured` (no S3 cache configured) or the save's skip reason, the workdir's first.",
         "properties": {
           "last_transcripts_backup": {
             "anyOf": [
@@ -5576,15 +5633,19 @@
             ],
             "title": "Autoclose After Seconds"
           },
-          "cache": {
+          "backup": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/WorkspaceCache"
+                "items": {
+                  "$ref": "#/components/schemas/BackupEntry"
+                },
+                "type": "array"
               },
               {
                 "type": "null"
               }
-            ]
+            ],
+            "title": "Backup"
           },
           "discard_hook_url": {
             "anyOf": [
@@ -5940,15 +6001,19 @@
             ],
             "title": "Autoclose After Seconds"
           },
-          "cache": {
+          "backup": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/WorkspaceCache"
+                "items": {
+                  "$ref": "#/components/schemas/BackupEntry"
+                },
+                "type": "array"
               },
               {
                 "type": "null"
               }
-            ]
+            ],
+            "title": "Backup"
           },
           "discard_hook_url": {
             "anyOf": [
@@ -7531,44 +7596,6 @@
           "withdrawn"
         ],
         "title": "Withdrawn",
-        "type": "object"
-      },
-      "WorkspaceCache": {
-        "additionalProperties": false,
-        "description": "`restore_key` and `save_key` are Jinja templates (surface `archive_name`).\n\nNone is unset: a preset-derived session gets `default_cache_key` for both when both are None.\nAn empty string is explicit: empty `restore_key` is a fresh start, empty `save_key` is\nrestore-only. A restore_key ending in `/` restores the newest archive under that prefix.",
-        "properties": {
-          "exclude": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "title": "Exclude",
-            "type": "array"
-          },
-          "restore_key": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Restore Key"
-          },
-          "save_key": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Save Key"
-          }
-        },
-        "title": "WorkspaceCache",
         "type": "object"
       },
       "WrapperSettings": {

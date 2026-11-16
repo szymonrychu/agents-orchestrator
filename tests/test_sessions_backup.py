@@ -19,7 +19,7 @@ from test_cache_jobs_render import (
     pod_of,
     walk,
 )
-from test_cache_restore import CACHE_KEY, Env, line
+from test_cache_restore import WS_ENTRY, Env, line
 from test_cache_save import SAVE, SaveEnv
 
 from agents_orchestrator.cache import presign as presign_module
@@ -319,9 +319,7 @@ async def test_no_sessions_save_without_session_cache(env, pool, dsn):
     from agents_orchestrator.spec import SessionSpec
 
     async with pool.connection() as conn:
-        d = await sessions.create(
-            conn, "beta", SessionSpec(cache={"restore_key": CACHE_KEY, "save_key": CACHE_KEY})
-        )
+        d = await sessions.create(conn, "beta", SessionSpec(backup=[WS_ENTRY]))
     await e.tick()
     await e.patch_restore(d.id, state="restored", reason=None, job=None)
     await e.delete(d)

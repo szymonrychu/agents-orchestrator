@@ -83,7 +83,7 @@ from agents_orchestrator.reconciler.rollout import BUSY, LEADS, Replacer, agent_
 from agents_orchestrator.reconciler.sweeper import CacheSweeper
 from agents_orchestrator.reconciler.wrapper_sessions import WrapperSessionBootstrapper
 from agents_orchestrator.settings import DiscardHook, Settings
-from agents_orchestrator.spec import parse_quantity
+from agents_orchestrator.spec import has_workspace_entry, parse_quantity
 from agents_orchestrator.tokens import tokens_for
 from agents_orchestrator.wrapper.models import describe_exception
 
@@ -984,10 +984,10 @@ class Reconciler:
     async def _quiesce(self, session: Session) -> bool:
         """Stop the agents and let the ingester drain before the history is exported or saved.
 
-        Only when an export is still owed (a hook that has not delivered) or a workspace cache
-        or transcripts save is (`spec.cache` set, no save outcome yet). The StatefulSet is scaled
-        to zero; once no agent pod is left, the ingester gets `discard_drain_seconds` to store
-        the last events of their streams. The wait is bounded by
+        Only when an export is still owed (a hook that has not delivered) or a workdir or
+        transcripts save is (a workspace backup entry, no save outcome yet). The StatefulSet is
+        scaled to zero; once no agent pod is left, the ingester gets `discard_drain_seconds` to
+        store the last events of their streams. The wait is bounded by
         `discard_quiesce_timeout_seconds` from the first pass, after which the discard goes on
         and logs what it could not confirm. True means the export and the saves may run.
         """
@@ -1150,7 +1150,7 @@ class Reconciler:
         agent = replace(agent, wrapper_session_id=None, wrapper_session_created_at=None)
         if self.bootstrapper is None or not agent.ready:
             return "done", {"cleared": True, "bootstrapped": False}
-        cache_gate = CacheGate.of(session.status.get("cache"), session.spec.cache is not None)
+        cache_gate = CacheGate.of(session.status.get("cache"), has_workspace_entry(session.spec))
         gate = InitGate.of(session.status.get("init"), session.spec.init_scripts)
         held = cache_gate if cache_gate.hold else gate
         if held.hold:  # the converge bootstraps it once the restore and the init run are over

@@ -201,10 +201,9 @@ INIT_SCRIPTS_MAX = 20
 VAULT_REFS_MAX = 100
 _VAULT_ENV_RE = re.compile(r"[A-Z_][A-Z0-9_]{0,127}")
 
-CACHE_KEY_TEMPLATE_MAX = 256
 CACHE_EXCLUDE_MAX = 50
 CACHE_EXCLUDE_ENTRY_MAX = 256
-# Always left out of a cache archive, besides spec.cache.exclude.
+# Always left out of a backup archive, besides the entry's exclude.
 CACHE_ALWAYS_EXCLUDE = (INIT_DIR,)
 # Left out of the /sessions transcript archive (fnmatch on the path relative to /sessions; `*`
 # crosses `/`, so the second entry covers `.credentials.json` at any depth). Claude credential
@@ -570,70 +569,51 @@ class WrapperSettings(_Strict):
         return v
 
 
-def default_cache_key(preset_id: uuid.UUID) -> str:
-    """Stable cache key derived from the immutable preset id (a rename keeps the cache)."""
-    digest = hashlib.sha256(b"workspace-cache:" + preset_id.bytes).hexdigest()
-    return "preset-" + digest[:16]
+BACKUP_MAX_ENTRIES = 16
+BACKUP_NAME_TEMPLATE_MAX = 256
+Direction = Literal["restore", "backup"]
 
 
-CACHE_KEY_RESERVED_PREFIX = "preset-"
-_CACHE_KEY_FIELDS = ("restore_key", "save_key")
+def _path_parts(path: str) -> tuple[str, ...]:
+    return () if path == "." else tuple(path.split("/"))
 
 
-def check_rendered_cache_name(name: str, field: str, derived_key: str | None = None) -> None:
-    """Reject a rendered name whose first segment is in the `preset-` prefix reserved for derived
-    keys (`derived_key`, the session's own preset's, is the one exception)."""
-    if name.split("/")[0].startswith(CACHE_KEY_RESERVED_PREFIX) and name != derived_key:
-        raise ValueError(
-            f"cache.{field} prefix {CACHE_KEY_RESERVED_PREFIX} is reserved for preset-derived keys"
-        )
+class BackupEntry(_Strict):
+    """One named directory of a session that is restored at start and or saved at discard.
 
-
-def check_caller_cache_key(spec: SessionSpec, derived_key: str | None = None) -> None:
-    """Reject a caller-supplied cache key in the prefix reserved for preset-derived keys.
-
-    The check is on the first segment each key template renders to against the `archive_name`
-    sample. `derived_key` is the one reserved key the spec may carry (its own preset's). Applied at
-    the API input boundary only: derived specs the server writes never pass through it.
-    """
-    if spec.cache is None:
-        return
-    for field in _CACHE_KEY_FIELDS:
-        template = getattr(spec.cache, field)
-        if not template:
-            continue
-        try:
-            name = rendering.render_name(
-                template, rendering.SAMPLES["archive_name"], allow_prefix=field == "restore_key"
-            )
-        except ValueError:
-            continue  # the grammar and template errors are validate_spec's to report
-        check_rendered_cache_name(name, field, derived_key)
-
-
-class WorkspaceCache(_Strict):
-    """`restore_key` and `save_key` are Jinja templates (surface `archive_name`).
-
-    None is unset: a preset-derived session gets `default_cache_key` for both when both are None.
-    An empty string is explicit: empty `restore_key` is a fresh start, empty `save_key` is
-    restore-only. A restore_key ending in `/` restores the newest archive under that prefix.
+    `root` picks the tree (`workspace` is the session workdir, `claude` the session PVC subPath
+    shared by all pods); `path` is relative to it (`.` is the whole root). `name` is a Jinja
+    template (surface `archive_name`) naming the backup in the object store.
     """
 
-    restore_key: str | None = None
-    save_key: str | None = None
+    root: Literal["workspace", "claude"]
+    path: str
+    mode: Literal["backup", "restore", "both"]
+    name: str
     exclude: list[str] = []
+    live: bool = False
+    after_init: bool = False
 
-    @field_validator(*_CACHE_KEY_FIELDS)
+    @field_validator("path")
     @classmethod
-    def _check_key(cls, v: str | None, info: ValidationInfo) -> str | None:
-        if v is None:
-            return v
-        if len(v) > CACHE_KEY_TEMPLATE_MAX:
-            raise ValueError(f"at most {CACHE_KEY_TEMPLATE_MAX} characters")
-        if v and not any(m in v for m in rendering.MARKERS):
+    def _check_path(cls, v: str) -> str:
+        if not v or len(v) > CACHE_EXCLUDE_ENTRY_MAX:
+            raise ValueError(f"path is 1 to {CACHE_EXCLUDE_ENTRY_MAX} characters")
+        if v.startswith("/") or ".." in v.split("/"):
+            raise ValueError(f"path {v!r} must be relative with no '..' segment")
+        if v != "." and "" in v.split("/"):
+            raise ValueError(f"path {v!r} has an empty segment")
+        return v
+
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, v: str) -> str:
+        if not v or len(v) > BACKUP_NAME_TEMPLATE_MAX:
+            raise ValueError(f"name is 1 to {BACKUP_NAME_TEMPLATE_MAX} characters")
+        if not any(m in v for m in rendering.MARKERS):
             # A plain name is checked here; a template renders in validate_spec (spec time), as
             # the sandbox is a child process and a stored spec is parsed on every read.
-            validate_name(v, allow_prefix=info.field_name == "restore_key")
+            validate_name(v, allow_prefix=False)
         return v
 
     @field_validator("exclude")
@@ -647,6 +627,66 @@ class WorkspaceCache(_Strict):
             if entry.startswith("/") or ".." in entry.split("/"):
                 raise ValueError(f"exclude {entry!r} must be relative with no '..' segment")
         return v
+
+    def directions(self) -> tuple[Direction, ...]:
+        return ("restore", "backup") if self.mode == "both" else (self.mode,)
+
+
+def _entries(spec: SessionSpec, direction: Direction) -> list[tuple[int, BackupEntry]]:
+    return [(i, e) for i, e in enumerate(spec.backup or []) if direction in e.directions()]
+
+
+def restores(spec: SessionSpec) -> list[tuple[int, BackupEntry]]:
+    """The (index, entry) pairs restored at start (mode restore or both)."""
+    return _entries(spec, "restore")
+
+
+def backups(spec: SessionSpec) -> list[tuple[int, BackupEntry]]:
+    """The (index, entry) pairs saved at discard (mode backup or both)."""
+    return _entries(spec, "backup")
+
+
+def has_workspace_entry(spec: SessionSpec) -> bool:
+    """True when any entry names the workspace root: the transcripts target rides on it."""
+    return any(e.root == "workspace" for e in spec.backup or [])
+
+
+def _contains(outer: tuple[str, ...], inner: tuple[str, ...]) -> bool:
+    return inner[: len(outer)] == outer
+
+
+def _backup_problems(spec: SessionSpec) -> list[str]:
+    """Rules across entries and the render check of each name (a dummy context)."""
+    entries = spec.backup or []
+    errors: list[str] = []
+    if len(entries) > BACKUP_MAX_ENTRIES:
+        errors.append(f"backup: at most {BACKUP_MAX_ENTRIES} entries")
+    for i, entry in enumerate(entries):
+        if entry.live and "restore" not in entry.directions():
+            errors.append(f"backup[{i}]: live needs mode restore or both")
+        if entry.after_init and "restore" not in entry.directions():
+            errors.append(f"backup[{i}]: after_init needs mode restore or both")
+        error, rendered = rendering.name_problem(entry.name)
+        if error is not None:
+            errors.append(f"backup[{i}].name: {error}")
+        elif rendered is not None:
+            try:
+                validate_name(rendered, allow_prefix=False)
+            except ValueError as exc:
+                errors.append(f"backup[{i}].name: renders to {rendered!r}: {exc}")
+    overlaps: dict[tuple[int, int], Direction] = {}
+    for direction in ("restore", "backup"):
+        picked = _entries(spec, direction)  # type: ignore[arg-type]
+        for x, (i, a) in enumerate(picked):
+            for j, b in picked[x + 1 :]:
+                pa, pb = _path_parts(a.path), _path_parts(b.path)
+                if a.root == b.root and (_contains(pa, pb) or _contains(pb, pa)):
+                    overlaps.setdefault((i, j), direction)  # type: ignore[arg-type]
+    errors.extend(
+        f"backup[{i}] and backup[{j}]: paths overlap in the {d} direction of the same root"
+        for (i, j), d in overlaps.items()
+    )
+    return errors
 
 
 class UsageQuota(_Strict):
@@ -777,8 +817,9 @@ class SessionSpec(BaseModel):
     docker_storage: Quantity | None = None
     docker_cpu: Quantity | None = None
     docker_memory: Quantity | None = None
-    # Workspace cache in S3; presence enables it. Sparse: unset is not stored or dumped.
-    cache: WorkspaceCache | None = None
+    # Named directory backups in S3, restored at start and saved at discard; presence enables
+    # them. Sparse: unset is not stored or dumped. No built-in default entries.
+    backup: list[BackupEntry] | None = None
     # env names of a stored session's legacy pins (`legacy_context`); never input or output
     _legacy_env: frozenset[str] = PrivateAttr(default_factory=frozenset)
 
@@ -1023,20 +1064,11 @@ def _template_problems(spec: SessionSpec) -> list[str]:
             fields.append(
                 ("wrapper.restart_continue_prompt", wrapper.restart_continue_prompt, "preset_text")
             )
-    if spec.cache is not None:
-        for field in _CACHE_KEY_FIELDS:
-            if getattr(spec.cache, field):
-                fields.append((f"cache.{field}", getattr(spec.cache, field), "archive_name"))
     errors: list[str] = []
     for name, template, surface in fields:
         error, rendered = rendering.problem(template, surface, spec.plain_env)
         if error is None and rendered is not None:
-            if surface == "archive_name":
-                try:
-                    validate_name(rendered, allow_prefix=name == "cache.restore_key")
-                except ValueError as exc:
-                    error = f"renders to {rendered!r}: {exc}"
-            elif name == "wrapper.auto_compact.instructions" and (
+            if name == "wrapper.auto_compact.instructions" and (
                 _INSTRUCTIONS_CONTROL.search(rendered) or len(rendered) > INSTRUCTIONS_MAX
             ):
                 error = "renders to more than one line, control characters or too many characters"
@@ -1051,7 +1083,7 @@ def validate_spec(spec: SessionSpec, settings: Settings, stored: SessionSpec | N
     """Validate a spec.
 
     `stored` stays for the preset PUT: a model, effort or image that has since left the settings
-    lists, and a cache, kube_cluster_access, kube_namespace_access or docker whose setting has
+    lists, and a backup, kube_cluster_access, kube_namespace_access or docker whose setting has
     since been unset, is accepted only when unchanged from the stored preset spec. Scheduling a
     session passes no `stored` and validates fully.
     """
@@ -1082,11 +1114,12 @@ def validate_spec(spec: SessionSpec, settings: Settings, stored: SessionSpec | N
     ):
         errors.append(f"effort {spec.effort!r} is not one of: {', '.join(settings.efforts)}")
     if (
-        spec.cache is not None
+        spec.backup
         and not settings.cache_available
-        and (stored is None or spec.cache != stored.cache)
+        and (stored is None or spec.backup != stored.backup)
     ):
-        errors.append("workspace cache is not configured (ORCH_CACHE_S3_BUCKET is unset)")
+        errors.append("backups are not configured (ORCH_CACHE_S3_BUCKET is unset)")
+    errors.extend(_backup_problems(spec))
     if (
         spec.kube_cluster_access
         and not settings.kube_cluster_access_available

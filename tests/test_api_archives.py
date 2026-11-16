@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 import httpx
 import pytest
+from backup_helpers import workspace_entries
 from test_api_sessions import assert_error, client_for, make_settings
 
 from agents_orchestrator.api import archives as archives_mod
@@ -121,7 +122,7 @@ async def test_api_credentials_are_the_api_pair_not_the_reconciler_pair(pool, ds
 async def test_list_pages_and_reports_references(pool, dsn, s3):
     s3.objects = [obj(f"proj/{i:02d}") for i in range(5)] + [obj("other/x")]
     async with pool.connection() as conn:
-        spec = SessionSpec(cache={"restore_key": "proj/00", "save_key": ""})
+        spec = SessionSpec(backup=workspace_entries("proj/00"))
         await sessions.create(conn, "alpha", spec)
     async with client(pool, dsn) as c:
         first = (await c.get(A, params={"limit": 3})).json()
@@ -239,7 +240,7 @@ async def test_preview_matches_the_planner_and_includes_the_last_sweep(pool, dsn
 async def test_preview_never_lists_a_protected_key(pool, dsn, s3):
     s3.objects = [obj("proj/z", NOW - timedelta(days=1)), obj("proj/b"), obj("proj/a")]
     async with pool.connection() as conn:
-        spec = SessionSpec(cache={"restore_key": "proj/b", "save_key": ""})
+        spec = SessionSpec(backup=workspace_entries("proj/b"))
         await sessions.create(conn, "alpha", spec)
     async with client(pool, dsn, cache_keep_newest=1) as c:
         body = (await c.get("/api/v1/cache/cleanup/preview")).json()
@@ -265,7 +266,7 @@ async def test_delete_removes_unreferenced_old_archives(pool, dsn, s3, caplog):
 async def test_delete_refuses_referenced_young_missing_and_invalid_keys(pool, dsn, s3):
     s3.objects = [obj("proj/live"), obj("proj/young", FRESH), obj("proj/ok")]
     async with pool.connection() as conn:
-        spec = SessionSpec(cache={"restore_key": "proj/live", "save_key": ""})
+        spec = SessionSpec(backup=workspace_entries("proj/live"))
         await sessions.create(conn, "alpha", spec)
     keys = [
         f"{PRE}proj/live.tar.zst",
@@ -296,7 +297,7 @@ async def test_delete_rechecks_the_protected_set_server_side(pool, dsn, s3, monk
         first = await c.request("DELETE", A, json={"keys": [f"{PRE}proj/a.tar.zst"]})
         assert first.json()["deleted"] == [f"{PRE}proj/a.tar.zst"]
         async with pool.connection() as conn:
-            spec = SessionSpec(cache={"restore_key": "proj/a", "save_key": ""})
+            spec = SessionSpec(backup=workspace_entries("proj/a"))
             await sessions.create(conn, "newcomer", spec)
         s3.deleted.clear()
         again = await c.request("DELETE", A, json={"keys": [f"{PRE}proj/a.tar.zst"]})

@@ -1074,10 +1074,8 @@ def test_cache_keys_migration_splits_the_single_key(empty_dsn, tmp_path):
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         c.execute(sql)
     assert stored() == (sessions, presets)
-    from agents_orchestrator.spec import SessionSpec
-
-    parsed = SessionSpec.model_validate(sessions["keyed"])
-    assert parsed.cache.restore_key == parsed.cache.save_key == "k1"
+    # the stored `cache` shape is no longer a SessionSpec field (spec.backup replaced it), so the
+    # row is checked as plain JSON above, not parsed
 
 
 def test_self_restart_migration_adds_nullable_column_idempotently(empty_dsn, tmp_path):

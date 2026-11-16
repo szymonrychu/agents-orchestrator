@@ -35,11 +35,10 @@ from agents_orchestrator.spec import (
     Ref,
     SessionSpec,
     SpecInvalid,
-    check_caller_cache_key,
-    check_rendered_cache_name,
-    default_cache_key,
+    backups,
     fill_resource_defaults,
     generated_slug,
+    has_workspace_entry,
     init_scripts_hash,
     validate_slug,
     validate_spec,
@@ -115,12 +114,12 @@ def session_backup(session: repo.Session, settings: Settings) -> schemas.Session
     """What the discard would save, by the reconciler's own save rule (`save_skip`)."""
     cache = session.status.get("cache")
     cache = cache if isinstance(cache, dict) else {}
-    if session.spec.cache is None:
+    if not has_workspace_entry(session.spec):
         skips = ["no_session_cache"] * 2
     elif not settings.cache_available:
         skips = ["cache_not_configured"] * 2
     else:
-        restore_only = not session.spec.cache.save_key
+        restore_only = not any(e.root == "workspace" for _, e in backups(session.spec))
         skips = [
             save_skip(True, session.status, target, restore_only=restore_only)
             for target in ("workdir", "sessions")
@@ -255,18 +254,12 @@ def check_spec(
     spec: SessionSpec,
     settings: Settings,
     stored: SessionSpec | None = None,
-    derived_cache_key: str | None = None,
 ) -> SessionSpec:
     """Validate the spec and return it with empty resource keys filled from the defaults.
 
     A model, effort or image equal to the one in `stored` is accepted even when it has left the
     settings lists; scheduling and preset creation pass no `stored` and validate fully.
-    `derived_cache_key` is the one `preset-` cache key the spec may carry (its own preset's).
     """
-    try:
-        check_caller_cache_key(spec, derived_cache_key)
-    except ValueError as exc:
-        raise ApiError(422, "invalid_request", str(exc)) from None
     try:
         validate_spec(spec, settings, stored)
     except SpecInvalid as exc:
@@ -437,13 +430,6 @@ async def create(
         body_spec = body.spec
         if body_spec.vault_refs:
             raise vault_refs_not_allowed(sorted(body_spec.vault_refs))
-        cache = body_spec.cache
-        if cache is not None and cache.restore_key is None and cache.save_key is None:
-            raise ApiError(
-                422,
-                "invalid_request",
-                "cache.restore_key or cache.save_key is required without a preset",
-            )
         spec = await run_in_threadpool(check_spec, body_spec, settings)
     if body.slug is not None:
         try:
@@ -585,29 +571,26 @@ def check_archive_names(
     spec: SessionSpec,
     preset_name: str | None,
     created_by_service: str | None,
-    derived_key: str | None = None,
+    project: str,
 ) -> None:
-    """Render both cache key templates with this session's real context; 422 on a bad name.
+    """Render every backup entry name with this session's real context; 422 on a bad name.
 
     `validate_spec` already rendered them against the preview sample, which cannot see a slug,
-    preset name or user that squeezes to nothing (`{{ preset_name }}` for a name of only symbols).
-    The save name is rendered again at save time with the clock then.
+    preset name or project that squeezes to nothing (`{{ preset_name }}` for a name of only
+    symbols). A `sha256` call renders as a placeholder here; names render again at restore and
+    save time.
     """
-    cache = spec.cache
-    if cache is None:
+    if not spec.backup:
         return
-    context = rendering.archive_context(slug, preset_name, created_by_service, datetime.now(UTC))
-    for field, template in (("restore_key", cache.restore_key), ("save_key", cache.save_key)):
-        if not template:
-            continue
+    context = rendering.archive_context(
+        slug, preset_name, created_by_service, datetime.now(UTC), project
+    )
+    for i, entry in enumerate(spec.backup):
         try:
-            name = rendering.render_name(template, context, allow_prefix=field == "restore_key")
-            check_rendered_cache_name(name, field, derived_key)
-        except ValueError as exc:  # ArchiveNameError is a ValueError
-            if not isinstance(exc, ArchiveNameError):
-                raise ApiError(422, "invalid_request", str(exc)) from None
+            rendering.render_name(entry.name, context, dry=True)
+        except ArchiveNameError as exc:
             where = f" (line {exc.line})" if exc.line else ""
-            raise ApiError(422, "invalid_request", f"cache.{field}{where}: {exc}") from None
+            raise ApiError(422, "invalid_request", f"backup[{i}].name{where}: {exc}") from None
 
 
 async def _insert(conn, slug: str, spec: SessionSpec, **provenance) -> repo.Session:
@@ -617,7 +600,7 @@ async def _insert(conn, slug: str, spec: SessionSpec, **provenance) -> repo.Sess
         spec,
         provenance.get("preset_name"),
         provenance.get("created_by_service"),
-        default_cache_key(provenance["preset_id"]) if provenance.get("preset_id") else None,
+        provenance.get("project", projects.DEFAULT),
     )
     try:
         return await repo.create(conn, slug, spec, **provenance)
@@ -693,16 +676,11 @@ async def _create_from_preset(
             check_spec,
             SessionSpec.model_validate(raw),
             settings,
-            derived_cache_key=default_cache_key(preset.id),
         )
     except ValidationError as exc:
         raise ApiError(422, "invalid_request", f"preset '{preset.name}': {exc}") from None
     except ApiError as exc:
         raise ApiError(422, "invalid_request", f"preset '{preset.name}': {exc.message}") from None
-    if spec.cache is not None and spec.cache.restore_key is None and spec.cache.save_key is None:
-        derived = default_cache_key(preset.id)
-        cache = spec.cache.model_copy(update={"restore_key": derived, "save_key": derived})
-        spec = spec.model_copy(update={"cache": cache})
     provenance = {
         "preset_id": preset.id,
         "preset_name": preset.name,
@@ -724,7 +702,7 @@ async def _create_from_preset(
             spec,
             preset.name,
             created_by_service,
-            default_cache_key(preset.id),
+            project,
         )
         try:
             return await repo.create(conn, generated, spec, **provenance)

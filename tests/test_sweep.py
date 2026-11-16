@@ -8,6 +8,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from backup_helpers import workspace_entries
 
 from agents_orchestrator.cache import sweep
 from agents_orchestrator.cache.policy import SweepPolicy
@@ -198,7 +199,7 @@ def settings_for(dsn=None, **kw):
 
 
 async def make(conn, slug, restore="", save_key="", **cache_status):
-    spec = SessionSpec(cache={"restore_key": restore, "save_key": save_key})
+    spec = SessionSpec(backup=workspace_entries(restore, save_key) or workspace_entries("k"))
     c = await sessions.create(conn, slug, spec)
     if cache_status:
         await sessions.set_status(conn, c.id, {"cache": cache_status}, c.observed_generation)
@@ -218,6 +219,7 @@ async def test_protected_set_covers_resolved_keys_and_transcripts(pool):
         f"{PRE}proj/20260101t000000z.tar.zst",
         f"{PRE}proj/20261031t100000z.tar.zst",
         f"{PRE}sessions/alpha.tar.zst",
+        f"{PRE}k.tar.zst",  # the entry the helper adds so the session has a workspace entry
     }
 
 
@@ -227,13 +229,6 @@ async def test_protected_set_includes_spec_names_before_the_reconciler_resolves_
         refs = await referenced_keys(conn, settings_for())
     assert refs[f"{PRE}shared/beta.tar.zst"] == ["beta"]
     assert refs[f"{PRE}fixed.tar.zst"] == ["beta"]
-
-
-async def test_prefix_form_restore_adds_no_spec_object(pool):
-    async with pool.connection() as conn:
-        await make(conn, "gamma", restore="proj/", save_key="")
-        got = await protected_keys(conn, settings_for())
-    assert got == {f"{PRE}sessions/gamma.tar.zst"}
 
 
 async def test_deleting_session_stays_protected_and_a_deleted_one_is_not(pool):

@@ -50,10 +50,14 @@ def make_session(session_id: uuid.UUID = SESSION_ID, **spec: Any) -> Session:
         spec=SessionSpec.model_validate(
             {
                 "init_scripts": ["echo hi"],
-                "cache": {
-                    "restore_key": "preset-0123456789abcdef",
-                    "save_key": "preset-0123456789abcdef",
-                },
+                "backup": [
+                    {
+                        "root": "workspace",
+                        "path": ".",
+                        "mode": "both",
+                        "name": "preset-0123456789abcdef",
+                    }
+                ],
                 **spec,
             }
         ),

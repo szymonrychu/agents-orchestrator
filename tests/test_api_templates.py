@@ -51,7 +51,7 @@ PLAN_KEYS = {
     "web_chat_start": {"session_slug", "preset_name", "user", "now"},
     "preset_text": {"session_slug", "preset_name", "env", "now"},
     "init_script": {"session_slug", "preset_name", "env"},
-    "archive_name": {"session_slug", "preset_name", "now", "date", "user"},
+    "archive_name": {"project", "session_slug", "preset_name", "now", "date", "user"},
 }
 
 

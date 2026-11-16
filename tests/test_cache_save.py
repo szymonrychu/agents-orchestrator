@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 
 import pytest
 import pytest_asyncio
-from test_cache_restore import CACHE_KEY, RESTORE, Env, line
+from test_cache_restore import CACHE_KEY, RESTORE, WS_ENTRY, Env, line
 
 from agents_orchestrator.cache.save_rule import save_skip
 from agents_orchestrator.db import sessions
@@ -219,9 +219,7 @@ async def test_save_skipped_when_cache_unavailable_now(pool, dsn):
     async with pool.connection() as conn:
         from agents_orchestrator.spec import SessionSpec
 
-        c = await sessions.create(
-            conn, "alpha", SessionSpec(cache={"restore_key": CACHE_KEY, "save_key": CACHE_KEY})
-        )
+        c = await sessions.create(conn, "alpha", SessionSpec(backup=[WS_ENTRY]))
     await e.tick()
     await e.patch_restore(c.id, state="restored", reason=None, job=None)
     await e.delete(c)
