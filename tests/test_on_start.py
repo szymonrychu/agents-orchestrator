@@ -69,10 +69,8 @@ TAIL_TOOLS = [
 ]
 # Allowed before the pinned plugin ships them; add a name here when the allow-list leads the
 # plugin pin and remove it when the pin offers the tool (project room T-117 O9; project grants
-# T-120).
-PLUGIN_PENDING: set[str] = {
-    "handoff_submit",  # until the plugins pin ships it (step 18)
-}
+# T-120). Empty while the pin (v0.53.0) offers every allowed tool.
+PLUGIN_PENDING: set[str] = set()
 ALONE_TOOLS = ["me", "handoff_submit", *TAIL_TOOLS]
 PROPOSAL = [
     "proposal_create",

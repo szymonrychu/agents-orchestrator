@@ -217,7 +217,8 @@ class Settings(BaseSettings):
     #: A session's `spec.inactivity` overrides either one.
     inactivity_reminder_seconds: int = 0
     inactivity_close_seconds: int = 0
-    #: Seconds the leader has to hand off after the strong-limit notice; 0 means no window.
+    #: Seconds the leader has to answer an orchestrator close ask (inactivity or autoclose);
+    #: 0 means no window.
     inactivity_handoff_seconds: int = Field(default=300, ge=0, le=3600)
     #: Runaway guard: limits per task (since the last delivered message); 0 turns one off. A
     #: session's `spec.runaway` overrides each.
@@ -230,17 +231,17 @@ class Settings(BaseSettings):
     #: oldest lines are dropped first), and the cap on each tool output in it.
     handover_transcript_bytes: int = Field(default=16384, ge=8192, le=1048576)
     #: Tokens a leader may work on top of its context at the start of its leadership before it
-    #: is due to hand over (the strong limit always wins), and the minimum time as leader before
-    #: a weak handover note is sent.
+    #: reaches context-pressure level L1 (L2 and L3 always apply), and the minimum time as leader
+    #: before L1 starts.
     handover_budget_tokens: int = Field(default=150000, ge=10000, le=2000000)
     handover_min_tenure_seconds: int = Field(default=1200, ge=0, le=86400)
     handover_output_chars: int = Field(default=500, ge=100, le=4000)
-    #: The strong limit sits at the smaller of: compact minus this many percent points, and
+    #: The L2 (hand off) level sits at the smaller of: compact minus this many percent points, and
     #: compact minus this many tokens of headroom (floored at 0).
     handover_strong_margin_pct: int = Field(default=10, ge=1, le=50)
     handover_strong_headroom_tokens: int = Field(default=60000, ge=0, le=500000)
     # L3 (critical): compact point minus this many points, or minus this many tokens, whichever
-    # is earlier; never below the strong point.
+    # is earlier; never below the L2 point.
     handover_critical_margin_pct: int = Field(default=5, ge=1, le=50)
     handover_critical_headroom_tokens: int = Field(default=25000, ge=0, le=500000)
     #: Handoff submit quality check and in-flight gate (handoff_quality.py, handoff_gate.py):
