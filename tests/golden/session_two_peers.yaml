@@ -36,11 +36,11 @@
       app.kubernetes.io/managed-by: agents-orchestrator
   data:
     config.yaml: "server:\n  auth_token: ${CCW_AUTH_TOKEN}\npaths:\n  workdir_root:\
-      \ /workdir\n  sessions_root: /sessions\nclaude:\n  passthrough_env:\n  - AAA\n\
-      \  - GITHUB_TOKEN\n  - ORCH_AGENT_TOKEN\n  - ORCH_AGENT_URL\n  - ORCH_SESSION_ID\n\
-      \  - POD_NAME\n  secret_env: []\n  env:\n    claude_code_oauth_token: ${CLAUDE_CODE_OAUTH_TOKEN}\n\
-      \    disable_autoupdater: true\n    claude_autocompact_pct_override: 95\n  model:\
-      \ opus\n  effort: high\n  main_agent_only_tools:\n  - mcp__any-mcp__orchestrator_*\n\
+      \ /workdir\n  sessions_root: /sessions\n  shared_claude_dir: /claude\nclaude:\n\
+      \  passthrough_env:\n  - AAA\n  - GITHUB_TOKEN\n  - ORCH_AGENT_TOKEN\n  - ORCH_AGENT_URL\n\
+      \  - ORCH_SESSION_ID\n  - POD_NAME\n  secret_env: []\n  env:\n    claude_code_oauth_token:\
+      \ ${CLAUDE_CODE_OAUTH_TOKEN}\n    disable_autoupdater: true\n    claude_autocompact_pct_override:\
+      \ 95\n  model: opus\n  effort: high\n  main_agent_only_tools:\n  - mcp__any-mcp__orchestrator_*\n\
       \  permissions:\n    deny:\n    - EnterPlanMode\n    - ExitPlanMode\n    - AskUserQuestion\n\
       \  mcp_servers:\n    any-mcp:\n      type: stdio\n      command: /opt/any-mcp/bin/any-mcp\n\
       \      args:\n      - --config\n      - /opt/any-mcp/etc/any-mcp.yaml\nhooks:\n\
@@ -49,17 +49,18 @@
       \ 1\n  resume_on_start: true\n  idle_timeout_seconds: 0\n  ask_user_question:\
       \ deny\n  restart_continue_prompt: Claude was restarted. Continue the task where\
       \ you left\n    off.\n  interrupt_settle_seconds: 20.0\n  commands:\n    client:\n\
-      \    - compact\n    - clear\n    permission_hold_seconds: 1800.0\n    dialog_auto_dismiss_seconds:\
-      \ 300.0\nprompts:\n  system_append: 'The AskUserQuestion tool is disabled and\
-      \ nobody answers interactive\n    questions. When you need a decision or information\
-      \ from the user, ask in writing\n    in your reply: write a numbered list of\
-      \ questions, and after each question give\n    your recommended answer, worded\
-      \ so that replying \"yes\" accepts it. Then stop and\n    wait for the reply.\
-      \ Never wait on an interactive question tool.'\nlimits:\n  shutdown_timeout_seconds:\
-      \ 90\nnotes:\n  enabled: true\npeers:\n  enabled: true\n  name: ${POD_NAME}\n\
-      \  advertise_url: ${CCW_PEER_URL}\n  token: ${CCW_PEER_TOKEN}\n  static:\n \
-      \ - http://agent-alpha-0.agent-alpha.agents.svc.cluster.local:8080\n  - http://agent-alpha-1.agent-alpha.agents.svc.cluster.local:8080\n\
-      guard:\n  max_stop_continuations: 25\n  max_agent_spawns: 300\n  tool_failure_repeats:\
+      \    - compact\n    - clear\n    - reload-skills\n    permission_hold_seconds:\
+      \ 1800.0\n    dialog_auto_dismiss_seconds: 300.0\nprompts:\n  system_append:\
+      \ 'The AskUserQuestion tool is disabled and nobody answers interactive\n   \
+      \ questions. When you need a decision or information from the user, ask in writing\n\
+      \    in your reply: write a numbered list of questions, and after each question\
+      \ give\n    your recommended answer, worded so that replying \"yes\" accepts\
+      \ it. Then stop and\n    wait for the reply. Never wait on an interactive question\
+      \ tool.'\nlimits:\n  shutdown_timeout_seconds: 90\nnotes:\n  enabled: true\n\
+      peers:\n  enabled: true\n  name: ${POD_NAME}\n  advertise_url: ${CCW_PEER_URL}\n\
+      \  token: ${CCW_PEER_TOKEN}\n  static:\n  - http://agent-alpha-0.agent-alpha.agents.svc.cluster.local:8080\n\
+      \  - http://agent-alpha-1.agent-alpha.agents.svc.cluster.local:8080\nguard:\n\
+      \  max_stop_continuations: 25\n  max_agent_spawns: 300\n  tool_failure_repeats:\
       \ 3\nshutdown:\n  handoff:\n    enabled: true\n    notice_seconds: 120\n   \
       \ handoff_seconds: 180\n    idle_proceed_seconds: 60\n    notice_prompt: 'This\
       \ pod is shutting down. Finish or park your current step now:\n      commit\
@@ -125,7 +126,7 @@
           agents.szymonrichert.pl/session: alpha
           app.kubernetes.io/managed-by: agents-orchestrator
         annotations:
-          agents.szymonrichert.pl/config-hash: 519e4406f7bba5ac1aa4a456a1ceb1ad1bc71d005f2168363b2f4bc1dd2467fd
+          agents.szymonrichert.pl/config-hash: b1406ba110728dfcd14586f2b36df8f72936189a409ff43e1e5b60401036099f
       spec:
         imagePullSecrets:
         - name: regcred
@@ -198,6 +199,9 @@
           - name: workspace
             mountPath: /sessions
             subPathExpr: sessions/$(POD_NAME)
+          - name: workspace
+            mountPath: /claude
+            subPath: claude
           - name: mise
             mountPath: /opt/mise
           - name: any-mcp

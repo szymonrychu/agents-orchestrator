@@ -1,4 +1,4 @@
-"""The workspace cache restore runs before init and the Claude sessions (D1, D3, D11)."""
+"""The backup entry restore runs before init and the Claude sessions (D1, D3, D11; S-68)."""
 
 from __future__ import annotations
 
@@ -13,10 +13,16 @@ from fakes.fake_wrapper import FakeWrapper
 from psycopg.rows import dict_row
 
 from agents_orchestrator.db import agents as agents_repo
+from agents_orchestrator.db import backups as backups_repo
 from agents_orchestrator.db import sessions
 from agents_orchestrator.k8s.kube import KubeError
 from agents_orchestrator.reconciler import Reconciler
-from agents_orchestrator.reconciler.cache import CacheGate, restore_job_name
+from agents_orchestrator.reconciler.cache import (
+    RESTORE_POST,
+    RESTORE_PRE,
+    CacheGate,
+    job_name,
+)
 from agents_orchestrator.reconciler.checks import DEADLINE_GRACE_SECONDS
 from agents_orchestrator.reconciler.init import init_job_name
 from agents_orchestrator.settings import Settings
@@ -27,9 +33,10 @@ from agents_orchestrator.wrapper.client import WrapperClient
 pytestmark = pytest.mark.asyncio
 
 KEY = "k" * 32
-CACHE_KEY = "preset-0123456789abcdef"
+CACHE_KEY = "proj/workspace"
 WS_ENTRY = {"root": "workspace", "path": ".", "mode": "both", "name": CACHE_KEY}
-RESTORE = restore_job_name("alpha")
+RESTORE = job_name("alpha", RESTORE_PRE)
+RESTORE_AFTER = job_name("alpha", RESTORE_POST)
 INIT = init_job_name("alpha")
 SESSIONS_MISS = {
     "state": "miss",
@@ -41,8 +48,39 @@ SESSIONS_MISS = {
 }
 
 
-def line(outcome: str, nbytes: int | None = None, reason: str | None = None) -> str:
-    return "noise\n" + json.dumps({"outcome": outcome, "bytes": nbytes, "reason": reason})
+def res(state: str, index: int = 0, **fields) -> dict:
+    return {"index": index, "state": state, **fields}
+
+
+def line(*results: dict | str, **fields) -> str:
+    """The Job's last log line: `line("restored", size=5)` or `line(res(...), res(...))`."""
+    if len(results) == 1 and isinstance(results[0], str):
+        results = (res(results[0], **fields),)
+    return "noise\n" + json.dumps({"entries": list(results)})
+
+
+async def seed_backup(pool, name: str = CACHE_KEY) -> str:
+    """A current version of `name`; returns its object key."""
+    async with pool.connection() as conn:
+        existing = await backups_repo.current(conn, name)
+        if existing is not None:
+            return existing.object_key
+        _, version = await backups_repo.record_save(
+            conn,
+            name=name,
+            object_key=f"workspace-cache/b/{name}/20260101t000000z-seed-aaaa.tar.zst",
+            size=1,
+            digest="d" * 64,
+            manifest=None,
+            base_version=None,
+            origin="save",
+            session_slug=None,
+            preset_id=None,
+            project=None,
+            created_by="seed",
+            orphan=False,
+        )
+    return version.object_key
 
 
 class Env:
@@ -72,6 +110,7 @@ class Env:
         """A new session row, with the workspace cache unless `cache` is False."""
         if cache:
             spec["backup"] = [WS_ENTRY]
+            await seed_backup(self.pool)
         async with self.pool.connection() as conn:
             c = await sessions.create(conn, slug, SessionSpec(**spec))
         if self.fake is not None:
@@ -87,7 +126,7 @@ class Env:
         c = await self.create(slug, cache, **spec)
         if not cache:
             return c
-        status = {**c.status, "cache": {"sessions_restore": SESSIONS_MISS}}
+        status = {**c.status, "backup": {"transcripts": {"restore": SESSIONS_MISS}}}
         async with self.pool.connection() as conn:
             return await sessions.set_status(conn, c.id, status, c.observed_generation)
 
@@ -99,17 +138,28 @@ class Env:
         async with self.pool.connection() as conn:
             return (await sessions.get(conn, session_id)).status
 
-    async def cache(self, session_id) -> dict | None:
-        return (await self.status(session_id)).get("cache")
+    async def backup(self, session_id) -> dict | None:
+        return (await self.status(session_id)).get("backup")
 
-    async def patch_restore(self, session_id, **fields) -> None:
+    async def run(self, session_id, key: str = RESTORE_PRE) -> dict | None:
+        """The run record of `key` (a transcripts run for the two transcripts keys)."""
+        from agents_orchestrator.reconciler.cache import get_run
+
+        return get_run(await self.status(session_id), key)
+
+    async def entry(self, session_id, index: int = 0) -> dict:
+        return ((await self.backup(session_id)) or {})["entries"][index]
+
+    async def patch_run(self, session_id, key: str = RESTORE_PRE, **fields) -> None:
+        from agents_orchestrator.reconciler.cache import _with_run, get_run
+
         async with self.pool.connection() as conn:
             c = await sessions.get(conn, session_id)
-            status = dict(c.status)
-            cache = dict(status["cache"])
-            cache["restore"] = {**cache["restore"], **fields}
-            status["cache"] = cache
-            await sessions.set_status(conn, session_id, status, c.observed_generation)
+            run = {**get_run(c.status, key), **fields}
+            backup = _with_run(c.status.get("backup") or {}, key, run)
+            await sessions.set_status(
+                conn, session_id, {**c.status, "backup": backup}, c.observed_generation
+            )
 
     async def agents(self, session_id) -> list[agents_repo.Agent]:
         async with self.pool.connection() as conn:
@@ -142,7 +192,7 @@ async def wenv(pool, dsn, fake) -> Env:
 async def test_no_cache_no_job(env):
     c = await env.session("alpha", cache=False)
     await env.tick(2)
-    assert await env.cache(c.id) is None
+    assert await env.backup(c.id) is None
     assert not env.kube.has("Job", RESTORE)
     assert env.creates(RESTORE) == 0
 
@@ -150,63 +200,48 @@ async def test_no_cache_no_job(env):
 async def test_restore_job_created_before_init(env):
     c = await env.session("alpha", init_scripts=["echo a"])
     await env.tick()
-    cache = await env.cache(c.id)
-    assert cache["restore_resolved"] == f"workspace-cache/{CACHE_KEY}.tar.zst"
-    restore = cache["restore"]
-    assert restore["state"] == "running" and restore["job"] == RESTORE
-    assert restore["started_at"] and restore["finished_at"] is None
-    assert restore["bytes"] is None and restore["reason"] is None
+    run = await env.run(c.id)
+    assert run["state"] == "running" and run["job"] == RESTORE
+    assert run["started_at"] and run["finished_at"] is None and run["reason"] is None
+    assert [p["name"] for p in run["plan"]] == [CACHE_KEY]
+    entry = await env.entry(c.id)
+    assert entry["restore"]["state"] == "running" and entry["version"] == run["plan"][0]["version"]
     job = env.kube.get("Job", RESTORE)
     env_vars = {
         e["name"]: e["value"] for e in job["spec"]["template"]["spec"]["containers"][0]["env"]
     }
-    assert env_vars["CACHE_URL"].startswith("http://bucket.rgw.example:80/workspace-cache/")
-    assert "X-Amz-Signature" in env_vars["CACHE_URL"]
-    assert "X-Amz-Algorithm" in env_vars["CACHE_URL"]
+    (item,) = json.loads(env_vars["CACHE_ENTRIES"])
+    assert item["url"].startswith("http://bucket.rgw.example:80/workspace-cache/b/proj/workspace/")
+    assert "X-Amz-Signature" in item["url"] and item["version"] == run["plan"][0]["version"]
     await env.tick(2)  # still running: no init Job
     assert not env.kube.has("Job", INIT)
     assert env.creates(INIT) == 0
     assert (await env.status(c.id))["phase"] == "pending"
-    assert "cache restore running" in (await env.status(c.id))["message"]
+    assert "backup restore pre running" in (await env.status(c.id))["message"]
 
 
 async def test_restored_then_init_runs(env):
     c = await env.session("alpha", init_scripts=["echo a"])
     await env.tick()
-    env.kube.finish_job(RESTORE, exit_code=0, log=line("restored", 4096))
+    env.kube.finish_job(RESTORE, exit_code=0, log=line("restored", size=4096))
     await env.tick()
-    restore = (await env.cache(c.id))["restore"]
-    assert restore["state"] == "restored" and restore["bytes"] == 4096
-    assert restore["finished_at"] and restore["reason"] is None
+    run = await env.run(c.id)
+    assert run["state"] == "done" and run["finished_at"] and run["reason"] is None
+    assert (await env.entry(c.id))["restore"]["state"] == "restored"
     assert not env.kube.has("Job", RESTORE)
     await env.tick()
     assert env.kube.has("Job", INIT)
 
 
-async def test_miss_is_not_degraded(wenv, fake):
+async def test_missing_and_unreadable_are_not_degraded(wenv, fake):
     c = await wenv.session("alpha")
     await wenv.tick()
-    wenv.kube.finish_job(RESTORE, exit_code=0, log=line("miss"))
+    wenv.kube.finish_job(RESTORE, exit_code=0, log=line("unreadable", reason="ExtractError: bad"))
     await wenv.tick(2)
-    restore = (await wenv.cache(c.id))["restore"]
-    assert restore["state"] == "miss" and restore["bytes"] is None
+    assert (await wenv.entry(c.id))["restore"]["state"] == "unreadable"
     assert len(fake.sessions) == 1
     status = await wenv.status(c.id)
-    assert status["phase"] == "ready" and "cache" not in status["message"]
-
-
-async def test_reset_is_not_degraded(wenv, fake):
-    c = await wenv.session("alpha")
-    await wenv.tick()
-    wenv.kube.finish_job(
-        RESTORE, exit_code=0, log=line("reset", reason="extract_failed: ExtractError: bad")
-    )
-    await wenv.tick(2)
-    restore = (await wenv.cache(c.id))["restore"]
-    assert restore["state"] == "reset" and restore["reason"].startswith("extract_failed: ")
-    assert len(fake.sessions) == 1
-    status = await wenv.status(c.id)
-    assert status["phase"] == "ready" and "cache" not in status["message"]
+    assert status["phase"] == "ready" and "backup" not in status["message"]
 
 
 async def test_failed_restore_degrades(wenv, fake):
@@ -214,20 +249,21 @@ async def test_failed_restore_degrades(wenv, fake):
     await wenv.tick()
     wenv.kube.finish_job(RESTORE, exit_code=1, log=line("failed", reason="http 403"))
     await wenv.tick(2)
-    restore = (await wenv.cache(c.id))["restore"]
-    assert (restore["state"], restore["reason"]) == ("failed", "http 403")
+    run = await wenv.run(c.id)
+    assert (run["state"], run["reason"]) == ("failed", "http 403")
+    assert (await wenv.entry(c.id))["restore"]["state"] == "failed"
     assert not wenv.kube.has("Job", RESTORE)
     assert len(fake.sessions) == 1  # the sessions start anyway
     status = await wenv.status(c.id)
     assert status["phase"] == "degraded"
-    assert "cache restore failed: http 403" in status["message"]
+    assert "backup restore pre failed: http 403" in status["message"]
 
     # no JSON line at all: the exit code
     d = await wenv.session("beta")
     await wenv.tick()
-    wenv.kube.finish_job(restore_job_name("beta"), exit_code=137, log="killed")
+    wenv.kube.finish_job(job_name("beta", RESTORE_PRE), exit_code=137, log="killed")
     await wenv.tick()
-    assert (await wenv.cache(d.id))["restore"]["reason"] == "exit 137"
+    assert (await wenv.run(d.id))["reason"] == "exit 137"
 
 
 async def test_unparseable_outcome_is_never_success(env):
@@ -235,18 +271,18 @@ async def test_unparseable_outcome_is_never_success(env):
     await env.tick()
     env.kube.finish_job(RESTORE, exit_code=0, log="all done\nnot json")
     await env.tick()
-    restore = (await env.cache(c.id))["restore"]
-    assert (restore["state"], restore["reason"]) == ("failed", "bad_output")
+    run = await env.run(c.id)
+    assert (run["state"], run["reason"]) == ("failed", "bad_output")
     d = await env.session("beta")
     await env.tick()
-    env.kube.finish_job(restore_job_name("beta"), exit_code=0, log="")
+    env.kube.finish_job(job_name("beta", RESTORE_PRE), exit_code=0, log="")
     await env.tick()
-    assert (await env.cache(d.id))["restore"]["state"] == "failed"
+    assert (await env.run(d.id))["state"] == "failed"
     e = await env.session("gamma")
     await env.tick()
-    env.kube.finish_job(restore_job_name("gamma"), exit_code=0, log='{"outcome": "weird"}')
+    env.kube.finish_job(job_name("gamma", RESTORE_PRE), exit_code=0, log='{"outcome": "weird"}')
     await env.tick()
-    assert (await env.cache(e.id))["restore"]["state"] == "failed"
+    assert (await env.run(e.id))["state"] == "failed"
 
 
 async def test_restore_timeout_missing_foreign(env):
@@ -255,8 +291,8 @@ async def test_restore_timeout_missing_foreign(env):
     await env.tick()
     env.kube.finish_job(RESTORE, deadline_exceeded=True)
     await env.tick()
-    restore = (await env.cache(c.id))["restore"]
-    assert (restore["state"], restore["reason"]) == ("failed", "timeout")
+    run = await env.run(c.id)
+    assert (run["state"], run["reason"]) == ("failed", "timeout")
     assert not env.kube.has("Job", RESTORE)
 
     # older than the cache timeout plus the grace
@@ -266,38 +302,38 @@ async def test_restore_timeout_missing_foreign(env):
         await _now(env)
         - timedelta(seconds=env.settings.cache_timeout_seconds + DEADLINE_GRACE_SECONDS + 5)
     ).isoformat()
-    await env.patch_restore(b.id, started_at=old)
+    await env.patch_run(b.id, started_at=old)
     await env.tick()
-    assert (await env.cache(b.id))["restore"]["reason"] == "timeout"
+    assert (await env.run(b.id))["reason"] == "timeout"
 
     # the Job vanished after its create
     g = await env.session("gamma")
     await env.tick()
-    await env.kube.delete("Job", "agents", restore_job_name("gamma"))
+    await env.kube.delete("Job", "agents", job_name("gamma", RESTORE_PRE))
     await env.tick()
-    restore = (await env.cache(g.id))["restore"]
-    assert (restore["state"], restore["reason"]) == ("failed", "job_missing")
+    run = await env.run(g.id)
+    assert (run["state"], run["reason"]) == ("failed", "job_missing")
 
     # a foreign Job under the name is never touched
     env.kube.seed(
         {
             "apiVersion": "batch/v1",
             "kind": "Job",
-            "metadata": {"name": restore_job_name("delta"), "labels": {"app": "other"}},
+            "metadata": {"name": job_name("delta", RESTORE_PRE), "labels": {"app": "other"}},
         }
     )
     d = await env.session("delta")
     await env.tick()
-    restore = (await env.cache(d.id))["restore"]
-    assert (restore["state"], restore["reason"]) == ("failed", "foreign_object")
-    assert env.kube.has("Job", restore_job_name("delta"))
+    run = await env.run(d.id)
+    assert (run["state"], run["reason"]) == ("failed", "foreign_object")
+    assert env.kube.has("Job", job_name("delta", RESTORE_PRE))
 
     # a create error
-    env.kube.fail("Job", restore_job_name("eps"), KubeError("quota"), verbs=["create"])
+    env.kube.fail("Job", job_name("eps", RESTORE_PRE), KubeError("quota"), verbs=["create"])
     e = await env.session("eps")
     await env.tick()
-    restore = (await env.cache(e.id))["restore"]
-    assert restore["state"] == "failed" and restore["reason"].startswith("job_create_failed: quota")
+    run = await env.run(e.id)
+    assert run["state"] == "failed" and run["reason"].startswith("job_create_failed")
 
 
 async def _now(env):
@@ -310,12 +346,12 @@ async def test_not_configured(pool, dsn):
     async with pool.connection() as conn:
         c = await sessions.create(conn, "alpha", SessionSpec(backup=[WS_ENTRY]))
     await e.tick()
-    restore = (await e.cache(c.id))["restore"]
-    assert (restore["state"], restore["reason"]) == ("failed", "not_configured")
+    run = await e.run(c.id)
+    assert (run["state"], run["reason"]) == ("failed", "not_configured")
     assert e.creates(RESTORE) == 0 and not e.kube.has("Job", RESTORE)
     status = await e.status(c.id)
     assert status["phase"] != "error"
-    assert "cache restore failed: not_configured" in status["message"]
+    assert "backup restore pre failed: not_configured" in status["message"]
 
 
 async def test_crash_safety(env):
@@ -323,29 +359,30 @@ async def test_crash_safety(env):
     await env.tick()
     # crash between the running write and the create: no Job, job null
     await env.kube.delete("Job", "agents", RESTORE)
-    await env.patch_restore(c.id, job=None)
+    await env.patch_run(c.id, job=None)
     await env.tick()
-    assert (await env.cache(c.id))["restore"]["state"] == "running"
+    assert (await env.run(c.id))["state"] == "running"
     assert env.kube.has("Job", RESTORE) and env.creates(RESTORE) == 2
     await env.tick(3)
     assert env.creates(RESTORE) == 2  # exactly once more, then adopted
-    assert (await env.cache(c.id))["restore"]["job"] == RESTORE
+    assert (await env.run(c.id))["job"] == RESTORE
 
     # crash between the create and the job write: the existing Job is adopted
     d = await env.session("beta")
     await env.tick()
-    await env.patch_restore(d.id, job=None)
+    await env.patch_run(d.id, job=None)
     await env.tick()
-    assert env.creates(restore_job_name("beta")) == 1
-    assert (await env.cache(d.id))["restore"]["job"] == restore_job_name("beta")
+    beta = job_name("beta", RESTORE_PRE)
+    assert env.creates(beta) == 1
+    assert (await env.run(d.id))["job"] == beta
 
     # crash between the outcome and the delete: a later tick deletes it
-    env.kube.finish_job(restore_job_name("beta"), exit_code=0, log=line("miss"))
+    env.kube.finish_job(beta, exit_code=0, log=line("missing"))
     await env.tick()
-    assert not env.kube.has("Job", restore_job_name("beta"))
-    env.kube.seed(env_job(restore_job_name("beta")))
+    assert not env.kube.has("Job", beta)
+    env.kube.seed(env_job(beta))
     await env.tick()
-    assert not env.kube.has("Job", restore_job_name("beta"))
+    assert not env.kube.has("Job", beta)
 
 
 def env_job(name: str) -> dict:
@@ -354,7 +391,7 @@ def env_job(name: str) -> dict:
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
-        "metadata": {"name": name, "labels": cache_labels("beta", "restore")},
+        "metadata": {"name": name, "labels": cache_labels("beta", RESTORE_PRE)},
     }
 
 
@@ -370,7 +407,7 @@ async def test_rebootstrap_held_during_restore(wenv, fake):
         await cur.execute("SELECT status, result FROM commands WHERE id = %s", (cmd["id"],))
         row = await cur.fetchone()
     assert row["status"] == "done" and row["result"]["bootstrapped"] is False
-    assert "cache restore running" in row["result"]["message"]
+    assert "backup restore pre running" in row["result"]["message"]
 
 
 async def test_reconciler_requires_cache_credentials(pool, dsn):
@@ -388,15 +425,13 @@ async def test_reconciler_requires_cache_credentials(pool, dsn):
 
 
 async def test_cache_gate_shapes():
-    assert CacheGate.of(None, False) == CacheGate()
-    assert CacheGate.of(None, True).hold
-    assert CacheGate.of({"restore": {"state": "running"}}, True).hold
-    assert CacheGate.of({"restore": {"state": "restored"}}, True) == CacheGate()
-    assert CacheGate.of({"restore": {"state": "miss"}}, True) == CacheGate()
-    assert CacheGate.of({"restore": {"state": "reset"}}, True) == CacheGate()
-    failed = CacheGate.of({"restore": {"state": "failed", "reason": "timeout"}}, True)
+    assert CacheGate.of_run(None, "x").hold
+    assert CacheGate.of_run({"state": "running"}, "x").hold
+    for state in ("done", "skipped"):
+        assert CacheGate.of_run({"state": state}, "x") == CacheGate()
+    failed = CacheGate.of_run({"state": "failed", "reason": "timeout"}, "backup restore")
     assert (failed.hold, failed.degraded, failed.message) == (
         False,
         True,
-        "cache restore failed: timeout",
+        "backup restore failed: timeout",
     )

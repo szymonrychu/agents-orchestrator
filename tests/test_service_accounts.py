@@ -105,8 +105,8 @@ def test_jobs_explicit_sa_no_token(
     jobs = [
         render_init_job(session, settings),
         render_job(session, check, settings),
-        render_cache_job(session, settings, "restore", URL),
-        render_cache_job(session, settings, "save", URL),
+        render_cache_job(session, settings, "restore_pre", []),
+        render_cache_job(session, settings, "save", []),
     ]
     for job in jobs:
         assert_explicit_sa_no_token(job["spec"]["template"]["spec"], account)

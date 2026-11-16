@@ -1,54 +1,77 @@
-"""Workspace cache and Claude transcript restore and save Jobs (D1, D2, D6; transcripts D7).
+"""Backup entry restore and save Jobs, resolve Jobs and the Claude transcripts Jobs (S-68; D7).
 
-A cache-enabled session gets Job `agent-<slug>-cache-restore` before init and Job
-`agent-<slug>-cache-save` during the discard. Both run `orch cache restore|save` in the configured
-cache image, never the session's `spec.image`, and mount only the session's workspace PVC (the save
-read-only). The same Jobs, runner and outcome handling serve a second target, the session's Claude
-transcripts: Jobs `agent-<slug>-sessions-restore|save` mount the PVC subPath `sessions` at
-`/sessions` (the archive leaves out Claude credential files, `SESSIONS_EXCLUDE`) and move object
-`<cache_s3_prefix>sessions/<slug>.tar.zst`, recorded in
-`status.cache.sessions_restore|sessions_save`. A target changes only the mount, `CACHE_DIR`,
-`CACHE_EXCLUDE`, the object, the Job name, the cache label and the status key.
+A session's `spec.backup` entries run in phases, each one Job that carries every entry of its
+phase (`orch cache restore|save` in the configured cache image, never the session's `spec.image`):
 
-The transcripts restore runs once, on a session's first converge with a workspace backup entry,
-before its agent pods start (the StatefulSet is held at `replicas: 0` meanwhile). It never runs once
-the session's StatefulSet or an agent pod exists: that records `skipped`/`pods_exist`, and a
-cache that is not configured records `skipped`/`not_configured`; neither creates a Job.
+1. transcripts restore (only with a workspace entry; the StatefulSet is held at zero replicas),
+2. a resolve Job when a restore name calls `sha256`, then the restore Job of the `after_init:
+   false` entries,
+3. the init Job (reconciler/init.py),
+4. a resolve Job when needed, then the restore Job of the `after_init: true` entries,
+5. the pods are bootstrapped.
 
-The S3 credentials stay in the reconciler: the Job gets exactly one presigned, expiring URL in
-`CACHE_URL` and no Secret, `spec.env`, `envFrom` or service account token: it runs as
-`ORCH_AGENT_SERVICE_ACCOUNT` with no token mounted, as every Job does (D4). The pod is
+The discard (decision 765: saves only at discard and through the backup tool) runs one save Job
+with every backup-direction entry once the pods are gone, preceded by a resolve Job when a name
+calls `sha256`, then the transcripts save. A restore warning never blocks: `missing` (no current
+version of the name), `unreadable` (the archive could not be extracted) and a save's
+`refused_secret` become a `backup_warning` session event and an entry state; only a Job-level
+`failed` degrades the session.
+
+Names render at restore time and at save time. A restore reads `backups.current` per name and
+presigns that version's object; a name without a row is `missing` and gets no Job entry. A save
+writes a fresh immutable version object (`presign`/`keys.object_key_for`) and every outcome goes
+through `db.backups.record_save` (an orphan when the entry's restore ended `failed`; an `unchanged`
+digest deletes the fresh object).
+
+Status: `sessions.status.backup` is `{entries, runs, transcripts}`. `entries[i]` is `{index, root,
+path, version, base_version, restore: {state, name, version, at}, save: {...}}` (`version` and
+`base_version` are what `db.backups.referenced_versions` reads); `runs[<phase>]` and
+`transcripts.restore|save` are the crash-safe Job runs with the shape of the init run: the state
+(and the plan: names, object keys, versions) is written before the create and `job` only after it,
+the outcome is recorded and then the Job deleted. The outcome is the last line of the pod log, a
+JSON object (`{"entries": [...]}` or `{"digests": {...}}`); a line that cannot be read is a
+failure, never a success.
+
+The S3 credentials stay in the reconciler: the Job gets presigned, expiring URLs in
+`CACHE_ENTRIES` and no Secret, `spec.env`, `envFrom` or service account token. The pod is
 hardened (uid 1000, non-root, read-only root filesystem with an emptyDir `/tmp` as `HOME`, no
-privilege escalation, all capabilities dropped, seccomp RuntimeDefault). The save archives into an
-emptyDir `/scratch` sized to `cache_max_bytes`. Like the init Job, neither carries a TTL.
-
-The workdir restore and save are recorded in `sessions.status.cache.restore|save` (contract
-orch-session-status-cache) with the crash-safe shape of the init run: the state is written before
-the create and `job` only after it, the outcome is recorded and then the Job deleted. The outcome
-is the last line of the pod log, the JSON the CLI prints; a line that cannot be read is a failure,
-never a success. The saves run from the discard once the agent pods are gone, the transcripts
-after the workdir; whatever their outcome, they never hold the discard.
+privilege escalation, all capabilities dropped, seccomp RuntimeDefault). A save archives into an
+emptyDir `/scratch` sized to `cache_max_bytes`. Only restore Jobs mount the `backup-state` subPath.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Any, Literal, get_args
+from typing import Any, Literal
 
 from psycopg_pool import AsyncConnectionPool
 
 from agents_orchestrator import rendering
-from agents_orchestrator.cache.keys import object_name_for
-from agents_orchestrator.cache.presign import CacheTarget, presign, presign_object
-from agents_orchestrator.cache.save_rule import PODS_EXIST, save_skip
+from agents_orchestrator.cache import save_rule
+from agents_orchestrator.cache.keys import ArchiveNameError, object_key_for
+from agents_orchestrator.cache.presign import (
+    delete_keys,
+    presign_object,
+    sessions_object_name,
+)
+from agents_orchestrator.cache.save_rule import EntryPlan, save_plan, transcripts_skip
+from agents_orchestrator.db import backups as backups_repo
+from agents_orchestrator.db import events as events_repo
 from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.k8s.kube import KubeApi, KubeError, Obj, is_owned
 from agents_orchestrator.k8s.labels import prefix, session_labels, workspace_pvc
 from agents_orchestrator.k8s.render import (
+    BACKUP_STATE_ROOT,
+    BACKUP_STATE_SUBPATH,
+    CLAUDE_ROOT,
+    CLAUDE_SUBPATH,
     SESSIONS_ROOT,
     WORKSPACE_VOLUME,
     agent_identity,
@@ -76,130 +99,147 @@ from agents_orchestrator.spec import (
 log = logging.getLogger(__name__)
 
 CACHE_LABEL = "agents.szymonrichert.pl/cache"
-CacheAction = Literal["restore", "save"]
 BACKOFF_LIMIT = 2
 TMP_DIR = "/tmp"
 SCRATCH_DIR = "/scratch"
 SESSIONS_SUBPATH = "sessions"  # the PVC subtree holding every agent pod's /sessions
+WARNING_EVENT = "backup_warning"
+EVENT_SESSION = "backup"  # the events key of the reconciler's own rows (agent_id: the session id)
+WARN_STATES = frozenset({"missing", "unreadable", "refused_secret"})
+
+RESOLVE_PRE, RESTORE_PRE = "resolve_pre", "restore_pre"
+RESOLVE_POST, RESTORE_POST = "resolve_post", "restore_post"
+RESOLVE_SAVE, SAVE = "resolve_save", "save"
+TX_RESTORE, TX_SAVE = "transcripts_restore", "transcripts_save"
+Phase = Literal["pre", "post"]
+_JOB_SUFFIX = {
+    RESOLVE_PRE: "backup-resolve-pre",
+    RESTORE_PRE: "backup-restore-pre",
+    RESOLVE_POST: "backup-resolve-post",
+    RESTORE_POST: "backup-restore-post",
+    RESOLVE_SAVE: "backup-resolve-save",
+    SAVE: "backup-save",
+    TX_RESTORE: "sessions-restore",
+    TX_SAVE: "sessions-save",
+}
+_TX_FIELD = {TX_RESTORE: "restore", TX_SAVE: "save"}
+# a resolve run that failed: names cannot render
+_RESOLVE_FAILED: dict[str, str] = {}
+
+
+def job_name(slug: str, key: str) -> str:
+    return f"{prefix(slug)}-{_JOB_SUFFIX[key]}"
+
+
+def cache_labels(slug: str, key: str) -> dict[str, str]:
+    return {**session_labels(slug), CACHE_LABEL: _JOB_SUFFIX[key]}
+
+
+def _title(key: str) -> str:
+    return _JOB_SUFFIX[key].replace("-", " ")
+
+
+def _is_restore(key: str) -> bool:
+    return key in (RESTORE_PRE, RESTORE_POST, TX_RESTORE)
+
+
+def _is_resolve(key: str) -> bool:
+    return key in (RESOLVE_PRE, RESOLVE_POST, RESOLVE_SAVE)
+
+
+def root_dir(spec: SessionSpec, root: str) -> str:
+    """Where the Job pod sees the root of an entry."""
+    return workdir_path(spec) if root == "workspace" else CLAUDE_ROOT
+
+
+def get_run(status: dict[str, Any], key: str) -> dict[str, Any] | None:
+    """The run record of `key` in `status.backup`, or None."""
+    backup = save_rule.backup_state(status)
+    if key in _TX_FIELD:
+        return save_rule.transcripts_run(status, _TX_FIELD[key])  # type: ignore[arg-type]
+    runs = backup.get("runs")
+    run = runs.get(key) if isinstance(runs, dict) else None
+    return run if isinstance(run, dict) else None
+
+
+def _with_run(backup: dict[str, Any], key: str, run: dict[str, Any]) -> dict[str, Any]:
+    out = dict(backup)
+    if key in _TX_FIELD:
+        out["transcripts"] = {**(backup.get("transcripts") or {}), _TX_FIELD[key]: run}
+    else:
+        out["runs"] = {**(backup.get("runs") or {}), key: run}
+    return out
+
+
+def _entry_record(spec: SessionSpec, index: int) -> dict[str, Any]:
+    entry = (spec.backup or [])[index]
+    return {
+        "index": index,
+        "root": entry.root,
+        "path": entry.path,
+        "version": None,
+        "base_version": None,
+        "restore": None,
+        "save": None,
+    }
+
+
+def phase_pairs(spec: SessionSpec, phase: Phase) -> list[tuple[int, BackupEntry]]:
+    """The restore entries of one phase: `after_init` false before the init Job, true after."""
+    return [(i, e) for i, e in restores(spec) if e.after_init == (phase == "post")]
 
 
 @dataclass(frozen=True)
-class CacheOp:
-    """One action on one target: what names its Job, cache label and status key."""
+class CacheGate:
+    """What a restore run means for this tick's init run, sessions and phase."""
 
-    action: CacheAction
-    target: CacheTarget = "workdir"
+    hold: bool = False  # neither init nor any session is started; phase pending
+    degraded: bool = False  # init and the sessions start; phase degraded
+    message: str = ""
 
-    def __post_init__(self) -> None:
-        if self.action not in get_args(CacheAction):
-            raise ValueError(f"unknown cache action {self.action!r}")
-        if self.target not in get_args(CacheTarget):
-            raise ValueError(f"unknown cache target {self.target!r}")
+    @classmethod
+    def of_run(cls, run: dict[str, Any] | None, title: str) -> CacheGate:
+        state = (run or {}).get("state")
+        if run is None or state == "running":
+            return cls(hold=True, message=f"{title} running")
+        if state == "failed":
+            reason = run.get("reason")
+            failed = f"{title} failed"
+            return cls(degraded=True, message=f"{failed}: {reason}" if reason else failed)
+        return cls()
 
-    @property
-    def sessions(self) -> bool:
-        return self.target == "sessions"
-
-    @property
-    def status_key(self) -> str:
-        return f"sessions_{self.action}" if self.sessions else self.action
-
-    @property
-    def label(self) -> str:
-        return f"sessions-{self.action}" if self.sessions else self.action
-
-    @property
-    def title(self) -> str:
-        return f"sessions {self.action}" if self.sessions else f"cache {self.action}"
-
-    def job_name(self, slug: str) -> str:
-        return f"{prefix(slug)}-{'sessions' if self.sessions else 'cache'}-{self.action}"
+    @classmethod
+    def of_restores(cls, spec: SessionSpec, status: dict[str, Any]) -> CacheGate:
+        """The gate of the entry restores (both phases) from the stored status."""
+        gates = [
+            cls.of_run(get_run(status, key), _title(key))
+            for phase, key in (("pre", RESTORE_PRE), ("post", RESTORE_POST))
+            if phase_pairs(spec, phase)  # type: ignore[arg-type]
+        ]
+        held = next((g for g in gates if g.hold), None)
+        return held or next((g for g in gates if g.degraded), cls())
 
 
-def restore_job_name(slug: str) -> str:
-    return CacheOp("restore").job_name(slug)
+def parse_outcome(tail: str | None) -> dict[str, Any] | None:
+    """The CLI's outcome object: the last non-empty log line as JSON, else None."""
+    lines = [ln for ln in (tail or "").splitlines() if ln.strip()]
+    if not lines:
+        return None
+    try:
+        value = json.loads(lines[-1])
+    except ValueError:
+        return None
+    if not isinstance(value, dict):
+        return None
+    if isinstance(value.get("entries"), list) or isinstance(value.get("digests"), dict):
+        return value
+    return None
 
 
-def save_job_name(slug: str) -> str:
-    return CacheOp("save").job_name(slug)
+# ---------------------------------------------------------------------------------- rendering
 
 
-def _workdir_entry(spec: SessionSpec, action: CacheAction) -> BackupEntry | None:
-    """The first workspace entry in the direction of `action`: until the per-entry phases land,
-    it alone drives the one workdir restore and save."""
-    pairs = restores(spec) if action == "restore" else backups(spec)
-    return next((e for _, e in pairs if e.root == "workspace"), None)
-
-
-def job_name(slug: str, action: CacheAction, target: CacheTarget = "workdir") -> str:
-    return CacheOp(action, target).job_name(slug)
-
-
-def cache_labels(slug: str, action: CacheAction, target: CacheTarget = "workdir") -> dict[str, str]:
-    return {**session_labels(slug), CACHE_LABEL: CacheOp(action, target).label}
-
-
-def render_cache_job(
-    session: Session,
-    settings: Settings,
-    action: CacheAction,
-    url: str,
-    target: CacheTarget = "workdir",
-) -> Obj:
-    """The restore or save Job of `target` of a cache-enabled session, given one presigned `url`."""
-    op = CacheOp(action, target)
-    spec, slug = session.spec, session.slug
-    if not has_workspace_entry(spec):
-        raise ValueError(f"session {slug} has no workspace backup entry")
-    save = action == "save"
-    labels = cache_labels(slug, action, target)
-    if op.sessions:
-        mount: dict[str, Any] = {
-            "name": WORKSPACE_VOLUME,
-            "mountPath": SESSIONS_ROOT,
-            "subPath": SESSIONS_SUBPATH,
-        }
-        cache_dir, exclude = SESSIONS_ROOT, list(SESSIONS_EXCLUDE)
-    else:
-        entry = _workdir_entry(spec, op.action)
-        mount, cache_dir = workdir_mount(spec), workdir_path(spec)
-        exclude = entry.exclude if entry is not None else []
-    mounts: list[dict[str, Any]] = [
-        {**mount, "readOnly": True} if save else mount,
-        {"name": "tmp", "mountPath": TMP_DIR},
-    ]
-    volumes: list[dict[str, Any]] = [
-        {
-            "name": WORKSPACE_VOLUME,
-            "persistentVolumeClaim": {"claimName": workspace_pvc(session.slug, session.status)},
-        },
-        {"name": "tmp", "emptyDir": {}},
-    ]
-    if save:
-        mounts.append({"name": "scratch", "mountPath": SCRATCH_DIR})
-        volumes.append(
-            {"name": "scratch", "emptyDir": {"sizeLimit": str(settings.cache_max_bytes)}}
-        )
-    container: dict[str, Any] = {
-        "name": "cache",
-        "image": settings.cache_image,
-        "command": ["orch", "cache", action],
-        "env": [
-            {"name": "CACHE_URL", "value": url},
-            {"name": "CACHE_DIR", "value": cache_dir},
-            {"name": "CACHE_MAX_BYTES", "value": str(settings.cache_max_bytes)},
-            {"name": "CACHE_EXCLUDE", "value": json.dumps(exclude)},
-            {"name": "CACHE_SCRATCH", "value": SCRATCH_DIR},
-            {"name": "CACHE_VERIFY_TLS", "value": str(settings.cache_s3_verify_tls).lower()},
-            {"name": "HOME", "value": TMP_DIR},
-        ],
-        "securityContext": {
-            "readOnlyRootFilesystem": True,
-            "allowPrivilegeEscalation": False,
-            "capabilities": {"drop": ["ALL"]},
-        },
-        "volumeMounts": mounts,
-    }
+def _hardened(settings: Settings, container: dict[str, Any], volumes: list[Obj]) -> Obj:
     pod_spec: dict[str, Any] = {
         "restartPolicy": "Never",
         **agent_identity(settings),
@@ -215,11 +255,17 @@ def render_cache_job(
     }
     if settings.image_pull_secret:
         pod_spec = {"imagePullSecrets": [{"name": settings.image_pull_secret}], **pod_spec}
+    return pod_spec
+
+
+def _job(
+    session: Session, settings: Settings, key: str, pod_spec: Obj, labels: dict[str, str]
+) -> Obj:
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
         "metadata": {
-            "name": op.job_name(slug),
+            "name": job_name(session.slug, key),
             "namespace": settings.namespace,
             "labels": dict(labels),
         },
@@ -231,42 +277,149 @@ def render_cache_job(
     }
 
 
-@dataclass(frozen=True)
-class CacheGate:
-    """What the cache restore means for this tick's init run, sessions and phase."""
-
-    hold: bool = False  # neither init nor any session is started; phase pending
-    degraded: bool = False  # init and the sessions start; phase degraded
-    message: str = ""
-
-    @classmethod
-    def of(
-        cls, cache: dict[str, Any] | None, enabled: bool, target: CacheTarget = "workdir"
-    ) -> CacheGate:
-        if not enabled:
-            return cls()
-        op = CacheOp("restore", target)
-        restore = (cache or {}).get(op.status_key)
-        state = (restore or {}).get("state")
-        if restore is None or state == "running":
-            return cls(hold=True, message=f"{op.title} running")
-        if state == "failed":
-            reason = restore.get("reason")
-            failed = f"{op.title} failed"
-            return cls(degraded=True, message=f"{failed}: {reason}" if reason else failed)
-        return cls()
+def _claude_mount(read_only: bool) -> dict[str, Any]:
+    mount: dict[str, Any] = {
+        "name": WORKSPACE_VOLUME,
+        "mountPath": CLAUDE_ROOT,
+        "subPath": CLAUDE_SUBPATH,
+    }
+    return {**mount, "readOnly": True} if read_only else mount
 
 
-def parse_outcome(tail: str | None) -> dict[str, Any] | None:
-    """The CLI's outcome object: the last non-empty log line as JSON, else None."""
-    lines = [ln for ln in (tail or "").splitlines() if ln.strip()]
-    if not lines:
-        return None
-    try:
-        value = json.loads(lines[-1])
-    except ValueError:
-        return None
-    return value if isinstance(value, dict) and isinstance(value.get("outcome"), str) else None
+def _pvc_volume(session: Session) -> Obj:
+    return {
+        "name": WORKSPACE_VOLUME,
+        "persistentVolumeClaim": {"claimName": workspace_pvc(session.slug, session.status)},
+    }
+
+
+def render_cache_job(
+    session: Session, settings: Settings, key: str, entries: list[dict[str, Any]]
+) -> Obj:
+    """The restore or save Job of run `key`, given its entries (each with its presigned `url`).
+
+    Entry roots: `workspace` (the session workdir), `claude` (/claude) or, for the transcripts,
+    `sessions` (/sessions). Restore Jobs mount the backup-state subPath, save Jobs do not.
+    """
+    spec = session.spec
+    save = not _is_restore(key)
+    action = "save" if save else "restore"
+    labels = cache_labels(session.slug, key)
+    if key in _TX_FIELD:
+        sessions_mount: dict[str, Any] = {
+            "name": WORKSPACE_VOLUME,
+            "mountPath": SESSIONS_ROOT,
+            "subPath": SESSIONS_SUBPATH,
+        }
+        mounts: list[dict[str, Any]] = [{**sessions_mount, **({"readOnly": True} if save else {})}]
+    else:
+        wd = workdir_mount(spec)
+        mounts = [{**wd, "readOnly": True} if save else wd, _claude_mount(save)]
+        if not save:
+            mounts.append(
+                {
+                    "name": WORKSPACE_VOLUME,
+                    "mountPath": BACKUP_STATE_ROOT,
+                    "subPath": BACKUP_STATE_SUBPATH,
+                }
+            )
+    mounts.append({"name": "tmp", "mountPath": TMP_DIR})
+    volumes: list[Obj] = [_pvc_volume(session), {"name": "tmp", "emptyDir": {}}]
+    if save:
+        mounts.append({"name": "scratch", "mountPath": SCRATCH_DIR})
+        volumes.append(
+            {"name": "scratch", "emptyDir": {"sizeLimit": str(settings.cache_max_bytes)}}
+        )
+    env: list[dict[str, str]] = [
+        {"name": "CACHE_ENTRIES", "value": json.dumps(entries)},
+        {"name": "CACHE_MAX_BYTES", "value": str(settings.cache_max_bytes)},
+        {"name": "CACHE_SCRATCH", "value": SCRATCH_DIR},
+        {"name": "CACHE_VERIFY_TLS", "value": str(settings.cache_s3_verify_tls).lower()},
+        {"name": "HOME", "value": TMP_DIR},
+    ]
+    if not save and key not in _TX_FIELD:
+        env.append({"name": "CACHE_STATE_DIR", "value": BACKUP_STATE_ROOT})
+    container: dict[str, Any] = {
+        "name": "cache",
+        "image": settings.cache_image,
+        "command": ["orch", "cache", action],
+        "env": env,
+        "securityContext": {
+            "readOnlyRootFilesystem": True,
+            "allowPrivilegeEscalation": False,
+            "capabilities": {"drop": ["ALL"]},
+        },
+        "volumeMounts": mounts,
+    }
+    return _job(session, settings, key, _hardened(settings, container, volumes), labels)
+
+
+def render_resolve_job(
+    session: Session, settings: Settings, key: str, calls: list[tuple[str, int]]
+) -> Obj:
+    """The resolve Job: digests of the paths a name template asks for, workdir read-only."""
+    spec = session.spec
+    labels = cache_labels(session.slug, key)
+    request = [
+        {"root_dir": workdir_path(spec), "path": path, "length": length, "exclude": []}
+        for path, length in calls
+    ]
+    container: dict[str, Any] = {
+        "name": "cache",
+        "image": settings.cache_image,
+        "command": ["orch", "cache", "resolve"],
+        "env": [
+            {"name": "CACHE_RESOLVE", "value": json.dumps(request)},
+            {"name": "HOME", "value": TMP_DIR},
+        ],
+        "securityContext": {
+            "readOnlyRootFilesystem": True,
+            "allowPrivilegeEscalation": False,
+            "capabilities": {"drop": ["ALL"]},
+        },
+        "volumeMounts": [
+            {**workdir_mount(spec), "readOnly": True},
+            {"name": "tmp", "mountPath": TMP_DIR},
+        ],
+    }
+    volumes = [_pvc_volume(session), {"name": "tmp", "emptyDir": {}}]
+    return _job(session, settings, key, _hardened(settings, container, volumes), labels)
+
+
+# ---------------------------------------------------------------------------------- name work
+
+
+def _sha_calls(templates: list[str]) -> list[tuple[str, int]]:
+    calls: list[tuple[str, int]] = []
+    for template in templates:
+        try:
+            found = rendering.sha256_calls(template)
+        except ArchiveNameError:
+            continue
+        calls += [c for c in found if c not in calls]
+    return calls
+
+
+def _render_names(
+    session: Session,
+    templates: list[str],
+    digests: dict[str, str] | None,
+    now: datetime | None = None,
+) -> list[str | ArchiveNameError]:
+    """Each template rendered (sandbox: blocking, run in a thread) or the error it raised."""
+    ctx = rendering.session_context("archive_name", session, now=now)
+    out: list[str | ArchiveNameError] = []
+    for template in templates:
+        try:
+            out.append(rendering.render_name(template, ctx, digests))
+        except ArchiveNameError as exc:
+            out.append(exc)
+        except rendering.NeedsDigests as exc:
+            out.append(ArchiveNameError(str(exc)))
+    return out
+
+
+# ---------------------------------------------------------------------------------- the runner
 
 
 class CacheRunner:
@@ -281,223 +434,366 @@ class CacheRunner:
         self.pool, self.kube, self.settings = pool, kube, settings
         self.write_status = write_status
 
-    async def restore_step(self, session: Session) -> CacheGate:
-        """Advance the one restore run by at most one transition; the gate for init and sessions."""
-        if not has_workspace_entry(session.spec):
-            return CacheGate()
-        op = CacheOp("restore")
-        cache = session.status.get("cache")
-        restore = (cache or {}).get(op.status_key)
-        if restore is None:
-            restore = await self._begin(session, op)
-        elif restore.get("state") == "running":
-            restore = await self._observe(session, cache or {}, op, restore)
-        elif restore.get("job"):
-            await self._delete_job(session, op)  # crashed between the outcome and the delete
-        return CacheGate.of({"restore": restore}, True)
+    # ------------------------------------------------------------------ entry restores
+
+    async def restore_step(self, session: Session, phase: Phase) -> tuple[Session, CacheGate]:
+        """Advance the restore of one phase by one transition; the gate for init and pods."""
+        pairs = phase_pairs(session.spec, phase)
+        if not pairs:
+            return session, CacheGate()
+        key = RESTORE_PRE if phase == "pre" else RESTORE_POST
+        run = get_run(session.status, key)
+        if run is None:
+            session, run = await self._begin_restore(session, key, phase, pairs)
+        elif run.get("state") == "running":
+            session, run = await self._observe(session, key, run)
+        elif run.get("job"):
+            await self._delete_job(session, key)  # crashed between the outcome and the delete
+        return session, CacheGate.of_run(run, _title(key))
+
+    async def _begin_restore(
+        self, session: Session, key: str, phase: Phase, pairs: list[tuple[int, BackupEntry]]
+    ) -> tuple[Session, dict[str, Any] | None]:
+        now = await self._now()
+        if not self.settings.cache_available:
+            return await self._fail_entries(session, key, pairs, "not_configured", now)
+        templates = [e.name for _, e in pairs]
+        calls = await asyncio.to_thread(_sha_calls, templates)
+        digests: dict[str, str] | None = None
+        if calls:
+            rkey = RESOLVE_PRE if phase == "pre" else RESOLVE_POST
+            session, found = await self._resolve(session, rkey, calls)
+            if found is None:
+                return session, None  # the resolve Job is still running: the restore waits
+            if found is _RESOLVE_FAILED:
+                return await self._fail_entries(session, key, pairs, "resolve_failed", now)
+            digests = found
+        names = await asyncio.to_thread(_render_names, session, templates, digests)
+        entries = self._entries(session)
+        plan: list[dict[str, Any]] = []
+        warnings: list[dict[str, Any]] = []
+        async with self.pool.connection() as conn:
+            for (index, _), name in zip(pairs, names, strict=True):
+                if isinstance(name, ArchiveNameError):
+                    entries[index]["restore"] = _state(
+                        "failed", None, None, now, f"bad_name: {name}"
+                    )
+                    continue
+                version = await backups_repo.current(conn, name)
+                if version is None:
+                    entries[index]["restore"] = _state("missing", name, None, now)
+                    warnings.append(_warning(index, name, "missing", "restore"))
+                    continue
+                await backups_repo.touch_used(conn, name)
+                entries[index]["version"] = str(version.id)
+                entries[index]["restore"] = _state("running", name, str(version.id), now)
+                plan.append(
+                    {
+                        "index": index,
+                        "name": name,
+                        "key": version.object_key,
+                        "version": str(version.id),
+                    }
+                )
+        run = _new_run(now, plan)
+        if not plan:
+            run = {**run, "state": "done", "finished_at": now.isoformat()}
+            session = await self._write(session, key, run, entries)
+            await self._warn(session, warnings)
+            return session, run
+        session = await self._write(session, key, run, entries)
+        await self._warn(session, warnings)
+        return await self._start(session, key, run)
+
+    async def _fail_entries(
+        self,
+        session: Session,
+        key: str,
+        pairs: list[tuple[int, BackupEntry]],
+        reason: str,
+        now: datetime,
+    ) -> tuple[Session, dict[str, Any]]:
+        entries = self._entries(session)
+        for index, entry in pairs:
+            entries[index]["restore"] = _state("failed", entry.name, None, now, reason)
+        run = {**_new_run(now, []), "state": "failed", "reason": reason}
+        run["finished_at"] = now.isoformat()
+        session = await self._write(session, key, run, entries)
+        log.warning("%s of session %s failed: %s", _title(key), session.slug, reason)
+        return session, run
+
+    # ------------------------------------------------------------------ resolve
+
+    async def _resolve(
+        self, session: Session, rkey: str, calls: list[tuple[str, int]]
+    ) -> tuple[Session, dict[str, str] | None]:
+        """The digests of `calls`: None while the resolve Job runs, `_RESOLVE_FAILED` on failure."""
+        run = get_run(session.status, rkey)
+        if run is None:
+            run = {**_new_run(await self._now(), []), "calls": [[p, n] for p, n in calls]}
+            session = await self._write(session, rkey, run)
+            session, run = await self._start(session, rkey, run)
+        elif run.get("state") == "running":
+            session, run = await self._observe(session, rkey, run)
+        elif run.get("job"):
+            await self._delete_job(session, rkey)
+        state = run.get("state")
+        if state == "running":
+            return session, None
+        if state == "done" and isinstance(run.get("digests"), dict):
+            return session, run["digests"]
+        return session, _RESOLVE_FAILED  # type: ignore[return-value]
+
+    # ------------------------------------------------------------------ entry saves
+
+    def save_owed(self, session: Session) -> bool:
+        """A backup-direction entry is set and the save run has no outcome yet."""
+        run = get_run(session.status, SAVE)
+        return bool(backups(session.spec)) and (run is None or run.get("state") == "running")
+
+    async def save_step(self, session: Session) -> tuple[Session, bool]:
+        """Advance the one save run by at most one transition; True lets the discard on.
+
+        A failed or timed-out save is logged and recorded, never held.
+        """
+        if not backups(session.spec):
+            return session, True
+        run = get_run(session.status, SAVE)
+        if run is None:
+            session, run = await self._begin_save(session)
+        elif run.get("state") == "running":
+            session, run = await self._observe(session, SAVE, run)
+        elif run.get("job"):
+            await self._delete_job(session, SAVE)  # crashed between the outcome and the delete
+        return session, run is not None and run.get("state") != "running"
+
+    async def _begin_save(self, session: Session) -> tuple[Session, dict[str, Any] | None]:
+        now = await self._now()
+        plan = save_plan(session, self.settings.cache_available)
+        targets = [p for p in plan if p.action == "save"]
+        entries = self._entries(session)
+        for line in plan:
+            if line.action == "skip":
+                entries[line.index]["save"] = _state("skipped", None, None, now, line.reason)
+        if not targets:
+            reason = next((p.reason for p in plan if p.action == "skip"), "nothing_to_save")
+            run = {**_new_run(now, []), "state": "skipped", "reason": reason}
+            run["finished_at"] = now.isoformat()
+            log.info("%s of session %s skipped: %s", _title(SAVE), session.slug, reason)
+            return await self._write(session, SAVE, run, entries), run
+        templates = [session.spec.backup[p.index].name for p in targets]  # type: ignore[index]
+        calls = await asyncio.to_thread(_sha_calls, templates)
+        digests: dict[str, str] | None = None
+        if calls:
+            session, found = await self._resolve(session, RESOLVE_SAVE, calls)
+            if found is None:
+                return session, None
+            digests = None if found is _RESOLVE_FAILED else found
+            if found is _RESOLVE_FAILED:
+                return await self._fail_save_entries(session, targets, entries, now)
+        names = await asyncio.to_thread(_render_names, session, templates, digests, now)
+        items: list[dict[str, Any]] = []
+        actor = rendering.slug(session.slug)
+        for line, name in zip(targets, names, strict=True):
+            if isinstance(name, ArchiveNameError):
+                entries[line.index]["save"] = _state("failed", None, None, now, f"bad_name: {name}")
+                continue
+            try:
+                object_key = object_key_for(
+                    self.settings.cache_s3_prefix, name, rendering.format_now(now), actor
+                )
+            except ArchiveNameError as exc:
+                entries[line.index]["save"] = _state("failed", name, None, now, f"bad_name: {exc}")
+                continue
+            base = entries[line.index].get("version")
+            entries[line.index]["base_version"] = base
+            entries[line.index]["save"] = _state("running", name, None, now)
+            items.append(
+                {
+                    "index": line.index,
+                    "name": name,
+                    "key": object_key,
+                    "base_version": base,
+                    "orphan": line.reason == save_rule.ORPHAN,
+                }
+            )
+        run = _new_run(now, items)
+        if not items:
+            run = {**run, "state": "failed", "reason": "no_valid_name"}
+            run["finished_at"] = now.isoformat()
+            return await self._write(session, SAVE, run, entries), run
+        session = await self._write(session, SAVE, run, entries)
+        return await self._start(session, SAVE, run)
+
+    async def _fail_save_entries(
+        self, session: Session, targets: list[EntryPlan], entries: list[dict[str, Any]], now
+    ) -> tuple[Session, dict[str, Any]]:
+        for line in targets:
+            entries[line.index]["save"] = _state("failed", None, None, now, "resolve_failed")
+        run = {**_new_run(now, []), "state": "failed", "reason": "resolve_failed"}
+        run["finished_at"] = now.isoformat()
+        return await self._write(session, SAVE, run, entries), run
+
+    # ------------------------------------------------------------------ transcripts
 
     async def sessions_restore_step(
         self, session: Session, agents_exist: Callable[[], Awaitable[bool]]
     ) -> tuple[Session, CacheGate]:
         """Advance the one transcripts restore by at most one transition, before the pods start.
 
-        Returns the session carrying the run (so a later step of the tick keeps it) and the gate:
-        `hold` keeps the StatefulSet at zero replicas, `degraded` starts it after a failure. On
-        the first converge with `spec.cache` set, `agents_exist` decides: the session's
-        StatefulSet or an agent pod already exists, so the pods wrote their own transcripts and
-        no restore may replace them (`skipped`/`pods_exist`). An unconfigured cache records
-        `skipped`/`not_configured`. Otherwise the Job restores `<prefix>sessions/<slug>.tar.zst`.
+        Returns the session carrying the run and the gate: `hold` keeps the StatefulSet at zero
+        replicas, `degraded` starts it after a failure. On the first converge with a workspace
+        entry, `agents_exist` decides: the session's StatefulSet or an agent pod already exists,
+        so the pods wrote their own transcripts and no restore may replace them
+        (`skipped`/`pods_exist`). An unconfigured cache records `skipped`/`not_configured`.
+        Otherwise the Job restores `<prefix>sessions/<slug>.tar.zst`.
         """
         if not has_workspace_entry(session.spec):
             return session, CacheGate()
-        op = CacheOp("restore", "sessions")
-        cache = session.status.get("cache") or {}
-        restore = cache.get(op.status_key)
-        if restore is None:
-            skip = PODS_EXIST if await agents_exist() else None
+        run = get_run(session.status, TX_RESTORE)
+        if run is None:
+            skip = save_rule.PODS_EXIST if await agents_exist() else None
             if skip is None and not self.settings.cache_available:
                 skip = "not_configured"
             if skip is None:
-                restore = await self._begin(session, op)
+                session, run = await self._begin_tx(session, TX_RESTORE)
             else:
-                restore = {"state": "skipped", "reason": skip}
-                await self._write(session, cache, op, restore)
-                log.info("%s of session %s skipped: %s", op.title, session.slug, skip)
-        elif restore.get("state") == "running":
-            restore = await self._observe(session, cache, op, restore)
-        elif restore.get("job"):
-            await self._delete_job(session, op)  # crashed between the outcome and the delete
-        status = {**session.status, "cache": {**cache, op.status_key: restore}}
-        gate = CacheGate.of(status["cache"], True, "sessions")
-        return replace(session, status=status), gate
+                run = {"state": "skipped", "reason": skip}
+                session = await self._write(session, TX_RESTORE, run)
+                log.info("sessions restore of session %s skipped: %s", session.slug, skip)
+        elif run.get("state") == "running":
+            session, run = await self._observe(session, TX_RESTORE, run)
+        elif run.get("job"):
+            await self._delete_job(session, TX_RESTORE)
+        return session, CacheGate.of_run(run, "sessions restore")
 
-    async def save_step(self, session: Session, target: CacheTarget = "workdir") -> bool:
-        """Advance the one save run of `target` by at most one transition; True lets the discard on.
+    def transcripts_save_owed(self, session: Session) -> bool:
+        run = get_run(session.status, TX_SAVE)
+        return has_workspace_entry(session.spec) and (run is None or run.get("state") == "running")
 
-        Skipped (no Job) unless the target's restore succeeded (`restored`, `miss` on first use, or
-        `reset` after an unreadable archive), so a failed restore never replaces a good archive
-        with partial content. The sessions save also runs without a sessions restore record (a
-        session older than the transcript backup that converged; one that never did skips as
-        `never_converged`) and after one skipped with `pods_exist`. A
-        failed or timed-out save is logged and recorded, never held.
-        """
+    async def transcripts_save_step(self, session: Session) -> tuple[Session, bool]:
+        """Advance the transcripts save; True lets the discard on (a failure is recorded only)."""
         if not has_workspace_entry(session.spec):
-            return True
-        op = CacheOp("save", target)
-        cache = session.status.get("cache") or {}
-        save = cache.get(op.status_key)
-        if save is None:
-            restore_only = target == "workdir" and not self._key(session, op)
-            skip = save_skip(
-                self.settings.cache_available, session.status, target, restore_only=restore_only
-            )
+            return session, True
+        run = get_run(session.status, TX_SAVE)
+        if run is None:
+            skip = transcripts_skip(self.settings.cache_available, session.status)
             if skip is not None:
-                await self._write(session, cache, op, {"state": "skipped", "reason": skip})
-                log.info("%s of session %s skipped: %s", op.title, session.slug, skip)
-                return True
-            save = await self._begin(session, op)
-        elif save.get("state") == "running":
-            save = await self._observe(session, cache, op, save)
-        elif save.get("job"):
-            await self._delete_job(session, op)  # crashed between the outcome and the delete
-        return save.get("state") != "running"
+                session = await self._write(session, TX_SAVE, {"state": "skipped", "reason": skip})
+                log.info("sessions save of session %s skipped: %s", session.slug, skip)
+                return session, True
+            session, run = await self._begin_tx(session, TX_SAVE)
+        elif run.get("state") == "running":
+            session, run = await self._observe(session, TX_SAVE, run)
+        elif run.get("job"):
+            await self._delete_job(session, TX_SAVE)
+        return session, run is not None and run.get("state") != "running"
 
-    def save_owed(self, session: Session, target: CacheTarget = "workdir") -> bool:
-        """A workspace entry is set and the save of `target` has no outcome yet."""
-        save = (session.status.get("cache") or {}).get(CacheOp("save", target).status_key)
-        return has_workspace_entry(session.spec) and (
-            save is None or save.get("state") == "running"
-        )
+    async def _begin_tx(self, session: Session, key: str) -> tuple[Session, dict[str, Any]]:
+        run = {**_new_run(await self._now(), []), "bytes": None}
+        session = await self._write(session, key, run)
+        return await self._start(session, key, run)
 
-    # ------------------------------------------------------------------ transitions
+    # ------------------------------------------------------------------ Job lifecycle
 
-    async def _begin(self, session: Session, op: CacheOp) -> dict[str, Any]:
-        cache = dict(session.status.get("cache") or {})
-        run = {
-            "state": "running",
-            "started_at": (await self._now()).isoformat(),
-            "finished_at": None,
-            "bytes": None,
-            "reason": None,
-            "job": None,
-        }
-        if not op.sessions and self.settings.cache_available:
-            # The resolved object is written with the running state, before any Job exists, so a
-            # crash or retry reuses it and the sweep sees it as referenced.
-            done = await self._resolve(session, op, cache)
-            if done is not None:
-                state, reason = done
-                return await self._finish(session, cache, op, run, state, reason=reason)
-        cache = await self._write(session, cache, op, run)
-        return await self._start(session, cache, op, run)
-
-    async def _resolve(
-        self, session: Session, op: CacheOp, cache: dict[str, Any]
-    ) -> tuple[str, str | None] | None:
-        """Fill `cache[<restore|save>_resolved]` with the object key; return the final
-        (state, reason) when no Job is needed (a miss, a fresh start, a bad name), else None."""
-        field = f"{op.action}_resolved"
-        if op.action == "save" and cache.get(field):
-            return None  # a retry keeps the name it was given
-        cache[field] = None
-        template = self._key(session, op)
-        if not template:
-            if op.action == "save":
-                return "skipped", "restore-only"
-            return "miss", "fresh_start"
-        prefix = self.settings.cache_s3_prefix
-        now = await self._now() if op.action == "save" else None
-        try:
-            name = rendering.render_name(
-                template, rendering.session_context("archive_name", session, now=now)
-            )
-            cache[field] = object_name_for(prefix, name)
-        except ValueError as exc:  # ArchiveNameError
-            return "failed", f"bad_cache_key: {exc}"[:REASON_MAX]
-        return None
-
-    @staticmethod
-    def _key(session: Session, op: CacheOp) -> str:
-        """The workdir name of this action: the first workspace entry in its direction, else ""."""
-        entry = _workdir_entry(session.spec, op.action)
-        return entry.name if entry is not None else ""
+    def _job_for(self, session: Session, key: str, run: dict[str, Any]) -> Obj:
+        settings, spec = self.settings, session.spec
+        if _is_resolve(key):
+            calls = [(str(p), int(n)) for p, n in run.get("calls") or []]
+            return render_resolve_job(session, settings, key, calls)
+        method: Literal["GET", "PUT"] = "GET" if _is_restore(key) else "PUT"
+        if key in _TX_FIELD:
+            url = presign_object(settings, method, sessions_object_name(settings, session.slug))
+            entries = [
+                {
+                    "index": 0,
+                    "root": "sessions",
+                    "root_dir": SESSIONS_ROOT,
+                    "path": ".",
+                    "exclude": list(SESSIONS_EXCLUDE),
+                    "url": url,
+                }
+            ]
+            return render_cache_job(session, settings, key, entries)
+        entries = []
+        for item in run.get("plan") or []:
+            entry = (spec.backup or [])[item["index"]]
+            record: dict[str, Any] = {
+                "index": item["index"],
+                "root": entry.root,
+                "root_dir": root_dir(spec, entry.root),
+                "path": entry.path,
+                "exclude": list(entry.exclude),
+                "url": presign_object(settings, method, item["key"]),
+                "name": item["name"],
+            }
+            if method == "GET":
+                record["version"] = item["version"]
+            entries.append(record)
+        return render_cache_job(session, settings, key, entries)
 
     async def _start(
-        self, session: Session, cache: dict[str, Any], op: CacheOp, run: dict[str, Any]
-    ) -> dict[str, Any]:
-        ns, name = self.settings.namespace, op.job_name(session.slug)
+        self, session: Session, key: str, run: dict[str, Any]
+    ) -> tuple[Session, dict[str, Any]]:
+        ns, name = self.settings.namespace, job_name(session.slug, key)
         if not self.settings.cache_available:
-            return await self._finish(session, cache, op, run, "failed", reason="not_configured")
-        resolved = cache.get(f"{op.action}_resolved")
-        if not op.sessions and not resolved:
-            return await self._finish(session, cache, op, run, "failed", reason="no_cache_key")
+            return await self._finish(session, key, run, "failed", reason="not_configured")
         existing = await self.kube.get_job(ns, name)
         if existing is not None:
             if not is_owned(existing, session.slug):
-                return await self._finish(
-                    session, cache, op, run, "failed", reason="foreign_object"
-                )
+                return await self._finish(session, key, run, "failed", reason="foreign_object")
         else:
             try:
-                method = "PUT" if op.action == "save" else "GET"
-                if op.sessions:
-                    url = presign(self.settings, method, session.slug, op.target)
-                else:
-                    url = presign_object(self.settings, method, resolved)
-                await self.kube.create_job(
-                    render_cache_job(session, self.settings, op.action, url, op.target)
-                )
+                await self.kube.create_job(self._job_for(session, key, run))
             except Exception as exc:
-                log.exception("creating the %s Job of session %s failed", op.title, session.slug)
-                reason = f"job_create_failed: {exc}"[:REASON_MAX]
-                return await self._finish(session, cache, op, run, "failed", reason=reason)
+                log.exception("creating the %s Job of session %s failed", _title(key), session.slug)
+                reason = f"job_create_failed: {type(exc).__name__}"[:REASON_MAX]
+                return await self._finish(session, key, run, "failed", reason=reason)
         run = {**run, "job": name}
-        await self._write(session, cache, op, run)
-        return run
+        return await self._write(session, key, run), run
 
     async def _observe(
-        self, session: Session, cache: dict[str, Any], op: CacheOp, run: dict[str, Any]
-    ) -> dict[str, Any]:
-        ns, name = self.settings.namespace, op.job_name(session.slug)
+        self, session: Session, key: str, run: dict[str, Any]
+    ) -> tuple[Session, dict[str, Any]]:
+        ns, name = self.settings.namespace, job_name(session.slug, key)
         job = await self.kube.get_job(ns, name)
         if job is None:
             if run.get("job") is None:  # crashed between the running write and the create
-                return await self._start(session, cache, op, run)
-            return await self._finish(session, cache, op, run, "failed", reason="job_missing")
+                return await self._start(session, key, run)
+            return await self._finish(session, key, run, "failed", reason="job_missing")
         if not is_owned(job, session.slug):
-            return await self._finish(session, cache, op, run, "failed", reason="foreign_object")
+            return await self._finish(session, key, run, "failed", reason="foreign_object")
         if run.get("job") is None:  # crashed between the create and the job write
             run = {**run, "job": name}
-            await self._write(session, cache, op, run)
+            session = await self._write(session, key, run)
         status = job.get("status") or {}
         failed = job_condition(job, "Failed")
         if failed is not None and failed.get("reason") == "DeadlineExceeded":
-            return await self._outcome(session, cache, op, run, reason="timeout")
+            return await self._outcome(session, key, run, reason="timeout")
         if job_condition(job, "Complete") is not None or status.get("succeeded"):
-            return await self._outcome(session, cache, op, run)
+            return await self._outcome(session, key, run)
         if failed is not None or status.get("failed"):
-            return await self._outcome(session, cache, op, run, failed=True)
+            return await self._outcome(session, key, run, failed=True)
         started = datetime.fromisoformat(run["started_at"])
         limit = self.settings.cache_timeout_seconds + DEADLINE_GRACE_SECONDS
         if (await self._now() - started).total_seconds() > limit:
-            return await self._outcome(session, cache, op, run, reason="timeout")
-        return run
+            return await self._outcome(session, key, run, reason="timeout")
+        return session, run
 
     async def _outcome(
         self,
         session: Session,
-        cache: dict[str, Any],
-        op: CacheOp,
+        key: str,
         run: dict[str, Any],
         *,
         reason: str | None = None,
         failed: bool = False,
-    ) -> dict[str, Any]:
+    ) -> tuple[Session, dict[str, Any]]:
         """Record the Job's outcome from its pod's log and exit code, then delete it."""
         ns = self.settings.namespace
         pods = [
             p
-            for p in await self.kube.list_pods(ns, cache_labels(session.slug, op.action, op.target))
+            for p in await self.kube.list_pods(ns, cache_labels(session.slug, key))
             if is_owned(p, session.slug)
         ]
         pod = pods[-1] if pods else None
@@ -509,100 +805,305 @@ class CacheRunner:
                 )
             except KubeError as exc:
                 log.warning(
-                    "reading the %s log of session %s failed: %s", op.title, session.slug, exc
+                    "reading the %s log of session %s failed: %s", _title(key), session.slug, exc
                 )
         if reason is not None:
-            run = await self._finish(session, cache, op, run, "failed", reason=reason)
+            session, run = await self._finish(session, key, run, "failed", reason=reason)
         else:
-            run = await self._finish_from_log(session, cache, op, run, pod, tail, failed)
-        await self._delete_job(session, op)
-        return run
+            outcome = parse_outcome(tail)
+            if outcome is None:
+                code = container_exit_code(pod) if pod is not None and failed else None
+                bad = f"exit {code}" if code is not None else "failed" if failed else "bad_output"
+                session, run = await self._finish(session, key, run, "failed", reason=bad)
+            else:
+                session, run = await self._finish_outcome(session, key, run, outcome, failed)
+        await self._delete_job(session, key)
+        return session, run
 
-    async def _finish_from_log(
-        self,
-        session: Session,
-        cache: dict[str, Any],
-        op: CacheOp,
-        run: dict[str, Any],
-        pod: Obj | None,
-        tail: str | None,
-        failed: bool,
+    async def _finish_outcome(
+        self, session: Session, key: str, run: dict[str, Any], outcome: dict[str, Any], failed: bool
+    ) -> tuple[Session, dict[str, Any]]:
+        if _is_resolve(key):
+            digests = outcome.get("digests")
+            if failed or not isinstance(digests, dict) or outcome.get("reason"):
+                reason = str(outcome.get("reason") or "bad_output")[:REASON_MAX]
+                return await self._finish(session, key, run, "failed", reason=reason)
+            return await self._finish(session, key, run, "done", extra={"digests": digests})
+        results = [r for r in outcome.get("entries") or [] if isinstance(r, dict)]
+        if not results and (failed or outcome.get("reason")):
+            reason = str(outcome.get("reason") or "failed")[:REASON_MAX]
+            return await self._finish(session, key, run, "failed", reason=reason)
+        if key in _TX_FIELD:
+            return await self._finish_tx(session, key, run, results[0] if results else {})
+        by_index = {r.get("index"): r for r in results}
+        if _is_restore(key):
+            return await self._finish_restore(session, key, run, by_index)
+        return await self._finish_save(session, key, run, by_index)
+
+    async def _finish_tx(
+        self, session: Session, key: str, run: dict[str, Any], result: dict[str, Any]
+    ) -> tuple[Session, dict[str, Any]]:
+        state = result.get("state")
+        reason = result.get("reason")
+        size = result.get("size")
+        if key == TX_RESTORE:
+            mapped = {"restored": "restored", "missing": "miss", "unreadable": "unreadable"}
+        else:
+            mapped = {"uploaded": "saved", "skipped": "skipped"}
+        if state not in mapped:
+            text = str(reason or state or "bad_output")[:REASON_MAX]
+            return await self._finish(session, key, run, "failed", reason=text)
+        nbytes = size if isinstance(size, int) and not isinstance(size, bool) else None
+        return await self._finish(
+            session,
+            key,
+            run,
+            mapped[state],
+            nbytes=nbytes,
+            reason=str(reason)[:REASON_MAX] if reason else None,
+        )
+
+    async def _finish_restore(
+        self, session: Session, key: str, run: dict[str, Any], by_index: dict[Any, Any]
+    ) -> tuple[Session, dict[str, Any]]:
+        now = await self._now()
+        entries = self._entries(session)
+        warnings: list[dict[str, Any]] = []
+        first_failure: str | None = None
+        for item in run.get("plan") or []:
+            result = by_index.get(item["index"]) or {}
+            state = result.get("state") or "failed"
+            reason = result.get("reason") if state == "failed" else None
+            if state == "failed" and reason is None:
+                reason = "no_outcome"
+            if state not in ("restored", "missing", "unreadable", "failed"):
+                state, reason = "failed", "bad_output"
+            entries[item["index"]]["restore"] = _state(
+                state, item["name"], item["version"] if state != "missing" else None, now, reason
+            )
+            if state in WARN_STATES:
+                warnings.append(_warning(item["index"], item["name"], state, "restore"))
+            if state == "failed" and first_failure is None:
+                first_failure = str(reason)[:REASON_MAX]
+        session, run = await self._finish(
+            session,
+            key,
+            run,
+            "failed" if first_failure else "done",
+            reason=first_failure,
+            entries=entries,
+        )
+        await self._warn(session, warnings)
+        return session, run
+
+    async def _finish_save(
+        self, session: Session, key: str, run: dict[str, Any], by_index: dict[Any, Any]
+    ) -> tuple[Session, dict[str, Any]]:
+        now = await self._now()
+        entries = self._entries(session)
+        warnings: list[dict[str, Any]] = []
+        first_failure: str | None = None
+        for item in run.get("plan") or []:
+            result = by_index.get(item["index"]) or {}
+            record = await self._record_one(session, item, result, now)
+            entries[item["index"]]["save"] = record
+            if record["state"] in WARN_STATES:
+                warnings.append(_warning(item["index"], item["name"], record["state"], "save"))
+            if record["state"] == "failed" and first_failure is None:
+                first_failure = str(record.get("reason"))[:REASON_MAX]
+        session, run = await self._finish(
+            session,
+            key,
+            run,
+            "failed" if first_failure else "done",
+            reason=first_failure,
+            entries=entries,
+        )
+        await self._warn(session, warnings)
+        return session, run
+
+    async def _record_one(
+        self, session: Session, item: dict[str, Any], result: dict[str, Any], now: datetime
     ) -> dict[str, Any]:
-        outcome = parse_outcome(tail)
-        kind = outcome["outcome"] if outcome else None
-        action = op.action
-        done = "saved" if action == "save" else "restored"
-        if not failed and kind == done:
-            nbytes = outcome.get("bytes") if outcome else None
-            if isinstance(nbytes, int) and not isinstance(nbytes, bool):
-                return await self._finish(session, cache, op, run, done, nbytes=nbytes)
-            return await self._finish(session, cache, op, run, "failed", reason="bad_output")
-        if not failed and action == "restore" and kind == "miss":
-            return await self._finish(session, cache, op, run, "miss")
-        if not failed and action == "restore" and kind == "reset" and outcome:
-            reason = str(outcome.get("reason") or "extract_failed")[:REASON_MAX]
-            return await self._finish(session, cache, op, run, "reset", reason=reason)
-        if not failed and action == "save" and kind == "skipped" and outcome:
-            reason = str(outcome.get("reason") or "skipped")[:REASON_MAX]
-            return await self._finish(session, cache, op, run, "skipped", reason=reason)
-        if kind == "failed" and outcome and outcome.get("reason"):
-            reason = str(outcome["reason"])[:REASON_MAX]
-        elif failed:
-            code = container_exit_code(pod) if pod is not None else None
-            reason = f"exit {code}" if code is not None else "failed"
-        else:  # a finished Job whose last line says nothing we can trust
-            reason = "bad_output"
-        return await self._finish(session, cache, op, run, "failed", reason=reason)
+        """Turn one entry's save outcome into its `save` record, recording the version."""
+        name, object_key = item["name"], item["key"]
+        state = result.get("state")
+        if state == "skipped":
+            return _state("skipped", name, None, now, str(result.get("reason") or "skipped"))
+        if state == "refused_secret":
+            return _state("refused_secret", name, None, now)
+        if state != "uploaded":
+            reason = str(result.get("reason") or state or "no_outcome")[:REASON_MAX]
+            return _state("failed", name, None, now, reason)
+        try:
+            manifest = result.get("manifest")
+            base = item.get("base_version")
+            async with self.pool.connection() as conn, conn.transaction():
+                existing = await backups_repo.by_object_key(conn, object_key)
+                if existing is not None:  # recorded before a crash: do not record it twice
+                    outcome, version = (
+                        ("orphan" if existing.state == "orphan" else "advanced"),
+                        existing,
+                    )
+                else:
+                    outcome, version = await backups_repo.record_save(
+                        conn,
+                        name=name,
+                        object_key=object_key,
+                        size=int(result["size"]),
+                        digest=str(result["digest"]),
+                        manifest={"files": manifest} if isinstance(manifest, list) else None,
+                        base_version=uuid.UUID(base) if base else None,
+                        origin="save",
+                        session_slug=session.slug,
+                        preset_id=session.preset_id,
+                        project=session.project,
+                        created_by=session.slug,
+                        orphan=bool(item.get("orphan")),
+                    )
+                current = await backups_repo.current(conn, name) if outcome == "unchanged" else None
+        except Exception as exc:  # noqa: BLE001 - one entry's record must not hold the discard
+            log.exception("recording the backup %s of session %s failed", name, session.slug)
+            return _state("failed", name, None, now, f"record_failed: {type(exc).__name__}")
+        if outcome == "unchanged":
+            await self._delete_object(object_key)
+            return _state("unchanged", name, str(current.id) if current else None, now)
+        assert version is not None
+        return _state("orphan" if outcome == "orphan" else "saved", name, str(version.id), now)
+
+    async def _delete_object(self, object_key: str) -> None:
+        try:
+            failures = await asyncio.to_thread(delete_keys, self.settings, [object_key])
+        except Exception:  # noqa: BLE001 - the sweep removes an object nothing references
+            log.exception("deleting the unchanged backup object failed")
+            return
+        if failures:
+            log.warning("deleting the unchanged backup object failed: %s", failures[0].code)
 
     async def _finish(
         self,
         session: Session,
-        cache: dict[str, Any],
-        op: CacheOp,
+        key: str,
         run: dict[str, Any],
         state: str,
         *,
         nbytes: int | None = None,
         reason: str | None = None,
-    ) -> dict[str, Any]:
+        entries: list[dict[str, Any]] | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> tuple[Session, dict[str, Any]]:
+        now = await self._now()
         run = {
             **run,
+            **(extra or {}),
             "state": state,
-            "finished_at": (await self._now()).isoformat(),
-            "bytes": nbytes,
+            "finished_at": now.isoformat(),
             "reason": reason,
         }
-        await self._write(session, cache, op, run)
+        if key in _TX_FIELD:
+            run["bytes"] = nbytes
+        if entries is None and state == "failed" and run.get("plan"):
+            entries = self._entries(session)
+            field = "restore" if _is_restore(key) else "save"
+            for item in run["plan"]:
+                if (entries[item["index"]].get(field) or {}).get("state") == "running":
+                    entries[item["index"]][field] = _state(
+                        "failed", item["name"], None, now, reason
+                    )
+        session = await self._write(session, key, run, entries)
         detail = f": {reason}" if reason else ""
-        if op.action == "save" and state == "failed":
-            subject = "" if op.sessions else f" (object {cache.get('save_resolved')})"
-            log.warning("%s of session %s%s failed%s", op.title, session.slug, subject, detail)
+        if state == "failed":
+            log.warning("%s of session %s failed%s", _title(key), session.slug, detail)
         else:
-            log.info("%s of session %s %s%s", op.title, session.slug, state, detail)
-        return run
+            log.info("%s of session %s %s%s", _title(key), session.slug, state, detail)
+        return session, run
 
-    async def _delete_job(self, session: Session, op: CacheOp) -> None:
+    async def _delete_job(self, session: Session, key: str) -> None:
         """Delete the session's own cache Job (background propagation); never a foreign one."""
-        ns, name = self.settings.namespace, op.job_name(session.slug)
+        ns, name = self.settings.namespace, job_name(session.slug, key)
         try:
             job = await self.kube.get_job(ns, name)
             if job is not None and is_owned(job, session.slug):
                 await self.kube.delete("Job", ns, name)
         except KubeError as exc:  # the outcome is recorded; a later tick deletes it
-            log.warning("deleting the %s Job of session %s failed: %s", op.title, session.slug, exc)
+            log.warning(
+                "deleting the %s Job of session %s failed: %s", _title(key), session.slug, exc
+            )
 
     # ------------------------------------------------------------------ helpers
 
+    @staticmethod
+    def _entries(session: Session) -> list[dict[str, Any]]:
+        """Copies of the stored entry records, one per spec entry (new ones are empty)."""
+        stored = save_rule.backup_state(session.status).get("entries")
+        stored = stored if isinstance(stored, list) else []
+        out = []
+        for index in range(len(session.spec.backup or [])):
+            record = (
+                stored[index] if index < len(stored) and isinstance(stored[index], dict) else None
+            )
+            out.append(dict(record) if record else _entry_record(session.spec, index))
+        return out
+
     async def _write(
-        self, session: Session, cache: dict[str, Any], op: CacheOp, run: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Write status.cache with this run, keeping the other runs' state the row carries."""
-        stored = session.status.get("cache") or {}
-        key = op.status_key
-        merged = {**stored, **{k: v for k, v in cache.items() if k != key}, key: run}
-        await self.write_status(session, {"cache": merged}, session.observed_generation)
-        return merged
+        self,
+        session: Session,
+        key: str,
+        run: dict[str, Any],
+        entries: list[dict[str, Any]] | None = None,
+    ) -> Session:
+        """Write status.backup with this run (and entries), keeping the other runs' state."""
+        backup = _with_run(save_rule.backup_state(session.status), key, run)
+        if entries is not None:
+            backup["entries"] = entries
+        await self.write_status(session, {"backup": backup}, session.observed_generation)
+        return replace(session, status={**session.status, "backup": backup})
+
+    async def _warn(self, session: Session, warnings: list[dict[str, Any]]) -> None:
+        """One `backup_warning` session event per warning (best effort: the session goes on)."""
+        if not warnings:
+            return
+        base = time.time_ns() // 1000
+        envelopes = [
+            {"seq": base + i, "type": WARNING_EVENT, "data": w} for i, w in enumerate(warnings)
+        ]
+        try:
+            async with self.pool.connection() as conn:
+                await events_repo.insert_events(
+                    conn, session.id, session.id, EVENT_SESSION, envelopes
+                )
+        except Exception:  # noqa: BLE001
+            log.exception("backup warning events of session %s not written", session.slug)
 
     async def _now(self) -> datetime:
         async with self.pool.connection() as conn:
             return (await (await conn.execute("SELECT now()")).fetchone())[0]
+
+
+def _new_run(now: datetime, plan: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "state": "running",
+        "started_at": now.isoformat(),
+        "finished_at": None,
+        "reason": None,
+        "job": None,
+        "plan": plan,
+    }
+
+
+def _state(
+    state: str, name: str | None, version: str | None, now: datetime, reason: str | None = None
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "state": state,
+        "name": name,
+        "version": version,
+        "at": now.isoformat(),
+    }
+    if reason:
+        record["reason"] = reason[:REASON_MAX]
+    return record
+
+
+def _warning(index: int, name: str, state: str, direction: str) -> dict[str, Any]:
+    return {"index": index, "name": name, "state": state, "direction": direction}

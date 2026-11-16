@@ -247,10 +247,7 @@ def _cmd_cache(args: argparse.Namespace) -> int:
 
     if args.action == "resolve":
         return transfer.resolve(os.environ)
-    if "CACHE_ENTRIES" in os.environ:
-        entry_run = transfer.restore_entries if args.action == "restore" else transfer.save_entries
-        return entry_run(os.environ)
-    run = transfer.restore if args.action == "restore" else transfer.save
+    run = transfer.restore_entries if args.action == "restore" else transfer.save_entries
     return run(os.environ)
 
 

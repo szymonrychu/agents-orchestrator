@@ -148,7 +148,7 @@ def test_the_wrapper_expands_the_rendered_reference(tmp_path, monkeypatch):
 
 
 def test_golden_pod_with_legacy_pin_and_expand_entries():
-    """Unchanged golden: the pod of a session created before 0041 renders byte-identical."""
+    """Golden: a pre-0041 session renders as before plus the /claude mount and wrapper options."""
     from test_render import golden
 
     env = {
