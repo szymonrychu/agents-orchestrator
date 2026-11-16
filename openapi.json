@@ -14917,7 +14917,7 @@
     },
     "/agent/v1/backup/save": {
       "post": {
-        "description": "Any agent of the session (leader or member). 404 `no_entry` when no entry that is saved\n(mode backup or both) names this root and path, 409 `save_running` while another on-demand\nsave is queued or running, 409 `session_deleting`. The reconciler runs one save Job for the\nentry and records the outcome like a discard save; the answer is the entry index and the\nJob's name.",
+        "description": "Any agent of the session (leader or member). 404 `no_entry` when no entry that is saved\n(mode backup or both) names this root and path, 409 `save_running` while another on-demand\nsave is queued or running, 409 `session_deleting`. The reconciler runs one save Job for the\nentry and records the outcome like a discard save; the answer is the entry index and the\nJob's name. 503 `cache_unavailable` when no cache is configured (nothing could run the save).",
         "operationId": "backup_save_agent_v1_backup_save_post",
         "parameters": [
           {
