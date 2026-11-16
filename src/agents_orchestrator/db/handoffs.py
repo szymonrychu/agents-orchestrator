@@ -641,3 +641,44 @@ async def on_leader_moved(
         successor_agent_id=successor,
         handoff_text=row.handoff_text if row.handoff_text is not None else text,
     )
+
+
+# ------------------------------------------------------------------ superleader reads (S-68)
+
+_READ_COLUMNS = (
+    "h.id, h.session_id, s.slug AS session_slug, h.agent_id, h.trigger AS kind, h.created_at,"
+    " coalesce(char_length(h.handoff_text), 0) AS size"
+)
+
+
+async def list_handoffs(
+    conn: psycopg.AsyncConnection,
+    *,
+    session_id: uuid.UUID | None,
+    limit: int,
+    before_id: int | None,
+) -> tuple[list[dict[str, Any]], bool]:
+    """The handoff rows newest first (id order), optionally of one session and older than
+    `before_id`; `kind` is the row's trigger and `size` the characters of its text. The bool says
+    whether more rows follow the page."""
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            f"SELECT {_READ_COLUMNS} FROM agent_handoffs h JOIN sessions s ON s.id = h.session_id"
+            " WHERE (%(sid)s::uuid IS NULL OR h.session_id = %(sid)s)"
+            " AND (%(before)s::bigint IS NULL OR h.id < %(before)s)"
+            " ORDER BY h.id DESC LIMIT %(n)s",
+            {"sid": session_id, "before": before_id, "n": limit + 1},
+        )
+        rows = await cur.fetchall()
+    return rows[:limit], len(rows) > limit
+
+
+async def get_handoff(conn: psycopg.AsyncConnection, id: int) -> dict[str, Any] | None:
+    """One handoff row in full: the list fields plus `handoff_text`; None when absent."""
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            f"SELECT {_READ_COLUMNS}, h.handoff_text FROM agent_handoffs h"
+            " JOIN sessions s ON s.id = h.session_id WHERE h.id = %s",
+            (id,),
+        )
+        return await cur.fetchone()

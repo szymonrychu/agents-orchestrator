@@ -20,7 +20,7 @@ from factories import (
 )
 from fakes.fake_kube import FakeKube
 
-from agents_orchestrator.db import sessions
+from agents_orchestrator.db import handoffs, sessions
 from agents_orchestrator.db.export import export_session_history
 from agents_orchestrator.reconciler import Reconciler
 from agents_orchestrator.reconciler.discard_hook import run_discard_hook
@@ -292,8 +292,32 @@ async def test_export_streams_with_a_server_side_cursor(env):
         conn.cursor = spy  # type: ignore[method-assign]
         n = sum([1 async for _ in export_session_history(conn, c.id)])
     assert n > 10 and sorted(s for s in seen if s) == sorted(
-        f"export_{k}" for k in ("agent", "message", "turn", "command", "check", "event")
+        f"export_{k}" for k in ("agent", "message", "turn", "command", "check", "event", "handoff")
     )
+
+
+async def seed_handoff(env: Env, session, agent, text: str = "the handoff text") -> int:
+    async with env.pool.connection() as conn:
+        row = await handoffs.insert(
+            conn, session.id, agent["id"], "voluntary", "done", handoff_text=text
+        )
+    return row.id
+
+
+async def test_export_includes_handoff_records(env):
+    c = await env.session("alpha")
+    a1, _ = await populate(env, c)
+    other = await env.session("bravo")
+    other_agent = await insert_agent(env.pool, other.id, ordinal=0, pod_name="b0")
+    await seed_handoff(env, other, other_agent, "not mine")
+    hid = await seed_handoff(env, c, a1)
+    lines = [line async for line in lines_of(env, c)]
+    assert any('"kind":"handoff"' in line for line in lines)
+    records = [json.loads(line) for line in lines if '"kind":"handoff"' in line]
+    assert [(r["id"], r["handoff_text"], r["session_id"]) for r in records] == [
+        (hid, "the handoff text", str(c.id))
+    ]
+    assert records[0]["trigger"] == "voluntary"
 
 
 # ---------------------------------------------------------------- the hook runner
@@ -791,3 +815,25 @@ async def test_stuck_pods_do_not_block_discard_past_timeout(pool, dsn, tmp_path,
     assert "still running" in caplog.text and "exporting anyway" in caplog.text
     assert env.calls() == 1
     assert await env.get(c.id) is None
+
+
+async def test_export_runs_before_cascade(pool, dsn, tmp_path):
+    """The handoff rows go to the hook first, then the discard cascade deletes them."""
+    env = Env(pool, dsn, tmp_path)
+    env.settings.discard_hook_command = env.command_hook()
+    c = await env.session("alpha")
+    await env.rec.reconcile_once()
+    a1, _ = await populate(env, c)
+    await seed_handoff(env, c, a1)
+
+    await env.discard(c.id)
+    await env.rec.reconcile_once()
+
+    sent = [json.loads(x) for x in (tmp_path / "out.jsonl").read_text().splitlines()]
+    assert [r["handoff_text"] for r in sent if r["kind"] == "handoff"] == ["the handoff text"]
+    assert await env.get(c.id) is None
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT count(*) FROM agent_handoffs WHERE session_id = %s", (c.id,)
+        )
+        assert (await cur.fetchone())[0] == 0

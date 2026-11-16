@@ -5,9 +5,9 @@ One `session` record (`id`, `slug`, `spec`, `created_at`, the provenance `preset
 `close_requested_at`, `close_reason`, `close_kind` and `close_deadline_at`, and the inactivity
 `inactivity_reminded_at` and `last_update_at` (the api-written update stamp, not the computed
 quiet clock), each null when unset; never the vault pins), then the
-`agent`, `message`, `turn`, `command`, `check` and `event` records of that session, each kind in
-id order (turns in started_at order). Every kind is read through a server-side cursor, so a long
-history is never held in memory.
+`agent`, `message`, `turn`, `command`, `check`, `event` and `handoff` records of that session,
+each kind in id order (turns in started_at order). Every kind is read through a server-side
+cursor, so a long history is never held in memory.
 """
 
 from __future__ import annotations
@@ -39,6 +39,8 @@ QUERIES: tuple[tuple[str, str], ...] = (
     ),
     ("check", "SELECT * FROM checks WHERE session_id = %(c)s ORDER BY id"),
     ("event", "SELECT * FROM events WHERE session_id = %(c)s ORDER BY id"),
+    # last: the discard cascade deletes these rows right after the export (decision 771)
+    ("handoff", "SELECT * FROM agent_handoffs WHERE session_id = %(c)s ORDER BY id"),
 )
 
 
