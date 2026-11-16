@@ -359,7 +359,8 @@ async def lock(
 # The one visibility rule: a proposal is hidden from its proposer when its target exists and the
 # proposer may no longer manage it: a preset that is not superleader-manageable, or another
 # session whose preset is not (or that has none), as `admin._target` decides. A project grant
-# (T-120) follows the rule of its target. A deleted target
+# (T-120) follows the rule of its target. A `preset_manageable` proposal (S-66) is never hidden:
+# it targets an unmanageable preset by design. A deleted target
 # stays visible as target_gone; the proposer's own session is never hidden.
 VISIBLE_SQL = (
     "NOT (kind IN ('preset', 'preset_projects') AND EXISTS (SELECT 1 FROM presets pr"
@@ -458,14 +459,14 @@ async def active_on_target(
 
 async def active_on_preset(conn: psycopg.AsyncConnection, preset_id: uuid.UUID) -> list[int]:
     """Ids, ascending, of the active proposals that concern the preset as they stand now: a
-    preset or preset_projects proposal targeting it, or a schedule proposal whose current
-    revision has it as the base `preset_id` or proposes it in a `preset_id` item. Session
-    proposals are not counted."""
+    preset, preset_projects or preset_manageable proposal targeting it, or a schedule proposal
+    whose current revision has it as the base `preset_id` or proposes it in a `preset_id` item.
+    Session proposals are not counted."""
     pid = str(preset_id)
     rows = await _all(
         conn,
         "SELECT p.id FROM change_proposals p WHERE p.status = ANY(%(active)s) AND ("
-        " (p.kind IN ('preset', 'preset_projects') AND p.target_id = %(id)s)"
+        " (p.kind IN ('preset', 'preset_projects', 'preset_manageable') AND p.target_id = %(id)s)"
         " OR (p.kind = 'schedule' AND ("
         "  EXISTS (SELECT 1 FROM change_proposal_revisions r WHERE r.proposal_id = p.id"
         "   AND r.revision = p.revision AND r.base->>'preset_id' = %(id)s)"

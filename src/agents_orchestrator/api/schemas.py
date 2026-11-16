@@ -281,7 +281,14 @@ class ProposalRevisionView(BaseModel):
     items: list[ProposalItemView]
 
 
-ProposalKind = Literal["preset", "schedule", "session", "session_projects", "preset_projects"]
+ProposalKind = Literal[
+    "preset",
+    "schedule",
+    "session",
+    "session_projects",
+    "preset_projects",
+    "preset_manageable",
+]
 
 
 class ProposalView(BaseModel):
