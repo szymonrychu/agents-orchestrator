@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -16,6 +17,7 @@ from agents_orchestrator.db import backups as backups_repo
 from agents_orchestrator.db import sessions
 from agents_orchestrator.reconciler import cache as cache_mod
 from agents_orchestrator.reconciler.cache import LIVE, RESTORE_POST, RESTORE_PRE, SAVE_NOW, job_name
+from agents_orchestrator.wrapper.models import WrapperUnreachable
 
 pytestmark = pytest.mark.asyncio
 
@@ -271,3 +273,82 @@ async def test_save_request_for_a_pending_restore_is_closed_with_a_reason(env):
     assert "backup_save" not in await env.status(c.id)
     run = await env.run(c.id, SAVE_NOW)
     assert run["state"] == "skipped" and run["reason"] == "restore_pending"
+
+
+async def set_delivery_age(env, c, seconds):
+    """Move the recorded live delivery `seconds` into the past (the retry backoff is time based)."""
+    async with env.pool.connection() as conn:
+        cur = await sessions.get(conn, c.id)
+        backup = cur.status["backup"]
+        record = backup["entries"][0]["live_delivery"]
+        past = datetime.fromisoformat(record["at"]) - timedelta(seconds=seconds)
+        record["at"] = past.isoformat()
+        await sessions.set_status(conn, c.id, cur.status, cur.observed_generation)
+
+
+async def test_failed_delivery_warns_and_is_retried_bounded(env):
+    c, _ = await env.running("alpha", [LIVE_SKILLS])
+    await env.tick()
+    v2 = await new_version(env.pool)
+    await env.tick()
+    env.kube.finish_job(job_name("alpha", LIVE), log=line(res("failed", 0, reason="s3 hiccup")))
+    await env.tick()
+    record = await env.live_state(c)
+    assert record["state"] == "failed" and record["version"] == str(v2.id)
+    warnings = [e["data"] for e in await env.events(c.id) if e["type"] == cache_mod.WARNING_EVENT]
+    assert [(w["state"], w["direction"]) for w in warnings] == [("failed", "restore")]
+    assert "s3 hiccup" in warnings[0]["message"]
+    await env.tick(3)
+    assert env.job_creates() == [job_name("alpha", LIVE)]  # backoff: no tight loop
+    for attempt in range(2, cache_mod.LIVE_ATTEMPTS + 1):
+        await set_delivery_age(env, c, cache_mod.LIVE_RETRY_SECONDS + 1)
+        await env.tick()
+        assert env.job_creates() == [job_name("alpha", LIVE)] * attempt
+        env.kube.finish_job(job_name("alpha", LIVE), log=line(res("failed", 0, reason="again")))
+        await env.tick()
+    await set_delivery_age(env, c, cache_mod.LIVE_RETRY_SECONDS + 1)
+    await env.tick(3)
+    assert len(env.job_creates()) == cache_mod.LIVE_ATTEMPTS  # bounded
+
+
+async def test_pending_reload_survives_a_second_delivery(env):
+    c, _ = await env.running("alpha", [LIVE_SKILLS])
+    await env.tick()
+    async with env.pool.connection() as conn:
+        await conn.execute(
+            "UPDATE agents SET wrapper_session_id = 'w-' || ordinal, url = 'http://a' || ordinal"
+            " WHERE session_id = %s",
+            (c.id,),
+        )
+    await new_version(env.pool)
+    await env.tick()
+    env.kube.finish_job(job_name("alpha", LIVE), log=line(res("restored", 0, size=2)))
+
+    class Down(StubWrapper):
+        async def command(self, session_id, name):
+            raise WrapperUnreachable("down")
+
+    env.rec.live.wrapper_factory = Down
+    await env.tick()
+    run = cache_mod.get_run(await env.status(c.id), LIVE)
+    assert run["reload_pending"] is True
+    await new_version(env.pool, digest="d" * 64)  # a second delivery starts first
+    await env.tick()
+    run = cache_mod.get_run(await env.status(c.id), LIVE)
+    assert run["state"] == "running" and run["reload_pending"] is True  # coalesced, not lost
+    env.rec.live.wrapper_factory = StubWrapper
+    env.kube.finish_job(job_name("alpha", LIVE), log=line(res("restored", 0, size=2)))
+    await env.tick(3)
+    assert {n for _, _, n in StubWrapper.calls} == {"reload-skills"}
+
+
+async def test_status_write_keeps_a_save_request_set_concurrently(env):
+    """The lost-update fix: the write re-reads the row under lock, so a request the api set after
+    this step read its session survives the reconciler's status write."""
+    c, _ = await env.running("alpha", [LIVE_SKILLS])
+    async with env.pool.connection() as conn:
+        stale = await sessions.get(conn, c.id)
+    await env.request_save(c)  # the api sets backup_save after `stale` was read
+    await env.rec._write_status(stale, {"message": "x"}, stale.observed_generation)
+    status = await env.status(c.id)
+    assert status["message"] == "x" and "backup_save" in status

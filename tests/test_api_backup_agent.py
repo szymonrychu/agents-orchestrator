@@ -18,6 +18,10 @@ SKILLS = {"root": "claude", "path": "skills", "mode": "both", "name": "skills/{{
 SRC = {"root": "workspace", "path": "src", "mode": "restore", "name": "src/{{ project }}"}
 
 
+def cached(dsn):
+    return make_settings(dsn).model_copy(update={"cache_s3_bucket": "b"})
+
+
 async def session_with(pool, entries):
     c = await insert_session(pool, spec={"replicas": 2, "max_replicas": 4, "backup": entries})
     a0 = await insert_agent(pool, c["id"], ordinal=0, ready=True)
@@ -34,7 +38,7 @@ async def post(app, c, body, ip=IP0):
 
 async def test_save_route_member_and_leader(pool, dsn):
     c, a0, a1 = await session_with(pool, [SRC, SKILLS])
-    app = create_app(make_settings(dsn), pool)
+    app = create_app(cached(dsn), pool)
     for ip in (IP0, IP1):  # any agent of the session, leader or member
         async with pool.connection() as conn:
             await conn.execute(
@@ -52,7 +56,7 @@ async def test_save_route_member_and_leader(pool, dsn):
 
 async def test_save_route_no_entry_404(pool, dsn):
     c, _, _ = await session_with(pool, [SRC, SKILLS])
-    app = create_app(make_settings(dsn), pool)
+    app = create_app(cached(dsn), pool)
     for body in (
         {"root": "claude", "path": "rules"},  # no such entry
         {"root": "workspace", "path": "skills"},  # wrong root
@@ -69,7 +73,7 @@ async def test_save_route_no_entry_404(pool, dsn):
 
 async def test_save_while_one_is_open_is_409(pool, dsn):
     c, _, _ = await session_with(pool, [SKILLS])
-    app = create_app(make_settings(dsn), pool)
+    app = create_app(cached(dsn), pool)
     assert (await post(app, c, {"root": "claude", "path": "skills"})).status_code == 202
     r = await post(app, c, {"root": "claude", "path": "skills"}, IP1)
     assert r.status_code == 409 and r.json()["error"]["code"] == "save_running"
@@ -83,13 +87,13 @@ async def test_save_while_the_run_is_running_is_409(pool, dsn):
             "UPDATE sessions SET status = %s::jsonb WHERE id = %s",
             (json.dumps({"backup": {"runs": {"save_now": run}}}), c["id"]),
         )
-    r = await post(create_app(make_settings(dsn), pool), c, {"root": "claude", "path": "skills"})
+    r = await post(create_app(cached(dsn), pool), c, {"root": "claude", "path": "skills"})
     assert r.status_code == 409 and r.json()["error"]["code"] == "save_running"
 
 
 async def test_backup_status_lists_entries(pool, dsn):
     c, _, _ = await session_with(pool, [SRC, SKILLS])
-    app = create_app(make_settings(dsn), pool)
+    app = create_app(cached(dsn), pool)
     async with client_for(app) as http:
         r = await http.get("/agent/v1/backup", headers=headers(c["id"]))
     assert r.status_code == 200, r.text
@@ -100,3 +104,12 @@ async def test_backup_status_lists_entries(pool, dsn):
     ]
     assert entries[1]["name"] == "skills/{{ project }}" and entries[1]["live"] is False
     assert entries[1]["restore"] is None and entries[1]["save"] is None
+
+
+async def test_save_without_cache_is_503_and_sets_no_request(pool, dsn):
+    c, _, _ = await session_with(pool, [SKILLS])
+    app = create_app(make_settings(dsn), pool)  # no cache bucket: the reconciler would never run it
+    r = await post(app, c, {"root": "claude", "path": "skills"})
+    assert r.status_code == 503 and r.json()["error"]["code"] == "cache_unavailable"
+    async with pool.connection() as conn:
+        assert "backup_save" not in (await sessions_repo.get(conn, c["id"])).status

@@ -38,6 +38,8 @@ from agents_orchestrator.db import sessions
 from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.reconciler.cache import (
     LIVE,
+    LIVE_ATTEMPTS,
+    LIVE_RETRY_SECONDS,
     SAVE_NOW,
     CacheRunner,
     _new_run,
@@ -54,7 +56,7 @@ RELOAD_COMMAND = "reload-skills"
 RELOAD_ATTEMPTS = 5  # passes an unreachable agent is retried
 DELIVERABLE_PHASES = frozenset({"ready", "degraded"})
 # entry states after which the same version is not delivered again
-NOT_RETRIED = frozenset({"skipped_dirty", "missing", "unreadable", "failed"})
+NOT_RETRIED = frozenset({"skipped_dirty", "missing", "unreadable"})
 
 
 def _running(run: dict[str, Any] | None) -> bool:
@@ -178,10 +180,25 @@ class Live:
                 if current is None or str(current.id) == record.get("version"):
                     continue
                 last = record.get("live_delivery") or {}
-                if last.get("version") == str(current.id) and last.get("state") in NOT_RETRIED:
-                    continue
+                if last.get("version") == str(current.id):
+                    if last.get("state") in NOT_RETRIED:
+                        continue
+                    if last.get("state") == "failed" and not await self._retry_due(conn, last):
+                        continue
                 out.append((index, name, current))
         return out
+
+    @staticmethod
+    async def _retry_due(conn: Any, last: dict[str, Any]) -> bool:
+        """A failed delivery of this version is tried again after a backoff, at most
+        LIVE_ATTEMPTS times (then it stays `failed`; the next version is tried afresh)."""
+        if int(last.get("attempts") or 1) >= LIVE_ATTEMPTS:
+            return False
+        cur = await conn.execute(
+            "SELECT now() >= %s::timestamptz + make_interval(secs => %s)",
+            (last.get("at"), LIVE_RETRY_SECONDS),
+        )
+        return bool((await cur.fetchone())[0])
 
     async def _begin(
         self, session: Session, stale: list[tuple[int, str, backups_repo.Version]]
@@ -200,8 +217,15 @@ class Live:
                         "version": str(version.id),
                     }
                 )
-                entries[index]["live_delivery"] = _state("running", name, str(version.id), now)
+                running = _state("running", name, str(version.id), now)
+                last = entries[index].get("live_delivery") or {}
+                if last.get("version") == str(version.id) and last.get("attempts"):
+                    running["attempts"] = last["attempts"]  # a retry keeps count
+                entries[index]["live_delivery"] = running
         run = _new_run(now, plan)
+        previous = get_run(session.status, LIVE) or {}
+        if previous.get("reload_pending"):
+            run["reload_pending"] = True  # coalesce: the pending reload follows this delivery
         session = await self.runner._write(session, LIVE, run, entries)
         await self.runner._start(session, LIVE, run)
 

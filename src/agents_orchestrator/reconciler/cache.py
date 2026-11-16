@@ -105,6 +105,8 @@ SCRATCH_DIR = "/scratch"
 SESSIONS_SUBPATH = "sessions"  # the PVC subtree holding every agent pod's /sessions
 WARNING_EVENT = "backup_warning"
 EVENT_SESSION = "backup"  # the events key of the reconciler's own rows (agent_id: the session id)
+LIVE_ATTEMPTS = 3  # deliveries of one version tried before it is given up (state `failed`)
+LIVE_RETRY_SECONDS = 60  # backoff between two attempts of the same version
 WARN_STATES = frozenset({"missing", "unreadable", "refused_secret"})
 # a restored claude path that the agents' Claude Code loads at start: they get `reload-skills`
 RELOAD_PATHS = frozenset({"skills", "."})
@@ -989,7 +991,10 @@ class CacheRunner:
                 warnings.append(warning)
             else:
                 reason = str(result.get("reason") or "no_outcome")[:REASON_MAX]
-                entries[index]["live_delivery"] = _state("failed", name, version, now, reason)
+                entries[index]["live_delivery"] = _failed_delivery(
+                    entries[index], name, version, now, reason
+                )
+                warnings.append(_failed_warning(index, name, reason))
                 first_failure = first_failure or reason
         session, run = await self._finish(
             session,
@@ -1113,19 +1118,22 @@ class CacheRunner:
         }
         if key in _TX_FIELD:
             run["bytes"] = nbytes
+        warnings: list[dict[str, Any]] = []
         if entries is None and state == "failed" and run.get("plan"):
             entries = self._entries(session)
             field = "restore" if _is_restore(key) else "save"
             for item in run["plan"]:
-                if key == LIVE:  # a failed delivery is not retried for the same version
-                    entries[item["index"]]["live_delivery"] = _state(
-                        "failed", item["name"], item["version"], now, reason
+                if key == LIVE:  # retried later, bounded (`live.Live._stale`)
+                    entries[item["index"]]["live_delivery"] = _failed_delivery(
+                        entries[item["index"]], item["name"], item["version"], now, reason
                     )
+                    warnings.append(_failed_warning(item["index"], item["name"], reason))
                 elif (entries[item["index"]].get(field) or {}).get("state") == "running":
                     entries[item["index"]][field] = _state(
                         "failed", item["name"], None, now, reason
                     )
         session = await self._write(session, key, run, entries)
+        await self._warn(session, warnings)
         detail = f": {reason}" if reason else ""
         if state == "failed":
             log.warning("%s of session %s failed%s", _title(key), session.slug, detail)
@@ -1218,6 +1226,22 @@ def _state(
     if reason:
         record["reason"] = reason[:REASON_MAX]
     return record
+
+
+def _failed_delivery(
+    entry: dict[str, Any], name: str, version: str, now: datetime, reason: str | None
+) -> dict[str, Any]:
+    """A failed live delivery record; `attempts` counts the failures of this same version."""
+    last = entry.get("live_delivery") or {}
+    same = last.get("version") == version
+    attempts = int(last.get("attempts") or 0) if same else 0
+    return {**_state("failed", name, version, now, reason), "attempts": attempts + 1}
+
+
+def _failed_warning(index: int, name: str, reason: str | None) -> dict[str, Any]:
+    warning = _warning(index, name, "failed", "restore")
+    warning["message"] = f"live delivery of the new version failed: {reason or 'no_outcome'}"
+    return warning
 
 
 def _warning(index: int, name: str, state: str, direction: str) -> dict[str, Any]:

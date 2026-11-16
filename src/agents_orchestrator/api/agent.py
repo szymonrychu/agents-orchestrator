@@ -406,12 +406,16 @@ class BackupSaveAccepted(BaseModel):
     response_model=BackupSaveAccepted,
     summary="Save one backup entry of the caller's session now",
 )
-async def backup_save(body: BackupSaveIn, agent: Caller, pool: Pool) -> BackupSaveAccepted:
+async def backup_save(
+    body: BackupSaveIn, agent: Caller, pool: Pool, settings: Cfg
+) -> BackupSaveAccepted:
     """Any agent of the session (leader or member). 404 `no_entry` when no entry that is saved
     (mode backup or both) names this root and path, 409 `save_running` while another on-demand
     save is queued or running, 409 `session_deleting`. The reconciler runs one save Job for the
     entry and records the outcome like a discard save; the answer is the entry index and the
-    Job's name."""
+    Job's name. 503 `cache_unavailable` when no cache is configured (nothing could run the save)."""
+    if not settings.cache_available:
+        raise ApiError(503, "cache_unavailable", "no backup cache is configured")
     async with pool.connection() as conn:
         session = await _session(conn, agent)
         index = next(

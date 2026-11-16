@@ -219,8 +219,14 @@ async def get(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Session |
 
 
 async def get_for_update(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Session | None:
-    """The session row FOR UPDATE in the caller's transaction (the reconciler's status write)."""
-    rows = await _fetch(conn, "SELECT * FROM sessions WHERE id = %s FOR UPDATE", (session_id,))
+    """The session row locked in the caller's transaction (the reconciler's status write).
+
+    FOR NO KEY UPDATE: the write only changes non-key columns, so rows referencing the session
+    (agents, events) can still be inserted meanwhile.
+    """
+    rows = await _fetch(
+        conn, "SELECT * FROM sessions WHERE id = %s FOR NO KEY UPDATE", (session_id,)
+    )
     return rows[0] if rows else None
 
 
