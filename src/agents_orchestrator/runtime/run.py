@@ -48,12 +48,19 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(out, default=str)
 
 
+def quiet_http_loggers() -> None:
+    """httpx and httpcore log the full upstream URL (query string included) at INFO."""
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
 def configure_logging(level: str) -> None:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JsonFormatter())
     root = logging.getLogger()
     root.handlers[:] = [handler]
     root.setLevel(level.upper())
+    quiet_http_loggers()
 
 
 def install_signal_handlers(stop: asyncio.Event) -> None:

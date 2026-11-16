@@ -49,3 +49,18 @@ def test_log_close_line(caplog):
         "close_reason": "quiet",
         "step": "ask",
     }
+
+
+def test_configure_logging_holds_http_clients_at_warning():
+    from agents_orchestrator.runtime.run import configure_logging
+
+    root = logging.getLogger()
+    saved = (root.handlers[:], root.level)
+    try:
+        for name in ("httpx", "httpcore"):
+            logging.getLogger(name).setLevel(logging.NOTSET)
+        configure_logging("DEBUG")
+        for name in ("httpx", "httpcore"):
+            assert logging.getLogger(name).level == logging.WARNING
+    finally:
+        root.handlers[:], root.level = saved[0], saved[1]

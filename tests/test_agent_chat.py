@@ -31,6 +31,7 @@ from agents_orchestrator.api.app import create_app
 from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import leadership
 from agents_orchestrator.db import sessions as sessions_repo
+from agents_orchestrator.runtime.run import quiet_http_loggers
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import SessionSpec
 from agents_orchestrator.tokens import derive_tokens
@@ -729,16 +730,18 @@ async def test_history_relay_never_logs_query_or_body(monkeypatch, caplog):
     rig = make_rig(monkeypatch)
     canary = "CANARY-" + secrets.token_hex(8)
     rig.upstream.reply = httpx.Response(202, json={"id": "a1", "status": "queued"})
+    quiet_http_loggers()  # the level setup production applies at startup (configure_logging)
     with caplog.at_level(logging.DEBUG):
         await rig.call("GET", f"/agent/v1/chat/history?from={canary}")
         await rig.call("POST", "/agent/v1/chat/attachments", json={"id": canary})
         rig.upstream.reply = httpx.Response(502, content=f"bad {canary}".encode())
         await rig.call("GET", f"/agent/v1/chat/history?from={canary}")
         await rig.call("POST", "/agent/v1/chat/attachments", json={"id": canary})
-    # the relay's own records (the httpx client logger of either side is not the relay)
-    ours = [r for r in caplog.records if r.name.startswith("agents_orchestrator")]
-    assert ours, "the relay logged nothing, the check proves nothing"
-    assert canary not in " ".join(r.getMessage() + str(r.__dict__) for r in ours)
+    # records of every logger (httpx included), not only ours
+    assert any(r.name.startswith("agents_orchestrator") for r in caplog.records), (
+        "the relay logged nothing, the check proves nothing"
+    )
+    assert canary not in " ".join(r.getMessage() + str(r.__dict__) for r in caplog.records)
 
 
 # ------------------------------------------------------------------------- identity and ports

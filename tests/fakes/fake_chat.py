@@ -183,7 +183,7 @@ class FakeChat:
     sends: dict[str, dict[str, Any]] = field(default_factory=dict)
     # the room's past messages (oldest first) served by `/history`, and the attachment fetches
     # queued by `/attachments` (id -> the session and message of the fetch)
-    history: list[dict[str, Any]] = field(default_factory=lambda: _default_history())
+    history: list[dict[str, Any]] = field(default_factory=_default_history)
     fetches: dict[str, dict[str, Any]] = field(default_factory=dict)
     # per-session room memory: the notes (body, version) and the skills (name -> record)
     notes: dict[uuid.UUID, tuple[str, int]] = field(default_factory=dict)
