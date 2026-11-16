@@ -74,8 +74,6 @@ PLUGIN_PENDING: set[str] = {
     "chat_attachment_fetch",
     "chat_attachment_status",
     "chat_admin_history",
-    "approval_ask",
-    "approval_list",
 }
 ALONE_TOOLS = ["me", "leadership_handover", *TAIL_TOOLS]
 PROPOSAL = [
