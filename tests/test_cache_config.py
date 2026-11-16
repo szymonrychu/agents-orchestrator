@@ -8,9 +8,9 @@ from agents_orchestrator.spec import (
     CACHE_ALWAYS_EXCLUDE,
     CACHE_EXCLUDE_MAX,
     INIT_DIR,
+    BackupEntry,
     SessionSpec,
     SpecInvalid,
-    WorkspaceCache,
     validate_spec,
 )
 
@@ -114,96 +114,77 @@ def test_secret_key_not_in_repr():
     assert "TOPSECRETVALUE" not in str(s)
 
 
-def test_workspace_cache_validation():
+def _entry(name="k", **over):
+    return BackupEntry(root="workspace", path=".", mode="both", name=name, **over)
+
+
+def test_backup_entry_validation():
     assert CACHE_EXCLUDE_MAX == 50
     assert CACHE_ALWAYS_EXCLUDE == (INIT_DIR,)
-    assert WorkspaceCache().restore_key is None
-    assert WorkspaceCache().save_key is None
-    assert WorkspaceCache().exclude == []
-    WorkspaceCache(restore_key="a", exclude=["node_modules", "build/*.o"])
-    WorkspaceCache(restore_key="a" + "b" * 62, save_key="p/q")
-    WorkspaceCache(restore_key="", save_key="")  # fresh start, restore-only
-    WorkspaceCache(restore_key="proj/", save_key="proj/{{ now }}")  # templates render later
+    assert _entry().exclude == []
+    _entry(exclude=["node_modules", "build/*.o"])
+    _entry("a" + "b" * 62)
+    _entry("p/q")
+    _entry("proj/{{ now }}")  # templates render later
     for bad in ("Bad Key", "-a", ".a", "a//b", "a" * 64, "sessions/x", "a/b/c/d/e", "a" * 257):
         with pytest.raises(ValidationError):
-            WorkspaceCache(restore_key=bad)
-        with pytest.raises(ValidationError):
-            WorkspaceCache(save_key=bad)
+            _entry(bad)
     with pytest.raises(ValidationError):
-        WorkspaceCache(save_key="proj/")  # only a restore name may end in '/'
-    with pytest.raises(ValidationError):
-        WorkspaceCache(key="a")  # the single key is gone
+        _entry("proj/")  # a name never ends in '/'
     for bad in ([""], ["/abs"], ["a/../b"], [".."], ["x" * 257], ["x"] * 51):
         with pytest.raises(ValidationError):
-            WorkspaceCache(exclude=bad)
-    WorkspaceCache(exclude=["x" * 256] * 50)
+            _entry(exclude=bad)
+    _entry(exclude=["x" * 256] * 50)
     with pytest.raises(ValidationError):
-        WorkspaceCache(bogus=1)
+        BackupEntry(root="workspace", path=".", mode="both", name="a", bogus=1)
     with pytest.raises(ValidationError):
-        SessionSpec.model_validate({"cache": {"restore_key": "Bad Key"}})
+        SessionSpec.model_validate({"backup": [{"root": "workspace", "path": ".", "mode": "both"}]})
 
 
-def test_cache_sparse_dump():
-    assert "cache" not in SessionSpec().model_dump(mode="json", exclude_none=True)
-    assert "cache" not in SessionSpec().model_dump(mode="json", exclude_unset=True)
-    spec = SessionSpec.model_validate({"cache": {}})
-    assert spec.cache == WorkspaceCache()
-    assert spec.model_dump(mode="json", exclude_none=True)["cache"] == {"exclude": []}
+def test_backup_sparse_dump():
+    assert "backup" not in SessionSpec().model_dump(mode="json", exclude_none=True)
+    assert "backup" not in SessionSpec().model_dump(mode="json", exclude_unset=True)
+    spec = SessionSpec(backup=[_entry()])
+    assert spec.model_dump(mode="json", exclude_none=True)["backup"][0]["name"] == "k"
 
 
-def test_validate_spec_cache_unavailable():
+def test_validate_spec_backup_unavailable():
     off = _settings()
     on = _settings(cache_s3_bucket="b")
-    spec = SessionSpec(cache=WorkspaceCache(restore_key="k", save_key="k"))
+    spec = SessionSpec(backup=[_entry("k")])
     validate_spec(SessionSpec(), off)
     with pytest.raises(SpecInvalid) as e:
         validate_spec(spec, off)
-    assert "workspace cache is not configured (ORCH_CACHE_S3_BUCKET is unset)" in e.value.errors
+    assert "backups are not configured (ORCH_CACHE_S3_BUCKET is unset)" in e.value.errors
     validate_spec(spec, on)
-    validate_spec(
-        spec, off, stored=SessionSpec(cache=WorkspaceCache(restore_key="k", save_key="k"))
-    )
+    validate_spec(spec, off, stored=SessionSpec(backup=[_entry("k")]))
     with pytest.raises(SpecInvalid):
-        validate_spec(
-            spec,
-            off,
-            stored=SessionSpec(cache=WorkspaceCache(restore_key="other", save_key="other")),
-        )
+        validate_spec(spec, off, stored=SessionSpec(backup=[_entry("other")]))
     with pytest.raises(SpecInvalid):
         validate_spec(spec, off, stored=SessionSpec())
 
 
 @pytest.mark.parametrize(
-    ("restore", "save", "fragment"),
+    ("name", "valid"),
     [
-        ("{{ nope }}", "ok", "cache.restore_key"),
-        ("ok", "{% if %}", "cache.save_key"),
-        ("{{ user }}", "ok", "cache.restore_key"),  # renders to the sample user: fine
-        ("{{ session_slug }}/../x", "ok", "cache.restore_key"),
-        ("ok", "{{ date }}", "cache.save_key"),  # 2026-01-01 is a valid segment
-        ("ok", "UPPER-{{ now }}", "cache.save_key"),
-        ("ok", "{{ 'sessions' }}/{{ now }}", "cache.save_key"),
-        ("ok", "{{ preset_name }}/", "cache.save_key"),  # a save name is not a prefix
+        ("{{ nope }}", False),
+        ("{% if %}", False),
+        ("{{ user }}", True),  # renders to the sample user: fine
+        ("{{ session_slug }}/../x", False),
+        ("{{ date }}", True),  # 2026-01-01 is a valid segment
+        ("UPPER-{{ now }}", False),
+        ("{{ 'sessions' }}/{{ now }}", False),
+        ("{{ preset_name }}/", False),  # a name is not a prefix
     ],
 )
-def test_validate_spec_renders_key_templates(restore, save, fragment):
-    spec = SessionSpec(cache=WorkspaceCache(restore_key=restore, save_key=save))
-    valid = {("{{ user }}", "ok"), ("ok", "{{ date }}")}
-    if (restore, save) in valid:
+def test_validate_spec_renders_name_templates(name, valid):
+    spec = SessionSpec(backup=[_entry(name)])
+    if valid:
         validate_spec(spec, _settings(cache_s3_bucket="b"))
         return
     with pytest.raises(SpecInvalid) as e:
         validate_spec(spec, _settings(cache_s3_bucket="b"))
-    assert any(m.startswith(fragment) for m in e.value.errors), e.value.errors
-
-
-def test_validate_spec_accepts_versioned_templates():
-    spec = SessionSpec(
-        cache=WorkspaceCache(
-            restore_key="{{ preset_name }}/", save_key="{{ preset_name }}/{{ now }}"
-        )
-    )
-    validate_spec(spec, _settings(cache_s3_bucket="b"))
+    assert any(m.startswith("backup[0].name") for m in e.value.errors), e.value.errors
 
 
 def test_sweep_settings_defaults():

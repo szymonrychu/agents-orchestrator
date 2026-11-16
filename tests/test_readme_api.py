@@ -164,5 +164,5 @@ def test_readme_documents_workspace_cache() -> None:
     assert names
     for name in names:
         assert f"`{name}`" in section, name
-    for word in ("spec.cache", "status.cache", "skipped_links", "last writer wins", "presigned"):
+    for word in ("spec.backup", "status.cache", "skipped_links", "last writer wins", "presigned"):
         assert word in section, word

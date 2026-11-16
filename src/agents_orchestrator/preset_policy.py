@@ -88,7 +88,7 @@ SESSION_FIXED: tuple[str, ...] = (
     "static",
     "workdir",
     "pvc_size",
-    "cache",
+    "backup",
 )
 _FIXED_DEFAULTS: dict[str, Any] = {"replicas": 1, "static": False, "workdir": "workdir"}
 

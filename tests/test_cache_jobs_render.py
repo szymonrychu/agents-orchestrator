@@ -56,11 +56,15 @@ def make_session(slug: str = "alpha", **spec: Any) -> Session:
         "image": SPEC_IMAGE,
         "workdir": "repo",
         "env": {"SPEC_VAR": {"value": "x"}, "AWS_PROFILE": {"value": "agent"}},
-        "cache": {
-            "restore_key": "preset-0123456789abcdef",
-            "save_key": "preset-0123456789abcdef",
-            "exclude": ["node_modules", "*.log"],
-        },
+        "backup": [
+            {
+                "root": "workspace",
+                "path": ".",
+                "mode": "both",
+                "name": "preset-0123456789abcdef",
+                "exclude": ["node_modules", "*.log"],
+            }
+        ],
         **spec,
     }
     return Session(
@@ -122,7 +126,7 @@ def test_restore_job_image_and_command():
     with pytest.raises(ValueError):
         render_cache_job(s, settings, unknown, URL)
     with pytest.raises(ValueError):
-        render_cache_job(make_session(cache=None), settings, "restore", URL)
+        render_cache_job(make_session(backup=None), settings, "restore", URL)
 
 
 @pytest.mark.parametrize("action", ["restore", "save"])

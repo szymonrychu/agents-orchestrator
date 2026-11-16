@@ -7,12 +7,11 @@ from urllib.parse import urlsplit
 
 import pytest
 import pytest_asyncio
+from backup_helpers import workspace_entries
 from test_cache_restore import line
 from test_cache_save import SAVE, SaveEnv
 
-from agents_orchestrator.cache.presign import ArchiveObject
 from agents_orchestrator.db import sessions
-from agents_orchestrator.reconciler import cache as cache_mod
 from agents_orchestrator.reconciler.cache import restore_job_name
 from agents_orchestrator.spec import SessionSpec
 
@@ -30,9 +29,9 @@ async def env(pool, dsn) -> SaveEnv:
 
 
 async def make(env, restore_key, save_key, slug="alpha", **spec):
-    cache = {"restore_key": restore_key, "save_key": save_key}
+    entries = workspace_entries(restore_key, save_key)
     async with env.pool.connection() as conn:
-        c = await sessions.create(conn, slug, SessionSpec(cache=cache, **spec))
+        c = await sessions.create(conn, slug, SessionSpec(backup=entries, **spec))
         status = {**c.status, "cache": {"sessions_restore": SKIP}}
         return await sessions.set_status(conn, c.id, status, c.observed_generation)
 
@@ -49,17 +48,6 @@ async def finish_restore(env, c, outcome="miss"):
     await env.tick(2)
 
 
-def stub_latest(monkeypatch, found):
-    calls = []
-
-    def fake(settings, prefix, **kw):
-        calls.append(prefix)
-        return found
-
-    monkeypatch.setattr(cache_mod, "latest_under", fake)
-    return calls
-
-
 async def test_exact_name_restore_presigns_the_rendered_object(env):
     c = await make(env, "proj/{{ session_slug }}", "proj/{{ session_slug }}")
     await env.tick()
@@ -67,42 +55,6 @@ async def test_exact_name_restore_presigns_the_rendered_object(env):
     assert cache["restore"]["state"] == "running"
     assert cache["restore_resolved"] == f"{PRE}proj/alpha.tar.zst"
     assert job_path(env, RESTORE).endswith(f"/{PRE}proj/alpha.tar.zst")
-
-
-async def test_prefix_restore_resolves_the_newest_object(env, monkeypatch):
-    newest = ArchiveObject(f"{PRE}proj/20261031t120000z.tar.zst", 5, None)  # type: ignore[arg-type]
-    calls = stub_latest(monkeypatch, newest)
-    c = await make(env, "proj/", "proj/{{ now }}")
-    await env.tick()
-    cache = await env.cache(c.id)
-    assert calls == [f"{PRE}proj/"]
-    assert cache["restore_resolved"] == newest.key
-    assert cache["restore"]["state"] == "running"
-    assert job_path(env, RESTORE).endswith(f"/{newest.key}")
-
-
-async def test_prefix_restore_without_an_object_is_a_miss_and_no_job(env, monkeypatch):
-    stub_latest(monkeypatch, None)
-    c = await make(env, "proj/", "proj/{{ now }}", init_scripts=["echo a"])
-    await env.tick()
-    cache = await env.cache(c.id)
-    assert cache["restore"]["state"] == "miss"
-    assert cache["restore_resolved"] is None
-    assert env.creates(RESTORE) == 0
-    await env.tick()
-    assert env.kube.has("Job", "agent-alpha-init")  # the gate is open: init follows
-
-
-async def test_prefix_listing_failure_fails_the_restore(env, monkeypatch):
-    def boom(settings, prefix, **kw):
-        raise RuntimeError("s3 down")
-
-    monkeypatch.setattr(cache_mod, "latest_under", boom)
-    c = await make(env, "proj/", "proj/{{ now }}")
-    await env.tick()
-    restore = (await env.cache(c.id))["restore"]
-    assert restore["state"] == "failed" and restore["reason"].startswith("list_failed")
-    assert env.creates(RESTORE) == 0
 
 
 async def test_empty_restore_key_is_a_fresh_start_that_still_saves(env):
@@ -186,13 +138,3 @@ async def test_bad_save_template_fails_the_save_but_not_the_discard(env):
     assert env.saves[-1]["reason"].startswith("bad_cache_key")
     assert env.saves_created() == 0
     assert await env.gone(c)
-
-
-async def test_save_name_rendering_into_the_reserved_prefix_fails_the_save(env):
-    c = await make(env, "proj", "{{ 'preset' ~ '-' }}{{ session_slug }}")
-    await finish_restore(env, c)
-    await env.delete(c)
-    await env.tick()
-    assert env.saves[-1]["state"] == "failed"
-    assert env.saves[-1]["reason"].startswith("bad_cache_key")
-    assert env.saves_created() == 0

@@ -28,6 +28,7 @@ pytestmark = pytest.mark.asyncio
 
 KEY = "k" * 32
 CACHE_KEY = "preset-0123456789abcdef"
+WS_ENTRY = {"root": "workspace", "path": ".", "mode": "both", "name": CACHE_KEY}
 RESTORE = restore_job_name("alpha")
 INIT = init_job_name("alpha")
 SESSIONS_MISS = {
@@ -70,7 +71,7 @@ class Env:
     async def create(self, slug: str = "alpha", cache: bool = True, **spec):
         """A new session row, with the workspace cache unless `cache` is False."""
         if cache:
-            spec["cache"] = {"restore_key": CACHE_KEY, "save_key": CACHE_KEY}
+            spec["backup"] = [WS_ENTRY]
         async with self.pool.connection() as conn:
             c = await sessions.create(conn, slug, SessionSpec(**spec))
         if self.fake is not None:
@@ -307,9 +308,7 @@ async def _now(env):
 async def test_not_configured(pool, dsn):
     e = Env(pool, dsn, cache_s3_bucket="")
     async with pool.connection() as conn:
-        c = await sessions.create(
-            conn, "alpha", SessionSpec(cache={"restore_key": CACHE_KEY, "save_key": CACHE_KEY})
-        )
+        c = await sessions.create(conn, "alpha", SessionSpec(backup=[WS_ENTRY]))
     await e.tick()
     restore = (await e.cache(c.id))["restore"]
     assert (restore["state"], restore["reason"]) == ("failed", "not_configured")

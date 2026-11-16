@@ -141,13 +141,17 @@ def test_sa_name_differs_per_session_id() -> None:
         {"session_messaging": True},
         {"kube_cluster_access": False},
         {
-            "cache": {
-                "restore_key": "preset-0123456789abcdef",
-                "save_key": "preset-0123456789abcdef",
-            }
+            "backup": [
+                {
+                    "root": "workspace",
+                    "path": ".",
+                    "mode": "both",
+                    "name": "preset-0123456789abcdef",
+                }
+            ]
         },
     ],
-    ids=["alone", "hive", "static", "messaging-only", "kube-false", "cache"],
+    ids=["alone", "hive", "static", "messaging-only", "kube-false", "backup"],
 )
 def test_only_cluster_access_yields_privileged_account(spec: dict[str, Any]) -> None:
     session = make_session(**spec)

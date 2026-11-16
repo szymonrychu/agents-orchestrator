@@ -44,6 +44,7 @@ from agents_orchestrator.cache.presign import (
 from agents_orchestrator.db import sessions as sessions_repo
 from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.settings import Settings
+from agents_orchestrator.spec import has_workspace_entry
 
 log = logging.getLogger(__name__)
 
@@ -152,30 +153,22 @@ def _decide(
 def _spec_objects(session: Session, prefix: str) -> set[str]:
     """Objects a session will touch that its status does not record yet.
 
-    A plain or exactly-rendering restore name is protected before the reconciler resolves it; a
-    save name is rendered at save time, so rendering it with the creation time protects only a
-    fixed (unversioned) save target. Prefix-form restores resolve to the newest object of a group,
-    which the planner never deletes. Blocking (the sandbox is a child process): run in a thread.
+    A restore name that renders exactly is protected before the reconciler resolves it; a save
+    name is rendered at save time, so rendering it with the creation time protects only a fixed
+    (unversioned) save target. Blocking (the sandbox is a child process): run in a thread.
     """
-    cache = session.spec.cache
-    if cache is None:
-        return set()
     ctx = rendering.session_context("archive_name", session)
     found: set[str] = set()
-    for template, prefix_form in ((cache.restore_key, True), (cache.save_key, False)):
-        if not template:
-            continue
+    for entry in session.spec.backup or []:
         try:
-            name = rendering.render_name(template, ctx, allow_prefix=prefix_form)
-            if not name.endswith("/"):
-                found.add(object_name_for(prefix, name))
+            found.add(object_name_for(prefix, rendering.render_name(entry.name, ctx, dry=True)))
         except ArchiveNameError:
             continue
     return found
 
 
 def _session_keys(session: Session, prefix: str) -> set[str]:
-    if session.spec.cache is None:
+    if not has_workspace_entry(session.spec):
         return set()
     cache = session.status.get("cache")
     cache = cache if isinstance(cache, dict) else {}

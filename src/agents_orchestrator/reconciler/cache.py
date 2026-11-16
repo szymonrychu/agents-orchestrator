@@ -10,8 +10,8 @@ transcripts: Jobs `agent-<slug>-sessions-restore|save` mount the PVC subPath `se
 `status.cache.sessions_restore|sessions_save`. A target changes only the mount, `CACHE_DIR`,
 `CACHE_EXCLUDE`, the object, the Job name, the cache label and the status key.
 
-The transcripts restore runs once, on a session's first converge with `spec.cache` set, before
-its agent pods start (the StatefulSet is held at `replicas: 0` meanwhile). It never runs once
+The transcripts restore runs once, on a session's first converge with a workspace backup entry,
+before its agent pods start (the StatefulSet is held at `replicas: 0` meanwhile). It never runs once
 the session's StatefulSet or an agent pod exists: that records `skipped`/`pods_exist`, and a
 cache that is not configured records `skipped`/`not_configured`; neither creates a Job.
 
@@ -32,7 +32,6 @@ after the workdir; whatever their outcome, they never hold the discard.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
@@ -43,8 +42,8 @@ from typing import Any, Literal, get_args
 from psycopg_pool import AsyncConnectionPool
 
 from agents_orchestrator import rendering
-from agents_orchestrator.cache.keys import list_prefix_for, object_name_for
-from agents_orchestrator.cache.presign import CacheTarget, latest_under, presign, presign_object
+from agents_orchestrator.cache.keys import object_name_for
+from agents_orchestrator.cache.presign import CacheTarget, presign, presign_object
 from agents_orchestrator.cache.save_rule import PODS_EXIST, save_skip
 from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.k8s.kube import KubeApi, KubeError, Obj, is_owned
@@ -65,7 +64,14 @@ from agents_orchestrator.reconciler.checks import (
 )
 from agents_orchestrator.reconciler.init import REASON_MAX, StatusWriter
 from agents_orchestrator.settings import Settings
-from agents_orchestrator.spec import SESSIONS_EXCLUDE, check_rendered_cache_name
+from agents_orchestrator.spec import (
+    SESSIONS_EXCLUDE,
+    BackupEntry,
+    SessionSpec,
+    backups,
+    has_workspace_entry,
+    restores,
+)
 
 log = logging.getLogger(__name__)
 
@@ -118,6 +124,13 @@ def save_job_name(slug: str) -> str:
     return CacheOp("save").job_name(slug)
 
 
+def _workdir_entry(spec: SessionSpec, action: CacheAction) -> BackupEntry | None:
+    """The first workspace entry in the direction of `action`: until the per-entry phases land,
+    it alone drives the one workdir restore and save."""
+    pairs = restores(spec) if action == "restore" else backups(spec)
+    return next((e for _, e in pairs if e.root == "workspace"), None)
+
+
 def job_name(slug: str, action: CacheAction, target: CacheTarget = "workdir") -> str:
     return CacheOp(action, target).job_name(slug)
 
@@ -136,8 +149,8 @@ def render_cache_job(
     """The restore or save Job of `target` of a cache-enabled session, given one presigned `url`."""
     op = CacheOp(action, target)
     spec, slug = session.spec, session.slug
-    if spec.cache is None:
-        raise ValueError(f"session {slug} has no workspace cache")
+    if not has_workspace_entry(spec):
+        raise ValueError(f"session {slug} has no workspace backup entry")
     save = action == "save"
     labels = cache_labels(slug, action, target)
     if op.sessions:
@@ -148,7 +161,9 @@ def render_cache_job(
         }
         cache_dir, exclude = SESSIONS_ROOT, list(SESSIONS_EXCLUDE)
     else:
-        mount, cache_dir, exclude = workdir_mount(spec), workdir_path(spec), spec.cache.exclude
+        entry = _workdir_entry(spec, op.action)
+        mount, cache_dir = workdir_mount(spec), workdir_path(spec)
+        exclude = entry.exclude if entry is not None else []
     mounts: list[dict[str, Any]] = [
         {**mount, "readOnly": True} if save else mount,
         {"name": "tmp", "mountPath": TMP_DIR},
@@ -268,7 +283,7 @@ class CacheRunner:
 
     async def restore_step(self, session: Session) -> CacheGate:
         """Advance the one restore run by at most one transition; the gate for init and sessions."""
-        if session.spec.cache is None:
+        if not has_workspace_entry(session.spec):
             return CacheGate()
         op = CacheOp("restore")
         cache = session.status.get("cache")
@@ -293,7 +308,7 @@ class CacheRunner:
         no restore may replace them (`skipped`/`pods_exist`). An unconfigured cache records
         `skipped`/`not_configured`. Otherwise the Job restores `<prefix>sessions/<slug>.tar.zst`.
         """
-        if session.spec.cache is None:
+        if not has_workspace_entry(session.spec):
             return session, CacheGate()
         op = CacheOp("restore", "sessions")
         cache = session.status.get("cache") or {}
@@ -326,7 +341,7 @@ class CacheRunner:
         `never_converged`) and after one skipped with `pods_exist`. A
         failed or timed-out save is logged and recorded, never held.
         """
-        if session.spec.cache is None:
+        if not has_workspace_entry(session.spec):
             return True
         op = CacheOp("save", target)
         cache = session.status.get("cache") or {}
@@ -348,9 +363,11 @@ class CacheRunner:
         return save.get("state") != "running"
 
     def save_owed(self, session: Session, target: CacheTarget = "workdir") -> bool:
-        """`spec.cache` is set and the save of `target` has no outcome yet."""
+        """A workspace entry is set and the save of `target` has no outcome yet."""
         save = (session.status.get("cache") or {}).get(CacheOp("save", target).status_key)
-        return session.spec.cache is not None and (save is None or save.get("state") == "running")
+        return has_workspace_entry(session.spec) and (
+            save is None or save.get("state") == "running"
+        )
 
     # ------------------------------------------------------------------ transitions
 
@@ -392,35 +409,18 @@ class CacheRunner:
         now = await self._now() if op.action == "save" else None
         try:
             name = rendering.render_name(
-                template,
-                rendering.session_context("archive_name", session, now=now),
-                allow_prefix=op.action == "restore",
+                template, rendering.session_context("archive_name", session, now=now)
             )
-            # A plain name was checked against its preset at create (a derived key is allowed
-            # there, even once the preset is gone); a template must not render into the prefix.
-            literal = name if not any(m in template for m in rendering.MARKERS) else None
-            check_rendered_cache_name(name, f"{op.action}_key", literal)
-            if not name.endswith("/"):
-                cache[field] = object_name_for(prefix, name)
-                return None
-            listing = list_prefix_for(prefix, name)
-        except ValueError as exc:  # ArchiveNameError or a reserved prefix
+            cache[field] = object_name_for(prefix, name)
+        except ValueError as exc:  # ArchiveNameError
             return "failed", f"bad_cache_key: {exc}"[:REASON_MAX]
-        try:
-            found = await asyncio.to_thread(latest_under, self.settings, listing)
-        except Exception as exc:
-            log.exception("listing %s for session %s failed", listing, session.slug)
-            return "failed", f"list_failed: {exc}"[:REASON_MAX]
-        cache[field] = found.key if found is not None else None
-        return None if found is not None else ("miss", None)
+        return None
 
     @staticmethod
     def _key(session: Session, op: CacheOp) -> str:
-        """The workdir cache name of this action: `restore_key` to restore, `save_key` to save."""
-        cache = session.spec.cache
-        if cache is None:
-            return ""
-        return (cache.save_key if op.action == "save" else cache.restore_key) or ""
+        """The workdir name of this action: the first workspace entry in its direction, else ""."""
+        entry = _workdir_entry(session.spec, op.action)
+        return entry.name if entry is not None else ""
 
     async def _start(
         self, session: Session, cache: dict[str, Any], op: CacheOp, run: dict[str, Any]
