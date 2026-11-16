@@ -8,11 +8,13 @@
     ]},
     {"match": "ramp to l2", "steps": [
       {"statusline": {"context_window": {"used_percentage": null, "context_window_size": 200000, "current_usage": {"input_tokens": 140000}}}},
+      {"sleep": 25},
       {"tool": "Bash", "input": {"command": "echo l2"}, "result": "ok"},
       {"text": "Context is high."}
     ]},
     {"match": "ramp to l3", "steps": [
       {"statusline": {"context_window": {"used_percentage": null, "context_window_size": 200000, "current_usage": {"input_tokens": 170000}}}},
+      {"sleep": 25},
       {"tool": "Bash", "input": {"command": "echo l3"}, "result": "ok"},
       {"text": "Context is critical."}
     ]},

@@ -3577,9 +3577,10 @@ def test_leader_pod_delete_hands_off_to_successor(api: httpx.Client, baseline: d
 # a window of 200000 tokens puts L2 at 130000 and L3 at 165000, so "ramp to l2" reads 140000 and
 # "ramp to l3" 170000. "background watcher" ends its turn with a running background task (a
 # later Stop of the same session), "watcher done" with none, "compact now" runs an auto
-# compaction. Nothing here is forced on the agent: it submits its handoff by itself.
+# compaction. The policy is pushed only once the gauge is at L1 or above (10 s push pass), so
+# the ramp turns sleep 25 s after the gauge step, before the tool call that carries the text.
+# Nothing here is forced on the agent: it submits its handoff by itself.
 
-POLICY_PUSH_SECONDS = 25  # the pressure policy reaches the wrapper on a 10 s push pass
 STRONG_TIMEOUT = 300
 HANDOFF_BODY = {
     "doing": "Driving the parser rewrite of work item 42 and keeping the test suite green.",
@@ -3634,7 +3635,6 @@ def test_strong_path_solo_cycle(api: httpx.Client, baseline: dict) -> None:
         cid = c["id"]
         (agent,) = ready_agents(api, cid, 1)
         pod, aid = agent["pod_name"], agent["id"]
-        time.sleep(POLICY_PUSH_SECONDS)
         post_message(api, cid, "ramp to l2")
         wait_level_delivered(api, cid, aid, 2)
         wait_for("an open pressure cycle", lambda: (pressure_of(pod) or {}).get("phase"), 60, 2)
@@ -3692,7 +3692,6 @@ def test_strong_path_hive_cycle(api: httpx.Client, baseline: dict) -> None:
         leader, epoch = leader_view(api, cid)
         assert leader is not None and epoch is not None
         successor = next(a for a in live_agents(api, cid) if a["id"] != leader["id"])
-        time.sleep(POLICY_PUSH_SECONDS)
         post_message(api, cid, "ramp to l2", leader["id"])
         wait_level_delivered(api, cid, leader["id"], 2)
         wait_for(
@@ -3740,7 +3739,6 @@ def test_strong_path_never_cooperates(api: httpx.Client, baseline: dict) -> None
         cid = c["id"]
         (agent,) = ready_agents(api, cid, 1)
         pod, aid = agent["pod_name"], agent["id"]
-        time.sleep(POLICY_PUSH_SECONDS)
         post_message(api, cid, "ramp to l3")
         wait_level_delivered(api, cid, aid, 3)
         wait_for(
