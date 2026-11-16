@@ -1013,6 +1013,21 @@ def test_system_append_has_room_prompt():
     assert render.PROJECT_ROOM_PROMPT not in sl["prompts"]["system_append"]
 
 
+def test_system_append_tells_to_save_backups_after_editing():
+    settings = make_settings(agent_api_url=AGENT_URL)
+    entry = {"root": "claude", "path": "skills", "mode": "both", "name": "skills/{{ project }}"}
+    cfg = config_of(render.render_session(make_session(backup=[entry]), settings, TOKENS))
+    text = cfg["prompts"]["system_append"]
+    assert render.BACKUP_SAVE_PROMPT in text
+    assert "orchestrator_backup_save" in text and "skill, a rule or a script" in text
+    # nothing to save without a backup entry, and no agent relay means no tool
+    plain = config_of(render.render_session(make_session(), settings, TOKENS))
+    assert render.BACKUP_SAVE_PROMPT not in plain["prompts"]["system_append"]
+    off = make_settings(agent_api_url="")
+    bare = config_of(render.render_session(make_session(backup=[entry]), off, TOKENS))
+    assert render.BACKUP_SAVE_PROMPT not in bare["prompts"]["system_append"]
+
+
 def test_room_prompt_absent_without_agent_api():
     cfg = config_of(render.render_session(make_session(), make_settings(agent_api_url=""), TOKENS))
     text = cfg["prompts"]["system_append"]

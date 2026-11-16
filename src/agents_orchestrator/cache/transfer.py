@@ -218,6 +218,32 @@ def _merge_into(temp: Path, target: Path) -> None:
     shutil.rmtree(temp, ignore_errors=True)
 
 
+def _read_state_digest(state_dir: Path | None, entry: Mapping[str, Any]) -> str | None:
+    """The digest the last restore or save left in `backup-state/<index>.json`, or None."""
+    if state_dir is None:
+        return None
+    try:
+        body = json.loads((state_dir / f"{entry['index']}.json").read_text())
+    except (OSError, ValueError, KeyError):
+        return None
+    digest = body.get("digest") if isinstance(body, dict) else None
+    return digest if isinstance(digest, str) else None
+
+
+def _is_dirty(
+    entry: Mapping[str, Any], target: Path, exclude: list[str], state_dir: Path | None
+) -> bool:
+    """The directory differs from what the last restore or save put there (unsaved edits).
+
+    Without a recorded state any file in the directory counts as unsaved.
+    """
+    files = archive.manifest(target, exclude) if target.is_dir() else []
+    recorded = _read_state_digest(state_dir, entry)
+    if recorded is None:
+        return bool(files)
+    return archive.digest(files) != recorded
+
+
 def _restore_one(
     entry: Mapping[str, Any],
     client: httpx.Client,
@@ -236,6 +262,8 @@ def _restore_one(
         exclude = _entry_exclude(entry)
         if not url:
             raise _BadEnv("entry has no url")
+        if entry.get("skip_dirty") and _is_dirty(entry, target, exclude, state_dir):
+            return {**result, "state": "skipped_dirty"}  # live delivery never overwrites edits
         with client.stream("GET", url) as response:
             if response.status_code == 404:
                 return {**result, "state": "missing"}
@@ -259,7 +287,7 @@ def _restore_one(
             result["version"] = version
         if state_dir is not None:
             try:
-                _write_state(state_dir, entry, version, report["manifest"])
+                _write_state(state_dir, entry, version, report)
             except OSError as exc:  # the files are restored: a state error is only a warning
                 result["warning"] = f"backup-state not written: {_error(exc, url)}"
         return result
@@ -272,10 +300,18 @@ def _restore_one(
             shutil.rmtree(temp, ignore_errors=True)
 
 
-def _write_state(state_dir: Path, entry: Mapping[str, Any], version: Any, manifest: Any) -> None:
-    """`backup-state/<index>.json`: what the restore put on disk, for the dirty check later."""
+def _write_state(
+    state_dir: Path, entry: Mapping[str, Any], version: Any, report: Mapping[str, Any]
+) -> None:
+    """`backup-state/<index>.json`: what a restore or save left on disk (its manifest and
+    digest), for the dirty check of a later live delivery."""
     state_dir.mkdir(parents=True, exist_ok=True)
-    body = {"name": entry.get("name"), "version": version, "manifest": manifest}
+    body = {
+        "name": entry.get("name"),
+        "version": version,
+        "manifest": report["manifest"],
+        "digest": report["digest"],
+    }
     target = state_dir / f"{entry['index']}.json"
     tmp = target.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(body))
@@ -291,8 +327,9 @@ def restore_entries(env: Mapping[str, str], *, transport: httpx.BaseTransport | 
     """Restore every entry of `CACHE_ENTRIES`; print `{"entries": [...]}`; exit 1 on a failure.
 
     Each entry ends `restored`, `missing` (404, nothing touched), `unreadable` (extraction failed
-    in a temp dir that is removed, nothing touched) or `failed`. Missing and unreadable are
-    warnings for the caller: the exit code stays 0.
+    in a temp dir that is removed, nothing touched), `skipped_dirty` (a live delivery found unsaved
+    local edits: `skip_dirty` on the entry, nothing downloaded or touched) or `failed`. Missing,
+    unreadable and skipped_dirty are warnings for the caller: the exit code stays 0.
     """
     try:
         entries = _load_list(env, "CACHE_ENTRIES")
@@ -312,6 +349,7 @@ def _save_one(
     client: httpx.Client,
     scratch: Path,
     max_bytes: int,
+    state_dir: Path | None = None,
 ) -> dict[str, Any]:
     index = entry.get("index")
     result: dict[str, Any] = {"index": index}
@@ -350,7 +388,13 @@ def _save_one(
             )
         if not response.is_success:
             return {**result, "state": "failed", "reason": f"HTTP {response.status_code}"}
-        return {**result, "state": "uploaded", "size": packed.compressed_bytes, **report}
+        result = {**result, "state": "uploaded", "size": packed.compressed_bytes, **report}
+        if state_dir is not None and isinstance(index, int) and not isinstance(index, bool):
+            try:  # the saver's directory is now what it saved: a live delivery finds it clean
+                _write_state(state_dir, entry, None, report)
+            except OSError as exc:
+                result["warning"] = f"backup-state not written: {_error(exc, url)}"
+        return result
     except Exception as exc:  # noqa: BLE001
         return {**result, "state": "failed", "reason": _error(exc, url)}
     finally:
@@ -371,8 +415,9 @@ def save_entries(env: Mapping[str, str], *, transport: httpx.BaseTransport | Non
         _emit_entries([], reason=f"bad_env: {exc}")
         return EXIT_FAILED
     scratch = Path(env.get("CACHE_SCRATCH") or DEFAULT_SCRATCH)
+    state_dir = _state_dir(env)  # mounted only for an on-demand save
     with httpx.Client(transport=transport, timeout=TIMEOUT, verify=verify) as client:
-        results = [_save_one(e, client, scratch, max_bytes) for e in entries]
+        results = [_save_one(e, client, scratch, max_bytes, state_dir) for e in entries]
     _emit_entries(results)
     return EXIT_FAILED if any(r["state"] == "failed" for r in results) else EXIT_OK
 

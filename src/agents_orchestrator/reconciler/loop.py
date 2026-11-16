@@ -79,6 +79,7 @@ from agents_orchestrator.reconciler.cache import CacheGate, CacheRunner
 from agents_orchestrator.reconciler.checks import CheckRunner
 from agents_orchestrator.reconciler.discard_hook import HookResult, resolve_hooks, run_discard_hook
 from agents_orchestrator.reconciler.init import InitGate, InitRunner
+from agents_orchestrator.reconciler.live import Live
 from agents_orchestrator.reconciler.rollout import BUSY, LEADS, Replacer, agent_pods, terminating
 from agents_orchestrator.reconciler.sweeper import CacheSweeper
 from agents_orchestrator.reconciler.wrapper_sessions import WrapperSessionBootstrapper
@@ -89,7 +90,7 @@ from agents_orchestrator.wrapper.models import describe_exception
 
 log = logging.getLogger(__name__)
 
-CHANNELS = ("session_changed",)
+CHANNELS = ("session_changed", "backups_current")
 # The per-session Kubernetes access objects; each carries the session id (`SESSION_ID_LABEL`).
 KUBE_KINDS = frozenset({"ServiceAccount", "RoleBinding", "ClusterRoleBinding"})
 GUARDED_KINDS = (
@@ -233,6 +234,7 @@ class Reconciler:
         self.checks = CheckRunner(pool, kube, settings)
         self.init = InitRunner(pool, kube, settings, write_status=self._write_status)
         self.cache = CacheRunner(pool, kube, settings, write_status=self._write_status)
+        self.live = Live(self.cache, wrapper_factory, self._session_lock)
         self.sweeper = CacheSweeper(pool, settings)
         self.replacer = Replacer(pool, kube, settings)
         self.bootstrapper = (
@@ -381,6 +383,7 @@ class Reconciler:
             except Exception as exc:
                 log.exception("reconcile of session %s failed", session.slug)
                 await self._record_error(session, exc)
+        await self.live.deliver()
 
     async def pre_discard(self, session: Session) -> bool:
         """The gate before a discard deletes anything (D15): True lets the deletion proceed.
@@ -1182,7 +1185,7 @@ class Reconciler:
         from waking it.
         """
         async with self.pool.connection() as conn, conn.transaction():
-            current = await sessions.get(conn, session.id)
+            current = await sessions.get_for_update(conn, session.id)
             if current is None:
                 return
             status = {k: v for k, v in current.status.items() if k not in drop} | fields

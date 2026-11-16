@@ -39,6 +39,7 @@ from agents_orchestrator.api.sessions import (
     gate_scale_up,
     init_scripts_view,
 )
+from agents_orchestrator.cache import save_rule
 from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import events as events_repo
 from agents_orchestrator.db import (
@@ -54,7 +55,7 @@ from agents_orchestrator.db import queue as q
 from agents_orchestrator.db import sessions as sessions_repo
 from agents_orchestrator.dispatcher import feed
 from agents_orchestrator.dispatcher import hive as hive_push
-from agents_orchestrator.spec import WORKDIR_ROOT
+from agents_orchestrator.spec import WORKDIR_ROOT, backups
 from agents_orchestrator.tokens import tokens_for
 
 router = APIRouter(prefix="/agent/v1", tags=["agent"])
@@ -385,6 +386,93 @@ async def init_scripts_put(
         return await edit_init_scripts(
             conn, agent.session_id, body.scripts, settings, same_project_preset=True
         )
+
+
+class BackupSaveIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    root: Literal["workspace", "claude"]
+    path: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=512)]
+
+
+class BackupSaveAccepted(BaseModel):
+    entry_index: int
+    job: str
+
+
+@router.post(
+    "/backup/save",
+    status_code=202,
+    response_model=BackupSaveAccepted,
+    summary="Save one backup entry of the caller's session now",
+)
+async def backup_save(body: BackupSaveIn, agent: Caller, pool: Pool) -> BackupSaveAccepted:
+    """Any agent of the session (leader or member). 404 `no_entry` when no entry that is saved
+    (mode backup or both) names this root and path, 409 `save_running` while another on-demand
+    save is queued or running, 409 `session_deleting`. The reconciler runs one save Job for the
+    entry and records the outcome like a discard save; the answer is the entry index and the
+    Job's name."""
+    async with pool.connection() as conn:
+        session = await _session(conn, agent)
+        index = next(
+            (i for i, e in backups(session.spec) if e.root == body.root and e.path == body.path),
+            None,
+        )
+        if index is None:
+            raise ApiError(404, "no_entry", "no backup entry of this session saves that path")
+        run = (save_rule.backup_state(session.status).get("runs") or {}).get("save_now")
+        running = isinstance(run, dict) and run.get("state") == "running"
+        request = {
+            "id": str(uuid.uuid4()),
+            "entry_index": index,
+            "requested_by": str(agent.id),
+            "requested_at": datetime.now(UTC).isoformat(),
+        }
+        if session.desired != "active":
+            raise ApiError(409, "session_deleting", "the session is being discarded")
+        if running or not await sessions_repo.request_backup_save(conn, session.id, request):
+            raise ApiError(409, "save_running", "a save of this session is already running")
+    return BackupSaveAccepted(entry_index=index, job=save_rule.save_now_job_name(session.slug))
+
+
+@router.get(
+    "/backup",
+    summary="The backup status of the caller's session",
+)
+async def backup_status(agent: Caller, pool: Pool) -> dict[str, Any]:
+    """`status.backup` of the caller's session with each entry's spec fields (root, path, mode,
+    name, live, after_init) beside its last restore, save and live delivery results, and the
+    pending on-demand save request, if any."""
+    async with pool.connection() as conn:
+        session = await _session(conn, agent)
+    state = save_rule.backup_state(session.status)
+    stored = state.get("entries")
+    stored = stored if isinstance(stored, list) else []
+    entries = []
+    for index, spec_entry in enumerate(session.spec.backup or []):
+        record = stored[index] if index < len(stored) and isinstance(stored[index], dict) else {}
+        entries.append(
+            {
+                "version": None,
+                "base_version": None,
+                "restore": None,
+                "save": None,
+                "live_delivery": None,
+                **record,
+                "index": index,
+                "root": spec_entry.root,
+                "path": spec_entry.path,
+                "mode": spec_entry.mode,
+                "name": spec_entry.name,
+                "live": spec_entry.live,
+                "after_init": spec_entry.after_init,
+            }
+        )
+    return {
+        **state,
+        "entries": entries,
+        "save_request": session.status.get("backup_save"),
+    }
 
 
 @router.post(

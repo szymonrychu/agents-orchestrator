@@ -20,6 +20,9 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from agents_orchestrator.db.pool import notify
+
+CURRENT_CHANNEL = "backups_current"  # NOTIFY {"name"}: a name got a new current version
 SaveResult = Literal["advanced", "unchanged", "orphan"]
 MAX_LIMIT = 200
 _COLUMNS = (
@@ -146,6 +149,7 @@ async def record_save(
         "UPDATE backups SET current_version = %s, updated_at = now() WHERE name = %s",
         (version_id, name),
     )
+    await notify(conn, CURRENT_CHANNEL, {"name": name})  # wakes live delivery (on commit)
     return "advanced", created
 
 

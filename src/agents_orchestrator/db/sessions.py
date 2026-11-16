@@ -218,6 +218,30 @@ async def get(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Session |
     return rows[0] if rows else None
 
 
+async def get_for_update(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Session | None:
+    """The session row FOR UPDATE in the caller's transaction (the reconciler's status write)."""
+    rows = await _fetch(conn, "SELECT * FROM sessions WHERE id = %s FOR UPDATE", (session_id,))
+    return rows[0] if rows else None
+
+
+async def request_backup_save(
+    conn: psycopg.AsyncConnection, session_id: uuid.UUID, request: dict[str, Any]
+) -> bool:
+    """Set `status.backup_save` (an on-demand save request) when the session is active and has
+    none; False otherwise. The one status key the api writes: an atomic jsonb update, which the
+    reconciler's locked read-merge-write of its own keys never loses."""
+    async with conn.transaction():
+        cur = await conn.execute(
+            "UPDATE sessions SET status = jsonb_set(status, '{backup_save}', %s)"
+            " WHERE id = %s AND desired = 'active' AND NOT (status ? 'backup_save')",
+            (Jsonb(request), session_id),
+        )
+        if cur.rowcount != 1:
+            return False
+        await _notify(conn, session_id)
+    return True
+
+
 async def get_stored(
     conn: psycopg.AsyncConnection, session_id: uuid.UUID
 ) -> tuple[Session, dict[str, Any]] | None:

@@ -57,6 +57,7 @@ PLAN_TOOLS = [
     "plan_step_deps", "plan_steps_order", "plan_step_next", "plan_step_update", "plan_gate",
     "spec_section", "plan_steps_push", "plan_export", "plan_questions_ask",
 ]  # fmt: skip
+BACKUP_TOOLS = ["backup_save", "backup_status"]
 TAIL_TOOLS = [
     *SESSION_TOOLS,
     *INIT_SCRIPTS_TOOLS,
@@ -66,11 +67,12 @@ TAIL_TOOLS = [
     *SPEC_TOOLS,
     *PLAN_TOOLS,
     *on_start.PROJECT_CHAT_TOOLS,
+    *BACKUP_TOOLS,
 ]
 # Allowed before the pinned plugin ships them; add a name here when the allow-list leads the
 # plugin pin and remove it when the pin offers the tool (project room T-117 O9; project grants
 # T-120). Empty while the pin (v0.53.0) offers every allowed tool.
-PLUGIN_PENDING: set[str] = set()
+PLUGIN_PENDING: set[str] = {"backup_save", "backup_status"}  # plugins release A (S-68)
 ALONE_TOOLS = ["me", "handoff_submit", *TAIL_TOOLS]
 PROPOSAL = [
     "proposal_create",
@@ -606,6 +608,7 @@ def test_alone_session_allow_is_the_literal_e2e_list():
         "plan_step_deps", "plan_steps_order", "plan_step_next", "plan_step_update", "plan_gate",
         "spec_section", "plan_steps_push", "plan_export", "plan_questions_ask",
         "project_chat_send", "project_chat_read",
+        "backup_save", "backup_status",
         "session_get", "session_patch", "proposal_create", "proposal_revise", "proposals_list",
         "proposal_get", "proposal_withdraw", "self_close",
     ]  # fmt: skip

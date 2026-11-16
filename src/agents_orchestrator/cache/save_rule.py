@@ -44,6 +44,16 @@ INIT_BLOCKS_SAVE = frozenset({"running", "failed"})
 # found none (first use) or found one it could not read (the save replaces the bad object)
 SAVE_OK_RESTORE_STATES = frozenset({"restored", "miss", "unreadable"})
 
+# the Job of an on-demand save (the agent backup tool); the reconciler names it from this suffix
+SAVE_NOW_JOB_SUFFIX = "backup-save-now"
+
+
+def save_now_job_name(slug: str) -> str:
+    """That Job's name, as `reconciler.cache.job_name` renders it (the api may not import k8s;
+    tests/test_api_backup_agent.py pins both to the same value)."""
+    return f"agent-{slug}-{SAVE_NOW_JOB_SUFFIX}"
+
+
 Action = Literal["save", "discard", "skip"]
 
 
