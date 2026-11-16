@@ -208,7 +208,12 @@ class Dispatcher:
         for session_id in sessions:
             try:
                 moved = await handoff.handoff_pass(
-                    conn, session_id, self._handoff_policy, self.settings, self._inflight
+                    conn,
+                    session_id,
+                    self._handoff_policy,
+                    self.settings,
+                    self._inflight,
+                    steering=self.hive.steering,
                 )
             except Exception:
                 log.exception("handoff pass for session %s failed", session_id)

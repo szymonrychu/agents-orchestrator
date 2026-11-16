@@ -1,11 +1,13 @@
 """pressure_policy.build: thresholds, handoff state mapping, the hash, the wrapper schema."""
 
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
 from claude_code_wrapper.pressure import PressurePolicy
 
+from agents_orchestrator import handoff_texts
 from agents_orchestrator import pressure_policy as pp
 from agents_orchestrator.db.handoffs import Handoff
 from agents_orchestrator.dispatcher import hive
@@ -114,3 +116,72 @@ def test_l1_threshold_shared_with_due_level():
     assert l1 == 800_000
     assert hive.due_level(lv, l1, 1_000_000, None, 9e9, 0, False) == "l1"
     assert hive.due_level(lv, l1 - 1, 1_000_000, None, 9e9, 0, False) == "none"
+
+
+# ---------------------------------------------------------------- compaction steering (spec 5.8)
+
+PRESERVE = (
+    "Preserve verbatim: open requests, in-flight items, the latest handoff (accepted or draft), "
+    "claimed task ids and the todo."
+)
+TODO = ["open: wire the policy", "done: write the texts"]
+
+
+def _accepted() -> Handoff:
+    busy = {"subagents": 1, "background_tasks": [{"id": "bf3a", "description": "CI"}]}
+    row = _row("submitted", busy)
+    return replace(row, handoff={"doing": "steering compaction", "next": ["open the PR"],
+                                 "open_requests": ["answer Anna about the rollout"]})  # fmt: skip
+
+
+def test_compact_instructions_present_while_cycle_open():
+    text = handoff_texts.compact_instructions(_accepted(), ["T-437", "T-423"], "work", todo=TODO)
+    assert text.startswith(PRESERVE)
+    for needle in ("T-437", "T-423", "open: wire the policy", "1 subagent(s)",
+                   "background task bf3a CI", "steering compaction", "open the PR",
+                   "answer Anna about the rollout"):  # fmt: skip
+        assert needle in text, needle
+    body = _build(_accepted(), extras=pp.PolicyExtras(compact_instructions=text))
+    assert body["compact_instructions"] == text
+    PressurePolicy.model_validate(body)
+    # an open row with nothing else still carries the instruction
+    assert handoff_texts.compact_instructions(_row(), [], "work").startswith(PRESERVE)
+
+
+def test_compact_instructions_capped():
+    big = replace(_accepted(), handoff={"doing": "x" * 20_000})
+    text = handoff_texts.compact_instructions(big, [f"T-{i}" for i in range(50)], "work",
+                                              todo=["open: " + "y" * 500] * 100)  # fmt: skip
+    assert len(text) <= 9000 and text.startswith(PRESERVE) and text.isascii()
+    reinject = handoff_texts.reinject_text(big, ["T-1"], ["open: " + "y" * 500] * 100, "work")
+    assert len(reinject) <= 9000 and reinject.isascii()
+    PressurePolicy.model_validate(
+        _build(big, extras=pp.PolicyExtras(compact_instructions=text, reinject_text=reinject))
+    )
+
+
+def test_reinject_has_task_todo_inflight():
+    text = handoff_texts.reinject_text(_accepted(), ["T-437"], TODO, "work")
+    for needle in ("T-437", "open: wire the policy", "done: write the texts", "1 subagent(s)",
+                   "background task bf3a CI", "steering compaction", "open the PR"):  # fmt: skip
+        assert needle in text, needle
+    chat = handoff_texts.reinject_text(_accepted(), [], [], "chat")
+    assert "answer Anna about the rollout" in chat and "room" in chat
+
+
+def test_no_steering_without_cycle():
+    assert handoff_texts.compact_instructions(None, ["T-1"], "work", todo=TODO) == ""
+    assert handoff_texts.reinject_text(None, ["T-1"], TODO, "work") == ""
+    body = _build(None)
+    assert body["compact_instructions"] == "" and body["reinject_text"] == ""
+
+
+def test_steering_texts_have_no_time_words():
+    import re
+
+    for text in (
+        handoff_texts.compact_instructions(_accepted(), ["T-1"], "work", todo=TODO),
+        handoff_texts.reinject_text(_accepted(), ["T-1"], TODO, "chat"),
+    ):
+        assert not re.search(r"minute|deadline|second", text, re.I), text
+        assert not re.search(r"\bin \d+", text), text

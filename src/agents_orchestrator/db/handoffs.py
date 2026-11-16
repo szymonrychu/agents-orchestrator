@@ -461,6 +461,24 @@ async def open_rows_all(conn: psycopg.AsyncConnection) -> list[Handoff]:
         return [Handoff(**row) for row in await cur.fetchall()]
 
 
+# An accepted handoff of a row closed `compacted` stays a reminder candidate this long.
+REMINDER_WINDOW_SECONDS = 3600
+
+
+async def unapplied_compacted(conn: psycopg.AsyncConnection) -> dict[uuid.UUID, Handoff]:
+    """Per agent its latest row when that row closed `compacted` with an accepted handoff that
+    was never delivered or returned: the handoff a compaction made moot, to remind of once."""
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            f"SELECT {_COLUMNS} FROM (SELECT DISTINCT ON (agent_id) * FROM agent_handoffs"
+            " ORDER BY agent_id, id DESC) h WHERE phase = 'done' AND close_reason = 'compacted'"
+            " AND handoff IS NOT NULL AND delivered_at IS NULL AND return_message_id IS NULL"
+            " AND closed_at > now() - make_interval(secs => %s)",
+            (REMINDER_WINDOW_SECONDS,),
+        )
+        return {row["agent_id"]: Handoff(**row) for row in await cur.fetchall()}
+
+
 async def queued_messages(
     conn: psycopg.AsyncConnection, row_id: int, *, notices_only: bool = False
 ) -> list[int]:

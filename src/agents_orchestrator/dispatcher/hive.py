@@ -98,6 +98,16 @@ Level = Literal["none", "l1", "l2", "l3"]
 LEVEL_NUMBER: dict[str, int] = {"none": 0, "l1": 1, "l2": 2, "l3": 3}
 
 
+@dataclass(frozen=True)
+class Steering:
+    """A session's claimed task ids and todo lines as the last handoff pass read them from the
+    taskboard (the push loop never calls the taskboard itself); `at` is a monotonic clock."""
+
+    task_ids: tuple[str, ...]
+    todo: tuple[str, ...]
+    at: float
+
+
 @dataclass
 class HiveState:
     """In-memory push state of one dispatcher: the throttle clocks, the last `rollout_due` key and
@@ -115,6 +125,12 @@ class HiveState:
     # per agent: the wrapper session that answered 404 or 409 pressure_disabled (logged once)
     pressure_off: dict[uuid.UUID, str] = field(default_factory=dict)
     pressure_tick: float | None = None
+    # per session: its claimed tasks and todo as the handoff pass last read them (written by
+    # the pass, read by the policy build; the push loop never asks the taskboard)
+    steering: dict[uuid.UUID, Steering] = field(default_factory=dict)
+    # per agent: the row id whose accepted handoff was last pushed as the post-compaction
+    # reminder (the reminder goes out once)
+    reminded: dict[uuid.UUID, int] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------- the note text
@@ -751,6 +767,7 @@ class _PressureTarget:
     wrapper_session_id: str
     body: dict[str, Any]  # the policy with version 0
     hash: str
+    reminder_row: int | None = None  # the row whose handoff this policy reminds of
 
 
 async def _pressure_targets(
@@ -769,21 +786,43 @@ async def _pressure_targets(
         url: str | None,
         wsid: str | None,
         body: dict[str, Any],
+        reminder_row: int | None = None,
     ) -> None:
         if url and wsid:
             h = pressure_policy.policy_hash(body)
-            out.append(_PressureTarget(agent_id, session_id, url, wsid, body, h))
+            out.append(_PressureTarget(agent_id, session_id, url, wsid, body, h, reminder_row))
 
-    def extras(row: handoffs.Handoff | None) -> pressure_policy.PolicyExtras:
+    reminders = {
+        a: r
+        for a, r in (await handoffs.unapplied_compacted(conn)).items()
+        if r.id > state.reminded.get(a, 0)
+    }
+
+    def extras(
+        row: handoffs.Handoff | None, session_id: uuid.UUID, reminder: handoffs.Handoff | None
+    ) -> pressure_policy.PolicyExtras:
         resubmit = bool(row is not None and (row.inflight or {}).get("resubmit"))
+        cached = state.steering.get(session_id)
+        task_ids, todo = (cached.task_ids, cached.todo) if cached else ((), ())
+        steer = row if row is not None else reminder
+        profile = steer.profile if steer is not None and steer.profile == "chat" else "work"
+        compact = handoff_texts.compact_instructions(row, task_ids, profile, todo=todo)  # type: ignore[arg-type]
+        reinject = handoff_texts.reinject_text(steer, task_ids, todo, profile)  # type: ignore[arg-type]
         if row is None or row.phase != "returning" or row.handoff is None:
-            return pressure_policy.PolicyExtras(resubmit=resubmit)
+            return pressure_policy.PolicyExtras(
+                resubmit=resubmit, compact_instructions=compact, reinject_text=reinject
+            )
         # a solo agent's fresh context: the resume check until the return turn ends
         first = [str(n) for n in row.handoff.get("next") or [] if str(n).strip()]
         text = handoff_texts.resume_text(
             [], first[0] if first else None, chat=row.profile == "chat"
         )
-        return pressure_policy.PolicyExtras(resume_pending=True, resume_text=text)
+        return pressure_policy.PolicyExtras(
+            resume_pending=True,
+            resume_text=text,
+            compact_instructions=compact,
+            reinject_text=reinject,
+        )
 
     seen: set[uuid.UUID] = set()
     for subject in await _subject_rows(conn):
@@ -791,7 +830,13 @@ async def _pressure_targets(
         lv, level, _ = _row_level(subject, settings)
         row = rows.get(agent_id)
         seen.add(agent_id)
-        if level == "none" and row is None and agent_id not in state.pressure_pushed:
+        reminder = reminders.get(agent_id) if row is None else None
+        if (
+            level == "none"
+            and row is None
+            and agent_id not in state.pressure_pushed
+            and reminder is None
+        ):
             continue
         profile = row.profile if row is not None else None
         if profile not in ("work", "chat"):
@@ -811,9 +856,16 @@ async def _pressure_targets(
             row,
             hive=not subject["solo"],
             version=0,
-            extras=extras(row),
+            extras=extras(row, subject["session_id"], reminder),
         )
-        add(agent_id, subject["session_id"], subject["url"], subject["wrapper_session_id"], body)
+        add(
+            agent_id,
+            subject["session_id"],
+            subject["url"],
+            subject["wrapper_session_id"],
+            body,
+            reminder.id if reminder is not None and body["reinject_text"] else None,
+        )
     others = [a for a in rows if a not in seen]
     if others:
         async with conn.cursor(row_factory=dict_row) as cur:
@@ -829,7 +881,7 @@ async def _pressure_targets(
                     row,
                     hive=True,
                     version=0,
-                    extras=extras(row),
+                    extras=extras(row, got["session_id"], None),
                 )
                 add(got["agent_id"], got["session_id"], got["url"], got["wrapper_session_id"], body)
     return out
@@ -898,6 +950,8 @@ async def _push_policy(
         log.info("pressure policy for agent %s not pushed: %s", agent_id, type(exc).__name__)
         return False
     state.pressure_pushed[agent_id] = (target.hash, version, now)
+    if target.reminder_row is not None:
+        state.reminded[agent_id] = target.reminder_row
     state.pressure_session[agent_id] = wsid
     state.pressure_off.pop(agent_id, None)
     return True

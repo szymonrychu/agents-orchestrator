@@ -72,6 +72,7 @@ class Env:
         self.policy = handoff.HandoffPolicy.from_settings(self.settings)
         self.clients: list[WrapperClient] = []
         self.fetch = handoff.inflight_fetcher(self.factory, 5.0)
+        self.tasks: list[dict] | None = None  # the taskboard's claimed tasks; None: unreadable
         self.state = hive.HiveState()
         self.clock = 1000.0
 
@@ -92,8 +93,19 @@ class Env:
     async def step(self, session_id) -> list[str]:
         async with self.pool.connection() as conn:
             return await handoff.handoff_pass(
-                conn, session_id, self.policy, self.settings, self.fetch
+                conn,
+                session_id,
+                self.policy,
+                self.settings,
+                self.fetch,
+                taskboard=self.taskboard,
+                steering=self.state.steering,
             )
+
+    async def taskboard(self, session) -> list[dict]:
+        if self.tasks is None:
+            raise RuntimeError("taskboard unavailable")
+        return self.tasks
 
     async def push(self, advance: float = 100.0) -> None:
         self.clock += advance
@@ -1973,3 +1985,53 @@ async def test_shutdown_leader_rejected_text_after_notice_sent_as_package(env):
     texts = [m["text"] for m in await env.messages(a1["id"])]
     assert "the shutdown handoff text was rejected (too_short" in texts[1].lower()
     assert "[thumbs-up]" not in texts[1]
+
+
+# ---------------------------------------------------------------- compaction steering (spec 5.8)
+
+STEER_TASKS = [
+    {"id": "T-437", "title": "steer", "status": "doing",
+     "todo": [{"text": "write the texts", "status": "open"}]},
+]  # fmt: skip
+
+
+async def test_compact_instructions_present_while_cycle_open(env):
+    env.tasks = STEER_TASKS
+    c, a = await env.solo()
+    assert await env.step(c["id"]) == [f"pressuring:{a['id']}"]
+    await env.push()
+    policy = env.policy_of(a)
+    assert policy["compact_instructions"].startswith("Preserve verbatim: open requests")
+    assert "T-437" in policy["compact_instructions"]
+    assert "open: write the texts" in policy["compact_instructions"]
+    assert "T-437" in policy["reinject_text"]
+
+
+async def test_no_steering_without_cycle(env):
+    env.tasks = STEER_TASKS
+    c, a = await env.solo(used=LOW)
+    assert await env.step(c["id"]) == []
+    assert env.state.steering == {}  # no taskboard call for a session without a cycle
+    await env.push()
+    assert env.policy_of(a) is None
+
+
+async def test_reinject_reminder_once_after_compaction_then_empty(env):
+    env.tasks = STEER_TASKS
+    c, a = await env.solo()
+    await env.step(c["id"])
+    assert await env.submit(a)
+    await env.push()
+    assert "wiring the cooperative handoff" in env.policy_of(a)["reinject_text"]
+    await insert_event(env.pool, c["id"], a["id"], type="compacted", data={"trigger": "auto"})
+    await env.gauge(a["id"], LOW)
+    assert await env.step(c["id"]) == [f"done:{a['id']}:compacted"]
+    await env.push()
+    policy = env.policy_of(a)
+    assert policy["compact_instructions"] == ""  # the cycle is closed
+    assert "wiring the cooperative handoff" in policy["reinject_text"]  # the one reminder
+    assert "T-437" in policy["reinject_text"]
+    await env.push()
+    assert env.policy_of(a)["reinject_text"] == ""  # discarded after one push
+    await env.push()
+    assert env.policy_of(a)["reinject_text"] == ""

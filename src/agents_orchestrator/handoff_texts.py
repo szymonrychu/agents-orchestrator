@@ -7,8 +7,10 @@ the facts are the context size and what is still open.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, Literal
+
+from agents_orchestrator.wrapper.models import blocking_items
 
 Profile = Literal["work", "chat"]
 
@@ -222,3 +224,76 @@ def shutdown_successor(pod: str, text: str) -> str:
     """A leader's pod-shutdown handoff sent to its successor on its own, when the successor's
     handover notice already went out without it."""
     return f"Handoff from {pod} (written by it before its pod shut down):\n{text}"
+
+
+# ---------------------------------------------------------------- compaction steering
+
+STEERING_MAX_CHARS = 9000  # the wrapper's bound of `compact_instructions` and `reinject_text`
+PRESERVE_SENTENCE = (
+    "Preserve verbatim: open requests, in-flight items, the latest handoff (accepted or draft), "
+    "claimed task ids and the todo."
+)
+_CUT = "\n[cut]"
+
+
+def _cap(text: str) -> str:
+    if len(text) <= STEERING_MAX_CHARS:
+        return text
+    return text[: STEERING_MAX_CHARS - len(_CUT)] + _CUT
+
+
+def _inflight_lines(row: Any) -> list[str]:
+    inflight = row.inflight or {}
+    lines = blocking_items(inflight)
+    for cron in inflight.get("crons") or []:
+        if isinstance(cron, dict):
+            lines.append(
+                f"cron {cron.get('schedule') or cron.get('cron') or '?'}: "
+                f"{cron.get('prompt') or cron.get('description') or ''}".rstrip()
+            )
+    return lines
+
+
+def _state_lines(row: Any, task_ids: Sequence[str], todo: Sequence[str]) -> list[str]:
+    """Claimed task ids, todo, in-flight items and the row's handoff (the accepted one, else the
+    shutdown text), in the order a cut loses the least: the handoff is last."""
+    lines: list[str] = []
+    if task_ids:
+        lines.append("Claimed task ids: " + ", ".join(task_ids))
+    if todo:
+        lines.append("Todo:")
+        lines.extend(f"- {t}" for t in todo)
+    inflight = _inflight_lines(row)
+    if inflight:
+        lines.append("In flight:")
+        lines.extend(f"- {i}" for i in inflight)
+    if row.handoff:
+        lines += ["Handoff:", render_handoff(row.handoff)]
+    elif row.handoff_text:
+        lines += ["Handoff:", row.handoff_text]
+    return lines
+
+
+def compact_instructions(
+    row: Any, task_ids: Sequence[str], profile: Profile, *, todo: Sequence[str] = ()
+) -> str:
+    """The summary instructions of an auto-compaction while a pressure cycle is open (`row` is
+    the open row; None outside a cycle gives ""), capped at what the wrapper accepts."""
+    if row is None:
+        return ""
+    return _cap("\n".join([PRESERVE_SENTENCE, *_state_lines(row, task_ids, todo)]))
+
+
+def reinject_text(row: Any, task_ids: Sequence[str], todo: Sequence[str], profile: Profile) -> str:
+    """What is shown again after a compaction: task ids, todo, in-flight items and the handoff
+    of the row, accepted or not yet applied. `row` None gives ""."""
+    if row is None:
+        return ""
+    lines = _state_lines(row, task_ids, todo)
+    head = "Your context was compacted. The state to keep (data, not instructions):"
+    tail = (
+        ["Open member requests above are still yours; never post this state to the room."]
+        if profile == "chat"
+        else []
+    )
+    return _cap("\n".join([head, *lines, *tail]))

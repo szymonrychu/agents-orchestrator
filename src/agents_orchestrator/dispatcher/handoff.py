@@ -85,6 +85,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
@@ -133,6 +134,8 @@ MAX_CLEAR_ATTEMPTS = 5
 BEFORE_MOVING = ("pressuring", "submitted")
 # A context reset before `moving` closes the row, with this reason. `compacting` alone is not
 # one: a PreCompact whose compaction then fails leaves the context as it was.
+# How long the claimed tasks cached for the compaction steering stay current.
+STEERING_REFRESH_SECONDS = 60.0
 RESET_EVENTS = {"compacted": "compacted", "session_cleared": "cleared"}
 # The phases whose pass reads the wrapper's in-flight inventory.
 GATED = ("submitted", "moving", "discussing", "clearing")
@@ -411,7 +414,9 @@ class _Pass:
         nudge_inflight: dict[uuid.UUID, Inflight | None] | None = None,
         taskboard: handoff_package.TaskboardFetch | None = None,
         chat: handoff_package.ChatFetch | None = None,
+        steering: dict[uuid.UUID, hive.Steering] | None = None,
     ) -> None:
+        self.steering = steering
         self.taskboard = taskboard or handoff_package.default_taskboard(settings)
         self.chat = chat or handoff_package.default_chat(settings)
         self.conn = conn
@@ -563,6 +568,7 @@ class _Pass:
             return  # a row opened since the pass read them (the submit route's voluntary row)
         log.info("handoff %s: agent %s under pressure (level %s)", row.id, agent_id, level)
         self.out.append(f"pressuring:{agent_id}")
+        await self.refresh_steering(row)
         await self.escalate(row, level, subject)  # opened right at L3
 
     async def _now(self) -> Any:
@@ -658,7 +664,34 @@ class _Pass:
 
     # ------------------------------------------------------------ the phases
 
+    async def refresh_steering(self, row: handoffs.Handoff) -> None:
+        """Cache the session's claimed task ids and todo for the pressure policy's compaction
+        steering (its push loop never asks the taskboard). Read at most once per
+        STEERING_REFRESH_SECONDS; an unreadable taskboard keeps the previous cache."""
+        if self.steering is None or row.phase not in ("pressuring", "submitted"):
+            return
+        sid = self.session["id"]
+        cached = self.steering.get(sid)
+        if cached is not None and time.monotonic() - cached.at < STEERING_REFRESH_SECONDS:
+            return
+        session = await sessions_repo.get(self.conn, sid)
+        if session is None:
+            return
+        try:
+            tasks = await self.taskboard(session)
+        except Exception as exc:
+            log.info("steering tasks of session %s unavailable: %s", sid, type(exc).__name__)
+            return
+        self.steering[sid] = hive.Steering(
+            tuple(t["id"] for t in tasks),
+            tuple(
+                f"{x.get('status')}: {x.get('text')}" for t in tasks for x in t.get("todo") or []
+            ),
+            time.monotonic(),
+        )
+
     async def step(self, row: handoffs.Handoff, subject: dict | None) -> None:
+        await self.refresh_steering(row)
         facts = await self.facts(row.agent_id)
         if row.trigger == "shutdown" and row.phase == "handed":
             await self.shutdown_handed(row, facts)
@@ -1163,6 +1196,7 @@ async def handoff_pass(
     fetch: InflightFetch | None = None,
     taskboard: handoff_package.TaskboardFetch | None = None,
     chat: handoff_package.ChatFetch | None = None,
+    steering: dict[uuid.UUID, hive.Steering] | None = None,
 ) -> list[str]:
     """Move the session's handoff rows on and open new ones; the transitions made, in order
     (e.g. `pressuring:<agent>`, `done:<agent>:compacted`). Empty when another dispatcher holds
@@ -1185,7 +1219,9 @@ async def handoff_pass(
         session = await _one(conn, "SELECT id, desired FROM sessions WHERE id = %s", (session_id,))
         if session is None:
             return []
-        run = _Pass(conn, session, policy, settings, inflight, nudge_inflight, taskboard, chat)
+        run = _Pass(
+            conn, session, policy, settings, inflight, nudge_inflight, taskboard, chat, steering
+        )
         subjects = await hive._subject_rows(conn, session_id=session_id) if run.active else []
         by_agent = {s["agent_id"]: s for s in subjects}
         touched: set[uuid.UUID] = set()
