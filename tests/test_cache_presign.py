@@ -227,3 +227,30 @@ def test_missing_object_is_miss(moto_settings, tmp_path, monkeypatch, capsys):
     assert outcome["outcome"] == "miss", outcome
     assert outcome["exit"] == 0
     assert _tree(dest) == {"keep.txt": "untouched"}
+
+
+def test_copy_object_called_with_keys():
+    calls: list[dict[str, Any]] = []
+
+    class Client:
+        def copy_object(self, **kwargs: Any) -> None:
+            calls.append(kwargs)
+
+    s = _settings()
+    src = "workspace-cache/b/n/20261116t000000z-a-0001.tar.zst"
+    dst = "workspace-cache/b/n/20261116t000100z-b-0002.tar.zst"
+    presign_module.copy_object(s, src, dst, client=Client())
+    assert calls == [{"Bucket": "b", "Key": dst, "CopySource": {"Bucket": "b", "Key": src}}]
+    with pytest.raises(ValueError):
+        presign_module.copy_object(s, "elsewhere/x.tar.zst", dst, client=Client())
+
+
+def test_presign_new_version_key_layout():
+    key, url = presign_module.presign_new_version(_settings(), "proj-x", "20261116t000000z", "me")
+    assert key.startswith("workspace-cache/b/proj-x/20261116t000000z-me-")
+    assert key.endswith(".tar.zst")
+    assert urlsplit(url).path == f"/b/{key}"
+    assert (
+        presign_module.presign_new_version(_settings(), "proj-x", "20261116t000000z", "me")[0]
+        != key
+    )

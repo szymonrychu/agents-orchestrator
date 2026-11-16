@@ -29,6 +29,7 @@ from typing import Any, Literal, NamedTuple
 from botocore.config import Config
 from botocore.session import get_session
 
+from agents_orchestrator.cache.keys import object_key_for
 from agents_orchestrator.cache.transfer import CONTENT_TYPE
 from agents_orchestrator.settings import Settings
 
@@ -158,6 +159,39 @@ def presign_object(settings: Settings, method: Literal["GET", "PUT"], key: str) 
         HttpMethod=method,
     )
     return url
+
+
+def presign_new_version(settings: Settings, name: str, now: str, actor: str) -> tuple[str, str]:
+    """A fresh immutable version object of backup `name`: its key and a PUT URL for it.
+
+    The key is `<prefix>b/<name>/<now>-<actor>-<rand>.tar.zst` (`keys.object_key_for`); every
+    call yields a new key, so a save never overwrites an earlier version.
+    """
+    key = object_key_for(settings.cache_s3_prefix, name, now, actor)
+    return key, presign_object(settings, "PUT", key)
+
+
+def copy_object(
+    settings: Settings,
+    src_key: str,
+    dst_key: str,
+    *,
+    client: Any | None = None,
+    credentials: S3Credentials | None = None,
+) -> None:
+    """Server-side copy of `src_key` to `dst_key` inside the cache bucket (RGW CopyObject).
+
+    The reconciler or api calls this with its own credentials; no Job carries them. Both keys
+    must be archives under the cache prefix. Errors propagate from botocore unchanged.
+    """
+    for key in (src_key, dst_key):
+        if not key.startswith(settings.cache_s3_prefix) or not key.endswith(SUFFIX):
+            raise ValueError(f"{key!r} is not an archive under {settings.cache_s3_prefix!r}")
+    (client or _client_for(settings, credentials)).copy_object(
+        Bucket=settings.cache_s3_bucket,
+        Key=dst_key,
+        CopySource={"Bucket": settings.cache_s3_bucket, "Key": src_key},
+    )
 
 
 def list_archives(
