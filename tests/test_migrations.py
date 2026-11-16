@@ -83,6 +83,7 @@ def test_fresh_database_gets_all_tables(empty_dsn):
         "0047", "0048", "0049", "0050",
         "0051",
         "0052",
+        "0053",
     ]  # fmt: skip
 
 
@@ -144,6 +145,7 @@ def test_presets_migration_on_existing_sessions(empty_dsn, tmp_path):
         "0050",
         "0051",
         "0052",
+        "0053",
     ]
     with psycopg.connect(empty_dsn) as c:
         row = c.execute(
@@ -172,6 +174,7 @@ def test_superleader_manageable_defaults_false_on_existing_rows(empty_dsn, tmp_p
         "0047", "0048", "0049", "0050",
         "0051",
         "0052",
+        "0053",
     ]  # fmt: skip
     with psycopg.connect(empty_dsn) as c:
         rows = c.execute("SELECT superleader_manageable FROM presets").fetchall()
@@ -641,6 +644,7 @@ def test_0005_renames_clusters_to_sessions(empty_dsn, tmp_path):
         "0047", "0048", "0049", "0050",
         "0051",
         "0052",
+        "0053",
     ]  # fmt: skip
     with psycopg.connect(empty_dsn) as c:
         assert c.execute(
@@ -894,6 +898,7 @@ def test_escape_template_tokens_migration(empty_dsn, tmp_path):
         "0047", "0048", "0049", "0050",
         "0051",
         "0052",
+        "0053",
     ]  # fmt: skip
     with psycopg.connect(empty_dsn) as c:
         stored = [
@@ -961,6 +966,7 @@ def test_escape_template_tokens_migration_never_aborts_at_the_limit(empty_dsn, t
         "0047", "0048", "0049", "0050",
         "0051",
         "0052",
+        "0053",
     ]  # fmt: skip
     with psycopg.connect(empty_dsn) as c:
         got = c.execute("SELECT spec FROM sessions WHERE slug='big'").fetchone()[0]
@@ -1033,6 +1039,7 @@ def test_cache_keys_migration_splits_the_single_key(empty_dsn, tmp_path):
         "0050",
         "0051",
         "0052",
+        "0053",
     ]
     expected = {
         "keyed": {
@@ -1108,6 +1115,7 @@ def test_self_restart_migration_adds_nullable_column_idempotently(empty_dsn, tmp
         "0050",
         "0051",
         "0052",
+        "0053",
     ]
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         assert c.execute("SELECT last_self_restart_at FROM sessions").fetchall() == [(None,)]
@@ -1169,6 +1177,7 @@ def test_preset_secrets_migration_adds_table_and_snapshot_column(empty_dsn, tmp_
         "0050",
         "0051",
         "0052",
+        "0053",
     ]
     assert _columns(empty_dsn, "preset_secrets") == set()
     assert "secret_versions" in _columns(empty_dsn, "sessions")
@@ -1218,6 +1227,7 @@ def test_env_entries_migration_wraps_plaintext_values(empty_dsn, tmp_path):
         "0047", "0048", "0049", "0050",
         "0051",
         "0052",
+        "0053",
     ]  # fmt: skip
 
     def stored():
@@ -1278,6 +1288,7 @@ def test_created_by_session_migration_adds_nullable_column_idempotently(empty_ds
         "0050",
         "0051",
         "0052",
+        "0053",
     ]
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         assert c.execute("SELECT created_by_session FROM sessions").fetchall() == [(None,)]
@@ -1297,6 +1308,7 @@ def test_command_issuer_migration_adds_nullable_columns_idempotently(empty_dsn, 
         "0047", "0048", "0049", "0050",
         "0051",
         "0052",
+        "0053",
     ]  # fmt: skip
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         c.execute((MIGRATIONS_DIR / "0022_command_issuer.sql").read_text())  # second run: no-op
@@ -1315,6 +1327,7 @@ def test_permission_mode_state_migration_adds_nullable_columns_idempotently(empt
         "0047", "0048", "0049", "0050",
         "0051",
         "0052",
+        "0053",
     ]  # fmt: skip
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         c.execute(
@@ -1374,6 +1387,7 @@ def test_session_close_columns_apply_after_a_database_already_at_0027(empty_dsn,
         "0050",
         "0051",
         "0052",
+        "0053",
     ]
     assert {"close_requested_at", "close_reason"} <= _columns(empty_dsn, "sessions")
 
@@ -1419,6 +1433,7 @@ def test_migration_adds_columns_and_gin_index(empty_dsn, tmp_path):
         "0050",
         "0051",
         "0052",
+        "0053",
     ]
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         c.execute((MIGRATIONS_DIR / "0027_labels.sql").read_text())  # second run: no-op
@@ -1515,6 +1530,7 @@ def test_inactivity_migration_backfills_now(empty_dsn, tmp_path):
         "0050",
         "0051",
         "0052",
+        "0053",
     ]
     with psycopg.connect(empty_dsn) as c:
         rows = c.execute(
@@ -1568,6 +1584,7 @@ def test_inactivity_migration_moves_discard_after_idle(empty_dsn, tmp_path):
         "0050",
         "0051",
         "0052",
+        "0053",
     ]
     want = {
         "plain": {"replicas": 1, "inactivity": {"close_seconds": 900}},
@@ -1617,6 +1634,7 @@ def test_discard_force_migration_adds_nullable_column_idempotently(empty_dsn, tm
         "0050",
         "0051",
         "0052",
+        "0053",
     ]
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         assert c.execute("SELECT discard_forced_at FROM sessions").fetchall() == [(None,)]
@@ -1667,6 +1685,7 @@ def test_kube_cluster_access_migration_renames_field_idempotently(empty_dsn, tmp
         "0050",
         "0051",
         "0052",
+        "0053",
     ]
 
     def specs():
@@ -1714,6 +1733,7 @@ def test_chat_relay_migration_adds_columns_and_index_idempotently(empty_dsn, tmp
         "0050",
         "0051",
         "0052",
+        "0053",
     ]
     assert run_migrations(empty_dsn) == []
     with psycopg.connect(empty_dsn, autocommit=True) as c:
@@ -1797,6 +1817,7 @@ def test_0035_strips_leader_lease(empty_dsn, tmp_path):
         "0045", "0046", "0047", "0048", "0049", "0050",
         "0051",
         "0052",
+        "0053",
     ]  # fmt: skip
 
     def read():
@@ -1838,6 +1859,7 @@ def test_0039_command_kind_clear(empty_dsn, tmp_path):
         "0050",
         "0051",
         "0052",
+        "0053",
     ]  # fmt: skip
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         c.execute((MIGRATIONS_DIR / "0039_command_clear.sql").read_text())  # second run: no-op
@@ -1886,6 +1908,7 @@ def test_reserved_project_labels_are_stripped(empty_dsn, tmp_path):
         "0050",
         "0051",
         "0052",
+        "0053",
     ]
     with psycopg.connect(empty_dsn) as c:
         presets = dict(c.execute("SELECT name, labels FROM presets WHERE name LIKE 'p%'"))
