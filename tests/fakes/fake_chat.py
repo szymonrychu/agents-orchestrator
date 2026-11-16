@@ -336,11 +336,11 @@ class FakeChat:
         messages = list(self.history)
         if "before" in query:
             if query["before"][0] not in ids:
-                return self._error(key, 400, "bad_reference", "no such message")
+                return self._error(key, 422, "bad_reference", "no such message")
             messages = messages[: ids.index(query["before"][0])]
         if "after" in query:
             if query["after"][0] not in ids:
-                return self._error(key, 400, "bad_reference", "no such message")
+                return self._error(key, 422, "bad_reference", "no such message")
             messages = messages[ids.index(query["after"][0]) + 1 :]
         if "from" in query:
             messages = [m for m in messages if m["from"] == query["from"][0]]
@@ -367,7 +367,7 @@ class FakeChat:
                 return sent
             found = next((m for m in self.history if m["id"] == sent["id"]), None)
             if found is None:
-                return self._error(key, 400, "bad_reference", "no such message")
+                return self._error(key, 422, "bad_reference", "no such message")
             fetch_id = f"a{len(self.fetches) + 1}"
             self.fetches[fetch_id] = {
                 "session": session,

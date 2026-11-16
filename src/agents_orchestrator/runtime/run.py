@@ -54,6 +54,24 @@ def quiet_http_loggers() -> None:
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
+class _AccessQueryFilter(logging.Filter):
+    """Drops the query string from uvicorn access args (client, method, path, ver, status)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+            path = args[2].split("?", 1)[0]
+            record.args = (*args[:2], path, *args[3:])
+        return True
+
+
+def quiet_access_log() -> None:
+    """Keep uvicorn's access log, but without the query string (it can carry names)."""
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, _AccessQueryFilter) for f in access.filters):
+        access.addFilter(_AccessQueryFilter())
+
+
 def configure_logging(level: str) -> None:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JsonFormatter())
@@ -61,6 +79,7 @@ def configure_logging(level: str) -> None:
     root.handlers[:] = [handler]
     root.setLevel(level.upper())
     quiet_http_loggers()
+    quiet_access_log()
 
 
 def install_signal_handlers(stop: asyncio.Event) -> None:

@@ -191,7 +191,7 @@ async def test_fake_chat_matches_vendored_schema():
     )
     assert [m["id"] for m in narrow.json()["messages"]] == ["m2"]
     assert narrow.json()["has_more_before"] is True
-    assert (await call("GET", "/chat/v1/history", "/chat/v1/history?after=zz")).status_code == 400
+    assert (await call("GET", "/chat/v1/history", "/chat/v1/history?after=zz")).status_code == 422
     fetch_body = valid[("POST", "/chat/v1/attachments")]
     queued = await call("POST", "/chat/v1/attachments", json=fetch_body)
     assert (queued.status_code, queued.json()["status"]) == (202, "queued")
@@ -202,7 +202,7 @@ async def test_fake_chat_matches_vendored_schema():
     missing = await call("GET", "/chat/v1/attachments/{request_id}", "/chat/v1/attachments/a99")
     assert missing.status_code == 404
     unknown_message = await call("POST", "/chat/v1/attachments", json={"id": "m99"})
-    assert unknown_message.status_code == 400
+    assert unknown_message.status_code == 422
 
     # error answers the fake produces by itself: bad token, bad session header, bad body
     bad_token = {**GOOD, "Authorization": "Bearer nope"}

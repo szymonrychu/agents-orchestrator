@@ -1716,7 +1716,7 @@ The skill name is percent-encoded as one path segment, dots included, exactly li
 
 #### `GET /agent/v1/chat/history`
 
-Forwards to `GET .../history` with the query string byte for byte (`before`, `after`, `from`, `limit`) and no body: 200 `{room_id, note, messages, has_more_before, has_more_after}`, the past messages of the room bound to the caller's session (the room comes from the binding upstream, never from the request). Upstream refusals pass through: 409 `room_unbound`, 400 `bad_reference`, 422 `invalid_request`. A read is not a chat update and never touches `last_update_at`.
+Forwards to `GET .../history` with the query string byte for byte (`before`, `after`, `from`, `limit`) and no body: 200 `{room_id, note, messages, has_more_before, has_more_after}`, the past messages of the room bound to the caller's session (the room comes from the binding upstream, never from the request). Upstream refusals pass through: 409 `room_unbound`, 422 `bad_reference`, 422 `invalid_request`. A read is not a chat update and never touches `last_update_at`.
 
 #### `POST /agent/v1/chat/attachments`
 
@@ -1814,7 +1814,7 @@ Each preset has a `superleader_manageable` switch (default false). It is turned 
 
 ### Chat rooms and room requests (superleader)
 
-Superleaders manage ALL chat rooms whatever their preset (user decision, 2026-11-04): the relay applies no preset check to `GET /agent/v1/admin/chats/rooms`, `PUT .../rooms/{room_id}/settings` or room rules. Relayed 1:1 to the connector (`/chat/v1/admin/...`), no guard: `GET /chats/rooms/{room_id}` (room detail and members), `GET /chats/rooms/{room_id}/messages?before=&limit=` (read-only room history of any room, tool `chat_admin_history`; no attachment fetch for superleaders), `GET /chats/users?q=` (known people), `POST /chats/rooms/{room_id}/allow` (allow a room, set its preset, accept a pending message request) and `GET /chats/room-requests/{request_id}`.
+Superleaders manage ALL chat rooms whatever their preset (user decision, 2026-11-04): the relay applies no preset check to `GET /agent/v1/admin/chats/rooms`, `PUT .../rooms/{room_id}/settings` or room rules. Relayed 1:1 to the connector (`/chat/v1/admin/...`), no guard: `GET /chats/rooms/{room_id}` (room detail and members), `GET /chats/rooms/{room_id}/messages?before=&after=&from=&limit=` (read-only room history of any room, tool `chat_admin_history`; no attachment fetch for superleaders), `GET /chats/users?q=` (known people), `POST /chats/rooms/{room_id}/allow` (allow a room, set its preset, accept a pending message request) and `GET /chats/room-requests/{request_id}`.
 
 Opening a chat or inviting someone never happens without the user's yes. `POST /chats/room-requests` (`target`, `action`, `room_id`, `task_key`) is relayed after a check that the task exists on the taskboard (422 `unknown_task`, nothing forwarded; 503 `taskboard_unconfigured` when no taskboard is set). When the connector answers 201 with a `pending_confirmation` request, the orchestrator asks a taskboard decision on that task as the calling session ("Yes, open it" recommended, or "No"; `client_key` `room-request-<id>`) and attaches its id to the request through the connector's internal routes (`/chat/v1/internal`, used only by the orchestrator and never relayed, so an agent cannot reach them). The 201 answer carries `decision: {id, url}`; if the taskboard failed, `decision` is null and the confirm route asks again.
 

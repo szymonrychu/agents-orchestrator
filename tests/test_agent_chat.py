@@ -730,6 +730,8 @@ async def test_history_relay_never_logs_query_or_body(monkeypatch, caplog):
     rig = make_rig(monkeypatch)
     canary = "CANARY-" + secrets.token_hex(8)
     rig.upstream.reply = httpx.Response(202, json={"id": "a1", "status": "queued"})
+    for name in ("httpx", "httpcore"):
+        monkeypatch.setattr(logging.getLogger(name), "level", logging.getLogger(name).level)
     quiet_http_loggers()  # the level setup production applies at startup (configure_logging)
     with caplog.at_level(logging.DEBUG):
         await rig.call("GET", f"/agent/v1/chat/history?from={canary}")
