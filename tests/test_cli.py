@@ -42,3 +42,15 @@ def test_uvicorn_config_caps_websocket_frames():
 
     config = cli.build_uvicorn_config(Settings(database_url="postgresql://u:p@localhost/db"))
     assert config.ws_max_size == 65536
+
+
+def test_uvicorn_config_installs_access_query_filter():
+    import logging
+
+    from agents_orchestrator.runtime.run import _AccessQueryFilter
+    from agents_orchestrator.settings import Settings
+
+    logging.getLogger("uvicorn.access").filters.clear()
+    cli.build_uvicorn_config(Settings(database_url="postgresql://u:p@localhost/db"))
+    filters = logging.getLogger("uvicorn.access").filters
+    assert any(isinstance(f, _AccessQueryFilter) for f in filters)

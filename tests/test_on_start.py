@@ -36,6 +36,7 @@ SESSION_TOOLS = ["sessions_list", "session_send"]
 INIT_SCRIPTS_TOOLS = ["init_scripts_get", "init_scripts_edit"]
 CHAT_TOOLS = [
     "chat_rooms", "chat_send", "chat_react", "chat_status",
+    "chat_history", "chat_attachment_fetch", "chat_attachment_status",
     "chat_notes_get", "chat_notes_update",
     "chat_skills_list", "chat_skills_get", "chat_skills_save", "chat_skills_delete",
 ]  # fmt: skip
@@ -67,7 +68,12 @@ TAIL_TOOLS = [
 # Allowed before the pinned plugin ships them; add a name here when the allow-list leads the
 # plugin pin and remove it when the pin offers the tool (project room T-117 O9; project grants
 # T-120).
-PLUGIN_PENDING: set[str] = set()
+PLUGIN_PENDING: set[str] = {
+    "chat_history",
+    "chat_attachment_fetch",
+    "chat_attachment_status",
+    "chat_admin_history",
+}
 ALONE_TOOLS = ["me", "leadership_handover", *TAIL_TOOLS]
 PROPOSAL = [
     "proposal_create",
@@ -89,7 +95,8 @@ ADMIN_TOOLS = [
     "schedule_run", "schedule_runs", "schedule_runs_all", "schedule_run_get",
     "schedule_preview", "chat_admin_rooms", "chat_room_settings", "chat_rules",
     "chat_rule_add", "chat_rule_delete",
-    "chat_admin_room", "chat_users", "chat_room_allow", "chat_open", "chat_open_status",
+    "chat_admin_room", "chat_admin_history", "chat_users", "chat_room_allow", "chat_open",
+    "chat_open_status",
     "chat_open_confirm", "vault_list", "vault_attach", "vault_detach",
     "history_search", "history_get",
     "history_records", "usage_get", "project_create",
@@ -588,6 +595,7 @@ def test_alone_session_allow_is_the_literal_e2e_list():
         "me", "leadership_handover", "sessions_list", "session_send", "init_scripts_get",
         "init_scripts_edit",
         "chat_rooms", "chat_send", "chat_react", "chat_status",
+        "chat_history", "chat_attachment_fetch", "chat_attachment_status",
         "chat_notes_get", "chat_notes_update", "chat_skills_list", "chat_skills_get",
         "chat_skills_save", "chat_skills_delete",
         "task_create", "task_update", "task_list", "task_get", "task_comment",

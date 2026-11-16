@@ -108,6 +108,9 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("GET", f"{_A}/chat/skills/{{name}}"): "own",
     ("PUT", f"{_A}/chat/skills/{{name}}"): "own",
     ("DELETE", f"{_A}/chat/skills/{{name}}"): "own",
+    ("GET", f"{_A}/chat/history"): "own",
+    ("POST", f"{_A}/chat/attachments"): "own",
+    ("GET", f"{_A}/chat/attachments/{{request_id}}"): "own",
     # session-spec-patch (`admin.session_router`): a leader edits its own session, a
     # superleader any it may manage
     ("GET", f"{_ADMIN}/sessions/{{slug}}"): "own",
@@ -186,6 +189,7 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("GET", f"{_ADMIN}/schedules/schedules/{{schedule_id}}/runs"): "superleader",
     ("GET", f"{_ADMIN}/chats/rooms"): "superleader",
     ("GET", f"{_ADMIN}/chats/rooms/{{room_id}}"): "superleader",
+    ("GET", f"{_ADMIN}/chats/rooms/{{room_id}}/messages"): "superleader",
     ("PUT", f"{_ADMIN}/chats/rooms/{{room_id}}/settings"): "superleader",
     ("POST", f"{_ADMIN}/chats/rooms/{{room_id}}/allow"): "superleader",
     ("GET", f"{_ADMIN}/chats/users"): "superleader",

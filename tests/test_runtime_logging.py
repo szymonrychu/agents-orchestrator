@@ -49,3 +49,53 @@ def test_log_close_line(caplog):
         "close_reason": "quiet",
         "step": "ask",
     }
+
+
+def test_configure_logging_holds_http_clients_at_warning():
+    from agents_orchestrator.runtime.run import configure_logging
+
+    root = logging.getLogger()
+    saved = (root.handlers[:], root.level)
+    levels = {n: logging.getLogger(n).level for n in ("httpx", "httpcore")}
+    try:
+        for name in ("httpx", "httpcore"):
+            logging.getLogger(name).setLevel(logging.NOTSET)
+        configure_logging("DEBUG")
+        for name in ("httpx", "httpcore"):
+            assert logging.getLogger(name).level == logging.WARNING
+    finally:
+        root.handlers[:], root.level = saved[0], saved[1]
+        for name, level in levels.items():
+            logging.getLogger(name).setLevel(level)
+
+
+def test_access_log_filter_strips_query_string():
+    import io
+
+    from agents_orchestrator.runtime.run import quiet_access_log
+
+    quiet_access_log()
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    access = logging.getLogger("uvicorn.access")
+    old_level, old_prop = access.level, access.propagate
+    access.addHandler(handler)
+    access.setLevel(logging.INFO)
+    access.propagate = False
+    try:
+        access.info(
+            '%s - "%s %s HTTP/%s" %d',
+            "10.0.0.1:1",
+            "GET",
+            "/agent/v1/chat/history?from=CANARY",
+            "1.1",
+            200,
+        )
+    finally:
+        access.removeHandler(handler)
+        access.setLevel(old_level)
+        access.propagate = old_prop
+    out = stream.getvalue()
+    assert "CANARY" not in out
+    assert "GET /agent/v1/chat/history HTTP/1.1" in out and "200" in out

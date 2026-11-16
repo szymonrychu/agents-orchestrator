@@ -45,6 +45,9 @@ checks the task on the taskboard, forwards, then asks and attaches a decision as
 session, and `POST /chats/room-requests/{request_id}/confirm` settles the request from the
 answer (`api/chat_requests.py`).
 
+The room history read (`GET /chats/rooms/{room_id}/messages`) is read only and covers any room;
+there is no attachment fetch for the superleader.
+
 History is read-only for the superleader: three GET routes and no DELETE (deleting a stored
 session is for the user, through the web UI), so the router answers any other method 405 and
 nothing reaches the upstream. The session list is paged upstream by `before_id`; when a page was
@@ -122,6 +125,7 @@ _SCHEDULES = [
 _CHATS = [
     ("GET", "/rooms", 200),
     ("GET", "/rooms/{room_id}", 200),
+    ("GET", "/rooms/{room_id}/messages", 200),
     ("PUT", "/rooms/{room_id}/settings", 200),
     ("POST", "/rooms/{room_id}/allow", 200),
     ("GET", "/users", 200),
@@ -196,6 +200,7 @@ GUARDS: dict[tuple[str, str, str], Guard] = {
     ("schedule", "GET", "/schedules/{schedule_id}/runs"): Guard(),
     ("connector", "GET", "/rooms"): Guard(),
     ("connector", "GET", "/rooms/{room_id}"): Guard(),
+    ("connector", "GET", "/rooms/{room_id}/messages"): Guard(),
     ("connector", "PUT", "/rooms/{room_id}/settings"): Guard(),
     ("connector", "POST", "/rooms/{room_id}/allow"): Guard(),
     ("connector", "GET", "/users"): Guard(),

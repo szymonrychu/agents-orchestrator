@@ -98,7 +98,9 @@ def build_uvicorn_config(settings):
     import uvicorn
 
     from agents_orchestrator.api.app import create_app
+    from agents_orchestrator.runtime.run import quiet_access_log
 
+    quiet_access_log()
     return uvicorn.Config(
         create_app(settings),
         host=settings.http_host,

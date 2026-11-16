@@ -8161,6 +8161,65 @@
         ]
       }
     },
+    "/agent/v1/admin/chats/rooms/{room_id}/messages": {
+      "get": {
+        "operationId": "admin_connector_get_rooms_room_id_messages",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "GET connector /rooms/{room_id}/messages",
+        "tags": [
+          "admin",
+          "admin"
+        ]
+      }
+    },
     "/agent/v1/admin/chats/rooms/{room_id}/settings": {
       "put": {
         "operationId": "admin_connector_put_rooms_room_id_settings",
@@ -13735,6 +13794,256 @@
         "tags": [
           "admin",
           "admin"
+        ]
+      }
+    },
+    "/agent/v1/chat/attachments": {
+      "post": {
+        "operationId": "attachment_fetch_agent_v1_chat_attachments_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "An attachment fetch as the upstream reads it (OpenAPI only; the upstream validates it).\n\n`id`: the id of a past message of the bound room that has an attachment.",
+                "properties": {
+                  "id": {
+                    "title": "Id",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id"
+                ],
+                "title": "ChatAttachmentIn",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "The chat upstream's status and JSON body, unchanged"
+          },
+          "401": {
+            "description": "unauthorized: missing or invalid agent credentials"
+          },
+          "403": {
+            "description": "forbidden (not a live agent pod) or not_leader"
+          },
+          "413": {
+            "description": "payload_too_large: a POST or PUT body exceeds 256 KiB"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "chat_unconfigured or chat_unavailable"
+          }
+        },
+        "summary": "Fetch the attachment of a past chat message; it arrives as a new turn (leader only)",
+        "tags": [
+          "agent"
+        ]
+      }
+    },
+    "/agent/v1/chat/attachments/{request_id}": {
+      "get": {
+        "operationId": "attachment_status_agent_v1_chat_attachments__request_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "The chat upstream's status and JSON body, unchanged"
+          },
+          "401": {
+            "description": "unauthorized: missing or invalid agent credentials"
+          },
+          "403": {
+            "description": "forbidden (not a live agent pod) or not_leader"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "chat_unconfigured or chat_unavailable"
+          }
+        },
+        "summary": "Status of an attachment fetch of the caller's session (leader only)",
+        "tags": [
+          "agent"
+        ]
+      }
+    },
+    "/agent/v1/chat/history": {
+      "get": {
+        "operationId": "history_agent_v1_chat_history_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "The chat upstream's status and JSON body, unchanged"
+          },
+          "401": {
+            "description": "unauthorized: missing or invalid agent credentials"
+          },
+          "403": {
+            "description": "forbidden (not a live agent pod) or not_leader"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "chat_unconfigured or chat_unavailable"
+          }
+        },
+        "summary": "Past messages of the room bound to the caller's session (leader only)",
+        "tags": [
+          "agent"
         ]
       }
     },

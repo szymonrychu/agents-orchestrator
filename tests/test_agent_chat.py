@@ -31,6 +31,7 @@ from agents_orchestrator.api.app import create_app
 from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import leadership
 from agents_orchestrator.db import sessions as sessions_repo
+from agents_orchestrator.runtime.run import quiet_http_loggers
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import SessionSpec
 from agents_orchestrator.tokens import derive_tokens
@@ -633,6 +634,118 @@ async def test_memory_routes_do_not_touch_the_session(monkeypatch):
     assert rig.db.touched == []
 
 
+HISTORY_ROUTES = [
+    ("GET", "/agent/v1/chat/history?limit=5", None),
+    ("POST", "/agent/v1/chat/attachments", {"id": "m3"}),
+    ("GET", "/agent/v1/chat/attachments/a1", None),
+]
+
+
+async def test_history_relayed_with_query_string(monkeypatch):
+    rig = make_rig(monkeypatch)
+    query = "before=m5&limit=20&from=Ann%20B"
+    r = await rig.call("GET", f"/agent/v1/chat/history?{query}")
+    assert r.status_code == 200, r.text
+    (sent,) = rig.upstream.seen
+    assert (sent.method, sent.url.raw_path) == ("GET", f"/chat/v1/history?{query}".encode())
+    assert sent.headers["authorization"] == f"Bearer {CHAT_TOKEN}"
+    assert sent.headers["x-orch-session"] == str(rig.session.id)
+    assert sent.headers["x-orch-slug"] == "chat-caller"
+    assert sent.content == b"" and "content-type" not in sent.headers
+
+
+async def test_attachment_fetch_forwards_body(monkeypatch):
+    rig = make_rig(monkeypatch)
+    rig.upstream.reply = httpx.Response(202, json={"id": "a1", "status": "queued"})
+    body = json.dumps({"id": "m3"}).encode()
+    r = await rig.call("POST", "/agent/v1/chat/attachments", content=body)
+    assert r.status_code == 202, r.text
+    assert r.json() == {"id": "a1", "status": "queued"}
+    (sent,) = rig.upstream.seen
+    assert (sent.method, sent.url.path) == ("POST", "/chat/v1/attachments")
+    assert sent.content == body
+    assert sent.headers["content-type"] == "application/json"
+    assert sent.headers["x-orch-session"] == str(rig.session.id)
+
+
+async def test_attachment_status_id_is_one_segment(monkeypatch):
+    rig = make_rig(monkeypatch)
+    r = await rig.call("GET", "/agent/v1/chat/attachments/..%2Fx")
+    assert r.status_code == 404 and rig.upstream.seen == []
+    for raw, encoded in (("%2E%2E", "%2E%2E"), ("a%20b", "a%20b"), ("a1", "a1")):
+        rig.upstream.seen.clear()
+        r = await rig.call("GET", f"/agent/v1/chat/attachments/{raw}")
+        assert r.status_code == 200, r.text
+        assert rig.upstream.seen[0].url.raw_path == f"/chat/v1/attachments/{encoded}".encode()
+    assert chat._segment("../x") == "%2E%2E%2Fx"
+
+
+async def test_history_and_attachments_leader_only(monkeypatch):
+    rig = make_rig(monkeypatch)
+    for method, path, body in HISTORY_ROUTES:
+        kw: dict[str, Any] = {} if body is None else {"json": body}
+        assert_error(await rig.call(method, path, ip=MEMBER_IP, **kw), 403, "not_leader")
+        assert_error(await rig.call(method, path, headers={}, **kw), 401, "unauthorized")
+    assert rig.upstream.seen == []
+
+
+async def test_history_unconfigured_and_unavailable(monkeypatch):
+    rig = make_rig(monkeypatch, chat_url="", chat_token="")
+    for method, path, body in HISTORY_ROUTES:
+        kw: dict[str, Any] = {} if body is None else {"json": body}
+        assert_error(await rig.call(method, path, **kw), 503, "chat_unconfigured")
+    rig = make_rig(monkeypatch)
+    rig.upstream.reply = httpx.Response(502, content=b"<html>bad gateway</html>")
+    for method, path, body in HISTORY_ROUTES:
+        kw = {} if body is None else {"json": body}
+        assert_error(await rig.call(method, path, **kw), 503, "chat_unavailable")
+
+
+async def test_history_upstream_refusals_pass_through(monkeypatch):
+    rig = make_rig(monkeypatch)
+    cases = [
+        ("GET", "/agent/v1/chat/history", 409, "room_unbound", None),
+        ("POST", "/agent/v1/chat/attachments", 409, "already_fetching", {"id": "m1"}),
+        ("POST", "/agent/v1/chat/attachments", 429, "rate_limited", {"id": "m1"}),
+        ("GET", "/agent/v1/chat/attachments/a9", 404, "not_found", None),
+    ]
+    for method, path, status, code, body in cases:
+        raw = json.dumps({"error": {"code": code, "message": "m"}}).encode()
+        rig.upstream.reply = httpx.Response(status, content=raw)
+        kw: dict[str, Any] = {} if body is None else {"json": body}
+        r = await rig.call(method, path, **kw)
+        assert (r.status_code, r.content) == (status, raw), (method, path)
+
+
+async def test_history_routes_do_not_touch_the_session(monkeypatch):
+    rig = make_rig(monkeypatch)
+    rig.upstream.reply = httpx.Response(202, json={"id": "a1", "status": "queued"})
+    for method, path, body in HISTORY_ROUTES:
+        kw: dict[str, Any] = {} if body is None else {"json": body}
+        assert (await rig.call(method, path, **kw)).status_code in (200, 202)
+    assert rig.db.touched == []
+
+
+async def test_history_relay_never_logs_query_or_body(monkeypatch, caplog):
+    rig = make_rig(monkeypatch)
+    canary = "CANARY-" + secrets.token_hex(8)
+    rig.upstream.reply = httpx.Response(202, json={"id": "a1", "status": "queued"})
+    for name in ("httpx", "httpcore"):
+        monkeypatch.setattr(logging.getLogger(name), "level", logging.getLogger(name).level)
+    quiet_http_loggers()  # the level setup production applies at startup (configure_logging)
+    with caplog.at_level(logging.DEBUG):
+        await rig.call("GET", f"/agent/v1/chat/history?from={canary}")
+        await rig.call("POST", "/agent/v1/chat/attachments", json={"id": canary})
+        rig.upstream.reply = httpx.Response(502, content=f"bad {canary}".encode())
+        await rig.call("GET", f"/agent/v1/chat/history?from={canary}")
+        await rig.call("POST", "/agent/v1/chat/attachments", json={"id": canary})
+    # records of every logger (httpx included), not only ours
+    assert any(r.name.startswith("agents_orchestrator") for r in caplog.records), (
+        "the relay logged nothing, the check proves nothing"
+    )
+    assert canary not in " ".join(r.getMessage() + str(r.__dict__) for r in caplog.records)
+
+
 # ------------------------------------------------------------------------- identity and ports
 
 
@@ -713,6 +826,9 @@ def test_readme_documents_chat_routes():
         ("GET", "/agent/v1/chat/skills/{name}"),
         ("PUT", "/agent/v1/chat/skills/{name}"),
         ("DELETE", "/agent/v1/chat/skills/{name}"),
+        ("GET", "/agent/v1/chat/history"),
+        ("POST", "/agent/v1/chat/attachments"),
+        ("GET", "/agent/v1/chat/attachments/{request_id}"),
     }
     assert documented == served
     assert {f"{m} {p}" for m, p in served} <= {
