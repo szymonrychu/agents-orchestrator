@@ -144,6 +144,43 @@ async def claimed_task(
         raise TaskboardUnavailable(type(exc).__name__) from None
 
 
+async def claimed_tasks(
+    settings: Settings,
+    session_id: uuid.UUID,
+    slug: str,
+    projects: str,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> list[dict[str, Any]]:
+    """Every active task the session is the assignee of, as `{id, title, status, todo}` with
+    `todo` a list of `{text, status}`. Same route and filter as `claimed_task`
+    (`GET /tasks?session=`); raises `TaskboardUnavailable` when the list cannot be read."""
+    if not settings.taskboard_available:
+        raise TaskboardUnavailable("not configured")
+    url = settings.taskboard_url.rstrip("/") + UPSTREAM_PREFIX + "/tasks"
+    headers = _session_headers(settings, session_id, slug, projects)
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS, transport=transport) as http:
+            response = await http.get(url, params={"session": str(session_id)}, headers=headers)
+        if not response.is_success:
+            raise TaskboardUnavailable(f"status {response.status_code}")
+        return [
+            {
+                "id": str(task["key"]),
+                "title": str(task.get("title") or ""),
+                "status": str(task.get("status") or ""),
+                "todo": [
+                    {"text": str(t.get("text") or ""), "status": str(t.get("status") or "")}
+                    for t in task.get("todo") or []
+                ],
+            }
+            for task in response.json()["items"]
+            if task.get("assignee_session") == str(session_id)
+        ]
+    except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise TaskboardUnavailable(type(exc).__name__) from None
+
+
 async def add_comment(
     settings: Settings,
     session_id: uuid.UUID,

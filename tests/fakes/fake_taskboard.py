@@ -23,6 +23,8 @@ class FakeTaskboard:
     down: bool = False
     # task key -> the assignee session id (its claimed task)
     assignees: dict[str, str] = field(default_factory=dict)
+    # task key -> extra fields of its list item (`title`, `status`, `todo`)
+    info: dict[str, dict[str, Any]] = field(default_factory=dict)
     created: list[dict[str, Any]] = field(default_factory=list)
     comments: list[dict[str, Any]] = field(default_factory=list)
 
@@ -35,7 +37,7 @@ class FakeTaskboard:
         if path == "/tasks" and request.method == "GET":
             session = request.url.params.get("session")
             items = [
-                {"key": key, "assignee_session": who, "decisions": []}
+                {"key": key, "assignee_session": who, "decisions": [], **self.info.get(key, {})}
                 for key, who in sorted(self.assignees.items())
                 if key in self.tasks and (session is None or who == session)
             ]

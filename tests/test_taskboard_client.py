@@ -171,3 +171,38 @@ async def test_post_notice_connect_error_is_false(caplog):
     assert ok is False
     assert "ConnectError" in caplog.text
     assert "CANARY-tb-0001" not in caplog.text
+
+
+async def test_claimed_tasks_lists_id_title_status_and_todo():
+    from fakes.fake_taskboard import FakeTaskboard
+
+    from agents_orchestrator.taskboard_client import TaskboardUnavailable, claimed_tasks
+
+    tb = FakeTaskboard(token=TOKEN, tasks={"T-1", "T-2"})
+    tb.assignees = {"T-1": str(SESSION), "T-2": "other-session"}
+    tb.info["T-1"] = {
+        "title": "successor package",
+        "status": "active",
+        "todo": [{"id": 1, "text": "write tests", "status": "done", "position": 0}],
+    }
+    got = await claimed_tasks(
+        settings(), SESSION, "slug", "default", transport=transport(tb.handler)
+    )
+    assert got == [
+        {
+            "id": "T-1",
+            "title": "successor package",
+            "status": "active",
+            "todo": [{"text": "write tests", "status": "done"}],
+        }
+    ]
+    request = tb.calls[0]
+    assert request.url.params["session"] == str(SESSION)
+    assert request.headers["x-orch-session"] == str(SESSION)
+
+    tb.down = True
+    with pytest.raises(TaskboardUnavailable):
+        await claimed_tasks(settings(), SESSION, "slug", "default", transport=transport(tb.handler))
+    with pytest.raises(TaskboardUnavailable):
+        off = settings(taskboard_url="", taskboard_token="")
+        await claimed_tasks(off, SESSION, "slug", "default")

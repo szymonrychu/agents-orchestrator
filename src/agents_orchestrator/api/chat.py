@@ -30,6 +30,7 @@ import httpx
 from fastapi import APIRouter, FastAPI, Request, Response
 from pydantic import BaseModel, ConfigDict
 
+from agents_orchestrator import chat_client
 from agents_orchestrator.api import chat_relay
 from agents_orchestrator.api import forward as forward_core
 from agents_orchestrator.api.agent import Caller, _leads, _session
@@ -43,7 +44,7 @@ router = APIRouter(prefix="/agent/v1/chat", tags=["agent"])
 
 MAX_BODY_BYTES = forward_core.MAX_BODY_BYTES
 TIMEOUT_SECONDS = forward_core.TIMEOUT_SECONDS
-UPSTREAM_PREFIX = "/chat/v1"
+UPSTREAM_PREFIX = chat_client.UPSTREAM_PREFIX
 STATE_ATTR = "chat_http"
 AGENT_HEADER = "X-Orch-Agent"  # the calling agent, whose workdir holds `files`
 

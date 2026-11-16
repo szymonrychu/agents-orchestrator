@@ -246,3 +246,21 @@ async def test_l2_and_shutdown_rows_never_escalate(tenv, tb):
         await tenv.step(c["id"])
     assert (await tenv.row(a["id"])).escalated_at is None
     assert await escalations(tenv, boss["id"]) == []
+
+
+async def test_l2_pressuring_row_rising_to_l3_escalates(tenv, tb):
+    boss = await superleader(tenv)
+    c, a = await tenv.solo(used=STRONG)
+    await tenv.busy(a["id"])
+    await tenv.step(c["id"])
+    row = await tenv.row(a["id"])
+    assert (row.level, row.escalated_at) == (2, None)
+    assert await escalations(tenv, boss["id"]) == []  # L2 reports nothing
+    await tenv.gauge(a["id"], CRITICAL, state="busy", current_turn_id="t-busy")
+    assert await tenv.step(c["id"]) == [f"level:{a['id']}:3"]
+    row = await tenv.row(a["id"])
+    assert (row.level, row.phase) == (3, "pressuring")
+    assert row.escalated_at is not None
+    (msg,) = await escalations(tenv, boss["id"])
+    assert "context level critical" in msg["text"]
+    await nothing_forced(tenv, c["id"])

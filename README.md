@@ -93,6 +93,7 @@ Every process reads `ORCH_*` variables (the contract `agents-orchestrator-settin
 | `ORCH_HANDOVER_CRITICAL_HEADROOM_TOKENS` | `25000` | dispatcher | tokens (0 to 500000) below the compaction point where level 3 (critical) sits |
 | `ORCH_HANDOFF_CHAT_SERVICES` | `agents-matrix-connector` | api | comma-separated service names (the names in `ORCH_SERVICE_TOKENS`) whose messages on the service port count as inbound chat activity of the session; with the outbound chat posts of the relay it tells a chat agent from a work agent for the context-pressure handoff |
 | `ORCH_HANDOFF_MIN_CHARS` | `300` | api | least characters over all fields of a submitted handoff (1 to 20000); a shorter one is rejected `too_short` |
+| `ORCH_HANDOFF_ROOM_TAIL` | `10` | dispatcher, api | inbound chat messages since the agents' last chat post that a chat successor's handoff package lists (0 to 100) |
 | `ORCH_HANDOFF_MIN_TEXT_RATIO` | `0.6` | api | least share (0 to 1) of letters, digits and whitespace in a submitted handoff; emoji and punctuation-only text is rejected `not_text` |
 | `ORCH_HANDOFF_MAX_REJECTS` | `3` | api | rejected submits (1 to 20) after which the handoff counts as stuck |
 | `ORCH_HANDOFF_INFLIGHT_TIMEOUT_SECONDS` | `15` | api | seconds (1 to 120) to wait for the wrapper's in-flight answer on a submit; no answer blocks the submit |

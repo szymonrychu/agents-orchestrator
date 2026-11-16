@@ -45,6 +45,7 @@ async def sweep(pool: AsyncConnectionPool, settings: Settings) -> None:
                 shutdown_hold_seconds=settings.agent_shutdown_notice_seconds
                 + settings.agent_shutdown_handoff_seconds
                 + SHUTDOWN_MARGIN_SECONDS,
+                settings=settings,
             ),
         ),
         (

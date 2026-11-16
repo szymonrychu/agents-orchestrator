@@ -396,25 +396,48 @@ async def mark_delivered(conn: psycopg.AsyncConnection, row_id: int) -> bool:
     return cur.rowcount == 1
 
 
+async def take_row(
+    conn: psycopg.AsyncConnection,
+    agent_id: uuid.UUID,
+    successor_agent_id: uuid.UUID,
+    since: datetime | None,
+) -> Handoff | None:
+    """Mark the newest undelivered handoff of `agent_id` for its successor delivered and return
+    that row (None when there is none). Only a row written since `since` (the predecessor's
+    tenure start) counts: an older undelivered one is stale."""
+    return await _fetch(
+        conn,
+        "UPDATE agent_handoffs SET delivered_at = now(), progress_at = now() WHERE id = ("
+        " SELECT id FROM agent_handoffs WHERE agent_id = %s AND successor_agent_id = %s"
+        " AND (handoff IS NOT NULL OR handoff_text IS NOT NULL) AND delivered_at IS NULL"
+        " AND (%s::timestamptz IS NULL OR created_at >= %s)"
+        f" ORDER BY id DESC LIMIT 1) AND delivered_at IS NULL RETURNING {_COLUMNS}",
+        (agent_id, successor_agent_id, since, since),
+    )
+
+
 async def take_undelivered(
     conn: psycopg.AsyncConnection,
     agent_id: uuid.UUID,
     successor_agent_id: uuid.UUID,
     since: datetime | None,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    """Mark the newest undelivered handoff of `agent_id` for its successor delivered and return
-    `(handoff, handoff_text)` (either may be None). Only a row written since `since` (the
-    predecessor's tenure start) counts: an older undelivered one is stale."""
+    """`take_row` as `(handoff, handoff_text)` (either may be None)."""
+    row = await take_row(conn, agent_id, successor_agent_id, since)
+    return (None, None) if row is None else (row.handoff, row.handoff_text)
+
+
+async def latest_inflight(
+    conn: psycopg.AsyncConnection, agent_id: uuid.UUID
+) -> dict[str, Any] | None:
+    """The newest in-flight inventory any row of the agent stored (the last one known)."""
     cur = await conn.execute(
-        "UPDATE agent_handoffs SET delivered_at = now(), progress_at = now() WHERE id = ("
-        " SELECT id FROM agent_handoffs WHERE agent_id = %s AND successor_agent_id = %s"
-        " AND (handoff IS NOT NULL OR handoff_text IS NOT NULL) AND delivered_at IS NULL"
-        " AND (%s::timestamptz IS NULL OR created_at >= %s)"
-        " ORDER BY id DESC LIMIT 1) AND delivered_at IS NULL RETURNING handoff, handoff_text",
-        (agent_id, successor_agent_id, since, since),
+        "SELECT inflight FROM agent_handoffs WHERE agent_id = %s AND inflight IS NOT NULL"
+        " ORDER BY id DESC LIMIT 1",
+        (agent_id,),
     )
     row = await cur.fetchone()
-    return (None, None) if row is None else (row[0], row[1])
+    return row[0] if row else None
 
 
 async def open_rows(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> list[Handoff]:

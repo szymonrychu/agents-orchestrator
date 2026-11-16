@@ -148,13 +148,25 @@ def resubmit_text() -> str:
     )
 
 
-def resume_text(task_ids: list[str], next_first: str | None) -> str:
-    """The resume instruction list for a fresh context: instructions, not data."""
+def resume_text(
+    task_ids: list[str],
+    next_first: str | None,
+    *,
+    scratch_paths: list[str] | None = None,
+    chat: bool = True,
+    crons: bool = True,
+) -> str:
+    """The resume instruction list for a fresh context: instructions, not data. `scratch_paths`
+    are persisted files to read first; `chat` adds the room notes step, `crons` the cron one."""
     steps = ["call orchestrator_me"]
     if task_ids:
         steps.append("read your tasks with orchestrator_task_get: " + ", ".join(task_ids))
-    steps.append("read your room notes and recent chat if you have a room")
-    steps.append("recreate the session crons listed in the handoff")
+    if scratch_paths:
+        steps.append("read these first: " + ", ".join(scratch_paths))
+    if chat:
+        steps.append("read your room notes and recent chat if you have a room")
+    if crons:
+        steps.append("recreate the session crons listed in the handoff")
     steps.append(f"continue with: {next_first}" if next_first else "continue with the next item")
     return "Resume now: " + "; ".join(f"{i}. {s}" for i, s in enumerate(steps, 1)) + "."
 

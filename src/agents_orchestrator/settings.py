@@ -251,6 +251,9 @@ class Settings(BaseSettings):
     handoff_min_text_ratio: float = Field(default=0.6, ge=0, le=1)
     handoff_max_rejects: int = Field(default=3, ge=1, le=20)
     handoff_inflight_timeout_seconds: int = Field(default=15, ge=1, le=120)
+    #: The inbound chat messages (newest) a chat successor's package lists, those since the
+    #: agents' last chat post.
+    handoff_room_tail: int = Field(default=10, ge=0, le=100)
     #: The quiet window a hive gets to discuss before the ex-leader is cleared (its own
     #: in-flight gate must be clear too); the cap drops only the session-quiet requirement.
     handover_quiet_seconds: int = Field(default=60, ge=0, le=3600)

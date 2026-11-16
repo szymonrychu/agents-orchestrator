@@ -63,6 +63,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from agents_orchestrator import handoff_texts
 from agents_orchestrator.db import handoffs, leadership
 from agents_orchestrator.db.eligibility import HANDOVER_MARGIN_PCT
 from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE
@@ -775,7 +776,14 @@ async def _pressure_targets(
 
     def extras(row: handoffs.Handoff | None) -> pressure_policy.PolicyExtras:
         resubmit = bool(row is not None and (row.inflight or {}).get("resubmit"))
-        return pressure_policy.PolicyExtras(resubmit=resubmit)
+        if row is None or row.phase != "returning" or row.handoff is None:
+            return pressure_policy.PolicyExtras(resubmit=resubmit)
+        # a solo agent's fresh context: the resume check until the return turn ends
+        first = [str(n) for n in row.handoff.get("next") or [] if str(n).strip()]
+        text = handoff_texts.resume_text(
+            [], first[0] if first else None, chat=row.profile == "chat"
+        )
+        return pressure_policy.PolicyExtras(resume_pending=True, resume_text=text)
 
     seen: set[uuid.UUID] = set()
     for subject in await _subject_rows(conn):

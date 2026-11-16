@@ -56,7 +56,8 @@ The pressure itself is the policy the push loop puts to the wrapper (`hive._push
    the last attempt, closes the row `cancelled clear_failed` (solo: the handoff still comes back,
    worded for a kept context); no new row opens for that agent for
    `clear_failed_block_seconds` unless its context is cleared or compacted first.
-7. returning: closed `done returned` once the message is sent.
+7. returning: closed `done returned` once the message is sent and its turn ended; until then the
+   policy carries `resume_pending` and the resume text (`hive._pressure_targets`).
 
 A transition of a `submitted` row is guarded on the `submitted_at` the pass read
 (`seen_submit`): a resubmit committed since, blocked or accepted, makes it lose, so neither a
@@ -95,7 +96,14 @@ import httpx
 import psycopg
 from psycopg.rows import dict_row
 
-from agents_orchestrator import handoff_gate, handoff_profile, handoff_texts, taskboard_client
+from agents_orchestrator import (
+    handoff_gate,
+    handoff_package,
+    handoff_profile,
+    handoff_quality,
+    handoff_texts,
+    taskboard_client,
+)
 from agents_orchestrator.api.scope import scope_of
 from agents_orchestrator.db import handoffs, leadership, queue
 from agents_orchestrator.db import sessions as sessions_repo
@@ -105,7 +113,7 @@ from agents_orchestrator.db.eligibility import (
     HOLDS_SESSION,
     background_busy,
 )
-from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE
+from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE, StoredAttachment
 from agents_orchestrator.db.sessions import quiet_clock_sql
 from agents_orchestrator.dispatcher import hive
 from agents_orchestrator.handoff_texts import shutdown_successor
@@ -401,7 +409,11 @@ class _Pass:
         settings: Settings,
         inflight: dict[uuid.UUID, Inflight | None],
         nudge_inflight: dict[uuid.UUID, Inflight | None] | None = None,
+        taskboard: handoff_package.TaskboardFetch | None = None,
+        chat: handoff_package.ChatFetch | None = None,
     ) -> None:
+        self.taskboard = taskboard or handoff_package.default_taskboard(settings)
+        self.chat = chat or handoff_package.default_chat(settings)
         self.conn = conn
         self.session = session
         self.policy = policy
@@ -436,9 +448,36 @@ class _Pass:
             "clear_failed": False,
         }
 
-    async def message(self, text: str, agent_id: uuid.UUID, notice: str | None) -> int:
+    async def message(
+        self,
+        text: str,
+        agent_id: uuid.UUID,
+        notice: str | None,
+        attachments: list[StoredAttachment] | None = None,
+    ) -> int:
         return await queue.enqueue_message(
-            self.conn, self.session["id"], text, agent_id, lane="regular", notice=notice
+            self.conn,
+            self.session["id"],
+            text,
+            agent_id,
+            lane="regular",
+            notice=notice,
+            attachments=attachments or [],
+        )
+
+    async def package(self, row: handoffs.Handoff) -> handoff_package.Package:
+        """The successor package of the row (the claimed tasks and room notes asked through
+        the pass's fetchers, each bounded by its client's own timeout)."""
+        session = await sessions_repo.get(self.conn, self.session["id"])
+        assert session is not None
+        return await handoff_package.build_package(
+            self.conn, row, session, self.settings, taskboard=self.taskboard, chat=self.chat
+        )
+
+    def shutdown_rejected(self, row: handoffs.Handoff) -> bool:
+        """A pod-shutdown text that fails the quality check is not delivered as the handoff."""
+        return row.handoff is None and bool(
+            handoff_quality.check_text(row.handoff_text or "", self.settings)
         )
 
     async def guarded(self, work: Callable[[], Awaitable[bool]]) -> bool:
@@ -901,25 +940,33 @@ class _Pass:
         if await self.send_return(row, cleared=True):
             self.out.append(f"returning:{row.agent_id}")
 
-    @staticmethod
-    def return_text(row: handoffs.Handoff, *, cleared: bool) -> str:
-        """The handoff sent back to a solo agent: the accepted handoff with the resume list, or
-        a pod-shutdown text (`cleared` False: the clear failed and the context was kept)."""
+    async def return_message(
+        self, row: handoffs.Handoff, *, cleared: bool
+    ) -> tuple[str, list[StoredAttachment] | None]:
+        """What goes back to a solo agent: after its clear the successor package of the accepted
+        handoff (resume list first, the inventory attached as `handoff-<row id>.md`); after a
+        failed clear (the context was kept) the handoff for reference; a pod-shutdown text as
+        today, unless it failed the quality check (then the package, with the reasons)."""
+        if self.shutdown_rejected(row) or (row.handoff is not None and cleared):
+            package = await self.package(row)
+            attachment = StoredAttachment(
+                f"handoff-{row.id}.md", "text/markdown", package.attachment.encode()
+            )
+            return package.text, [attachment]
         if row.handoff is not None:
-            return handoff_texts.return_text(row.handoff, cleared=cleared)
+            return handoff_texts.return_text(row.handoff, cleared=cleared), None
         text = row.handoff_text or ""
         why = "pod shutdown" if row.trigger == "shutdown" else "handoff"
         if not cleared:
-            return f"Handoff from your current context ({why}, the clear failed):\n\n{text}"
-        return f"Handoff from your previous context ({why}, cleared just now):\n\n{text}"
+            return f"Handoff from your current context ({why}, the clear failed):\n\n{text}", None
+        return f"Handoff from your previous context ({why}, cleared just now):\n\n{text}", None
 
     async def send_return(self, row: handoffs.Handoff, *, cleared: bool) -> bool:
         """Queue the handoff back to the agent with the move to `returning` (exactly once)."""
 
         async def send() -> bool:
-            message_id = await self.message(
-                self.return_text(row, cleared=cleared), row.agent_id, "handoff_return"
-            )
+            text, attachments = await self.return_message(row, cleared=cleared)
+            message_id = await self.message(text, row.agent_id, "handoff_return", attachments)
             fields: dict[str, Any] = {"return_message_id": message_id}
             if cleared:
                 fields["cleared_at"] = await self._now()
@@ -1032,11 +1079,18 @@ class _Pass:
         assert row.handoff_text is not None
 
         async def send() -> bool:
-            await self.message(
-                shutdown_successor(pod["pod_name"] if pod else str(row.agent_id), row.handoff_text),
-                leader.agent_id,
-                None,
-            )
+            if self.shutdown_rejected(row):
+                package = await self.package(row)
+                text = package.text
+                attachments = [
+                    StoredAttachment(
+                        f"handoff-{row.id}.md", "text/markdown", package.attachment.encode()
+                    )
+                ]
+            else:
+                pod_name = pod["pod_name"] if pod else str(row.agent_id)
+                text, attachments = shutdown_successor(pod_name, row.handoff_text), None
+            await self.message(text, leader.agent_id, None, attachments)
             return await handoffs.mark_delivered(self.conn, row.id)
 
         if await self.guarded(send):
@@ -1044,12 +1098,24 @@ class _Pass:
             self.out.append(f"handoff_sent:{leader.agent_id}")
         return False
 
+    async def return_turn_running(self, row: handoffs.Handoff, msg: dict | None) -> bool:
+        """The turn the return message started has not ended: the agent's current turn is it."""
+        turn = await _one(
+            self.conn,
+            "SELECT m.turn_id IS NOT NULL AND s.current_turn_id = m.turn_id AS running"
+            " FROM messages m LEFT JOIN agent_status s ON s.agent_id = %s WHERE m.id = %s",
+            (row.agent_id, row.return_message_id),
+        )
+        return bool(turn and turn["running"])
+
     async def returning(self, row: handoffs.Handoff) -> None:
         msg = await _one(
             self.conn, "SELECT status FROM messages WHERE id = %s", (row.return_message_id,)
         )
         status = msg["status"] if msg is not None else "failed"
         if status == "sent":
+            if await self.return_turn_running(row, msg):
+                return  # the policy keeps asking for the resume check until the turn ends
             if await handoffs.close(self.conn, row.id, "done", "returned"):
                 log.info("handoff %s: agent %s got its handoff back", row.id, row.agent_id)
                 self.out.append(f"done:{row.agent_id}")
@@ -1095,6 +1161,8 @@ async def handoff_pass(
     policy: HandoffPolicy,
     settings: Settings,
     fetch: InflightFetch | None = None,
+    taskboard: handoff_package.TaskboardFetch | None = None,
+    chat: handoff_package.ChatFetch | None = None,
 ) -> list[str]:
     """Move the session's handoff rows on and open new ones; the transitions made, in order
     (e.g. `pressuring:<agent>`, `done:<agent>:compacted`). Empty when another dispatcher holds
@@ -1117,7 +1185,7 @@ async def handoff_pass(
         session = await _one(conn, "SELECT id, desired FROM sessions WHERE id = %s", (session_id,))
         if session is None:
             return []
-        run = _Pass(conn, session, policy, settings, inflight, nudge_inflight)
+        run = _Pass(conn, session, policy, settings, inflight, nudge_inflight, taskboard, chat)
         subjects = await hive._subject_rows(conn, session_id=session_id) if run.active else []
         by_agent = {s["agent_id"]: s for s in subjects}
         touched: set[uuid.UUID] = set()

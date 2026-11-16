@@ -68,7 +68,7 @@ async def fake(monkeypatch):
 class Env:
     def __init__(self, pool, dsn: str, fake: FakeWrapper) -> None:
         self.pool, self.dsn, self.fake = pool, dsn, fake
-        self.settings = Settings(database_url=dsn, master_key=KEY)
+        self.settings = Settings(database_url=dsn, master_key=KEY, handoff_min_chars=1)
         self.policy = handoff.HandoffPolicy.from_settings(self.settings)
         self.clients: list[WrapperClient] = []
         self.fetch = handoff.inflight_fetcher(self.factory, 5.0)
@@ -421,8 +421,7 @@ async def test_submitted_clear_solo_waits_for_idle_then_clears(env):
     await env.cleared(c["id"], a["id"])
     assert await env.step(c["id"]) == [f"returning:{a['id']}"]
     (ret,) = await env.messages(a["id"], "handoff_return")
-    assert ret["text"] == handoff_texts.return_text(row.handoff, cleared=True)
-    assert ret["text"].startswith("Your context was cleared after your accepted handoff.")
+    assert ret["text"].startswith("Resume now: 1. call orchestrator_me")
     assert "continue with: open the draft PR" in ret["text"]
     assert "Doing: wiring the cooperative handoff into the dispatcher" in ret["text"]
     assert (ret["lane"], ret["target_agent_id"]) == ("regular", a["id"])
@@ -1489,6 +1488,7 @@ async def _deliver(env) -> list:
             output_chars=500,
             decisions=no_decisions,
             shutdown_hold_seconds=330,
+            settings=env.settings,
         )
 
 
@@ -1869,3 +1869,107 @@ async def test_nudge_inventory_timeout_skips_only_the_nudge(env):
     async with env.pool.connection() as conn:
         out = await handoff.handoff_pass(conn, c["id"], env.policy, env.settings, slow)
     assert out == [f"done:{a['id']}:compacted"]  # the pass itself still ran
+
+
+# ---------------------------------------------------------------- successor package, resume
+
+
+async def _attachment_names(env, message_id) -> list[str]:
+    async with env.pool.connection() as conn:
+        return [a.name for a in await queue.message_attachments(conn, message_id)]
+
+
+async def test_solo_return_carries_package_and_sets_resume_pending(env):
+    c, a = await env.solo()
+    ret = await env.to_returning(c, a)
+    row = await env.row(a["id"])
+    assert ret["text"].startswith("Resume now: 1. call orchestrator_me")
+    assert "continue with: open the draft PR" in ret["text"]
+    assert "Doing: wiring the cooperative handoff into the dispatcher" in ret["text"]
+    assert "orchestrator_task_get" not in ret["text"].split("\n", 1)[0]  # no taskboard configured
+    assert "claimed tasks unavailable" in ret["text"].lower()  # degraded, never missing
+    assert await _attachment_names(env, ret["id"]) == [f"handoff-{row.id}.md"]
+    await env.push()
+    policy = env.policy_of(a)
+    assert policy["resume_pending"] is True
+    assert policy["resume_text"].startswith("Resume now: 1. call orchestrator_me")
+    assert "open the draft PR" in policy["resume_text"]
+
+
+async def test_resume_pending_cleared_after_return_turn(env):
+    c, a = await env.solo()
+    ret = await env.to_returning(c, a)
+    # the return was delivered and its turn is running: the row (and the resume check) stay
+    await env.run(
+        "UPDATE messages SET status = 'sent', turn_id = 't-ret' WHERE id = %s", (ret["id"],)
+    )
+    await env.busy(a["id"])
+    await env.run(
+        "UPDATE agent_status SET current_turn_id = 't-ret' WHERE agent_id = %s", (a["id"],)
+    )
+    assert await env.step(c["id"]) == []
+    assert (await env.row(a["id"])).phase == "returning"
+    await env.push()
+    assert env.policy_of(a)["resume_pending"] is True
+    # the turn ended: the row closes and the next policy no longer asks for the resume check
+    await env.idle_for(a["id"], 1)
+    assert await env.step(c["id"]) == [f"done:{a['id']}"]
+    await env.push()
+    assert env.policy_of(a)["resume_pending"] is False
+    assert env.policy_of(a)["resume_text"] == ""
+
+
+async def test_solo_shutdown_rejected_text_returns_package_with_inventory(env):
+    env.settings = env.settings.model_copy(update={"handoff_min_chars": 300})
+    c, a = await env.solo(LOW)
+    await _shutdown(env, c["id"], a["id"], "[thumbs-up]")
+    assert await env.step(c["id"]) == [f"shutdown_handed:{a['id']}"]
+    await _next_pod(env, a["id"])
+    assert await env.step(c["id"]) == [f"clearing:{a['id']}"]
+    (cmd,) = await env.commands(a["id"])
+    await env.finish_command(cmd["id"], "done", {"response": {"id": "c1"}})
+    await env.cleared(c["id"], a["id"])
+    assert await env.step(c["id"]) == [f"returning:{a['id']}"]
+    (ret,) = await env.messages(a["id"], "handoff_return")
+    assert "the shutdown handoff text was rejected (too_short" in ret["text"].lower()
+    assert "[thumbs-up]" not in ret["text"]
+    assert ret["text"].startswith("Resume now:")
+
+
+async def test_shutdown_leader_rejected_text_sent_to_successor_as_package(env):
+    env.settings = env.settings.model_copy(update={"handoff_min_chars": 300})
+    c, (a0, a1, a2) = await env.hive(used=LOW)
+    await env.gauge(a2["id"], 60000)
+    await env.run("UPDATE agent_status SET stopping_since = now() WHERE agent_id = %s", (a0["id"],))
+    await insert_event(env.pool, c["id"], a0["id"], type="shutdown_started", data={})
+    await env.lpass(c["id"])
+    assert await _deliver(env) == []
+    await _shutdown_handoff(env, c["id"], a0["id"], "[thumbs-up]")
+    assert await env.step(c["id"]) == [f"shutdown_handed:{a0['id']}"]
+    assert await _deliver(env) == [c["id"]]
+    (notice,) = await env.messages(a1["id"], "handover")
+    assert "the shutdown handoff text was rejected (too_short" in notice["text"].lower()
+    assert "[thumbs-up]" not in notice["text"]
+
+
+async def test_shutdown_leader_rejected_text_after_notice_sent_as_package(env):
+    env.settings = env.settings.model_copy(update={"handoff_min_chars": 300})
+    c, (a0, a1, a2) = await env.hive(used=LOW)
+    await env.gauge(a2["id"], 60000)
+    await env.run("UPDATE agent_status SET stopping_since = now() WHERE agent_id = %s", (a0["id"],))
+    await env.run("UPDATE agents SET ready = false WHERE id = %s", (a0["id"],))
+    await _leader_lost(env, c["id"])
+    await env.run(
+        "UPDATE agent_status SET stopping_since = now() - interval '1 hour' WHERE agent_id = %s",
+        (a0["id"],),
+    )
+    assert await _deliver(env) == [c["id"]]
+    await env.run("UPDATE agent_status SET stopping_since = now() WHERE agent_id = %s", (a0["id"],))
+    await _shutdown_handoff(env, c["id"], a0["id"], "[thumbs-up]")
+    assert await env.step(c["id"]) == [
+        f"shutdown_handed:{a0['id']}",
+        f"handoff_sent:{a1['id']}",
+    ]
+    texts = [m["text"] for m in await env.messages(a1["id"])]
+    assert "the shutdown handoff text was rejected (too_short" in texts[1].lower()
+    assert "[thumbs-up]" not in texts[1]

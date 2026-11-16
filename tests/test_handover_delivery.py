@@ -12,6 +12,7 @@ from psycopg.rows import dict_row
 
 from agents_orchestrator.db import handoffs, handover
 from agents_orchestrator.db.queue import message_attachments
+from agents_orchestrator.settings import Settings
 from agents_orchestrator.taskboard_client import OpenDecision
 
 BUDGET = 16384
@@ -55,7 +56,18 @@ async def _no_decisions(session_id, slug, projects):
     return []
 
 
-async def _deliver(pool, decisions=_no_decisions) -> list:
+SETTINGS = Settings(database_url="postgresql://unused/db", master_key="k" * 32)
+
+
+async def _no_tasks(session):
+    return []
+
+
+async def _no_notes(session):
+    return ""
+
+
+async def _deliver(pool, decisions=_no_decisions, settings=SETTINGS, taskboard=_no_tasks) -> list:
     async with pool.connection() as conn:
         return await handover.deliver_handover(
             conn,
@@ -63,6 +75,9 @@ async def _deliver(pool, decisions=_no_decisions) -> list:
             output_chars=OUTPUT,
             decisions=decisions,
             shutdown_hold_seconds=330,
+            settings=settings,
+            taskboard=taskboard,
+            chat=_no_notes,
         )
 
 
@@ -677,3 +692,102 @@ async def test_slow_taskboard_does_not_stall_the_sweep(pool, monkeypatch):
         texts[s["id"]] = att.data.decode()
     assert "taskboard unavailable" in texts[slow[0]["id"]]
     assert "- T-5 decision 9: merge now?" in texts[fast[0]["id"]]
+
+
+HANDOFF = {
+    "doing": "finishing the successor package",
+    "done": ["commit abc on feat/forced-handoff"],
+    "in_flight": [],
+    "next": ["open the draft PR", "watch CI"],
+    "open_requests": [],
+    "results": ["notes in .scratchpad/forced-handoff/notes.md (the design so far)"],
+    "gotchas": ["none"],
+    "abandoned": [],
+}
+
+
+async def _structured(pool, session_id, agent_id, successor, handoff=HANDOFF, inflight=None):
+    async with pool.connection() as conn:
+        row = await handoffs.open_pressure(conn, session_id, agent_id, 2, "work")
+        assert await handoffs.submit(conn, row.id, handoff, inflight or {"crons": []}, None)
+        assert await handoffs.advance(
+            conn, row.id, ["submitted"], "discussing", successor_agent_id=successor
+        )
+    return row.id
+
+
+async def test_hive_successor_notice_uses_package(pool):
+    s, (a0, a1, _) = await _hive(pool)
+    await _lead(pool, s["id"], a0["id"], 1, "initial")
+    row_id = await _structured(
+        pool,
+        s["id"],
+        a0["id"],
+        a1["id"],
+        inflight={"crons": [{"id": "c1", "schedule": "*/5 * * * *", "prompt": "poll CI"}]},
+    )
+    await _lead(pool, s["id"], a1["id"], 2, "handover: limit", previous=a0["id"])
+
+    async def tasks(session):
+        return [{"id": "T-9", "title": "the task", "status": "active", "todo": []}]
+
+    assert await _deliver(pool, taskboard=tasks) == [s["id"]]
+    [msg] = await _messages(pool, s["id"])
+    assert msg["text"].startswith("Resume now: 1. call orchestrator_me")
+    assert "continue with: open the draft PR" in msg["text"]
+    assert "Doing: finishing the successor package" in msg["text"]  # the structured dict
+    assert "T-9" in msg["text"] and "poll CI" in msg["text"]
+    assert "Orchestrator notice (leadership handover):" in msg["text"]
+    [att] = await _attachments(pool, msg["id"])
+    body = bytes(att.data).decode()
+    assert "# Handoff" in body and "# Inventory" in body and "poll CI" in body
+    assert len(body.encode()) <= BUDGET
+    (row,) = await _rows(pool, "SELECT delivered_at FROM agent_handoffs WHERE id = %s", (row_id,))
+    assert row["delivered_at"] is not None
+
+
+async def test_hive_successor_gets_scratch_paths(pool):
+    s, (a0, a1, _) = await _hive(pool)
+    await _lead(pool, s["id"], a0["id"], 1, "initial")
+    await _structured(pool, s["id"], a0["id"], a1["id"])
+    await _lead(pool, s["id"], a1["id"], 2, "handover: limit", previous=a0["id"])
+    await _deliver(pool)
+    [msg] = await _messages(pool, s["id"])
+    head = msg["text"].split("\n", 1)[0]
+    assert "read these first: .scratchpad/forced-handoff/notes.md" in head
+    assert "(the design so far)" in msg["text"]
+
+
+async def _shutdown_row(pool, session_id, agent_id, successor, text):
+    async with pool.connection() as conn:
+        row = await handoffs.insert(
+            conn, session_id, agent_id, "shutdown", "handed", handoff_text=text
+        )
+        await handoffs.advance(conn, row.id, ["handed"], "handed", successor_agent_id=successor)
+
+
+async def test_shutdown_thumbs_up_text_rejected_package_has_inventory(pool):
+    s, (a0, a1, _) = await _hive(pool)
+    await _lead(pool, s["id"], a0["id"], 1, "initial")
+    await _shutdown_row(pool, s["id"], a0["id"], a1["id"], "[thumbs-up]")
+    await _lead(pool, s["id"], a1["id"], 2, "leader_lost", previous=a0["id"])
+
+    async def tasks(session):
+        return [{"id": "T-9", "title": "the task", "status": "active", "todo": []}]
+
+    await _deliver(pool, taskboard=tasks)
+    [msg] = await _messages(pool, s["id"])
+    assert "the shutdown handoff text was rejected (too_short" in msg["text"].lower()
+    assert "[thumbs-up]" not in msg["text"]
+    assert "T-9" in msg["text"]
+
+
+async def test_shutdown_valid_text_delivered_as_today(pool):
+    s, (a0, a1, _) = await _hive(pool)
+    await _lead(pool, s["id"], a0["id"], 1, "initial")
+    text = "tests green and the parser is next. " * 12
+    await _shutdown_row(pool, s["id"], a0["id"], a1["id"], text)
+    await _lead(pool, s["id"], a1["id"], 2, "leader_lost", previous=a0["id"])
+    await _deliver(pool)
+    [msg] = await _messages(pool, s["id"])
+    assert msg["text"].startswith(f"Handoff from {a0['pod_name']} (written by it):\n{text}\n\n")
