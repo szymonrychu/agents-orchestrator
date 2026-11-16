@@ -1381,6 +1381,7 @@ def test_session_close_columns_apply_after_a_database_already_at_0027(empty_dsn,
         "0051_",
         "0052_",
         "0053_",
+        "0054_",
     )
     for path in MIGRATIONS_DIR.glob("*.sql"):
         if not path.name.startswith(skipped):
