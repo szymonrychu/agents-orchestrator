@@ -1000,9 +1000,12 @@ def test_cache_keys_migration_splits_the_single_key(empty_dsn, tmp_path):
             ("nocache", nocache),
             ("nullkey", nullkey),
         ):
+            # preset_name lets the backup data migration (the python step that runs after the
+            # SQL files) name the default workspace backup of a session whose preset is gone
             c.execute(
-                "INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), %s, %s)",
-                (slug, json.dumps(spec)),
+                "INSERT INTO sessions (id, slug, spec, preset_name)"
+                " VALUES (gen_random_uuid(), %s, %s, %s)",
+                (slug, json.dumps(spec), slug),
             )
             c.execute(
                 "INSERT INTO presets (id, name, spec) VALUES (gen_random_uuid(), %s, %s)",
@@ -1048,14 +1051,13 @@ def test_cache_keys_migration_splits_the_single_key(empty_dsn, tmp_path):
         "0053",
         "0054",
     ]
+    # 0015 splits the key; the backup data migration then rewrites the result to spec.backup
+    entry = {"root": "workspace", "path": ".", "mode": "both"}
     expected = {
-        "keyed": {
-            "replicas": 2,
-            "cache": {"restore_key": "k1", "save_key": "k1", "exclude": ["tmp"]},
-        },
-        "derived": derived,
+        "keyed": {"replicas": 2, "backup": [{**entry, "name": "k1", "exclude": ["tmp"]}]},
+        "derived": {"backup": [{**entry, "name": "derived/workspace", "exclude": ["x"]}]},
         "nocache": nocache,
-        "nullkey": {"cache": {}},
+        "nullkey": {"backup": [{**entry, "name": "nullkey/workspace"}]},
     }
 
     def stored():
@@ -1074,8 +1076,6 @@ def test_cache_keys_migration_splits_the_single_key(empty_dsn, tmp_path):
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         c.execute(sql)
     assert stored() == (sessions, presets)
-    # the stored `cache` shape is no longer a SessionSpec field (spec.backup replaced it), so the
-    # row is checked as plain JSON above, not parsed
 
 
 def test_self_restart_migration_adds_nullable_column_idempotently(empty_dsn, tmp_path):
