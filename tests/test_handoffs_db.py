@@ -6,7 +6,7 @@ import psycopg.errors
 import pytest
 from factories import insert_agent, insert_session
 
-from agents_orchestrator.db import handoffs
+from agents_orchestrator.db import handoffs, queue
 
 
 async def _agent(pool):
@@ -344,3 +344,57 @@ async def test_successor_leading_again_leaves_other_phases(pool, phase):
         await handoffs.insert(conn, session_id, a, trigger, phase)
         await handoffs.on_leader_moved(conn, session_id, b, a, {"kind": "user"})
         assert (await handoffs.open_row(conn, a)).phase == phase
+
+
+async def _clearing_ex_leader(conn, session_id, agent_id, *, running: bool):
+    """An ex-leader's discussion row in `clearing` with its clear command queued (or running)."""
+    row = await handoffs.insert(conn, session_id, agent_id, "pressure", "discussing")
+    now = datetime.now(UTC)
+    assert await handoffs.advance(conn, row.id, ["discussing"], "discussing", discuss_since=now)
+    command_id = await queue.enqueue_command(conn, agent_id, "clear")
+    assert await handoffs.start_clear(conn, row.id, ["discussing"], command_id)
+    if running:
+        assert (await queue.claim_command(conn, ["clear"])).id == command_id
+    return row, command_id
+
+
+async def _status(conn, sql, params):
+    return (await (await conn.execute(sql, params)).fetchone())[0]
+
+
+async def test_successor_leading_again_cancels_its_queued_clear(pool):
+    # an ex-leader whose clear is still queued leads again: the clear is cancelled and the row
+    # closes cancelled leader_again in the move's transaction, so the successor's handoff it
+    # now holds is never wiped
+    session_id, a, b = await _two_agents(pool)
+    async with pool.connection() as conn:
+        row, command_id = await _clearing_ex_leader(conn, session_id, a, running=False)
+        await handoffs.on_leader_moved(conn, session_id, b, a, {"kind": "user"})
+        assert await handoffs.open_row(conn, a) is None
+        sql = "SELECT phase, close_reason FROM agent_handoffs WHERE id = %s"
+        closed = await (await conn.execute(sql, (row.id,))).fetchone()
+        assert closed == ("cancelled", "leader_again")
+        cmd = "SELECT status FROM commands WHERE id = %s"
+        assert await _status(conn, cmd, (command_id,)) == "cancelled"
+
+
+async def test_successor_leading_again_leaves_a_running_clear(pool):
+    # a clear already running is left alone: its row stays `clearing`
+    session_id, a, b = await _two_agents(pool)
+    async with pool.connection() as conn:
+        row, command_id = await _clearing_ex_leader(conn, session_id, a, running=True)
+        await handoffs.on_leader_moved(conn, session_id, b, a, {"kind": "user"})
+        assert (await handoffs.open_row(conn, a)).phase == "clearing"
+        cmd = "SELECT status FROM commands WHERE id = %s"
+        assert await _status(conn, cmd, (command_id,)) == "running"
+
+
+async def test_cancel_queued_command_is_status_guarded(pool):
+    session_id, a = await _agent(pool)
+    async with pool.connection() as conn:
+        queued = await queue.enqueue_command(conn, a, "clear")
+        assert await queue.cancel_queued_command(conn, queued)
+        assert not await queue.cancel_queued_command(conn, queued)  # already cancelled
+        running = await queue.enqueue_command(conn, a, "clear")
+        assert (await queue.claim_command(conn, ["clear"])).id == running
+        assert not await queue.cancel_queued_command(conn, running)

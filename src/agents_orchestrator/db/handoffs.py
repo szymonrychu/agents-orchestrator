@@ -427,11 +427,25 @@ FORCED_REASONS = ("rollout", "limit")
 
 async def _close_leader_again(conn: psycopg.AsyncConnection, agent_id: uuid.UUID) -> None:
     row = await open_row(conn, agent_id)
-    if row is None or row.phase not in ("discussing", "moving"):
+    if row is None:
         return
-    if await close(conn, row.id, "cancelled", "leader_again", ("discussing", "moving")):
-        for message_id in await queued_messages(conn, row.id):
-            await queue.cancel_message(conn, message_id)
+    if row.phase == "clearing":
+        # an ex-leader's clear still queued is cancelled with its row in one savepoint (a
+        # cancelled clear with the row still `clearing` would read as clear_failed); a clear
+        # already running is left alone, and the pass never retries it while the agent leads
+        if row.discuss_since is None or row.trigger == "shutdown" or row.clear_command_id is None:
+            return
+        async with conn.transaction():
+            if not await queue.cancel_queued_command(conn, row.clear_command_id):
+                return
+            if not await close(conn, row.id, "cancelled", "leader_again", ("clearing",)):
+                raise psycopg.Rollback()
+    elif row.phase not in ("discussing", "moving") or not await close(
+        conn, row.id, "cancelled", "leader_again", ("discussing", "moving")
+    ):
+        return
+    for message_id in await queued_messages(conn, row.id):
+        await queue.cancel_message(conn, message_id)
 
 
 async def on_leader_moved(
@@ -454,8 +468,10 @@ async def on_leader_moved(
     A shutdown row belongs to the shutdown path and is left alone.
 
     The successor's own `discussing` or `moving` row (an ex-leader leading again, as in a
-    2-agent hive's ping-pong) closes `cancelled leader_again`: it is never cleared as an
-    ex-leader while it leads, and the unique open-row index lets it open its own cycle."""
+    2-agent hive's ping-pong, a user pick or a leader_lost move) closes `cancelled
+    leader_again`: it is never cleared as an ex-leader while it leads, and the unique open-row
+    index lets it open its own cycle. So does its `clearing` row whose clear is still queued
+    (the clear cancelled in the same savepoint); a running clear is left alone."""
     await _close_leader_again(conn, successor)
     row = await open_row(conn, previous)
     if row is not None and row.trigger == "shutdown":

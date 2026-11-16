@@ -1018,6 +1018,28 @@ async def complete_command(
         return row is not None
 
 
+async def cancel_queued_command(conn: psycopg.AsyncConnection, id: int) -> bool:
+    """Cancel a command still `queued` (status-guarded: one already claimed runs on); True when
+    it was cancelled."""
+    cur = await conn.execute(
+        "UPDATE commands SET status = 'cancelled', finished_at = now()"
+        " WHERE id = %s AND status = 'queued'",
+        (id,),
+    )
+    return cur.rowcount == 1
+
+
+async def fail_unfinished_command(conn: psycopg.AsyncConnection, id: int, result: Any) -> bool:
+    """Fail a command still `queued` or `running` (status-guarded), so it never runs after this
+    and a late completion of a running one changes nothing; True when it changed."""
+    cur = await conn.execute(
+        "UPDATE commands SET status = 'failed', result = %s, finished_at = now()"
+        " WHERE id = %s AND status IN ('queued', 'running')",
+        (Jsonb(result), id),
+    )
+    return cur.rowcount == 1
+
+
 async def release_ready_notes(conn: psycopg.AsyncConnection) -> None:
     """Release each held self-restart note whose restarted agents are all back up.
 

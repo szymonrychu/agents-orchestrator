@@ -773,6 +773,78 @@ async def test_two_agent_ping_pong_closes_the_returning_leaders_row(env):
     assert (await env.row(a["id"])).phase == "pressuring"
 
 
+async def _clearing_ex_leader(env):
+    """A 2-agent hive: A hands to B by its limit move and, quiet and idle, is being cleared."""
+    c, (a, b) = await env.hive(n=2)
+    assert await env.step(c["id"]) == [f"pressuring:{a['id']}"]
+    assert await env.submit(a)
+    assert await env.step(c["id"]) == [f"moving:{a['id']}"]
+    assert (await env.lpass(c["id"])).agent_id == b["id"]
+    for agent in (a, b):
+        await env.idle_for(agent["id"], 700)
+    await env.run(
+        "UPDATE sessions SET created_at = now() - interval '1 day',"
+        " last_update_at = now() - interval '1 day' WHERE id = %s",
+        (c["id"],),
+    )
+    await env.run(
+        "UPDATE agent_handoffs SET discuss_since = now() - interval '700 seconds'"
+        " WHERE agent_id = %s",
+        (a["id"],),
+    )
+    assert await env.step(c["id"]) == [f"clearing:{a['id']}"]
+    (cmd,) = await env.commands(a["id"])
+    return c, a, b, cmd
+
+
+async def _user_moves_lead_to(env, c, agent) -> None:
+    async with env.pool.connection() as conn:
+        await leadership.insert_request(conn, c["id"], "user", None, agent["id"], "test", None)
+    assert (await env.lpass(c["id"])).agent_id == agent["id"]
+
+
+async def test_clearing_ex_leader_leading_again_has_its_queued_clear_cancelled(env):
+    # the ex-leader's clear is still queued when a user pick makes it leader again: the clear
+    # is cancelled and the row closed leader_again with the move, never read as clear_failed
+    c, a, b, cmd = await _clearing_ex_leader(env)
+    row = await env.row(a["id"])
+    await _user_moves_lead_to(env, c, a)
+    (got,) = await env.commands(a["id"])
+    assert (got["id"], got["status"]) == (cmd["id"], "cancelled")
+    last = await env.rows("SELECT * FROM agent_handoffs WHERE id = %s", (row.id,))
+    assert (last[0]["phase"], last[0]["close_reason"]) == ("cancelled", "leader_again")
+    out = await env.step(c["id"])
+    assert not any("clear_failed" in o for o in out)
+    assert len(await env.commands(a["id"])) == 1
+
+
+async def test_clearing_ex_leader_leading_again_keeps_a_running_clear(env):
+    c, a, b, cmd = await _clearing_ex_leader(env)
+    await env.run(
+        "UPDATE commands SET status = 'running', started_at = now() WHERE id = %s", (cmd["id"],)
+    )
+    await _user_moves_lead_to(env, c, a)
+    assert (await env.commands(a["id"]))[0]["status"] == "running"
+    assert (await env.row(a["id"])).phase == "clearing"
+
+
+async def test_clear_retry_not_requeued_while_the_agent_leads(env):
+    # the running clear is refused (subagents_running) after the ex-leader leads again: the
+    # retry would wipe the successor's handoff it now holds, so the row closes leader_again
+    c, a, b, cmd = await _clearing_ex_leader(env)
+    await env.run(
+        "UPDATE commands SET status = 'running', started_at = now() WHERE id = %s", (cmd["id"],)
+    )
+    await _user_moves_lead_to(env, c, a)
+    await env.finish_command(
+        cmd["id"], "failed", {"error": "WrapperError: 409 subagents_running: /clear is refused"}
+    )
+    assert f"cancelled:{a['id']}:leader_again" in await env.step(c["id"])
+    assert len(await env.commands(a["id"])) == 1
+    last = await env.rows("SELECT * FROM agent_handoffs WHERE clear_command_id = %s", (cmd["id"],))
+    assert (last[0]["phase"], last[0]["close_reason"]) == ("cancelled", "leader_again")
+
+
 async def test_compaction_closes_pressuring_and_submitted_compacted(env):
     c, a = await env.solo()
     await env.step(c["id"])

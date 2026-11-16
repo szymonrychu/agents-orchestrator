@@ -39,13 +39,15 @@ The pressure itself is the policy the push loop puts to the wrapper (`hive._push
    is clear; until then it keeps its policy (`accepted`, with `waiting_on`). Only the row's own
    `limit` move or the leader's voluntary handover reaches this phase: a rollout or user move
    closes the row before it (`handoffs.on_leader_moved`), so it is never cleared. An ex-leader
-   that leads again (a 2-agent hive's ping-pong) has its row closed `cancelled leader_again` in
-   that move, so it is never cleared while it leads.
+   that leads again (a 2-agent hive's ping-pong, a user pick, a leader_lost move) has its row
+   closed `cancelled leader_again` in that move, so it is never cleared while it leads; so does
+   a `clearing` row whose clear is still queued (the clear cancelled with it).
 6. clearing: a `session_cleared` after the clear closes the row `done cleared` (hive order) or,
    solo, queues the accepted handoff back (`handoff_texts.return_text`) with the move to
    `returning`, exactly once. A clear refused with `subagents_running` or lost (no
    `session_cleared` after `clear_timeout_seconds` idle) is queued again, MAX_CLEAR_ATTEMPTS in
-   all, and only while no background subagent runs and the gate is clear; any other failure, or
+   all, and only while no background subagent runs and the gate is clear; an ex-leader leading
+   again is never re-cleared (its row closes `cancelled leader_again`); any other failure, or
    the last attempt, closes the row `cancelled clear_failed` (solo: the handoff still comes back,
    worded for a kept context); no new row opens for that agent for
    `clear_failed_block_seconds` unless its context is cleared or compacted first.
@@ -83,7 +85,6 @@ from typing import Any
 
 import psycopg
 from psycopg.rows import dict_row
-from psycopg.types.json import Jsonb
 
 from agents_orchestrator import handoff_gate, handoff_profile, handoff_texts
 from agents_orchestrator.db import handoffs, leadership, queue
@@ -473,11 +474,7 @@ class _Pass:
         for message_id in await handoffs.queued_messages(self.conn, row.id) if messages else []:
             await queue.cancel_message(self.conn, message_id)
         if messages and row.clear_command_id is not None:
-            await self.conn.execute(
-                "UPDATE commands SET status = 'cancelled', finished_at = now()"
-                " WHERE id = %s AND status = 'queued'",
-                (row.clear_command_id,),
-            )
+            await queue.cancel_queued_command(self.conn, row.clear_command_id)
         log.info("handoff %s: agent %s %s (%s)", row.id, row.agent_id, phase, reason)
         self.out.append(f"{phase}:{row.agent_id}:{reason}")
 
@@ -719,6 +716,9 @@ class _Pass:
             await self.drop_lost_clear(row.clear_command_id)
         retryable = "subagents_running" in error or error == "clear_timeout"
         if retryable and row.clear_attempts < MAX_CLEAR_ATTEMPTS:
+            if await self.leads_again(row):
+                await self.cancel(row, "leader_again")  # its retry would wipe the lead's context
+                return
             gate_clear = row.trigger == "shutdown" or self.gate(row).clear
             if not facts["background_busy"] and gate_clear:
                 await self.clear(row, ["clearing"])
@@ -728,16 +728,21 @@ class _Pass:
             await self.send_return(row, cleared=False)  # the solo agent still gets its handoff
         await self.cancel(row, "clear_failed", messages=False)
 
+    async def leads_again(self, row: handoffs.Handoff) -> bool:
+        """An ex-leader's discussion row whose agent leads again (a user pick, a leader_lost
+        move or its successor's own limit move): its context now holds the lead's handoff."""
+        if row.discuss_since is None or row.trigger == "shutdown":
+            return False
+        leader = await leadership.current_leader(self.conn, self.session["id"])
+        return leader is not None and leader.agent_id == row.agent_id
+
     async def drop_lost_clear(self, command_id: int | None) -> None:
         """Finish a clear that timed out, still queued or running, as `failed` with the retryable
         `clear_timeout` (never `cancelled`, which reads as non-retryable on a later pass),
         status-guarded, so it never runs after its retry or the return; a late completion of a
         running one then changes nothing."""
-        await self.conn.execute(
-            "UPDATE commands SET finished_at = now(), result = %s, status = 'failed'"
-            " WHERE id = %s AND status IN ('queued', 'running')",
-            (Jsonb({"error": "clear_timeout"}), command_id),
-        )
+        if command_id is not None:
+            await queue.fail_unfinished_command(self.conn, command_id, {"error": "clear_timeout"})
 
     async def cleared(self, row: handoffs.Handoff) -> None:
         if _hive_order(row):  # nothing comes back

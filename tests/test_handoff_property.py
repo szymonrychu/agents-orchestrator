@@ -50,6 +50,8 @@ EVENTS = (
     "request_rejected",
     "time_passes",
     "other_busy",
+    "clear_runs",
+    "clear_refused",
 )
 
 
@@ -228,6 +230,24 @@ class Run:
                 " WHERE agent_id IN (SELECT id FROM agents WHERE session_id = %s)",
                 (sid,),
             )
+        elif name == "clear_runs":
+            # the reconciler claims a queued clear of this session
+            await self.q(
+                "UPDATE commands SET status = 'running', started_at = now() WHERE id = ("
+                " SELECT k.id FROM commands k JOIN agents a ON a.id = k.agent_id"
+                " WHERE a.session_id = %s AND k.kind = 'clear' AND k.status = 'queued'"
+                " ORDER BY k.id LIMIT 1)",
+                (sid,),
+            )
+        elif name == "clear_refused":
+            # the wrapper refuses a running clear while a subagent runs: the pass may retry
+            await self.q(
+                "UPDATE commands SET status = 'failed', finished_at = now(),"
+                ' result = \'{"error": "409 subagents_running"}\'::jsonb'
+                " WHERE status = 'running' AND kind = 'clear' AND agent_id IN"
+                " (SELECT id FROM agents WHERE session_id = %s)",
+                (sid,),
+            )
         elif name == "request_rejected":
             await self.q(
                 "UPDATE leadership_requests SET status = 'rejected', reject_reason = 'test',"
@@ -304,6 +324,17 @@ class Run:
                 (sid,),
             )
             assert leading == [], self.fail(f"the leader discusses its own move {leading}")
+            # an ex-leader leading again never keeps a queued clear (it would wipe the
+            # successor's handoff it now holds); a running one is left to finish
+            queued = await self.q(
+                "SELECT h.id FROM agent_handoffs h JOIN session_leaders l"
+                " ON l.session_id = h.session_id AND l.agent_id = h.agent_id"
+                " JOIN commands k ON k.id = h.clear_command_id"
+                " WHERE h.session_id = %s AND h.phase = 'clearing'"
+                " AND h.discuss_since IS NOT NULL AND k.status = 'queued'",
+                (sid,),
+            )
+            assert queued == [], self.fail(f"a queued clear of the leader {queued}")
         removed = await self.q(
             "SELECT id FROM messages WHERE session_id = %s"
             " AND notice IN ('handoff_notice', 'handoff_request')",
@@ -315,7 +346,7 @@ class Run:
 async def test_no_clear_without_accepted_submit(pool, dsn):
     settings = Settings(database_url=dsn, master_key=KEY)
     rng = random.Random(716)
-    proceeded = ping_pong = 0
+    proceeded = ping_pong = clearing_again = 0
     for _ in range(RUNS):
         run = Run(pool, settings, rng)
         await run.setup()
@@ -331,5 +362,13 @@ async def test_no_clear_without_accepted_submit(pool, dsn):
                 (run.session["id"],),
             )
         )
+        clearing_again += len(
+            await run.q(
+                "SELECT id FROM agent_handoffs WHERE session_id = %s"
+                " AND close_reason = 'leader_again' AND clear_command_id IS NOT NULL",
+                (run.session["id"],),
+            )
+        )
     assert proceeded > 0  # the property is not vacuous: some cycles did clear or move
     assert ping_pong > 0  # some ex-leaders led again (the 2-agent ping-pong)
+    assert clearing_again > 0  # some led again with their clear queued or refused
