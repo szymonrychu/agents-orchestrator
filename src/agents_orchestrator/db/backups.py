@@ -162,6 +162,16 @@ async def current(conn: psycopg.AsyncConnection, name: str) -> Version | None:
     return _version(row) if row else None
 
 
+async def by_object_key(conn: psycopg.AsyncConnection, object_key: str) -> Version | None:
+    """The version stored under `object_key` (a save recorded twice after a crash), or None."""
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            f"SELECT {_COLUMNS} FROM backup_versions WHERE object_key = %s", (object_key,)
+        )
+        row = await cur.fetchone()
+    return _version(row) if row else None
+
+
 async def touch_used(conn: psycopg.AsyncConnection, name: str) -> None:
     await conn.execute("UPDATE backups SET last_used_at = now() WHERE name = %s", (name,))
 
@@ -272,13 +282,13 @@ async def delete_name(conn: psycopg.AsyncConnection, name: str) -> list[str]:
 async def referenced_versions(conn: psycopg.AsyncConnection) -> set[uuid.UUID]:
     """Versions that stored session statuses name as restore source or base.
 
-    Reads `sessions.status.backup`, a list of entry records that carry `version` (restore
+    Reads `sessions.status.backup.entries`, a list of entry records that carry `version` (restore
     source) and `base_version` (the version a later save is based on).
     """
     cur = await conn.execute(
         "SELECT DISTINCT e.value ->> k FROM sessions s,"
-        " jsonb_array_elements(CASE WHEN jsonb_typeof(s.status -> 'backup') = 'array'"
-        "   THEN s.status -> 'backup' ELSE '[]'::jsonb END) AS e(value),"
+        " jsonb_array_elements(CASE WHEN jsonb_typeof(s.status #> '{backup,entries}') = 'array'"
+        "   THEN s.status #> '{backup,entries}' ELSE '[]'::jsonb END) AS e(value),"
         " unnest(ARRAY['version', 'base_version']) AS k"
         " WHERE jsonb_typeof(e.value) = 'object' AND e.value ->> k IS NOT NULL"
     )

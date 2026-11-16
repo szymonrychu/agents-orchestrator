@@ -21,7 +21,7 @@ from agents_orchestrator.api.service_auth import calling_service
 from agents_orchestrator.api.usage_gate import UsageSource
 from agents_orchestrator.api.vault_client import Pin, VaultClient
 from agents_orchestrator.cache.keys import ArchiveNameError
-from agents_orchestrator.cache.save_rule import save_skip
+from agents_orchestrator.cache.save_rule import save_plan, transcripts_run, transcripts_skip
 from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import leadership, presets, projects, queue, views
 from agents_orchestrator.db import sessions as repo
@@ -35,7 +35,6 @@ from agents_orchestrator.spec import (
     Ref,
     SessionSpec,
     SpecInvalid,
-    backups,
     fill_resource_defaults,
     generated_slug,
     has_workspace_entry,
@@ -111,24 +110,31 @@ def _last_backup(run: object) -> schemas.BackupRun | None:
 
 
 def session_backup(session: repo.Session, settings: Settings) -> schemas.SessionBackup:
-    """What the discard would save, by the reconciler's own save rule (`save_skip`)."""
-    cache = session.status.get("cache")
-    cache = cache if isinstance(cache, dict) else {}
+    """What the discard would save, by the reconciler's own rules (`save_plan`)."""
+    plan = save_plan(session, settings.cache_available)
+    backup = session.spec.backup or []
+    workdir = any(
+        p.action == "save" and backup[p.index].root == "workspace" for p in plan if p.index >= 0
+    )
     if not has_workspace_entry(session.spec):
-        skips = ["no_session_cache"] * 2
+        transcripts, reason = False, "no_session_cache"
     elif not settings.cache_available:
-        skips = ["cache_not_configured"] * 2
+        transcripts, reason = False, "cache_not_configured"
     else:
-        restore_only = not any(e.root == "workspace" for _, e in backups(session.spec))
-        skips = [
-            save_skip(True, session.status, target, restore_only=restore_only)
-            for target in ("workdir", "sessions")
-        ]
+        skip = transcripts_skip(True, session.status)
+        transcripts = skip is None
+        reason = next((p.reason for p in plan if p.action == "skip"), None) or skip
     return schemas.SessionBackup(
-        workdir=skips[0] is None,
-        transcripts=skips[1] is None,
-        reason=next((s for s in skips if s is not None), None),
-        last_transcripts_backup=_last_backup(cache.get("sessions_save")),
+        entries=[
+            schemas.EntryPlanView(
+                index=p.index, name_template=p.name_template, action=p.action, reason=p.reason
+            )
+            for p in plan
+        ],
+        workdir=workdir,
+        transcripts=transcripts,
+        reason=reason,
+        last_transcripts_backup=_last_backup(transcripts_run(session.status, "save")),
     )
 
 

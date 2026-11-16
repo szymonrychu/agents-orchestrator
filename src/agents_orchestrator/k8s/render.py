@@ -38,6 +38,13 @@ from agents_orchestrator.tokens import SessionTokens
 
 HASH_ANNOTATION = "agents.szymonrichert.pl/config-hash"
 SESSIONS_ROOT = "/sessions"
+# The shared Claude dir of a session (PVC subPath `claude`), the same in every pod and Job. It is
+# distinct from, and neither contains nor lies inside, the sessions root where each session config
+# dir lives: the wrapper links <config>/skills and rules to it and has no guard against equal paths.
+CLAUDE_ROOT = "/claude"
+CLAUDE_SUBPATH = "claude"
+BACKUP_STATE_ROOT = "/backup-state"
+BACKUP_STATE_SUBPATH = "backup-state"
 WORKSPACE_VOLUME = "workspace"
 PROBE_PERIOD = 5
 STARTUP_SLACK = 12
@@ -48,9 +55,10 @@ KUBE_PASSTHROUGH_ENV = ("KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT")
 DOCKER_PASSTHROUGH_ENV = ("DOCKER_HOST",)
 DOCKER_CONFIG_DIR = "/docker-config"
 # The wrapper commands the orchestrator itself sends (`sessions.commands.client`): `compact`
-# (api and dispatcher) and `clear`, the ex-leader reset after a voluntary handover
-# (claude-code-wrapper >= 0.10.0; an older wrapper refuses it with 403 command_denied).
-CLIENT_COMMANDS = ("compact", "clear")
+# (api and dispatcher), `clear`, the ex-leader reset after a voluntary handover
+# (claude-code-wrapper >= 0.10.0; an older wrapper refuses it with 403 command_denied), and
+# `reload-skills`, sent after a live backup delivery.
+CLIENT_COMMANDS = ("compact", "clear", "reload-skills")
 AGENT_PASSTHROUGH_ENV = ("ORCH_AGENT_TOKEN", "ORCH_AGENT_URL", "ORCH_SESSION_ID", "POD_NAME")
 
 AGENT_USAGE_TOKEN_ENV = "CCW_USAGE_TOKEN"
@@ -511,7 +519,11 @@ def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
     }
     cfg: dict[str, Any] = {
         "server": {"auth_token": "${CCW_AUTH_TOKEN}"},
-        "paths": {"workdir_root": WORKDIR_ROOT, "sessions_root": SESSIONS_ROOT},
+        "paths": {
+            "workdir_root": WORKDIR_ROOT,
+            "sessions_root": SESSIONS_ROOT,
+            "shared_claude_dir": CLAUDE_ROOT,
+        },
         "claude": claude,
         "hooks": {
             "onStart": [
@@ -735,6 +747,7 @@ def _container(session: Session, settings: Settings, names: dict[str, str]) -> d
                 "mountPath": SESSIONS_ROOT,
                 "subPathExpr": "sessions/$(POD_NAME)",
             },
+            {"name": WORKSPACE_VOLUME, "mountPath": CLAUDE_ROOT, "subPath": CLAUDE_SUBPATH},
             {"name": "mise", "mountPath": "/opt/mise"},
             {"name": "any-mcp", "mountPath": "/opt/any-mcp"},
             {"name": "config", "mountPath": "/etc/ccw"},

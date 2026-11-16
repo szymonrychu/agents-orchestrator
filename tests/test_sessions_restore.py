@@ -11,19 +11,27 @@ import pytest_asyncio
 from fakes.fake_wrapper import FakeWrapper
 from test_cache_jobs_render import container_of, pod_of, walk
 from test_cache_restore import RESTORE, Env, line
+from test_cache_save import uploaded
 
 from agents_orchestrator.db import sessions
 from agents_orchestrator.k8s import labels, render
 from agents_orchestrator.k8s.labels import object_names, session_labels
 from agents_orchestrator.reconciler import cache as cache_mod
-from agents_orchestrator.reconciler.cache import CACHE_LABEL, job_name, render_cache_job
+from agents_orchestrator.reconciler.cache import (
+    CACHE_LABEL,
+    TX_RESTORE,
+    TX_SAVE,
+    job_name,
+    render_cache_job,
+)
+from agents_orchestrator.reconciler.cache import SAVE as SAVE_KEY
 from agents_orchestrator.spec import SESSIONS_EXCLUDE
 
 pytestmark = pytest.mark.asyncio
 
-SESSIONS_RESTORE = job_name("alpha", "restore", "sessions")
-SESSIONS_SAVE = job_name("alpha", "save", "sessions")
-SAVE = job_name("alpha", "save")
+SESSIONS_RESTORE = job_name("alpha", TX_RESTORE)
+SESSIONS_SAVE = job_name("alpha", TX_SAVE)
+SAVE = job_name("alpha", SAVE_KEY)
 STS = object_names("alpha")["statefulset"]
 
 
@@ -42,7 +50,7 @@ class RestoreEnv(Env):
         inner = self.rec.cache.write_status
 
         async def spy(session, fields, generation, **kw):
-            run = (fields.get("cache") or {}).get("sessions_save")
+            run = ((fields.get("backup") or {}).get("transcripts") or {}).get("save")
             if run is not None:
                 self.sessions_saves.append(dict(run))
             return await inner(session, fields, generation, **kw)
@@ -92,9 +100,8 @@ def _env(job: dict[str, Any]) -> dict[str, str]:
 async def test_restore_runs_before_agent_pods_start(env, fake):
     c = await env.session("alpha")
     await env.tick()
-    cache = await env.cache(c.id)
-    assert cache["sessions_restore"]["state"] == "running"
-    assert cache["sessions_restore"]["job"] == SESSIONS_RESTORE
+    run = await env.run(c.id, TX_RESTORE)
+    assert run["state"] == "running" and run["job"] == SESSIONS_RESTORE
     assert env.kube.has("Job", SESSIONS_RESTORE)
     assert env.kube.has("StatefulSet", STS) and env.sts_replicas() == [0]
     assert env.agent_pods() == [] and await env.agents(c.id) == []
@@ -102,15 +109,15 @@ async def test_restore_runs_before_agent_pods_start(env, fake):
     assert status["phase"] == "pending" and "sessions restore running" in status["message"]
 
     # the workdir restore finishing alone does not start the pods
-    env.kube.finish_job(RESTORE, exit_code=0, log=line("miss"))
+    env.kube.finish_job(RESTORE, exit_code=0, log=line("missing"))
     await env.tick(2)
-    assert (await env.cache(c.id))["restore"]["state"] == "miss"
+    assert (await env.entry(c.id))["restore"]["state"] == "missing"
     assert env.agent_pods() == [] and fake.sessions == {}
     assert set(env.sts_replicas()) == {0}
     assert (await env.status(c.id))["phase"] == "pending"
 
     # the outcome starts them in the same tick, and the wrapper sessions follow
-    env.kube.finish_job(SESSIONS_RESTORE, exit_code=0, log=line("restored", 2048))
+    env.kube.finish_job(SESSIONS_RESTORE, exit_code=0, log=line("restored", size=2048))
     await env.tick()
     assert env.sts_replicas()[-1] == 1
     assert env.agent_pods() == [f"{STS}-0"]
@@ -131,18 +138,17 @@ async def test_restore_runs_before_agent_pods_start(env, fake):
 
 
 async def test_sessions_restore_job_render(env, monkeypatch):
-    signed: list[tuple[str, str, str]] = []
-    real = cache_mod.presign
+    signed: list[tuple[str, str]] = []
+    real = cache_mod.presign_object
 
-    def spy(settings, method, name, target="workdir"):
-        signed.append((method, name, target))
-        return real(settings, method, name, target)
+    def spy(settings, method, key):
+        signed.append((method, key))
+        return real(settings, method, key)
 
-    monkeypatch.setattr(cache_mod, "presign", spy)
+    monkeypatch.setattr(cache_mod, "presign_object", spy)
     c = await env.session("alpha")
     await env.tick()
-    assert ("GET", "alpha", "sessions") in signed
-    assert [s for s in signed if s[2] == "sessions"] == [("GET", "alpha", "sessions")]
+    assert ("GET", "workspace-cache/sessions/alpha.tar.zst") in signed
 
     job = env.kube.get("Job", SESSIONS_RESTORE)
     assert job["metadata"]["name"] == "agent-alpha-sessions-restore"
@@ -161,22 +167,15 @@ async def test_sessions_restore_job_render(env, monkeypatch):
     assert [v["name"] for v in pod_of(job)["volumes"]] == [render.WORKSPACE_VOLUME, "tmp"]
 
     env_vars = _env(job)
-    assert env_vars["CACHE_DIR"] == "/sessions"
-    assert json.loads(env_vars["CACHE_EXCLUDE"]) == list(SESSIONS_EXCLUDE)
-    # exactly one URL: the presigned GET of <prefix>sessions/<slug>.tar.zst
-    urls = [v for v in env_vars.values() if "://" in v]
-    assert urls == [env_vars["CACHE_URL"]]
-    parts = urlsplit(env_vars["CACHE_URL"])
+    (entry,) = json.loads(env_vars["CACHE_ENTRIES"])
+    assert (entry["root"], entry["root_dir"], entry["path"]) == ("sessions", "/sessions", ".")
+    assert entry["exclude"] == list(SESSIONS_EXCLUDE)
+    parts = urlsplit(entry["url"])
     assert parts.path == "/workspace-cache/sessions/alpha.tar.zst"
     assert "X-Amz-Signature" in parts.query
-    # the reconciler's Job is the render of the sessions restore target with that URL
+    # the reconciler's Job is the render of the transcripts run with that entry
     session = await _get(env, c.id)
-    assert (
-        job["spec"]
-        == render_cache_job(
-            session, env.settings, "restore", env_vars["CACHE_URL"], target="sessions"
-        )["spec"]
-    )
+    assert job["spec"] == render_cache_job(session, env.settings, TX_RESTORE, [entry])["spec"]
     for forbidden in ("envFrom", "secretKeyRef", "secretName"):
         assert forbidden not in json.dumps(job)
     assert pod_of(job)["automountServiceAccountToken"] is False
@@ -190,10 +189,10 @@ async def _get(env, session_id):
 async def test_sessions_restore_miss_starts_pods(env, fake):
     c = await env.session("alpha")
     await env.tick()
-    env.kube.finish_job(RESTORE, exit_code=0, log=line("miss"))
-    env.kube.finish_job(SESSIONS_RESTORE, exit_code=0, log=line("miss"))
+    env.kube.finish_job(RESTORE, exit_code=0, log=line("missing"))
+    env.kube.finish_job(SESSIONS_RESTORE, exit_code=0, log=line("missing"))
     await env.tick(2)
-    run = (await env.cache(c.id))["sessions_restore"]
+    run = await env.run(c.id, TX_RESTORE)
     assert run["state"] == "miss" and run["bytes"] is None and run["reason"] is None
     assert not env.kube.has("Job", SESSIONS_RESTORE)
     assert env.agent_pods() == [f"{STS}-0"] and len(fake.sessions) == 1
@@ -216,10 +215,10 @@ async def test_sessions_restore_miss_starts_pods(env, fake):
 async def test_sessions_restore_failure_starts_pods_and_skips_save(env, fake, finish, reason, skip):
     c = await env.session("alpha")
     await env.tick()
-    env.kube.finish_job(RESTORE, exit_code=0, log=line("miss"))
+    env.kube.finish_job(RESTORE, exit_code=0, log=line("missing"))
     env.kube.finish_job(SESSIONS_RESTORE, **finish)
     await env.tick(2)
-    run = (await env.cache(c.id))["sessions_restore"]
+    run = await env.run(c.id, TX_RESTORE)
     assert (run["state"], run["reason"]) == ("failed", reason)
     assert not env.kube.has("Job", SESSIONS_RESTORE)
     assert env.agent_pods() == [f"{STS}-0"] and len(fake.sessions) == 1  # started anyway
@@ -230,7 +229,7 @@ async def test_sessions_restore_failure_starts_pods_and_skips_save(env, fake, fi
     # the transcripts save after a failed restore is skipped; the workdir save is not
     await env.delete(c)
     await env.tick()
-    env.kube.finish_job(SAVE, exit_code=0, log=line("saved", 10))
+    env.kube.finish_job(SAVE, exit_code=0, log=uploaded(10))
     await env.tick()
     assert await env.gone(c)
     assert env.creates(SESSIONS_SAVE) == 0
@@ -249,23 +248,23 @@ async def test_existing_session_skips_restore_and_still_saves(env, fake):
     )
     c = await env.session("alpha")
     await env.tick()
-    run = (await env.cache(c.id))["sessions_restore"]
+    run = await env.run(c.id, TX_RESTORE)
     assert run == {"state": "skipped", "reason": "pods_exist"}
     assert env.creates(SESSIONS_RESTORE) == 0 and not env.kube.has("Job", SESSIONS_RESTORE)
     assert 0 not in env.sts_replicas()  # never held: the pods keep running
-    env.kube.finish_job(RESTORE, exit_code=0, log=line("miss"))
+    env.kube.finish_job(RESTORE, exit_code=0, log=line("missing"))
     await env.tick(3)
     assert env.creates(SESSIONS_RESTORE) == 0
-    assert (await env.cache(c.id))["sessions_restore"] == run
+    assert await env.run(c.id, TX_RESTORE) == run
     assert env.agent_pods() == [f"{STS}-0"]
 
     # it still saves at discard
     await env.delete(c)
     await env.tick()
-    env.kube.finish_job(SAVE, exit_code=0, log=line("saved", 10))
+    env.kube.finish_job(SAVE, exit_code=0, log=uploaded(10))
     await env.tick()
     assert env.creates(SESSIONS_SAVE) == 1
-    env.kube.finish_job(SESSIONS_SAVE, exit_code=0, log=line("saved", 20))
+    env.kube.finish_job(SESSIONS_SAVE, exit_code=0, log=uploaded(20))
     await env.tick()
     assert await env.gone(c)
 
@@ -280,8 +279,8 @@ async def test_existing_session_skips_restore_and_still_saves(env, fake):
     )
     d = await env.session("beta")
     await env.tick()
-    assert (await env.cache(d.id))["sessions_restore"] == run
-    assert env.creates(job_name("beta", "restore", "sessions")) == 0
+    assert await env.run(d.id, TX_RESTORE) == run
+    assert env.creates(job_name("beta", TX_RESTORE)) == 0
     assert 0 not in env.sts_replicas("beta")
 
 
@@ -293,34 +292,33 @@ async def test_existing_job_pods_are_not_agent_pods(env):
             "kind": "Pod",
             "metadata": {
                 "name": "agent-alpha-cache-restore-x1",
-                "labels": {**session_labels("alpha"), CACHE_LABEL: "restore"},
+                "labels": {**session_labels("alpha"), CACHE_LABEL: "backup-restore-pre"},
             },
             "status": {"phase": "Succeeded"},
         }
     )
     c = await env.session("alpha")
     await env.tick()
-    assert (await env.cache(c.id))["sessions_restore"]["state"] == "running"
+    assert (await env.run(c.id, TX_RESTORE))["state"] == "running"
     assert env.sts_replicas() == [0]
 
 
 async def test_sessions_restore_status_recorded(env, fake):
     c = await env.session("alpha")
     await env.tick()
-    env.kube.finish_job(RESTORE, exit_code=0, log=line("restored", 7))
+    env.kube.finish_job(RESTORE, exit_code=0, log=line("restored", size=7))
     await env.tick()
-    env.kube.finish_job(SESSIONS_RESTORE, exit_code=0, log=line("restored", 4096))
+    env.kube.finish_job(SESSIONS_RESTORE, exit_code=0, log=line("restored", size=4096))
     await env.tick()
-    cache = await env.cache(c.id)
-    run = cache["sessions_restore"]
+    run = await env.run(c.id, TX_RESTORE)
     assert run["state"] == "restored" and run["bytes"] == 4096
     assert run["started_at"] and run["finished_at"] and run["reason"] is None
     assert run["job"] == SESSIONS_RESTORE
     assert not env.kube.has("Job", SESSIONS_RESTORE)
     # the workdir restore run is kept beside it
-    assert cache["restore"]["state"] == "restored" and cache["restore"]["bytes"] == 7
+    assert (await env.entry(c.id))["restore"]["state"] == "restored"
     await env.tick(2)
-    assert (await env.cache(c.id))["sessions_restore"] == run  # never rerun
+    assert await env.run(c.id, TX_RESTORE) == run  # never rerun
     assert env.creates(SESSIONS_RESTORE) == 1
 
 
@@ -329,13 +327,9 @@ async def test_sessions_restore_crash_safety(env):
     c = await env.session("alpha")
     await env.tick()
     await env.kube.delete("Job", "agents", SESSIONS_RESTORE)
-    async with env.pool.connection() as conn:
-        s = await sessions.get(conn, c.id)
-        cache = dict(s.status["cache"])
-        cache["sessions_restore"] = {**cache["sessions_restore"], "job": None}
-        await sessions.set_status(conn, c.id, {**s.status, "cache": cache}, s.observed_generation)
+    await env.patch_run(c.id, TX_RESTORE, job=None)
     await env.tick()
-    assert (await env.cache(c.id))["sessions_restore"]["job"] == SESSIONS_RESTORE
+    assert (await env.run(c.id, TX_RESTORE))["job"] == SESSIONS_RESTORE
     assert env.creates(SESSIONS_RESTORE) == 2
     assert set(env.sts_replicas()) == {0}
 
@@ -344,7 +338,7 @@ async def test_no_sessions_restore_without_session_cache(pool, dsn, fake):
     e = RestoreEnv(pool, dsn, fake)
     c = await e.session("alpha", cache=False)
     await e.tick(2)
-    assert await e.cache(c.id) is None
+    assert await e.backup(c.id) is None
     assert e.creates(SESSIONS_RESTORE) == 0
     assert e.sts_replicas()[0] == 1 and e.agent_pods() == [f"{STS}-0"]
     assert len(fake.sessions) == 1
@@ -353,9 +347,9 @@ async def test_no_sessions_restore_without_session_cache(pool, dsn, fake):
     u = RestoreEnv(pool, dsn, cache_s3_bucket="")
     d = await u.session("beta")
     await u.tick()
-    run = (await u.cache(d.id))["sessions_restore"]
+    run = await u.run(d.id, TX_RESTORE)
     assert run == {"state": "skipped", "reason": "not_configured"}
-    assert u.creates(job_name("beta", "restore", "sessions")) == 0
+    assert u.creates(job_name("beta", TX_RESTORE)) == 0
     assert u.sts_replicas("beta")[0] == 1
     assert u.agent_pods("beta") == ["agent-beta-0"]
     assert "sessions restore" not in (await u.status(d.id))["message"]

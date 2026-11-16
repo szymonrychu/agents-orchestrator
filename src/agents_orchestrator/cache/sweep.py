@@ -170,13 +170,12 @@ def _spec_objects(session: Session, prefix: str) -> set[str]:
 def _session_keys(session: Session, prefix: str) -> set[str]:
     if not has_workspace_entry(session.spec):
         return set()
-    cache = session.status.get("cache")
-    cache = cache if isinstance(cache, dict) else {}
     keys = {f"{prefix}{SESSIONS_GROUP}{session.slug}{SUFFIX}"}
-    for field_name in ("restore_resolved", "save_resolved"):
-        value = cache.get(field_name)
-        if isinstance(value, str) and value:
-            keys.add(value)
+    runs = (session.status.get("backup") or {}).get("runs")
+    for run in (runs or {}).values():  # the version objects an in-flight save is writing
+        for item in (run or {}).get("plan") or []:
+            if isinstance(item, dict) and isinstance(item.get("key"), str):
+                keys.add(item["key"])
     return keys | _spec_objects(session, prefix)
 
 

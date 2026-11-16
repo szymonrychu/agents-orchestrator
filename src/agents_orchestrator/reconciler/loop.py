@@ -83,7 +83,7 @@ from agents_orchestrator.reconciler.rollout import BUSY, LEADS, Replacer, agent_
 from agents_orchestrator.reconciler.sweeper import CacheSweeper
 from agents_orchestrator.reconciler.wrapper_sessions import WrapperSessionBootstrapper
 from agents_orchestrator.settings import DiscardHook, Settings
-from agents_orchestrator.spec import has_workspace_entry, parse_quantity
+from agents_orchestrator.spec import parse_quantity
 from agents_orchestrator.tokens import tokens_for
 from agents_orchestrator.wrapper.models import describe_exception
 
@@ -601,9 +601,13 @@ class Reconciler:
             await self._apply(obj, live.get(obj_key(obj)), reason)
         desired = {obj_key(o) for o in objs}
         await self._prune(slug, desired, reason="no longer rendered")
-        cache_gate = await self.cache.restore_step(session)
+        session, cache_gate = await self.cache.restore_step(session, "pre")
         # init waits for the restore, so a script never runs on a workspace about to be replaced
         gate = await self.init.step(session) if not cache_gate.hold else InitGate()
+        # the after_init entries are restored over what the init run built
+        post_gate = CacheGate()
+        if not cache_gate.hold and not gate.hold:
+            session, post_gate = await self.cache.restore_step(session, "post")
 
         ready = await self._observe(session)
         draining = await self._draining(session.id, replicas)
@@ -613,7 +617,7 @@ class Reconciler:
             phase = "pending" if ready == 0 else "degraded"
             message = f"{ready} of {replicas} pods ready"
         problems: list[str] = []
-        gates = (sessions_gate, cache_gate, gate)
+        gates = (sessions_gate, cache_gate, gate, post_gate)
         if any(g.hold for g in gates):  # sessions wait for the restores and the init run
             phase = "pending"
         else:
@@ -889,15 +893,16 @@ class Reconciler:
         session = await self._abandon_forced(session)
         if not await self._quiesce(session):
             return
-        if not await self.cache.save_step(session):
+        session, saved = await self.cache.save_step(session)
+        if not saved:
             await self._write_status(
                 session,
-                {"phase": "deleting", "message": "saving the workspace cache"},
+                {"phase": "deleting", "message": "saving the backup entries"},
                 session.observed_generation,
             )
             return
-        session = await self._reload(session)  # the workdir save may have just written its run
-        if not await self.cache.save_step(session, "sessions"):
+        session, saved = await self.cache.transcripts_save_step(session)
+        if not saved:
             await self._write_status(
                 session,
                 {"phase": "deleting", "message": "saving the Claude transcripts"},
@@ -993,7 +998,7 @@ class Reconciler:
         """
         status = session.status
         hook_owed = bool(self._owed_hooks(session)[1])
-        save_owed = self.cache.save_owed(session) or self.cache.save_owed(session, "sessions")
+        save_owed = self.cache.save_owed(session) or self.cache.transcripts_save_owed(session)
         if not hook_owed and not save_owed:
             return True
         ns, slug = self.settings.namespace, session.slug
@@ -1150,7 +1155,7 @@ class Reconciler:
         agent = replace(agent, wrapper_session_id=None, wrapper_session_created_at=None)
         if self.bootstrapper is None or not agent.ready:
             return "done", {"cleared": True, "bootstrapped": False}
-        cache_gate = CacheGate.of(session.status.get("cache"), has_workspace_entry(session.spec))
+        cache_gate = CacheGate.of_restores(session.spec, session.status)
         gate = InitGate.of(session.status.get("init"), session.spec.init_scripts)
         held = cache_gate if cache_gate.hold else gate
         if held.hold:  # the converge bootstraps it once the restore and the init run are over

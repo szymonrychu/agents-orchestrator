@@ -198,11 +198,16 @@ def settings_for(dsn=None, **kw):
     )
 
 
-async def make(conn, slug, restore="", save_key="", **cache_status):
+async def make(conn, slug, restore="", save_key="", **run_keys):
+    """A session; each `run_keys` item (run name -> keys) becomes a status.backup run plan."""
     spec = SessionSpec(backup=workspace_entries(restore, save_key) or workspace_entries("k"))
     c = await sessions.create(conn, slug, spec)
-    if cache_status:
-        await sessions.set_status(conn, c.id, {"cache": cache_status}, c.observed_generation)
+    if run_keys:
+        runs = {
+            name: {"state": "running", "plan": [{"key": key} for key in keys]}
+            for name, keys in run_keys.items()
+        }
+        await sessions.set_status(conn, c.id, {"backup": {"runs": runs}}, c.observed_generation)
     return c
 
 
@@ -211,8 +216,8 @@ async def test_protected_set_covers_resolved_keys_and_transcripts(pool):
         await make(
             conn,
             "alpha",
-            restore_resolved=f"{PRE}proj/20260101t000000z.tar.zst",
-            save_resolved=f"{PRE}proj/20261031t100000z.tar.zst",
+            restore_run=[f"{PRE}proj/20260101t000000z.tar.zst"],
+            save_run=[f"{PRE}proj/20261031t100000z.tar.zst"],
         )
         got = await protected_keys(conn, settings_for())
     assert got == {
@@ -233,9 +238,9 @@ async def test_protected_set_includes_spec_names_before_the_reconciler_resolves_
 
 async def test_deleting_session_stays_protected_and_a_deleted_one_is_not(pool):
     async with pool.connection() as conn:
-        live = await make(conn, "live", restore_resolved=f"{PRE}a.tar.zst")
-        gone = await make(conn, "gone", restore_resolved=f"{PRE}b.tar.zst")
-        dying = await make(conn, "dying", save_resolved=f"{PRE}c.tar.zst")
+        live = await make(conn, "live", restore_run=[f"{PRE}a.tar.zst"])
+        gone = await make(conn, "gone", restore_run=[f"{PRE}b.tar.zst"])
+        dying = await make(conn, "dying", save_run=[f"{PRE}c.tar.zst"])
         await sessions.request_delete(conn, dying.id)
         await sessions.request_delete(conn, gone.id)
         await sessions.purge(conn, gone.id)
@@ -253,8 +258,7 @@ async def test_in_flight_cache_run_keys_are_protected(pool):
             conn,
             "flight",
             save_key="v/{{ now }}",
-            save_resolved=f"{PRE}v/20261031t115900z.tar.zst",
-            save={"state": "running", "job": "agent-flight-cache-save"},
+            save_run=[f"{PRE}v/20261031t115900z.tar.zst"],
         )
         got = await protected_keys(conn, settings_for())
     assert f"{PRE}v/20261031t115900z.tar.zst" in got
