@@ -412,7 +412,7 @@ def _expired(req: dict) -> bool:
 
 def _voluntary(req: dict) -> bool:
     """The leader chose to hand over: a `handover` other than the forced `rollout` (the
-    reconciler's) and `limit` (the strong-limit handoff's)."""
+    reconciler's) and `limit` (the context-pressure handoff's)."""
     return req["kind"] == "handover" and req["reason"] not in handoffs.FORCED_REASONS
 
 
