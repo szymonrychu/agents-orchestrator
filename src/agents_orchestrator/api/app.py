@@ -163,6 +163,7 @@ def create_app(
     app.include_router(chat.router)
     app.include_router(tasks.router)
     app.include_router(tasks.summary_router)
+    app.include_router(tasks.approvals_router)
     app.include_router(specs.router)
     app.include_router(mindmap.router)
     app.include_router(session_labels.router)

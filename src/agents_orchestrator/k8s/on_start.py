@@ -52,7 +52,8 @@ CLOSE_TOOL = "self_close"
 # web only).
 TASK_TOOLS = [
     "task_create", "task_update", "task_list", "task_get", "task_comment",
-    "decision_ask", "decision_withdraw", "todo_set", "todo_update", "session_labels_set",
+    "decision_ask", "decision_withdraw", "approval_ask", "approval_list",
+    "todo_set", "todo_update", "session_labels_set",
 ]  # fmt: skip
 # Project tool (projects T-19): every session lists the projects its scope reaches
 # (GET /agent/v1/projects: its own project, or every one for a superleader).

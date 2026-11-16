@@ -526,3 +526,37 @@ async def test_relay_unconfigured_code(monkeypatch):
     r = await rig.call("GET", "/agent/v1/other/things")
     assert_error(r, 503, "x_unconfigured")
     assert rig.upstream.seen == []
+
+
+async def test_approval_ask_is_relayed(monkeypatch):
+    rig = make_rig(monkeypatch)
+    r = await rig.call("POST", "/agent/v1/tasks/T-1/approvals", json={"title": "deploy?"})
+    assert r.status_code == 200
+    (sent,) = rig.upstream.seen
+    assert sent.url.raw_path == b"/taskboard/api/v1/tasks/T-1/approvals"
+    assert sent.headers["x-orch-session"] == str(rig.session.id)
+
+
+async def test_approval_list_relay_path_and_query(monkeypatch):
+    rig = make_rig(monkeypatch)
+    r = await rig.call("GET", "/agent/v1/approvals?status=open")
+    assert r.status_code == 200
+    (sent,) = rig.upstream.seen
+    assert (sent.method, sent.url.raw_path) == ("GET", b"/taskboard/api/v1/approvals?status=open")
+    assert sent.headers["authorization"] == f"Bearer {TB_TOKEN}"
+    assert sent.headers["x-orch-projects"] == "default"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/agent/v1/approvals/answer",
+        "/agent/v1/tasks/T-1/approvals/answer",
+        "/agent/v1/tasks/T-1/approvals/3/answer",
+    ],
+)
+async def test_approval_answer_is_never_relayed(monkeypatch, path):
+    rig = make_rig(monkeypatch)
+    r = await rig.call("POST", path, json={"items": [{"id": 3, "verdict": "go"}]})
+    assert_error(r, 404, "not_found")
+    assert rig.upstream.seen == []
