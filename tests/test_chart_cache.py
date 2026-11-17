@@ -329,3 +329,65 @@ def test_api_pair_needs_a_bucket() -> None:
     for dep in _deployments(docs).values():
         for cont in dep["spec"]["template"]["spec"]["containers"]:
             assert not [n for n in _env_names(cont) if n.startswith("ORCH_CACHE_")]
+
+
+# ---------------------------------------------------------------- backup migration Job (S-68)
+
+
+def _jobs(docs: list[dict]) -> dict[str, dict]:
+    return {d["metadata"]["name"]: d for d in docs if d["kind"] == "Job"}
+
+
+def _migration(**extra: Any) -> dict[str, Any]:
+    return {"enabled": True, **extra}
+
+
+def test_migration_job_is_off_by_default() -> None:
+    assert _jobs(render(_values(_cache()))) == {}
+
+
+def test_migration_job_runs_orch_migrate_then_the_object_migration() -> None:
+    docs = render(_values(_cache(), backupMigration=_migration()))
+    (job,) = _jobs(docs).values()
+    pod = job["spec"]["template"]["spec"]
+    assert pod["restartPolicy"] == "Never"
+    assert pod["automountServiceAccountToken"] is False
+    assert [c["args"] for c in pod["initContainers"]] == [["migrate"]]
+    (main,) = pod["containers"]
+    assert main["command"] == ["orch"]
+    assert main["args"] == ["backup", "migrate"]
+    hooks = job["metadata"]["annotations"]
+    assert hooks["helm.sh/hook"] == "pre-upgrade"
+    assert hooks["helm.sh/hook-delete-policy"] == "before-hook-creation"
+
+
+def test_migration_job_delete_old_is_its_own_run() -> None:
+    docs = render(_values(_cache(), backupMigration=_migration(deleteOld=True)))
+    (job,) = _jobs(docs).values()
+    (main,) = job["spec"]["template"]["spec"]["containers"]
+    assert main["args"] == ["backup", "migrate", "--delete-old"]
+
+
+def test_migration_job_carries_the_reconciler_s3_identity_only() -> None:
+    cache = _cache(existingSecret="rec", api={"existingSecret": "api"})
+    docs = render(_values(cache, backupMigration=_migration()))
+    (job,) = _jobs(docs).values()
+    (main,) = job["spec"]["template"]["spec"]["containers"]
+    env = {e["name"]: e for e in main["env"]}
+    for name in CREDENTIAL_ENV:
+        assert env[name]["valueFrom"]["secretKeyRef"]["name"] == "rec", name
+    for name in API_CREDENTIAL_ENV:
+        assert name not in env, name
+
+
+def test_migration_job_needs_the_cache() -> None:
+    err = render_error({**BASE, "backupMigration": _migration()})
+    assert "cache.s3.bucket" in err
+
+
+def test_values_document_the_rgw_put_policy_and_the_dry_run_default() -> None:
+    text = (CHART / "values.yaml").read_text()
+    assert "s3:PutObject" in text and "CopyObject" in text
+    assert "never a put" not in text
+    readme = (CHART / "README.md").read_text()
+    assert "s3:PutObject" in readme

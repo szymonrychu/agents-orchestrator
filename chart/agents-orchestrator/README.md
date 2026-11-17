@@ -115,10 +115,16 @@ and reaches the reconciler container only, as `secretKeyRef` env: the api, dispa
 ingester, the migrate init containers and the agent pods never see it, and each cache Job gets
 one presigned URL instead. A bucket without `cache.s3.existingSecret` fails the render.
 The api container alone reads its own pair from `cache.s3.api.existingSecret` (same key
-options), used for the backups list, versions, manifest, download, copy, delete and cleanup preview routes; the code
-only lists, gets and deletes with it. It may name the same Secret as `cache.s3.existingSecret`
-when the store has one identity. Without it those routes answer 503. The cleanup sweep starts in
-dry-run: read `GET /api/v1/backups/cleanup/preview`, then set `cache.sweep.dryRun: false`.
+options), used for the backups list, versions, manifest, download, copy, delete and cleanup preview routes. It may name the same Secret as `cache.s3.existingSecret`
+when the store has one identity. Without it those routes answer 503.
+The store policy of the api key (for example an RGW user policy): `s3:ListBucket`, `s3:GetObject` and `s3:DeleteObject` on the bucket,
+and `s3:PutObject` under `<prefix>b/`, because the backup copy route is a server-side CopyObject
+and the store checks the write on the destination key. Without `s3:PutObject` the copy answers 502
+`storage_error`. The reconciler key needs the same four (it also presigns the Jobs' uploads).
+The cleanup sweep starts in
+dry-run and must stay in dry-run until the object migration (`orch backup migrate`, see
+`backupMigration` below) has run and its restores are verified: read `GET /api/v1/backups/cleanup/preview`,
+then set `cache.sweep.dryRun: false`.
 The `cache.sweep.*` values are only the seed: they apply until a policy is saved in Settings > Backups
 (or with `PUT /api/v1/backups/cleanup/settings`), and from then on the database row wins and later
 changes to these values have no effect.
@@ -133,3 +139,19 @@ cache:
     pathStyle: true
     existingSecret: workspace-cache-s3
 ```
+
+### Backup migration Job
+
+`backupMigration.enabled: true` renders a Helm `pre-upgrade` hook Job
+`<fullname>-backup-migrate` (default off; it needs `cache.s3.bucket`). Its init container runs
+`orch migrate` (SQL, spec and status rewrite) and its container `orch backup migrate` (legacy flat
+archives copied into the `b/` layout as versions), with the reconciler's S3 key pair and no
+Kubernetes API access. `backupMigration.deleteOld: true` makes the container run
+`orch backup migrate --delete-old` instead (a later release, after the restores were verified).
+Run order of the release that switches to named backups: `orch backup migrate --dry-run` must exit 0,
+scale the old `api` and `reconciler` Deployments to 0, upgrade with `backupMigration.enabled: true`
+(the hook finishes before the new Deployments roll), then set it back to `false` in the next upgrade.
+The hook is upgrade-only (a fresh install has nothing to migrate) and reads the previous release's
+`-settings` ConfigMap, so change `cache.s3` values in a separate upgrade before enabling migration.
+Deploy only when no session is mid-restore or mid-save, and with an agent image of
+claude-code-wrapper 0.20.0 or newer (`claude.subagent_allowed_tools` is rendered for every session).
