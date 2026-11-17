@@ -77,14 +77,14 @@ kubeNamespaceAccess:
   namespaces: [e2e-target]
   tiers: [read, port-forward]
 
-# Backups (S-68): a throwaway MinIO (e2e/manifests/minio.yaml) holds the versions; its root key
+# Backups (S-68): a throwaway moto S3 server (e2e/manifests/s3.yaml) holds the versions; its key
 # pair is the Secret scripts/e2e.sh generates. The sweep stays in dry-run (the chart default).
 cache:
   s3:
-    endpoint: http://minio:9000
+    endpoint: http://s3:5000
     bucket: orch-e2e
     prefix: e2e/
     pathStyle: true
-    existingSecret: minio-credentials
+    existingSecret: s3-credentials
     api:
-      existingSecret: minio-credentials
+      existingSecret: s3-credentials
