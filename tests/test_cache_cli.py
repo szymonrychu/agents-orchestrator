@@ -567,3 +567,23 @@ def test_restore_truncated_archive_is_unreadable_and_leaves_dir(tmp_path, capsys
     assert _tree(work) == {"keep.txt": "mine"}
     assert sorted(p.name for p in (tmp_path / "root").iterdir()) == ["work"]
     assert not (tmp_path / "state").exists()
+
+
+@pytest.mark.parametrize("path", ["link/work", "link"])
+@pytest.mark.parametrize("action", ["restore", "save"])
+def test_a_symlinked_path_component_is_refused(tmp_path, capsys, path, action):
+    """L1: a symlink under the root (any component of the entry path) is never followed."""
+    outside = tmp_path / "outside"
+    (outside / "work").mkdir(parents=True)
+    (outside / "work" / "f.txt").write_text("outside")
+    (tmp_path / "root").mkdir()
+    (tmp_path / "root" / "link").symlink_to(outside)
+    body = _tar_zst([_file_member("pwn.txt", b"pwn")])
+    rec = _Recorder(lambda request: httpx.Response(200, content=body))
+    env = _entries_env(tmp_path, [_entry(tmp_path, path=path)])
+    run = transfer.restore_entries if action == "restore" else transfer.save_entries
+    run(env, transport=rec.transport)
+    assert _entries_out(capsys)[0]["state"] == "failed"
+    assert rec.requests == []
+    assert sorted(p.name for p in outside.iterdir()) == ["work"]
+    assert sorted(p.name for p in (outside / "work").iterdir()) == ["f.txt"]

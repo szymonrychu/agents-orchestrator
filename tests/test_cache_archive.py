@@ -464,3 +464,13 @@ def test_holds_secret(tmp_path):
     (root / "skills" / ".credentials.json").write_text("{}")
     assert archive.holds_secret(root)
     assert not archive.holds_secret(root, ["skills"])
+
+
+@pytest.mark.parametrize("name", [".credentials.json", ".claude.json", ".mcp.json"])
+def test_holds_secret_covers_every_claude_secret_file(tmp_path, name):
+    root = tmp_path / "c"
+    (root / "d").mkdir(parents=True)
+    assert not archive.holds_secret(root)
+    (root / "d" / name).write_text("{}")
+    assert archive.holds_secret(root)
+    assert not archive.holds_secret(root, ["d"])
