@@ -285,6 +285,33 @@ async def test_unparseable_outcome_is_never_success(env):
     assert (await env.run(e.id))["state"] == "failed"
 
 
+def _big_line(manifest_bytes: int) -> str:
+    manifest = {f"dir/file-{i}.txt": "a" * 40 for i in range(manifest_bytes // 60)}
+    return "noise\n" + json.dumps({"entries": [res("restored", manifest=manifest)]})
+
+
+async def test_outcome_line_over_the_16k_tail_still_parses(env):
+    log = _big_line(200_000)
+    assert len(log.splitlines()[-1]) > 150_000
+    c = await env.session("alpha")
+    await env.tick()
+    env.kube.finish_job(RESTORE, exit_code=0, log=log)
+    await env.tick()
+    run = await env.run(c.id)
+    assert run["state"] != "failed" and run["reason"] != "bad_output"
+    assert (await env.entry(c.id))["restore"]["state"] == "restored"
+
+
+async def test_outcome_line_over_the_cap_is_bad_output(env, monkeypatch):
+    monkeypatch.setattr("agents_orchestrator.reconciler.cache.OUTCOME_MAX_BYTES", 50_000)
+    c = await env.session("alpha")
+    await env.tick()
+    env.kube.finish_job(RESTORE, exit_code=0, log=_big_line(200_000))
+    await env.tick()
+    run = await env.run(c.id)
+    assert (run["state"], run["reason"]) == ("failed", "bad_output")
+
+
 async def test_restore_timeout_missing_foreign(env):
     # the Job's own deadline fired
     c = await env.session("alpha")
