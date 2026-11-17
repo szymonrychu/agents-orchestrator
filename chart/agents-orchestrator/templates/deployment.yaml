@@ -26,7 +26,7 @@ spec:
         {{- if and $.Values.serviceApi.tokenHashes (not $.Values.serviceApi.existingSecret) }}
         checksum/services-secret: {{ include "agents-orchestrator.serviceTokensCsv" $ | sha256sum }}
         {{- end }}
-        {{- if and (eq $component "api") $.Values.chat.token (not $.Values.chat.existingSecret) }}
+        {{- if and (has $component (list "api" "ingester" "reconciler")) $.Values.chat.token (not $.Values.chat.existingSecret) }}
         checksum/chat-secret: {{ $.Values.chat.token | sha256sum }}
         {{- end }}
         {{- if and (eq $component "api") $.Values.taskboard.token (not $.Values.taskboard.existingSecret) }}
@@ -138,12 +138,14 @@ spec:
                   name: {{ $cacheApi.existingSecret }}
                   key: {{ $cacheApi.secretAccessKeyKey | default "AWS_SECRET_ACCESS_KEY" }}
           {{- end }}
-          {{- if eq $component "api" }}
-            - name: ORCH_HTTP_PORT
-              value: "8000"
+          {{- if has $component (list "api" "ingester" "reconciler") }}
             {{- with include "agents-orchestrator.chatEnv" $ }}
             {{- . | nindent 12 }}
             {{- end }}
+          {{- end }}
+          {{- if eq $component "api" }}
+            - name: ORCH_HTTP_PORT
+              value: "8000"
             {{- with include "agents-orchestrator.taskboardEnv" $ }}
             {{- . | nindent 12 }}
             {{- end }}

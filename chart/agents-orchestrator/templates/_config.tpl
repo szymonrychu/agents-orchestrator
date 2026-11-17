@@ -145,8 +145,10 @@ true
 
 {{/*
 ORCH_CHAT_URL and ORCH_CHAT_TOKEN env entries, always together (Settings refuses one without the
-other). Only the api main container, which serves the chat relay, includes this; never the shared
-ConfigMap, the migrate init containers or the other components. Empty when the chat relay is off.
+other). The main containers of api (serves the chat relay), ingester (runs the envelope relay
+worker, which sends upstream with the pair) and reconciler (renders the envelope prompt and hook
+into session ConfigMaps when settings.chat_available) include this; never the shared ConfigMap, the
+migrate init containers or the dispatcher. Empty when the chat relay is off.
 */}}
 {{- define "agents-orchestrator.chatEnv" -}}
 {{- if include "agents-orchestrator.chatEnabled" . -}}
