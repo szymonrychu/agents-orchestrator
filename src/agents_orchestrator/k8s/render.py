@@ -351,6 +351,22 @@ def _lock_check_hook() -> dict[str, Any]:
     }
 
 
+def _envelope_stop_hook() -> dict[str, Any]:
+    """Blocks a Stop once when chat envelopes of the turn were malformed or refused (S-70)."""
+    return {
+        "type": "webhook",
+        "url": "${ORCH_AGENT_URL}/agent/v1/envelope/stop",
+        "headers": {
+            "Authorization": "Bearer ${ORCH_AGENT_TOKEN}",
+            "X-Orch-Session": "${ORCH_SESSION_ID}",
+        },
+        "blocking": True,
+        "on_error": "allow",
+        "timeout_seconds": 5,
+        "retries": 0,
+    }
+
+
 def _escape(value: Any) -> Any:
     """Double each `$` in every string of a user subtree (keys excluded).
 
@@ -468,6 +484,14 @@ SUPERLEADER_ROOM_PROMPT = (
 )
 
 
+CHAT_ENVELOPE_PROMPT = (
+    "You reach a chat room only with envelopes at the start of a line, outside code fences, in "
+    'your own text: <chat-send reply_to="m12">text</chat-send> sends a message (room="..." names '
+    'a room, files="a.png,b.pdf" attaches workdir files), <chat-react to="m12" key="..."/> '
+    "reacts. Everything else, including your final answer, is shown only in the web UI. To stay "
+    "silent, write no envelope."
+)
+
 BACKUP_SAVE_PROMPT = (
     "After you create or change a skill, a rule or a script that lives in a backed up directory, "
     "call orchestrator_backup_save (root and path of the backup entry) so the other sessions of "
@@ -491,6 +515,8 @@ def _system_append(spec: SessionSpec, settings: Settings) -> str:
         return ask
     room = SUPERLEADER_ROOM_PROMPT if spec.session_messaging else PROJECT_ROOM_PROMPT
     parts = [ask, room]
+    if settings.chat_available:
+        parts.append(CHAT_ENVELOPE_PROMPT)
     if backups(spec):
         parts.append(BACKUP_SAVE_PROMPT)
     return "\n\n".join(parts)
@@ -587,6 +613,8 @@ def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
     cfg["notes"] = {"enabled": True}
     if spec.hive and settings.agent_api_url:
         cfg["hooks"]["onAgentToolCall"] = [_lock_check_hook()]
+    if settings.chat_available and settings.agent_api_url:
+        cfg["hooks"]["onStop"] = [_envelope_stop_hook()]
     if spec.peers and spec.hive:
         cfg["peers"] = {
             "enabled": True,

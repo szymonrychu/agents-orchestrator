@@ -204,6 +204,7 @@ class _Session:
     idle_since: str | None = None
     context: dict[str, Any] | None = None
     current_turn_id: str | None = None
+    stop_texts: list[dict[str, str]] = field(default_factory=list)  # main-chain blocks of the turn
     waiting: dict[str, Any] | None = None
     outstanding_subagents: int = 0
     bootstrap_steps: list[dict[str, Any]] = field(default_factory=list)
@@ -453,13 +454,66 @@ class FakeWrapper:
             ses.turns_completed += 1
             ses.has_transcript = True
             ses.current_turn_id = None
-            self.emit("assistant_text", {"text": text}, ses.session_id)
+            self.emit(
+                "assistant_text",
+                {"text": text, "turn_id": turn_id, "sidechain": False},
+                ses.session_id,
+            )
             # the real wrapper logs the idle transition before turn_completed
             self._set_state(ses, "ready")
             self.emit("turn_completed", {"record": turn.record(ses.session_id)}, ses.session_id)
             await asyncio.sleep(0)
             return
         raise KeyError(turn_id)
+
+    def say(self, text: str, session_id: str | None = None, sidechain: bool = False):
+        """An `assistant_text` event of the running turn, as the real wrapper emits it (`turn_id`
+        and `sidechain`); a main-chain block is also kept for the onStop payload."""
+        ses = self._session(session_id)
+        message_id = self._new_id("msg")
+        if not sidechain:
+            ses.stop_texts.append({"message_id": message_id, "text": text})
+        return self.emit(
+            "assistant_text",
+            {"text": text, "turn_id": ses.current_turn_id, "sidechain": sidechain},
+            ses.session_id,
+        )
+
+    def on_stop_payload(self, session_id: str | None = None) -> dict[str, Any]:
+        """The onStop webhook body (payload envelope) for the running turn, as the real wrapper
+        sends it: `data.assistant_texts` holds the main-chain blocks of the turn."""
+        ses = self._session(session_id)
+        return {
+            "event": "onStop",
+            "session_id": ses.session_id,
+            "turn_id": ses.current_turn_id,
+            "ts": _now(),
+            "data": {
+                "turn_id": ses.current_turn_id,
+                "stop_hook_active": False,
+                "last_assistant_message": ses.stop_texts[-1]["text"] if ses.stop_texts else None,
+                "background_tasks": [],
+                "session_crons": [],
+                "transcript_path": None,
+                "assistant_texts": list(ses.stop_texts),
+                "assistant_texts_truncated": False,
+            },
+        }
+
+    async def call_on_stop(
+        self, url: str, headers: dict[str, str], session_id: str | None = None
+    ) -> dict[str, Any]:
+        """POST the onStop webhook to `url` as the wrapper does; returns the JSON answer."""
+        import httpx
+
+        async with httpx.AsyncClient() as http:
+            r = await http.post(
+                url,
+                json=self.on_stop_payload(session_id),
+                headers={"X-CCW-Event": "onStop", **headers},
+            )
+        r.raise_for_status()
+        return r.json()
 
     def set_context(
         self,
@@ -849,6 +903,7 @@ class FakeWrapper:
                 turn.state = "running"
             ses.turns[turn.turn_id] = turn
             ses.current_turn_id = turn.turn_id
+            ses.stop_texts = []
             self.received_turns += 1
             self.turn_texts.append(text)
             self.turn_metadata.append(metadata)

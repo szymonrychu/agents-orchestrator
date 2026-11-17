@@ -61,7 +61,7 @@ def test_legacy_open_strong_and_voluntary_rows_closed_superseded(empty_dsn, tmp_
         for n, phase in enumerate(LEGACY_OPEN):
             s, a = _agent(c, n)
             ids.append(_row(c, s, a, trigger, phase))
-    assert run_migrations(empty_dsn) == ["0051", "0052", "0053", "0054"]
+    assert run_migrations(empty_dsn) == ["0051", "0052", "0053", "0054", "0055"]
     with psycopg.connect(empty_dsn) as c:
         for row_id in ids:
             assert _state(c, row_id) == ("cancelled", "superseded", True, "kept text")

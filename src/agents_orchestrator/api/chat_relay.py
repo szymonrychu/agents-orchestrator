@@ -16,7 +16,8 @@ import logging
 import uuid
 from typing import Any, Literal
 
-from fastapi import Request, Response
+import httpx
+from fastapi import Response
 from pydantic import BaseModel
 
 from agents_orchestrator.api import forward as forward_core
@@ -107,7 +108,7 @@ def _parse(body: bytes) -> tuple[str, str] | None:
 
 
 async def relay(
-    request: Request,
+    http: httpx.AsyncClient,
     pool: Pool,
     settings: Settings,
     target: forward_core.Target,
@@ -154,8 +155,8 @@ async def relay(
             )
         hop = await session_limits.check_limits(conn, agent_id, own, occupier, settings)
     payload = json.dumps({"text": prefixed, "room": room}).encode()
-    status, content = await forward_core.forward(
-        request, target, "POST", "/messages", payload, str(occupier.id), occupier.slug
+    status, content = await forward_core.forward_http(
+        http, target, "POST", "/messages", payload, str(occupier.id), occupier.slug
     )
     if not 200 <= status < 300:
         return _plain(status, content)

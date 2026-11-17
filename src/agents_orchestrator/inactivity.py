@@ -72,7 +72,7 @@ def reminder_text(
     tools = " or ".join(
         name
         for name, on in (
-            ("orchestrator_chat_send", chat),
+            ("a <chat-send> envelope", chat),
             ("a comment on your task (orchestrator_task_comment)", taskboard),
         )
         if on
@@ -110,9 +110,9 @@ def _handoff_steps(chat: bool, taskboard: bool, workdir_saved: bool) -> list[str
     workdir only when the session saves its workspace."""
     steps: list[str] = []
     if chat and taskboard:
-        steps.append("post a final status (orchestrator_chat_send or a task comment)")
+        steps.append("post a final status (a <chat-send> envelope or a task comment)")
     elif chat:
-        steps.append("post a final status (orchestrator_chat_send)")
+        steps.append("post a final status (a <chat-send> envelope)")
     elif taskboard:
         steps.append("post a final status (a task comment with orchestrator_task_comment)")
     if workdir_saved:

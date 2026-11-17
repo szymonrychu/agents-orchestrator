@@ -7099,6 +7099,28 @@
         "title": "SkippedRecipient",
         "type": "object"
       },
+      "StopOut": {
+        "properties": {
+          "decision": {
+            "default": "allow",
+            "title": "Decision",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "title": "StopOut",
+        "type": "object"
+      },
       "SweepPolicyIn": {
         "additionalProperties": false,
         "description": "The whole sweep policy; every field is required (a PUT replaces the saved policy).",
@@ -16739,6 +16761,72 @@
           }
         },
         "summary": "Close the caller's session once idle (leader only)",
+        "tags": [
+          "agent"
+        ]
+      }
+    },
+    "/agent/v1/envelope/stop": {
+      "post": {
+        "description": "Never fails on a body it cannot use: an unreadable one is an allow.",
+        "operationId": "stop_agent_v1_envelope_stop_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StopOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "onStop webhook: block once on chat envelopes that were not delivered",
         "tags": [
           "agent"
         ]

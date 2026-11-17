@@ -132,6 +132,16 @@ async def reset_start_context(
     )
 
 
+async def leads(
+    conn: psycopg.AsyncConnection, session_id: uuid.UUID, agent_id: uuid.UUID, *, alone: bool
+) -> bool:
+    """The only agent of an alone session leads it; a hive has its leader row."""
+    if alone:
+        return True
+    leader = await current_leader(conn, session_id)
+    return leader is not None and leader.agent_id == agent_id
+
+
 async def current_leader(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Leader | None:
     cur = await conn.execute(
         "SELECT l.agent_id, a.pod_name, l.epoch FROM session_leaders l"

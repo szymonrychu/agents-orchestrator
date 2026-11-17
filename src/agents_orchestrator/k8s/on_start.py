@@ -35,8 +35,7 @@ HIVE_TOOLS = [
 SESSION_TOOLS = ["sessions_list", "session_send"]
 INIT_SCRIPTS_TOOLS = ["init_scripts_get", "init_scripts_edit"]
 CHAT_TOOLS = [
-    "chat_rooms", "chat_send", "chat_react", "chat_status",
-    "chat_history", "chat_attachment_fetch", "chat_attachment_status",
+    "chat_rooms", "chat_history", "chat_attachment_fetch", "chat_attachment_status",
     "chat_notes_get", "chat_notes_update",
     "chat_skills_list", "chat_skills_get", "chat_skills_save", "chat_skills_delete",
 ]  # fmt: skip
@@ -149,7 +148,7 @@ RETRO_TOOLS = [*RETRO_READ_TOOLS, "backups_copy", "chat_admin_notes_update"]
 READ_ONLY_TOOLS: frozenset[str] = frozenset(
     {
         *RETRO_READ_TOOLS,
-        "me", "activity", "lock_list", "sessions_list", "chat_rooms", "chat_status",
+        "me", "activity", "lock_list", "sessions_list", "chat_rooms",
         "chat_history", "chat_attachment_status", "chat_notes_get", "task_list", "task_get",
         "approval_list", "project_list", "project_summary", "project_chat_read", "spec_list",
         "spec_get", "spec_versions", "spec_comments", "spec_queue_list", "spec_section",

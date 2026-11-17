@@ -41,6 +41,8 @@ from psycopg_pool import AsyncConnectionPool
 
 from agents_orchestrator.db import events, leadership, status
 from agents_orchestrator.db.pool import notify
+from agents_orchestrator.envelope_outbox.worker import EnvelopeRelay
+from agents_orchestrator.ingester import chat_envelopes
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.tokens import tokens_for
 from agents_orchestrator.wrapper import Envelope, WrapperClient, WrapperError, WrapperUnreachable
@@ -362,6 +364,15 @@ class _AgentStream:
                 )
                 await status.clear_current_turn(conn, ref.agent_id, turn_id)
                 await status.notify_status(conn, ref.session_id, ref.agent_id)
+        elif env.type == "assistant_text":
+            await chat_envelopes.project_assistant_text(
+                conn,
+                session_id=ref.session_id,
+                agent_id=ref.agent_id,
+                wrapper_session_id=ref.wrapper_session_id,
+                event_seq=env.seq,
+                data=data,
+            )
         # user_message and every other type: stored as an events row only
         return _Projected()
 
@@ -398,7 +409,22 @@ class Ingester:
         """Agents that currently have a stream task (running, or ended by session_closed)."""
         return set(self._tasks)
 
+    async def _relay_forever(self, stop: asyncio.Event) -> None:
+        """Run the envelope relay, restarting it with backoff when it dies."""
+        delay = self.backoff_initial
+        while not stop.is_set():
+            try:
+                await EnvelopeRelay(self.pool, self.settings).run(stop)
+                return
+            except Exception:
+                log.exception("envelope relay died; restarting in %.1f s", delay)
+            await self.sleep(delay)
+            delay = min(delay * 2, self.backoff_max)
+
     async def run(self, stop: asyncio.Event) -> None:
+        relay = (
+            asyncio.create_task(self._relay_forever(stop)) if self.settings.chat_available else None
+        )
         try:
             while not stop.is_set():
                 try:
@@ -408,6 +434,10 @@ class Ingester:
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(stop.wait(), self.settings.ingest_refresh_seconds)
         finally:
+            if relay is not None:
+                relay.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await relay
             await self._cancel(list(self._tasks))
 
     async def _wanted(self) -> dict[uuid.UUID, AgentRef]:

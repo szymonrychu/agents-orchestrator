@@ -70,6 +70,7 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("GET", f"{_A}/locks"): "own",
     ("POST", f"{_A}/locks/reassign"): "own",
     ("POST", f"{_A}/locks/check"): "own",
+    ("POST", f"{_A}/envelope/stop"): "own",
     ("GET", f"{_A}/activity"): "own",
     ("PUT", f"{_A}/session/labels"): "own",
     # the session's own backup entries: save one now, read the status (S-68)
