@@ -88,7 +88,10 @@ async def insert_rows(conn: psycopg.AsyncConnection, rows: Sequence[Row]) -> int
 
 async def claim_next(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> dict[str, Any] | None:
     """Move the oldest queued row of the session to `sending`, unless one is already sending
-    (one row at a time keeps the message order). Returns the claimed row."""
+    (one row at a time keeps the message order). Returns the claimed row.
+
+    Assumes a single relay worker claims per session: the READ COMMITTED NOT EXISTS check is
+    not race-free across concurrent claimers."""
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "UPDATE envelope_outbox SET status = 'sending', attempts = attempts + 1,"

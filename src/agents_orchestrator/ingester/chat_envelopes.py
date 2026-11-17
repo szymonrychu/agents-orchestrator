@@ -28,16 +28,6 @@ def is_main_chain(data: dict[str, Any]) -> bool:
     return not data.get("sidechain") and data.get("agent_id") is None
 
 
-async def _leads(conn: psycopg.AsyncConnection, session_id: uuid.UUID, agent_id: uuid.UUID) -> bool:
-    session = await sessions_repo.get(conn, session_id)
-    if session is None:
-        return False
-    if session.spec.alone:
-        return True
-    leader = await leadership.current_leader(conn, session_id)
-    return leader is not None and leader.agent_id == agent_id
-
-
 def _row(env: Envelope, common: dict[str, Any]) -> Row:
     attrs = env.attrs
     if env.tag == "chat-react":
@@ -61,6 +51,7 @@ def _row(env: Envelope, common: dict[str, Any]) -> Row:
 
 
 def _error_row(err: EnvelopeError, common: dict[str, Any]) -> Row:
+    # err.snippet is the opening tag (EnvelopeError has no tag field): prefix match is reliable.
     kind = "react" if _ERROR_TAG.match(err.snippet) else "send"
     return Row(
         kind=kind,
@@ -98,7 +89,10 @@ async def project_assistant_text(
     rows = [_row(e, common) for e in parsed.envelopes] + [
         _error_row(e, common) for e in parsed.errors
     ]
-    if not await _leads(conn, session_id, agent_id):
+    session = await sessions_repo.get(conn, session_id)
+    if session is None or not await leadership.leads(
+        conn, session_id, agent_id, alone=session.spec.alone
+    ):
         rows = [
             Row(
                 **{

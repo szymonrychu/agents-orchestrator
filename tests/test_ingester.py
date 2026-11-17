@@ -1730,3 +1730,17 @@ async def test_leader_of_a_hive_queues(harness, pool) -> None:
     h.fake.emit("assistant_text", {"text": "<chat-send>hi</chat-send>"})
     await h.stored_through(h.last_fake_seq())
     assert [r["status"] for r in await outbox_rows(pool, h.agent_id)] == ["queued"]
+
+
+async def test_parse_error_before_valid_envelope_shares_index_space(harness, pool) -> None:
+    h = await harness()
+    await h.start()
+    h.fake.emit(
+        "assistant_text",
+        {"text": "<chat-status>bad</chat-status>\n<chat-send>ok</chat-send>\n"},
+    )
+    await h.stored_through(h.last_fake_seq())
+    rows = await outbox_rows(pool, h.agent_id)
+    assert len(rows) == 2
+    assert sorted(r["status"] for r in rows) == ["invalid", "queued"]
+    assert len({r["envelope_index"] for r in rows}) == 2

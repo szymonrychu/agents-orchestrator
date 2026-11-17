@@ -833,10 +833,7 @@ async def sessions_list(agent: Caller, pool: Pool) -> SessionPeers:
 
 async def _leads(conn: Any, agent: agents_repo.Agent, session: sessions_repo.Session) -> bool:
     """The only agent of an alone session leads it; a hive has its leader row."""
-    if session.spec.alone:
-        return True
-    leader = await leadership.current_leader(conn, agent.session_id)
-    return leader is not None and leader.agent_id == agent.id
+    return await leadership.leads(conn, agent.session_id, agent.id, alone=session.spec.alone)
 
 
 @router.post(
