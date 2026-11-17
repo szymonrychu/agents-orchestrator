@@ -294,6 +294,15 @@ def _is_api_main(dep: str, container: dict) -> bool:
     return dep == f"{FULL}-api" and container["name"] == "api"
 
 
+def _has_chat_env(dep: str, container: dict) -> bool:
+    """api serves the relay, the ingester runs the envelope relay worker, the reconciler renders
+    the envelope prompt and hook into session ConfigMaps (all gated on settings.chat_available)."""
+    return (
+        container["name"] in ("api", "ingester", "reconciler")
+        and dep == f"{FULL}-{container['name']}"
+    )
+
+
 @pytest.mark.parametrize("chat", CHAT_VALUES.values(), ids=CHAT_VALUES.keys())
 def test_configmap_has_no_chat_url(chat):
     cm = by_kind(render(values(postgres={"url": URL}, chat=chat)), "ConfigMap")[f"{FULL}-settings"]
@@ -311,7 +320,7 @@ def test_chat_pair_rendered_together_per_container(chat):
         for c in items:
             names = _env_names(c)
             assert ("ORCH_CHAT_URL" in names) == ("ORCH_CHAT_TOKEN" in names), (dep, c["name"])
-            assert ("ORCH_CHAT_URL" in names) == _is_api_main(dep, c), (dep, c["name"])
+            assert ("ORCH_CHAT_URL" in names) == _has_chat_env(dep, c), (dep, c["name"])
 
 
 @pytest.mark.parametrize("chat", CHAT_VALUES.values(), ids=CHAT_VALUES.keys())
@@ -326,7 +335,7 @@ def test_api_container_has_chat_pair(chat):
     }
 
 
-def test_chat_token_secret_on_api_only():
+def test_chat_token_secret_on_chat_containers_only():
     tok = "".join(["marker", "chat", "value"])
     docs = render(values(postgres={"url": URL}, chat={"url": CHAT_URL, "token": tok}))
     assert by_kind(docs, "Secret")[f"{FULL}-chat"]["stringData"] == {"chat-token": tok}
@@ -335,7 +344,7 @@ def test_chat_token_secret_on_api_only():
     for name, items in containers.items():
         for c in items:
             refs = [e for e in c.get("env", []) if e["name"] == "ORCH_CHAT_TOKEN"]
-            if name == f"{FULL}-api" and c["name"] == "api":
+            if _has_chat_env(name, c):
                 assert refs == [
                     {
                         "name": "ORCH_CHAT_TOKEN",
@@ -361,7 +370,9 @@ def test_chat_token_secret_on_api_only():
 
     one, two = chat_sums("t1"), chat_sums("t2")
     assert one[f"{FULL}-api"] and two[f"{FULL}-api"] and one[f"{FULL}-api"] != two[f"{FULL}-api"]
-    assert {v for n, v in one.items() if n != f"{FULL}-api"} == {None}
+    for comp in ("ingester", "reconciler"):
+        assert one[f"{FULL}-{comp}"] and one[f"{FULL}-{comp}"] != two[f"{FULL}-{comp}"]
+    assert one[f"{FULL}-dispatcher"] is None
 
     docs = render(
         values(
@@ -380,7 +391,7 @@ def test_chat_token_secret_on_api_only():
     assert ref["valueFrom"]["secretKeyRef"] == {"name": "chat-s", "key": "k"}
     for name, items in _containers(docs).items():
         for c in items:
-            if not (name == f"{FULL}-api" and c["name"] == "api"):
+            if not _has_chat_env(name, c):
                 assert "ORCH_CHAT_TOKEN" not in _env_names(c), (name, c["name"])
     deps = by_kind(docs, "Deployment")
     assert all(
