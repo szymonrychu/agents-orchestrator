@@ -84,8 +84,8 @@ def test_relay_routes_exist_upstream():
         if path.startswith(RELAY_PREFIX)
         for method in item
     ]
-    # rooms, messages, reactions, status, notes, skills, history, attachments
-    assert len(relayed) == 13, relayed
+    # rooms, messages, reactions, status, notes, history, attachments
+    assert len(relayed) == 9, relayed
     assert {(method, path) for method, path in relayed} == {
         (method, f"{RELAY_PREFIX}{p}")
         for method, p in (
@@ -95,10 +95,6 @@ def test_relay_routes_exist_upstream():
             ("GET", "/messages/{send_id}"),
             ("GET", "/notes"),
             ("PUT", "/notes"),
-            ("GET", "/skills"),
-            ("GET", "/skills/{name}"),
-            ("PUT", "/skills/{name}"),
-            ("DELETE", "/skills/{name}"),
             ("GET", "/history"),
             ("POST", "/attachments"),
             ("GET", "/attachments/{request_id}"),

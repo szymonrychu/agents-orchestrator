@@ -15,7 +15,7 @@ The upstream status and JSON body come back unchanged, except that the `occupier
 409 `room_bound` never reaches the agent, and `POST /messages` answered 409 `room_bound` with an
 occupier is relayed through the occupier's session (`chat_relay`, 202 `relayed`); a connection
 error, a timeout or a non-JSON answer is 503 `chat_unavailable`.
-The room notes and skills routes (`/notes`, `/skills`, `/skills/{name}`) are relayed the same way;
+The room notes routes (`/notes`) are relayed the same way;
 the upstream resolves the room from the caller's session binding, so no route takes a room.
 The history and attachment routes (`GET /history`, `POST /attachments`, `GET /attachments/{id}`)
 are relayed like notes: the query string of a history read goes through as is, the room comes from
@@ -81,16 +81,6 @@ class ChatNotesIn(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    body: str
-    expected_version: int
-
-
-class ChatSkillIn(BaseModel):
-    """A skill replacement as the upstream reads it (OpenAPI only; the upstream validates it)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    description: str
     body: str
     expected_version: int
 
@@ -258,49 +248,6 @@ async def notes_get(request: Request, agent: Caller, pool: Pool, settings: Cfg) 
 )
 async def notes_put(request: Request, agent: Caller, pool: Pool, settings: Cfg) -> Response:
     return await _relay(request, agent, pool, settings, "PUT", "/notes")
-
-
-@router.get(
-    "/skills",
-    summary="The skills of the room bound to the caller's session, no bodies (leader only)",
-    responses={200: _PASS_THROUGH, **_RESPONSES},
-)
-async def skills_list(request: Request, agent: Caller, pool: Pool, settings: Cfg) -> Response:
-    return await _relay(request, agent, pool, settings, "GET", "/skills")
-
-
-@router.get(
-    "/skills/{name}",
-    summary="One skill of the room bound to the caller's session (leader only)",
-    responses={200: _PASS_THROUGH, **_RESPONSES},
-)
-async def skill_get(
-    name: str, request: Request, agent: Caller, pool: Pool, settings: Cfg
-) -> Response:
-    return await _relay(request, agent, pool, settings, "GET", f"/skills/{_segment(name)}")
-
-
-@router.put(
-    "/skills/{name}",
-    summary="Create or replace a skill of the room bound to the caller's session (leader only)",
-    responses={200: _PASS_THROUGH, **_POST_RESPONSES},
-    openapi_extra=_json_body(ChatSkillIn),
-)
-async def skill_put(
-    name: str, request: Request, agent: Caller, pool: Pool, settings: Cfg
-) -> Response:
-    return await _relay(request, agent, pool, settings, "PUT", f"/skills/{_segment(name)}")
-
-
-@router.delete(
-    "/skills/{name}",
-    summary="Delete a skill of the room bound to the caller's session (leader only)",
-    responses={200: _PASS_THROUGH, **_RESPONSES},
-)
-async def skill_delete(
-    name: str, request: Request, agent: Caller, pool: Pool, settings: Cfg
-) -> Response:
-    return await _relay(request, agent, pool, settings, "DELETE", f"/skills/{_segment(name)}")
 
 
 @router.get(

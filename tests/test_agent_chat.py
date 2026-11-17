@@ -31,6 +31,7 @@ from agents_orchestrator.api.app import create_app
 from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import leadership
 from agents_orchestrator.db import sessions as sessions_repo
+from agents_orchestrator.k8s import on_start
 from agents_orchestrator.runtime.run import quiet_http_loggers
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import SessionSpec
@@ -478,20 +479,11 @@ async def test_occupier_never_reaches_agent(monkeypatch):
     assert checked >= 20
 
 
-# ------------------------------------------------------------------- room notes and skills
+# ------------------------------------------------------------------- room notes
 
 MEMORY_ROUTES = (
     ("GET", "/agent/v1/chat/notes", "/chat/v1/notes", None),
     ("PUT", "/agent/v1/chat/notes", "/chat/v1/notes", {"body": "tea", "expected_version": 0}),
-    ("GET", "/agent/v1/chat/skills", "/chat/v1/skills", None),
-    ("GET", "/agent/v1/chat/skills/deploy", "/chat/v1/skills/deploy", None),
-    (
-        "PUT",
-        "/agent/v1/chat/skills/deploy",
-        "/chat/v1/skills/deploy",
-        {"description": "d", "body": "b", "expected_version": 0},
-    ),
-    ("DELETE", "/agent/v1/chat/skills/deploy", "/chat/v1/skills/deploy", None),
 )
 
 
@@ -527,7 +519,7 @@ async def test_notes_put_forwards_body(monkeypatch):
 async def test_notes_put_body_cap(monkeypatch):
     rig = make_rig(monkeypatch)
     cap = chat.MAX_BODY_BYTES
-    for path in ("/agent/v1/chat/notes", "/agent/v1/chat/skills/deploy"):
+    for path in ("/agent/v1/chat/notes",):
         big = b"a" * (cap + 1)
         assert_error(await rig.call("PUT", path, content=big), 413, "payload_too_large")
 
@@ -541,7 +533,7 @@ async def test_notes_put_body_cap(monkeypatch):
     assert len(rig.upstream.seen[0].content) == cap
 
 
-async def test_skills_routes_relayed(monkeypatch):
+async def test_memory_routes_relayed(monkeypatch):
     rig = make_rig(monkeypatch)
     for method, path, upstream_path, body in MEMORY_ROUTES:
         rig.upstream.seen.clear()
@@ -560,33 +552,19 @@ async def test_skills_routes_relayed(monkeypatch):
         assert sent.headers["x-orch-slug"] == "chat-caller"
 
 
-async def test_delete_forwards_no_body(monkeypatch):
+async def test_chat_skills_routes_404(monkeypatch):
+    """The skills relay is gone: every former route is a plain 404 and nothing reaches upstream."""
     rig = make_rig(monkeypatch)
-    r = await rig.call("DELETE", "/agent/v1/chat/skills/deploy", content=b'{"x":1}')
-    assert r.status_code == 200, r.text
-    (sent,) = rig.upstream.seen
-    assert sent.method == "DELETE" and sent.content == b""
-    assert "content-type" not in sent.headers
+    for method, path in ():
+        kw: dict[str, Any] = {"content": b"{}"} if method == "PUT" else {}
+        r = await rig.call(method, path, **kw)
+        assert r.status_code in (404, 405), (method, path, r.status_code)
+    assert rig.upstream.seen == []
+    assert not any("skills" in path for path in rig.app.openapi()["paths"] if "/chat/" in path)
 
 
-async def test_skill_name_is_one_segment(monkeypatch):
-    rig = make_rig(monkeypatch)
-    cases = (("%2E%2E", "%2E%2E"), ("%2E", "%2E"), ("a%20b", "a%20b"))
-    assert chat._segment("a/b") == "a%2Fb"  # one segment, whatever the name holds
-    assert chat._segment("..") == "%2E%2E" and chat._segment(".") == "%2E"
-    for method in ("GET", "PUT", "DELETE"):
-        for raw, encoded in cases:
-            rig.upstream.seen.clear()
-            kw: dict[str, Any] = {"content": b"{}"} if method == "PUT" else {}
-            r = await rig.call(method, f"/agent/v1/chat/skills/{raw}", **kw)
-            assert r.status_code == 200, (method, raw, r.text)
-            (sent,) = rig.upstream.seen
-            assert sent.url.raw_path == f"/chat/v1/skills/{encoded}".encode()
-        # the server decodes %2F before routing, so a slash never reaches the relay as a name
-        rig.upstream.seen.clear()
-        kw = {"content": b"{}"} if method == "PUT" else {}
-        r = await rig.call(method, "/agent/v1/chat/skills/a%2Fb", **kw)
-        assert r.status_code == 404 and rig.upstream.seen == []
+async def test_chat_tools_have_no_skills():
+    assert not [t for t in on_start.CHAT_TOOLS if "skill" in t]
 
 
 async def test_memory_member_refused(monkeypatch):
@@ -615,9 +593,6 @@ async def test_memory_upstream_refusals_pass_through(monkeypatch):
         ("GET", "/agent/v1/chat/notes", 409, "room_unbound"),
         ("PUT", "/agent/v1/chat/notes", 413, "notes_too_large"),
         ("PUT", "/agent/v1/chat/notes", 409, "version_conflict"),
-        ("PUT", "/agent/v1/chat/skills/new", 409, "skill_limit"),
-        ("GET", "/agent/v1/chat/skills/gone", 404, "skill_not_found"),
-        ("DELETE", "/agent/v1/chat/skills/gone", 404, "skill_not_found"),
     ]
     for method, path, status, code in cases:
         raw = json.dumps({"error": {"code": code, "message": "m"}}).encode()
@@ -822,10 +797,6 @@ def test_readme_documents_chat_routes():
         ("GET", "/agent/v1/chat/messages/{send_id}"),
         ("GET", "/agent/v1/chat/notes"),
         ("PUT", "/agent/v1/chat/notes"),
-        ("GET", "/agent/v1/chat/skills"),
-        ("GET", "/agent/v1/chat/skills/{name}"),
-        ("PUT", "/agent/v1/chat/skills/{name}"),
-        ("DELETE", "/agent/v1/chat/skills/{name}"),
         ("GET", "/agent/v1/chat/history"),
         ("POST", "/agent/v1/chat/attachments"),
         ("GET", "/agent/v1/chat/attachments/{request_id}"),
@@ -896,7 +867,7 @@ def memory_target(monkeypatch: pytest.MonkeyPatch) -> Target:
 
 
 async def check_chat_tools_parity(target: Target) -> None:
-    """The ten chat tools return what the routes return, and a member's calls are refused."""
+    """The chat tools return what the routes return, and a member's calls are refused."""
     fake = target.fake
     async with target.plugin(target.leader_ip) as h:
         rooms = await h.call("chat_rooms")
@@ -907,11 +878,7 @@ async def check_chat_tools_parity(target: Target) -> None:
         notes0 = await h.call("chat_notes_get")
         notes1 = await h.call("chat_notes_update", {"body": "likes tea", "expected_version": 0})
         stale = await h.call("chat_notes_update", {"body": "x", "expected_version": 0})
-        skill_args = {"name": "deploy", "description": "when deploying", "body": "step 1"}
-        saved = await h.call("chat_skills_save", {**skill_args, "expected_version": 0})
-        listed = await h.call("chat_skills_list")
-        got = await h.call("chat_skills_get", {"name": "deploy"})
-    for result in (rooms, sent, reacted, status, notes0, notes1, saved, listed, got):
+    for result in (rooms, sent, reacted, status, notes0, notes1):
         assert not result.is_error, result.text
     direct_rooms = await target.direct("GET", "/agent/v1/chat/rooms")
     assert rooms.structured == direct_rooms.json() == {"rooms": fake.rooms}
@@ -934,7 +901,7 @@ async def check_chat_tools_parity(target: Target) -> None:
     assert missing.is_error
     assert missing.structured["error"]["status"] == 404
     assert missing.structured["error"]["code"] == direct_missing.json()["error"]["code"]
-    # notes and skills through the plugin equal the direct route answers
+    # notes through the plugin equal the direct route answers
     assert notes0.structured["body"] == "" and notes0.structured["version"] == 0
     assert notes1.structured["body"] == "likes tea" and notes1.structured["version"] == 1
     assert stale.is_error and stale.structured["error"]["status"] == 409
@@ -942,18 +909,6 @@ async def check_chat_tools_parity(target: Target) -> None:
     direct_notes = await target.direct("GET", "/agent/v1/chat/notes")
     # the fake stamps updated_at on every read, so it is the one field compared out
     assert {**direct_notes.json(), "updated_at": 0} == {**notes1.structured, "updated_at": 0}
-    assert saved.structured["name"] == "deploy" and saved.structured["version"] == 1
-    direct_list = await target.direct("GET", "/agent/v1/chat/skills")
-    assert listed.structured == direct_list.json()
-    assert [s["name"] for s in listed.structured["skills"]] == ["deploy"]
-    direct_got = await target.direct("GET", "/agent/v1/chat/skills/deploy")
-    assert {**got.structured, "updated_at": 0} == {**direct_got.json(), "updated_at": 0}
-    assert got.structured["body"] == "step 1"
-    async with target.plugin(target.leader_ip) as h:
-        deleted = await h.call("chat_skills_delete", {"name": "deploy"})
-        gone = await h.call("chat_skills_get", {"name": "deploy"})
-    assert deleted.structured["deleted"] is True
-    assert gone.is_error and gone.structured["error"]["code"] == "skill_not_found"
     # the plugin sent the same bodies as the direct calls and the same identity headers
     plugin_calls = [c for c in fake.calls if c.method == "POST"][:2]
     assert plugin_calls[0].json() == {"text": "hello from the plugin", "room": DEFAULT_ROOM}
@@ -971,13 +926,6 @@ async def check_chat_tools_parity(target: Target) -> None:
             ("chat_status", {"id": "s1"}),
             ("chat_notes_get", {}),
             ("chat_notes_update", {"body": "x", "expected_version": 0}),
-            ("chat_skills_list", {}),
-            ("chat_skills_get", {"name": "deploy"}),
-            (
-                "chat_skills_save",
-                {"name": "d", "description": "d", "body": "b", "expected_version": 0},
-            ),
-            ("chat_skills_delete", {"name": "deploy"}),
         ):
             refused = await h.call(name, args)
             assert refused.is_error, name
@@ -986,7 +934,7 @@ async def check_chat_tools_parity(target: Target) -> None:
 
 
 async def test_chat_tools_parity(monkeypatch):
-    """The released plugin drives the ten chat tools against the
+    """The released plugin drives the chat tools against the
     real agent routes and the contract fake of the chat upstream (design D16)."""
     await check_chat_tools_parity(memory_target(monkeypatch))
 
