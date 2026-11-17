@@ -955,6 +955,9 @@ async def test_dispatcher_run_pushes_after_decision(env, monkeypatch):
     try:
         async with asyncio.timeout(15):
             while not env.notes(a2):  # the first push: hive_state everywhere
+                # the startup drain can hold the session lock when the first push runs (it skips
+                # that session without a throttle tick); wake the push again, not a timer tick
+                dispatcher._push_wake.set()
                 await asyncio.sleep(0.1)
         dispatcher.hive.last_tick.clear()  # the per-session 10 s throttle has run out
         # the target goes unready after the API accepted the request: the dispatcher rejects it
