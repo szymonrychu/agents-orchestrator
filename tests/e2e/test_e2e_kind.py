@@ -35,6 +35,7 @@ import yaml
 from websockets.exceptions import InvalidStatus
 from websockets.sync.client import ClientConnection, connect
 
+from agents_orchestrator import handoff_texts
 from agents_orchestrator.settings import Settings
 
 pytestmark = pytest.mark.e2e
@@ -674,6 +675,15 @@ def discarded(
 
 
 # ------------------------------------------------------------------ tests
+
+
+def assert_deployment_texts(config: dict[str, Any]) -> None:
+    """The rendered wrapper config carries the orchestrator's deployment texts (default image)."""
+    notes = {"enabled": True, "frame_line": handoff_texts.NOTES_FRAME_LINE}
+    assert config["notes"] == notes, config
+    assert config["pressure"] == {"enabled": True, "head": handoff_texts.PRESSURE_HEAD}, config
+    marker = config["sessions"]["trailing_marker_pattern"]
+    assert marker == handoff_texts.RUN_MARKER_PATTERN, config
 
 
 def test_chart_installed_and_helm_test_passes(api: httpx.Client) -> None:
@@ -1326,7 +1336,7 @@ def test_alone_session_has_no_hive_tools(api: httpx.Client, session: dict[str, A
 
         configmap = wait_for("the alone session's ConfigMap", rendered, 120)
         config = yaml.safe_load(configmap["data"]["config.yaml"])
-        assert config["notes"] == {"enabled": True}, config
+        assert_deployment_texts(config)
         assert "peers" not in config or not config["peers"].get("enabled"), config
         assert "onAgentToolCall" not in config["hooks"], config["hooks"]
         assert_alone_session_tools(configmap)
@@ -1337,7 +1347,7 @@ def test_alone_session_has_no_hive_tools(api: httpx.Client, session: dict[str, A
         hive_entry = next(p for p in hive_plugins if p.get("name") == "orchestrator")
         assert "me" in hive_entry["allow"], hive_entry
         assert hive_entry["source"] == orchestrator_source(), hive_entry
-        assert yaml.safe_load(hive_map["data"]["config.yaml"])["notes"] == {"enabled": True}
+        assert_deployment_texts(yaml.safe_load(hive_map["data"]["config.yaml"]))
     finally:
         api.delete(f"/sessions/{alone['id']}")
 
@@ -1667,7 +1677,7 @@ def test_static_single_pod_is_alone(api: httpx.Client, baseline: dict) -> None:
 
         configmap = wait_for("the single static pod's ConfigMap", rendered, 120)
         config = yaml.safe_load(configmap["data"]["config.yaml"])
-        assert config["notes"] == {"enabled": True}, config
+        assert_deployment_texts(config)
         assert not (config.get("peers") or {}).get("enabled"), config
         assert_alone_session_tools(configmap)
 

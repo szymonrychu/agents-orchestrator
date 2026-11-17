@@ -68,7 +68,7 @@ def test_on_for_default_image():
     names = env_names(objs)
     assert names.index("CCW_USAGE_TOKEN") == names.index("CLAUDE_CODE_OAUTH_TOKEN") + 1
     assert config_of(objs)["usage"] == {
-        "url": URL,
+        "endpoint": URL + "/usage/v1/samples",
         "token": "${CCW_USAGE_TOKEN}",
         "agent": "${POD_NAME}",
     }
@@ -77,7 +77,7 @@ def test_on_for_default_image():
 def test_on_for_explicit_default_image():
     objs = rendered(make_session(image=IMAGE), agent_images=[IMAGE], **ON)
     assert "CCW_USAGE_TOKEN" in env_names(objs)
-    assert config_of(objs)["usage"]["url"] == URL
+    assert config_of(objs)["usage"]["endpoint"] == URL + "/usage/v1/samples"
 
 
 def test_off_for_other_image():

@@ -601,7 +601,31 @@ def test_alone_session_no_hive_config():
 
 def test_notes_enabled_for_solo_session():
     cfg = config_of(_render(make_session(replicas=1, static=True)))
+    assert cfg["notes"] == {"enabled": True, "frame_line": handoff_texts.NOTES_FRAME_LINE}
+
+
+def test_notes_frame_line_only_for_default_image():
+    other = make_session(image="harbor.example/containers/ccw:0.14.0")
+    settings = make_settings(agent_images=["harbor.example/containers/ccw:0.14.0"])
+    cfg = config_of(render.render_session(other, settings, TOKENS))
     assert cfg["notes"] == {"enabled": True}
+
+
+def test_run_marker_pattern_only_for_default_image():
+    assert _guard_cfg()["sessions"]["trailing_marker_pattern"] == handoff_texts.RUN_MARKER_PATTERN
+    other = make_session(image="harbor.example/containers/ccw:0.14.0")
+    settings = make_settings(agent_images=["harbor.example/containers/ccw:0.14.0"])
+    cfg = config_of(render.render_session(other, settings, TOKENS))
+    assert "trailing_marker_pattern" not in cfg["sessions"]
+
+
+def test_run_marker_pattern_matches_agents_common_marker():
+    import re
+
+    pattern = re.compile(handoff_texts.RUN_MARKER_PATTERN)
+    assert pattern.fullmatch("<!-- agents-webhook:42 -->")
+    assert pattern.fullmatch("<!-- agents-schedule:abc-1 -->")
+    assert not pattern.fullmatch("<!-- other:42 -->")
 
 
 def test_hive_session_config():
@@ -849,6 +873,7 @@ def test_rendered_wrapper_settings_validate(tmp_path, monkeypatch):
 def test_no_wrapper_block_renders_unchanged():
     cfg = config_of(render.render_session(make_session(), make_settings(), TOKENS))
     assert cfg["hooks"] == {"onStart": [cfg["hooks"]["onStart"][0]]}
+    assert cfg["sessions"].pop("trailing_marker_pattern") == handoff_texts.RUN_MARKER_PATTERN
     assert cfg["sessions"] == {
         "max_sessions": 1,
         "resume_on_start": True,
@@ -1158,8 +1183,9 @@ def test_ask_prompt_routes_permissions_to_approvals():
 
 
 def test_render_pressure_only_for_default_image():
-    assert _guard_cfg()["pressure"] == {"enabled": True}
-    assert _guard_cfg(image=IMAGE)["pressure"] == {"enabled": True}
+    pressure = {"enabled": True, "head": handoff_texts.PRESSURE_HEAD}
+    assert _guard_cfg()["pressure"] == pressure
+    assert _guard_cfg(image=IMAGE)["pressure"] == pressure
     assert "pressure" not in _guard_cfg(image="harbor.example/containers/ccw:0.14.0")
 
 
