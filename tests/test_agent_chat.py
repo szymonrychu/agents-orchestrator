@@ -555,10 +555,15 @@ async def test_memory_routes_relayed(monkeypatch):
 async def test_chat_skills_routes_404(monkeypatch):
     """The skills relay is gone: every former route is a plain 404 and nothing reaches upstream."""
     rig = make_rig(monkeypatch)
-    for method, path in ():
+    for method, path in (
+        ("GET", "/agent/v1/chat/skills"),
+        ("GET", "/agent/v1/chat/skills/x"),
+        ("PUT", "/agent/v1/chat/skills/x"),
+        ("DELETE", "/agent/v1/chat/skills/x"),
+    ):
         kw: dict[str, Any] = {"content": b"{}"} if method == "PUT" else {}
         r = await rig.call(method, path, **kw)
-        assert r.status_code in (404, 405), (method, path, r.status_code)
+        assert r.status_code == 404, (method, path, r.status_code)
     assert rig.upstream.seen == []
     assert not any("skills" in path for path in rig.app.openapi()["paths"] if "/chat/" in path)
 
