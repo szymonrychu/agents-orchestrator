@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from claude_code_wrapper.config import load_config as _wrapper_load_config
+from claude_code_wrapper.config import load_config
 
 from agents_orchestrator import handoff_texts
 from agents_orchestrator.db.sessions import Session
@@ -21,28 +21,6 @@ from agents_orchestrator.k8s import labels, on_start, render
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import SessionSpec
 from agents_orchestrator.tokens import SessionTokens
-
-# Keys the claude-code-wrapper 0.22.0 config knows and the pinned wrapper package (older) refuses
-# (extra="forbid"). Rendered by value in the tests above; stripped before the package validates
-# the rest. Drop this and the `usage` rename below once the package pin reaches 0.22.0.
-_AGNOSTIC_KEYS = {
-    "sessions": ("trailing_marker_pattern",),
-    "notes": ("frame_line",),
-    "pressure": ("head",),
-}
-
-
-def load_config(path):
-    cfg = yaml.safe_load(Path(path).read_text())
-    for section, keys in _AGNOSTIC_KEYS.items():
-        for key in keys:
-            cfg.get(section, {}).pop(key, None)
-    if "endpoint" in cfg.get("usage", {}):
-        cfg["usage"]["url"] = cfg["usage"].pop("endpoint").removesuffix("/usage/v1/samples")
-    stripped = Path(path).with_name(Path(path).name + ".stripped.yaml")
-    stripped.write_text(yaml.safe_dump(cfg))
-    return _wrapper_load_config(stripped)
-
 
 GOLDEN = Path(__file__).parent / "golden"
 TOKENS = SessionTokens(auth="a" * 32, peer="p" * 32, agent="g" * 32)
