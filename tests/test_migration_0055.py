@@ -78,3 +78,22 @@ def test_session_delete_cascades(empty_dsn):
         _row(c, sid)
         c.execute("DELETE FROM sessions WHERE id = %s", (sid,))
         assert c.execute("SELECT count(*) FROM envelope_outbox").fetchone()[0] == 0
+
+
+def test_stop_checks_record_allowed_stops_without_a_block(empty_dsn):
+    run_migrations(empty_dsn)
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        sid = _seed(c)
+        agent = c.execute(
+            "INSERT INTO agents (id, session_id, ordinal, pod_name)"
+            " VALUES (gen_random_uuid(), %s, 0, 'p') RETURNING id",
+            (sid,),
+        ).fetchone()[0]
+        c.execute(
+            "INSERT INTO envelope_stop_checks (agent_id, turn_id, allowed_at)"
+            " VALUES (%s, 't1', now())",
+            (agent,),
+        )
+        assert c.execute(
+            "SELECT blocked_at IS NULL, allowed_at IS NOT NULL FROM envelope_stop_checks"
+        ).fetchone() == (True, True)

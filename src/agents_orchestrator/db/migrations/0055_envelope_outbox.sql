@@ -31,11 +31,14 @@ CREATE INDEX IF NOT EXISTS envelope_outbox_session_status
 CREATE INDEX IF NOT EXISTS envelope_outbox_turn
     ON envelope_outbox (agent_id, turn_id) WHERE turn_id IS NOT NULL;
 
--- Written only by the onStop endpoint.
+-- Written only by the onStop endpoint: `blocked_at` is set by the one retry block of a turn,
+-- `allowed_at` by every Stop it allowed (the turn is then over for the agent, even before the
+-- turns row completes).
 CREATE TABLE IF NOT EXISTS envelope_stop_checks (
     agent_id uuid NOT NULL REFERENCES agents (id) ON DELETE CASCADE,
     turn_id text NOT NULL,
-    blocked_at timestamptz NOT NULL DEFAULT now(),
+    blocked_at timestamptz,
+    allowed_at timestamptz,
     blocks_seen integer NOT NULL DEFAULT 1,
     PRIMARY KEY (agent_id, turn_id)
 );

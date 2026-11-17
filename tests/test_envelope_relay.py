@@ -285,6 +285,43 @@ async def test_refusal_during_the_running_turn_is_left_to_the_stop_hook(pool, ds
     assert (await _rows(pool))[0][1] == "refused"
 
 
+async def test_refusal_after_allowed_stop_before_turn_completed_tells_the_session(pool, dsn):
+    s, a = await _seed(pool)
+    await insert_turn(pool, a["id"], turn_id="t1")
+    await set_agent_status(pool, a["id"], state="busy", current_turn_id="t1")
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO envelope_stop_checks (agent_id, turn_id, allowed_at)"
+            " VALUES (%s, 't1', now())",
+            (a["id"],),
+        )
+    await _insert(pool, _row(s, a, 2, turn_id="t1"))
+    err = {"error": {"code": "room_not_allowed", "message": "no"}}
+    await _worker(pool, dsn, Upstream(httpx.Response(403, json=err))).drain()
+    msgs = await _refused_messages(pool, s["id"])
+    assert len(msgs) == 1 and "envelope 2" in msgs[0][0]
+
+
+async def test_refusal_and_session_message_are_one_transaction(pool, dsn, monkeypatch):
+    from agents_orchestrator.db import queue
+
+    s, a = await _seed(pool)
+    await insert_turn(pool, a["id"], turn_id="t1", status="completed")
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE turns SET completed_at = now() WHERE turn_id = 't1'")
+    await _insert(pool, _row(s, a, 1, turn_id="t1"))
+
+    async def boom(*_a, **_k):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(queue, "enqueue_message", boom)
+    err = {"error": {"code": "room_not_allowed", "message": "no"}}
+    await _worker(pool, dsn, Upstream(httpx.Response(403, json=err))).drain()
+    # the refused mark rolled back with the failed enqueue; the row is settled once, as failed
+    assert (await _rows(pool))[0][1:3] == ("failed", "unknown_outcome")
+    assert await _refused_messages(pool, s["id"]) == []
+
+
 async def test_refusal_without_turn_id_sends_no_message(pool, dsn):
     s, a = await _seed(pool)
     await _insert(pool, _row(s, a, 1))
