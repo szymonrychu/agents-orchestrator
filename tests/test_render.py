@@ -1242,3 +1242,53 @@ def test_client_commands_include_reload_skills():
     assert render.CLIENT_COMMANDS == ("compact", "clear", "reload-skills")
     cfg = config_of(render.render_session(make_session(), make_settings(), TOKENS))
     assert "reload-skills" in cfg["sessions"]["commands"]["client"]
+
+
+CHAT = {"chat_url": "http://chat", "chat_token": "t"}
+
+
+def test_envelope_stop_hook_and_prompt_render_with_chat_and_agent_api():
+    cfg = config_of(_render(make_session(replicas=1), **CHAT))
+    assert cfg["hooks"]["onStop"] == [
+        {
+            "type": "webhook",
+            "url": "${ORCH_AGENT_URL}/agent/v1/envelope/stop",
+            "headers": {
+                "Authorization": "Bearer ${ORCH_AGENT_TOKEN}",
+                "X-Orch-Session": "${ORCH_SESSION_ID}",
+            },
+            "blocking": True,
+            "on_error": "allow",
+            "timeout_seconds": 5,
+            "retries": 0,
+        }
+    ]
+    assert render.CHAT_ENVELOPE_PROMPT in cfg["prompts"]["system_append"]
+    assert render.CHAT_ENVELOPE_PROMPT == (
+        "You reach a chat room only with envelopes at the start of a line, outside code fences, "
+        'in your own text: <chat-send reply_to="m12">text</chat-send> sends a message '
+        '(room="..." names a room, files="a.png,b.pdf" attaches workdir files), '
+        '<chat-react to="m12" key="..."/> reacts. Everything else, including your final '
+        "answer, is shown only in the web UI. To stay silent, write no envelope."
+    )
+
+
+def test_envelope_stop_hook_and_prompt_need_chat_and_agent_api():
+    no_chat = config_of(_render(make_session(replicas=1)))
+    assert "onStop" not in no_chat["hooks"]
+    assert render.CHAT_ENVELOPE_PROMPT not in no_chat["prompts"]["system_append"]
+    no_api = config_of(
+        render.render_session(make_session(replicas=1), make_settings(**CHAT), TOKENS)
+    )
+    assert "onStop" not in no_api["hooks"]
+    assert render.CHAT_ENVELOPE_PROMPT not in no_api["prompts"]["system_append"]
+
+
+def test_envelope_stop_hook_comes_before_preset_stop_hooks():
+    session = make_session(
+        replicas=1, wrapper={"hooks": {"onStop": [{"type": "command", "run": "echo mine"}]}}
+    )
+    cfg = config_of(_render(session, **CHAT))
+    stop = cfg["hooks"]["onStop"]
+    assert stop[0]["url"].endswith("/agent/v1/envelope/stop")
+    assert stop[1]["run"] == "echo mine"

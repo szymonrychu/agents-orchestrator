@@ -1,5 +1,9 @@
 """Chat relay (`/agent/v1/chat`), served only on the agent port (design D2, D5, D12).
 
+Agents no longer call these routes for messages: they write a <chat-send> envelope in their own
+text and the envelope relay (`envelope_outbox/worker.py`, through `chat_core`) delivers it. The
+routes stay, undocumented to agents (decision 794).
+
 A session leader reaches the user's chat through the orchestrator: every route runs
 `require_agent`, then the leader check of `session_send` (403 `not_leader`), then requires the
 chat upstream configured (503 `chat_unconfigured`), then caps the body at 256 KiB (413
