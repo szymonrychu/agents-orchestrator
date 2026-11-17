@@ -357,7 +357,7 @@ def test_migration_job_runs_orch_migrate_then_the_object_migration() -> None:
     assert main["command"] == ["orch"]
     assert main["args"] == ["backup", "migrate"]
     hooks = job["metadata"]["annotations"]
-    assert hooks["helm.sh/hook"] == "pre-install,pre-upgrade"
+    assert hooks["helm.sh/hook"] == "pre-upgrade"
     assert hooks["helm.sh/hook-delete-policy"] == "before-hook-creation"
 
 

@@ -142,7 +142,7 @@ cache:
 
 ### Backup migration Job
 
-`backupMigration.enabled: true` renders a Helm `pre-install,pre-upgrade` hook Job
+`backupMigration.enabled: true` renders a Helm `pre-upgrade` hook Job
 `<fullname>-backup-migrate` (default off; it needs `cache.s3.bucket`). Its init container runs
 `orch migrate` (SQL, spec and status rewrite) and its container `orch backup migrate` (legacy flat
 archives copied into the `b/` layout as versions), with the reconciler's S3 key pair and no
@@ -151,5 +151,7 @@ Kubernetes API access. `backupMigration.deleteOld: true` makes the container run
 Run order of the release that switches to named backups: `orch backup migrate --dry-run` must exit 0,
 scale the old `api` and `reconciler` Deployments to 0, upgrade with `backupMigration.enabled: true`
 (the hook finishes before the new Deployments roll), then set it back to `false` in the next upgrade.
+The hook is upgrade-only (a fresh install has nothing to migrate) and reads the previous release's
+`-settings` ConfigMap, so change `cache.s3` values in a separate upgrade before enabling migration.
 Deploy only when no session is mid-restore or mid-save, and with an agent image of
 claude-code-wrapper 0.20.0 or newer (`claude.subagent_allowed_tools` is rendered for every session).

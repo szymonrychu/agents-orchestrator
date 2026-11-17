@@ -464,7 +464,7 @@ cache:
     # Archives younger than this are never deleted; empty means timeoutSeconds + 600.
     graceSeconds: ""
 
-# One-off migration to named, versioned backups (S-68): a Helm pre-install/pre-upgrade hook Job
+# One-off migration to named, versioned backups (S-68): a Helm pre-upgrade hook Job
 # that runs `orch migrate` (init container) and `orch backup migrate` with the reconciler's S3
 # key pair. Needs cache.s3.bucket. Enable it for the one release that switches to backups, with
 # the old api and reconciler scaled to 0 and no session mid-restore or mid-save, then disable it
