@@ -321,8 +321,9 @@ def forwards_usage(spec: SessionSpec, settings: Settings) -> bool:
 
 def runs_default_image(spec: SessionSpec, settings: Settings) -> bool:
     """Whether the pods run the default agent image: only it is known to accept the newest
-    wrapper config sections (`usage`, `shutdown`, `guard`, `pressure`); the config is strict, so
-    an older image would refuse them."""
+    wrapper config sections (`usage`, `shutdown`, `guard`, `pressure`) and keys (`notes.frame_line`,
+    `sessions.trailing_marker_pattern`, `pressure.head`, which need claude-code-wrapper >= 0.22.0);
+    the config is strict, so an older image would refuse them."""
     return not spec.image or spec.image == settings.agent_image
 
 
