@@ -330,8 +330,8 @@ async def test_delete_refuses_a_referenced_version(pool, dsn, s3):
     async with pool.connection() as conn:
         s = await sessions.create(conn, "alpha", SessionSpec())
         await conn.execute(
-            "UPDATE sessions SET status = jsonb_build_object('backup',"
-            " jsonb_build_array(jsonb_build_object('version', %s::text))) WHERE id = %s",
+            "UPDATE sessions SET status = jsonb_build_object('backup', jsonb_build_object("
+            "'entries', jsonb_build_array(jsonb_build_object('version', %s::text)))) WHERE id = %s",
             (str(old.id), s.id),
         )
     async with client(pool, dsn) as c:

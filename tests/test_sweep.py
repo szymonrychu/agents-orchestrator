@@ -187,8 +187,9 @@ async def test_references_cover_versions_spec_names_and_transcripts(pool, dsn):
             conn, "alpha", SessionSpec(backup=workspace_entries("proj/a", "fixed"))
         )
         await conn.execute(
-            "UPDATE sessions SET status = jsonb_build_object('backup', jsonb_build_array("
-            "jsonb_build_object('version', %s::text, 'base_version', %s::text))) WHERE id = %s",
+            "UPDATE sessions SET status = jsonb_build_object('backup', jsonb_build_object("
+            "'entries', jsonb_build_array(jsonb_build_object("
+            "'version', %s::text, 'base_version', %s::text)))) WHERE id = %s",
             (str(v.id), str(uuid.uuid4()), s.id),
         )
         await sessions.create(conn, "plain", SessionSpec())
@@ -196,6 +197,24 @@ async def test_references_cover_versions_spec_names_and_transcripts(pool, dsn):
     assert refs.versions == {v.id: ["alpha"]}  # the unknown base_version is not a reference
     assert refs.names == {"proj/a": ["alpha"], "fixed": ["alpha"]}
     assert refs.transcripts == {f"{PRE}sessions/alpha.tar.zst"}
+
+
+async def test_a_version_restored_through_a_save_time_template_is_pinned(pool, dsn):
+    """M3: a name that renders only at save time (`now`) yields no spec name, so the restored
+    version stays protected through the session's recorded entry (`status.backup.entries`)."""
+    v = await add_version(pool, "tpl/x")
+    async with pool.connection() as conn:
+        s = await sessions.create(
+            conn, "gamma", SessionSpec(backup=workspace_entries("tpl/x", "tpl/{{ now }}"))
+        )
+        await conn.execute(
+            "UPDATE sessions SET status = jsonb_build_object('backup', jsonb_build_object("
+            "'entries', jsonb_build_array(jsonb_build_object('version', %s::text)))) WHERE id = %s",
+            (str(v.id), s.id),
+        )
+        refs = await references(conn, settings_for(dsn))
+    assert refs.versions == {v.id: ["gamma"]}
+    assert "tpl/x" in refs.names
 
 
 async def test_spec_names_render_before_the_reconciler_resolves_them(pool, dsn):

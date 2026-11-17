@@ -19,7 +19,7 @@ from test_admin_gate import concrete
 from test_admin_relay import DOCS, UPSTREAM_PREFIX, _body_schema, rig  # noqa: F401
 from test_agent_session_messaging import Sess, alone, other_project
 from test_agent_tasks import make_rig
-from test_api_agent import client_for, headers, make_settings
+from test_api_agent import AGENT_PORT, KEY, client_for, headers, make_settings
 from test_api_sessions import assert_error
 
 from agents_orchestrator.api import (
@@ -325,3 +325,63 @@ async def test_retro_notes_update_scoped_to_granted_project(rig):  # noqa: F811
     assert_error(r, 403, "not_superleader")
     r = await call(rig.app, rig.boss, "PUT", url.replace("{room_id}", "22"), json=body)
     assert r.status_code == 200, r.text
+
+
+# ------------------------------------------------------------------------------ the copy scope
+
+
+async def _copy_rig(pool, dsn, monkeypatch, *, retro_project="default", extra=()):
+    from test_api_backups import FakeS3, add_version, settings_for
+
+    from agents_orchestrator.api import backups as backups_mod
+
+    fake = FakeS3()
+    monkeypatch.setattr(backups_mod.s3, "copy_object", fake.copy_object)
+    monkeypatch.setattr(backups_mod.s3, "delete_keys", fake.delete_keys)
+    await add_version(pool, "src/a")
+    caller = await retro(pool, "rc-r", project=retro_project, extra=extra)
+    app = create_app(settings_for(dsn, master_key=KEY, agent_port=AGENT_PORT), pool)
+    return app, caller, fake
+
+
+async def _preset_with_backup(pool, project: str, name: str) -> None:
+    pid = uuid.uuid4()
+    await _exec(
+        pool,
+        "INSERT INTO presets (id, name, spec, superleader_manageable, project)"
+        " VALUES (%s, %s, %s, true, %s)",
+        (
+            pid,
+            f"b-{pid.hex[:8]}",
+            Jsonb({"backup": [{"root": "workspace", "path": ".", "mode": "both", "name": name}]}),
+            project,
+        ),
+    )
+
+
+async def test_retrospective_copy_into_a_foreign_project_name_is_refused(pool, dsn, monkeypatch):
+    app, caller, fake = await _copy_rig(pool, dsn, monkeypatch)
+    await _preset_with_backup(pool, await other_project(pool), "tgt/live")
+    r = await call(
+        app,
+        caller,
+        "POST",
+        f"{ADMIN_PREFIX}/backups/copy",
+        json={"source": "src/a", "target": "tgt/live"},
+    )
+    assert_error(r, 403, "forbidden")
+    assert fake.copied == []
+
+
+async def test_retrospective_copy_into_an_own_project_name_is_allowed(pool, dsn, monkeypatch):
+    app, caller, fake = await _copy_rig(pool, dsn, monkeypatch)
+    await _preset_with_backup(pool, "default", "tgt/mine")
+    r = await call(
+        app,
+        caller,
+        "POST",
+        f"{ADMIN_PREFIX}/backups/copy",
+        json={"source": "src/a", "target": "tgt/mine"},
+    )
+    assert r.status_code == 201, r.text
+    assert len(fake.copied) == 1

@@ -21,8 +21,10 @@ from agents_orchestrator.api.admin import (
     reader_router,
     router,
 )
+from agents_orchestrator.api.errors import ApiError
 from agents_orchestrator.api.sessions import Cfg, Pool
 from agents_orchestrator.api.spec_edit import note_fields
+from agents_orchestrator.db import backups as backups_repo
 
 _UNAVAILABLE = {"description": "unavailable: backups are not configured for the api"}
 _BAD_REQUEST = {"description": "bad_request: invalid name or cursor"}
@@ -67,6 +69,15 @@ async def copy_backup(
     only, no merge). The audit row names source and target, never content."""
     _, caller = caller_of(request)
     role = "superleader" if caller.spec.session_messaging else "retrospective"
+    if role == "retrospective":
+        # a copy makes the target current, and live entries deliver it: only into names that
+        # presets and sessions of the caller's own projects use (S-68 step 16, H2)
+        async with pool.connection() as conn:
+            owners = await backups_repo.projects_using_name(conn, body.target)
+        if not owners <= set(caller.projects):
+            raise ApiError(
+                403, "forbidden", "a retrospective session copies into its projects' names only"
+            )
     view, _created = await backups.copy_backup(pool, settings, body, f"{role} {caller.slug}")
     note_detail(request, source=body.source, target=body.target)
     return view

@@ -163,3 +163,19 @@ async def test_referenced_versions_reads_session_status(pool):
         )
         refs = await backups.referenced_versions(conn)
     assert refs == {v.id, base}
+
+
+async def test_referencing_reads_status_backup_entries(pool):
+    async with pool.connection() as conn:
+        _, v = await _save(conn, name="ref")
+    session = await insert_session(pool)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE sessions SET status = status || jsonb_build_object('backup',"
+            " jsonb_build_object('entries', jsonb_build_array(jsonb_build_object("
+            "'version', %s::text))))"
+            " WHERE id = %s",
+            (str(v.id), session["id"]),
+        )
+        rows = await backups.referencing(conn)
+    assert rows == [(v.id, "ref", session["slug"])]

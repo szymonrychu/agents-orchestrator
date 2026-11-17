@@ -251,6 +251,8 @@ def unpack(src: BinaryIO, workdir: Path, *, max_bytes: int = UNPACK_MAX_BYTES) -
 MANIFEST_MAX_FILES = 10_000
 NO_PATH_DIGEST = "none"
 CREDENTIALS_FILE = ".credentials.json"
+# files of a claude root that hold tokens or connector credentials, never packed (S-68 step 16)
+SECRET_FILES = frozenset({CREDENTIALS_FILE, ".claude.json", ".mcp.json"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -353,7 +355,7 @@ def holds_secret(root: Path, exclude: Sequence[str] = ()) -> bool:
     """True when packing `root` would carry session material that is not redacted.
 
     The same rule the transcripts target applies: a `config/` subdir whose parent has no
-    `.redacted` marker, or a `.credentials.json` file anywhere (excluded paths are not looked at).
+    `.redacted` marker, or a file of `SECRET_FILES` anywhere (excluded paths are not looked at).
     """
     base = os.fspath(root)
     patterns = [*CACHE_ALWAYS_EXCLUDE, *exclude]
@@ -367,6 +369,6 @@ def holds_secret(root: Path, exclude: Sequence[str] = ()) -> bool:
         if config_in and _holds_unmarked_config(dirpath):
             return True
         dirnames[:] = [d for d in dirnames if not _excluded(rel_of(d), patterns)]
-        if any(n == CREDENTIALS_FILE and not _excluded(rel_of(n), patterns) for n in filenames):
+        if any(n in SECRET_FILES and not _excluded(rel_of(n), patterns) for n in filenames):
             return True
     return False
