@@ -208,3 +208,14 @@ async def test_direct_patch_true_stays_422(pool, app, boss):
         app, boss, "PATCH", f"/presets/{mine.id}", json={"superleader_manageable": True}
     )
     assert r.status_code == 422, r.text
+
+
+async def test_approving_one_request_marks_the_other_stale(pool, app, boss, preset):
+    other = await alone(pool, "man-boss-2", superleader=True)
+    first = (await _request(app, boss, preset.name)).json()
+    second = (await _request(app, other, preset.name, client_key="second")).json()
+    assert first["id"] != second["id"]
+    r = await _review(app, first)
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "applied"
+    assert await _status(app, second["id"]) == "stale"
