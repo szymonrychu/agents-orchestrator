@@ -41,6 +41,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from agents_orchestrator.db import events, leadership, status
 from agents_orchestrator.db.pool import notify
+from agents_orchestrator.envelope_outbox.worker import EnvelopeRelay
 from agents_orchestrator.ingester import chat_envelopes
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.tokens import tokens_for
@@ -409,6 +410,11 @@ class Ingester:
         return set(self._tasks)
 
     async def run(self, stop: asyncio.Event) -> None:
+        relay = (
+            asyncio.create_task(EnvelopeRelay(self.pool, self.settings).run(stop))
+            if self.settings.chat_available
+            else None
+        )
         try:
             while not stop.is_set():
                 try:
@@ -418,6 +424,10 @@ class Ingester:
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(stop.wait(), self.settings.ingest_refresh_seconds)
         finally:
+            if relay is not None:
+                relay.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await relay
             await self._cancel(list(self._tasks))
 
     async def _wanted(self) -> dict[uuid.UUID, AgentRef]:

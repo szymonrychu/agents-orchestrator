@@ -31,12 +31,11 @@ from fastapi import APIRouter, FastAPI, Request, Response
 from pydantic import BaseModel, ConfigDict
 
 from agents_orchestrator import chat_client
-from agents_orchestrator.api import chat_relay
+from agents_orchestrator.api import chat_core, chat_relay
 from agents_orchestrator.api import forward as forward_core
 from agents_orchestrator.api.agent import Caller, _leads, _session
 from agents_orchestrator.api.errors import ApiError
 from agents_orchestrator.api.sessions import Cfg, Pool
-from agents_orchestrator.db import chat_activity
 from agents_orchestrator.settings import Settings
 
 log = logging.getLogger(__name__)
@@ -46,7 +45,7 @@ MAX_BODY_BYTES = forward_core.MAX_BODY_BYTES
 TIMEOUT_SECONDS = forward_core.TIMEOUT_SECONDS
 UPSTREAM_PREFIX = chat_client.UPSTREAM_PREFIX
 STATE_ATTR = "chat_http"
-AGENT_HEADER = "X-Orch-Agent"  # the calling agent, whose workdir holds `files`
+AGENT_HEADER = chat_core.AGENT_HEADER
 
 
 def client(app: FastAPI) -> httpx.AsyncClient:
@@ -130,14 +129,7 @@ def _json_body(model: type[BaseModel]) -> dict[str, Any]:
 
 
 def _target(settings: Settings) -> forward_core.Target:
-    return forward_core.Target(
-        "chat relay",
-        settings.chat_url.rstrip("/") + UPSTREAM_PREFIX,
-        settings.chat_token,
-        STATE_ATTR,
-        "chat_unavailable",
-        TIMEOUT_SECONDS,
-    )
+    return chat_core.chat_target(settings, TIMEOUT_SECONDS)
 
 
 async def _relay(
@@ -159,44 +151,22 @@ async def _relay(
     if not settings.chat_available:
         raise ApiError(503, "chat_unconfigured", "no chat upstream is configured")
     body = await forward_core.capped_body(request) if method in ("POST", "PUT") else None
-    target = _target(settings)
-    status, content = await forward_core.forward(
-        request,
-        target,
+    status, content = await chat_core.relay_call(
+        pool,
+        forward_core.client(request.app, STATE_ATTR),
+        settings,
+        _target(settings),
+        own,
+        agent.id,
         method,
         path,
         body,
-        str(own.id),
-        own.slug,
-        extra_headers={AGENT_HEADER: str(agent.id)},
+        query=request.scope.get("query_string", b"").decode("latin-1"),
+        counts_as_update=counts_as_update,
+        relay_bound=relay_bound,
+        records_activity=records_activity,
     )
-    occupier = chat_relay.occupier_of(status, content) if relay_bound else None
-    if occupier is not None:
-        assert body is not None
-        response = await chat_relay.relay(
-            request, pool, settings, target, agent.id, own, body, occupier, content
-        )
-    else:
-        response = Response(
-            chat_relay.without_occupier(content), status, media_type="application/json"
-        )
-    if counts_as_update:
-        await forward_core.touch_on_success(pool, own.id, response.status_code)
-    if records_activity:
-        await _record_out(pool, own.id, agent.id, response.status_code)
-    return response
-
-
-async def _record_out(pool: Pool, session_id: Any, agent_id: Any, status: int) -> None:
-    """Record an outbound chat activity of the caller after a 2xx. Best effort like
-    `touch_on_success`: the post already happened, so a failed write is only logged."""
-    if not 200 <= status < 300:
-        return
-    try:
-        async with pool.connection() as conn:
-            await chat_activity.record(conn, session_id, agent_id, "out")
-    except Exception:
-        log.exception("chat relay: could not record activity of session %s", session_id)
+    return Response(content, status, media_type="application/json")
 
 
 @router.get(

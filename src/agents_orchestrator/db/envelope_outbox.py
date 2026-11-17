@@ -158,3 +158,22 @@ async def queued_sessions(conn: psycopg.AsyncConnection) -> list[uuid.UUID]:
         "SELECT DISTINCT session_id FROM envelope_outbox WHERE status = 'queued'"
     )
     return [r[0] for r in await cur.fetchall()]
+
+
+async def turn_ended(
+    conn: psycopg.AsyncConnection, agent_id: uuid.UUID, turn_id: str | None
+) -> bool:
+    """True when the agent's turn is over, so its Stop was already allowed and a late refusal
+    cannot reach the agent through the Stop reason. Over means: the `turns` row is completed, or
+    the turn is not the agent's current running turn (`agent_status.current_turn_id`). A row
+    without a turn id (a wrapper without the new fields) is never over: nothing can be told."""
+    if turn_id is None:
+        return False
+    cur = await conn.execute(
+        "SELECT EXISTS (SELECT 1 FROM turns WHERE turn_id = %s AND agent_id = %s"
+        " AND completed_at IS NOT NULL)"
+        " OR NOT EXISTS (SELECT 1 FROM agent_status WHERE agent_id = %s AND current_turn_id = %s)",
+        (turn_id, agent_id, agent_id, turn_id),
+    )
+    row = await cur.fetchone()
+    return bool(row[0])

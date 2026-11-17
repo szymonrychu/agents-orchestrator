@@ -114,9 +114,40 @@ async def forward(
     replaces the request's query string when given; `extra_headers` (`X-Orch-Projects`, `If-Match`)
     are sent as well.
     """
-    url = target.base.rstrip("/") + path
     if query is None:
         query = request.scope.get("query_string", b"").decode("latin-1")
+    return await forward_http(
+        client(request.app, target.state_attr),
+        target,
+        method,
+        path,
+        body,
+        session,
+        slug,
+        empty_ok=empty_ok,
+        query=query,
+        extra_headers=extra_headers,
+    )
+
+
+async def forward_http(
+    http: httpx.AsyncClient,
+    target: Target,
+    method: str,
+    path: str,
+    body: bytes | None,
+    session: str,
+    slug: str,
+    *,
+    empty_ok: bool = False,
+    query: str | None = None,
+    extra_headers: Mapping[str, str] | None = None,
+    retry_after: list[str] | None = None,
+) -> tuple[int, bytes]:
+    """`forward` without a request: the caller supplies the client and the query string (none by
+    default). The relay worker calls it directly; `forward` is its request-bound wrapper. When
+    `retry_after` is given, the upstream's `Retry-After` header value is appended to it."""
+    url = target.base.rstrip("/") + path
     if query:
         url += "?" + query
     headers = {
@@ -127,7 +158,6 @@ async def forward(
     }
     if body is not None:
         headers["Content-Type"] = "application/json"
-    http = client(request.app, target.state_attr)
     unavailable = ApiError(503, target.unavailable, f"{target.label} upstream is unavailable")
     try:
         async with asyncio.timeout(target.timeout):
@@ -143,5 +173,7 @@ async def forward(
                 "%s %s %s status %s: not JSON", target.label, method, path, upstream.status_code
             )
             raise unavailable from None
+    if retry_after is not None and "retry-after" in upstream.headers:
+        retry_after.append(upstream.headers["retry-after"])
     log.info("%s %s %s status %s", target.label, method, path, upstream.status_code)
     return upstream.status_code, upstream.content
