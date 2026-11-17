@@ -32,6 +32,7 @@ from agents_orchestrator.spec import (
     WORKDIR_ROOT,
     SessionSpec,
     WrapperSettings,
+    backups,
     parse_quantity,
 )
 from agents_orchestrator.tokens import SessionTokens
@@ -467,6 +468,14 @@ SUPERLEADER_ROOM_PROMPT = (
 )
 
 
+BACKUP_SAVE_PROMPT = (
+    "After you create or change a skill, a rule or a script that lives in a backed up directory, "
+    "call orchestrator_backup_save (root and path of the backup entry) so the other sessions of "
+    "the project get it; the directory is saved at the end of the session too, but only this "
+    "call shares it while the session runs."
+)
+
+
 def _ask_prompt(settings: Settings) -> str:
     """Questions go through taskboard decisions when the agent relay and taskboard are reachable."""
     if settings.agent_api_url and settings.taskboard_available:
@@ -475,12 +484,16 @@ def _ask_prompt(settings: Settings) -> str:
 
 
 def _system_append(spec: SessionSpec, settings: Settings) -> str:
-    """The ask prompt, plus the project room guidance when the agent relay is reachable."""
+    """The ask prompt, plus the project room guidance and, with backup entries, the save
+    guidance, when the agent relay is reachable."""
     ask = _ask_prompt(settings)
     if not settings.agent_api_url:
         return ask
     room = SUPERLEADER_ROOM_PROMPT if spec.session_messaging else PROJECT_ROOM_PROMPT
-    return f"{ask}\n\n{room}"
+    parts = [ask, room]
+    if backups(spec):
+        parts.append(BACKUP_SAVE_PROMPT)
+    return "\n\n".join(parts)
 
 
 ORCHESTRATOR_TOOL_PREFIX = "mcp__any-mcp__orchestrator_"

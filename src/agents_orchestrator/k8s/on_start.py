@@ -89,6 +89,9 @@ MINDMAP_TOOLS = [
     "mindmap_task_nodes", "mindmap_direction_list", "mindmap_direction_create",
     "mindmap_direction_update",
 ]  # fmt: skip
+# Backup tools (S-68): every session saves one of its own backup entries on demand and reads its
+# backup status (`POST /agent/v1/backup/save`, `GET /agent/v1/backup`; any agent of the session).
+BACKUP_TOOLS = ["backup_save", "backup_status"]
 # Superleader admin tools: the plugin's declarative admin rows (any-mcp-tatara-plugins
 # orchestration/orchestrator admin.py), the vault tools included. History is read and search
 # only: there is no history delete tool, deleting a stored session is for the user (web UI).
@@ -189,6 +192,7 @@ def orchestrator_allow(spec: SessionSpec, *, mindmap: bool = False) -> list[str]
         *PLAN_TOOLS,
         *PROJECT_CHAT_TOOLS,
         *(MINDMAP_TOOLS if mindmap else []),
+        *BACKUP_TOOLS,
         *(ADMIN_TOOLS if spec.session_messaging else _regular_tools(spec)),
     ]
     if not spec.hive:

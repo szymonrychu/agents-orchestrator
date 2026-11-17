@@ -752,6 +752,49 @@
         "title": "BackupRun",
         "type": "object"
       },
+      "BackupSaveAccepted": {
+        "properties": {
+          "entry_index": {
+            "title": "Entry Index",
+            "type": "integer"
+          },
+          "job": {
+            "title": "Job",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entry_index",
+          "job"
+        ],
+        "title": "BackupSaveAccepted",
+        "type": "object"
+      },
+      "BackupSaveIn": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Path",
+            "type": "string"
+          },
+          "root": {
+            "enum": [
+              "workspace",
+              "claude"
+            ],
+            "title": "Root",
+            "type": "string"
+          }
+        },
+        "required": [
+          "root",
+          "path"
+        ],
+        "title": "BackupSaveIn",
+        "type": "object"
+      },
       "BackupVersionPage": {
         "properties": {
           "items": {
@@ -15283,6 +15326,150 @@
           }
         },
         "summary": "The caller's own taskboard approvals (taskboard relay)",
+        "tags": [
+          "agent"
+        ]
+      }
+    },
+    "/agent/v1/backup": {
+      "get": {
+        "description": "`status.backup` of the caller's session with each entry's spec fields (root, path, mode,\nname, live, after_init) beside its last restore, save and live delivery results, and the\npending on-demand save request, if any.",
+        "operationId": "backup_status_agent_v1_backup_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Backup Status Agent V1 Backup Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "The backup status of the caller's session",
+        "tags": [
+          "agent"
+        ]
+      }
+    },
+    "/agent/v1/backup/save": {
+      "post": {
+        "description": "Any agent of the session (leader or member). 404 `no_entry` when no entry that is saved\n(mode backup or both) names this root and path, 409 `save_running` while another on-demand\nsave is queued or running, 409 `session_deleting`. The reconciler runs one save Job for the\nentry and records the outcome like a discard save; the answer is the entry index and the\nJob's name. 503 `cache_unavailable` when no cache is configured (nothing could run the save).",
+        "operationId": "backup_save_agent_v1_backup_save_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupSaveIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupSaveAccepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Save one backup entry of the caller's session now",
         "tags": [
           "agent"
         ]

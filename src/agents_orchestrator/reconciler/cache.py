@@ -105,11 +105,20 @@ SCRATCH_DIR = "/scratch"
 SESSIONS_SUBPATH = "sessions"  # the PVC subtree holding every agent pod's /sessions
 WARNING_EVENT = "backup_warning"
 EVENT_SESSION = "backup"  # the events key of the reconciler's own rows (agent_id: the session id)
+LIVE_ATTEMPTS = 3  # deliveries of one version tried before it is given up (state `failed`)
+LIVE_RETRY_SECONDS = 60  # backoff between two attempts of the same version
 WARN_STATES = frozenset({"missing", "unreadable", "refused_secret"})
+# a restored claude path that the agents' Claude Code loads at start: they get `reload-skills`
+RELOAD_PATHS = frozenset({"skills", "."})
 
 RESOLVE_PRE, RESTORE_PRE = "resolve_pre", "restore_pre"
 RESOLVE_POST, RESTORE_POST = "resolve_post", "restore_post"
 RESOLVE_SAVE, SAVE = "resolve_save", "save"
+# live delivery of a new current version, and the on-demand save of one entry (reconciler/live.py)
+LIVE, SAVE_NOW, RESOLVE_NOW = "live", "save_now", "resolve_now"
+DIRTY_MESSAGE = (
+    "local changes not saved; call orchestrator_backup_save or the next save makes yours current"
+)
 TX_RESTORE, TX_SAVE = "transcripts_restore", "transcripts_save"
 Phase = Literal["pre", "post"]
 _JOB_SUFFIX = {
@@ -119,6 +128,9 @@ _JOB_SUFFIX = {
     RESTORE_POST: "backup-restore-post",
     RESOLVE_SAVE: "backup-resolve-save",
     SAVE: "backup-save",
+    LIVE: "backup-live",
+    SAVE_NOW: save_rule.SAVE_NOW_JOB_SUFFIX,
+    RESOLVE_NOW: "backup-resolve-now",
     TX_RESTORE: "sessions-restore",
     TX_SAVE: "sessions-save",
 }
@@ -140,11 +152,11 @@ def _title(key: str) -> str:
 
 
 def _is_restore(key: str) -> bool:
-    return key in (RESTORE_PRE, RESTORE_POST, TX_RESTORE)
+    return key in (RESTORE_PRE, RESTORE_POST, TX_RESTORE, LIVE)
 
 
 def _is_resolve(key: str) -> bool:
-    return key in (RESOLVE_PRE, RESOLVE_POST, RESOLVE_SAVE)
+    return key in (RESOLVE_PRE, RESOLVE_POST, RESOLVE_SAVE, RESOLVE_NOW)
 
 
 def root_dir(spec: SessionSpec, root: str) -> str:
@@ -299,7 +311,9 @@ def render_cache_job(
     """The restore or save Job of run `key`, given its entries (each with its presigned `url`).
 
     Entry roots: `workspace` (the session workdir), `claude` (/claude) or, for the transcripts,
-    `sessions` (/sessions). Restore Jobs mount the backup-state subPath, save Jobs do not.
+    `sessions` (/sessions). Restore Jobs (live deliveries included) mount the backup-state
+    subPath, save Jobs do not, except the on-demand save, which records what it saved there so
+    the saver's own directory is not dirty for the next live delivery.
     """
     spec = session.spec
     save = not _is_restore(key)
@@ -315,7 +329,7 @@ def render_cache_job(
     else:
         wd = workdir_mount(spec)
         mounts = [{**wd, "readOnly": True} if save else wd, _claude_mount(save)]
-        if not save:
+        if not save or key == SAVE_NOW:
             mounts.append(
                 {
                     "name": WORKSPACE_VOLUME,
@@ -337,7 +351,7 @@ def render_cache_job(
         {"name": "CACHE_VERIFY_TLS", "value": str(settings.cache_s3_verify_tls).lower()},
         {"name": "HOME", "value": TMP_DIR},
     ]
-    if not save and key not in _TX_FIELD:
+    if (not save or key == SAVE_NOW) and key not in _TX_FIELD:
         env.append({"name": "CACHE_STATE_DIR", "value": BACKUP_STATE_ROOT})
     container: dict[str, Any] = {
         "name": "cache",
@@ -525,12 +539,23 @@ class CacheRunner:
     # ------------------------------------------------------------------ resolve
 
     async def _resolve(
-        self, session: Session, rkey: str, calls: list[tuple[str, int]]
+        self,
+        session: Session,
+        rkey: str,
+        calls: list[tuple[str, int]],
+        stamp: dict[str, Any] | None = None,
     ) -> tuple[Session, dict[str, str] | None]:
-        """The digests of `calls`: None while the resolve Job runs, `_RESOLVE_FAILED` on failure."""
+        """The digests of `calls`: None while the resolve Job runs, `_RESOLVE_FAILED` on failure.
+
+        `stamp` is added to a new run (an on-demand save marks its request id).
+        """
         run = get_run(session.status, rkey)
         if run is None:
-            run = {**_new_run(await self._now(), []), "calls": [[p, n] for p, n in calls]}
+            run = {
+                **_new_run(await self._now(), []),
+                "calls": [[p, n] for p, n in calls],
+                **(stamp or {}),
+            }
             session = await self._write(session, rkey, run)
             session, run = await self._start(session, rkey, run)
         elif run.get("state") == "running":
@@ -567,9 +592,39 @@ class CacheRunner:
             await self._delete_job(session, SAVE)  # crashed between the outcome and the delete
         return session, run is not None and run.get("state") != "running"
 
-    async def _begin_save(self, session: Session) -> tuple[Session, dict[str, Any] | None]:
+    async def begin_save_now(
+        self, session: Session, request_id: str, index: int
+    ) -> tuple[Session, dict[str, Any] | None]:
+        """Start the on-demand save of entry `index` for request `request_id`.
+
+        The run record carries the request id. A resolve run of an earlier request is dropped
+        first, so the digests are fresh. None while a resolve Job runs.
+        """
+        stale = get_run(session.status, RESOLVE_NOW)
+        if stale is not None and stale.get("request_id") != request_id:
+            session = await self._drop_run(session, RESOLVE_NOW)
+        return await self._begin_save(
+            session, SAVE_NOW, only=index, stamp={"request_id": request_id}
+        )
+
+    async def _drop_run(self, session: Session, key: str) -> Session:
+        backup = dict(save_rule.backup_state(session.status))
+        backup["runs"] = {k: v for k, v in (backup.get("runs") or {}).items() if k != key}
+        await self.write_status(session, {"backup": backup}, session.observed_generation)
+        return replace(session, status={**session.status, "backup": backup})
+
+    async def _begin_save(
+        self,
+        session: Session,
+        key: str = SAVE,
+        *,
+        only: int | None = None,
+        stamp: dict[str, Any] | None = None,
+    ) -> tuple[Session, dict[str, Any] | None]:
         now = await self._now()
         plan = save_plan(session, self.settings.cache_available)
+        if only is not None:
+            plan = [p for p in plan if p.index == only]
         targets = [p for p in plan if p.action == "save"]
         entries = self._entries(session)
         for line in plan:
@@ -577,20 +632,21 @@ class CacheRunner:
                 entries[line.index]["save"] = _state("skipped", None, None, now, line.reason)
         if not targets:
             reason = next((p.reason for p in plan if p.action == "skip"), "nothing_to_save")
-            run = {**_new_run(now, []), "state": "skipped", "reason": reason}
+            run = {**_new_run(now, []), **(stamp or {}), "state": "skipped", "reason": reason}
             run["finished_at"] = now.isoformat()
-            log.info("%s of session %s skipped: %s", _title(SAVE), session.slug, reason)
-            return await self._write(session, SAVE, run, entries), run
+            log.info("%s of session %s skipped: %s", _title(key), session.slug, reason)
+            return await self._write(session, key, run, entries), run
         templates = [session.spec.backup[p.index].name for p in targets]  # type: ignore[index]
         calls = await asyncio.to_thread(_sha_calls, templates)
         digests: dict[str, str] | None = None
         if calls:
-            session, found = await self._resolve(session, RESOLVE_SAVE, calls)
+            rkey = RESOLVE_NOW if key == SAVE_NOW else RESOLVE_SAVE
+            session, found = await self._resolve(session, rkey, calls, stamp)
             if found is None:
                 return session, None
-            digests = None if found is _RESOLVE_FAILED else found
             if found is _RESOLVE_FAILED:
-                return await self._fail_save_entries(session, targets, entries, now)
+                return await self._fail_save_entries(session, key, targets, entries, now, stamp)
+            digests = found
         names = await asyncio.to_thread(_render_names, session, templates, digests, now)
         items: list[dict[str, Any]] = []
         actor = rendering.slug(session.slug)
@@ -617,22 +673,28 @@ class CacheRunner:
                     "orphan": line.reason == save_rule.ORPHAN,
                 }
             )
-        run = _new_run(now, items)
+        run = {**_new_run(now, items), **(stamp or {})}
         if not items:
             run = {**run, "state": "failed", "reason": "no_valid_name"}
             run["finished_at"] = now.isoformat()
-            return await self._write(session, SAVE, run, entries), run
-        session = await self._write(session, SAVE, run, entries)
-        return await self._start(session, SAVE, run)
+            return await self._write(session, key, run, entries), run
+        session = await self._write(session, key, run, entries)
+        return await self._start(session, key, run)
 
     async def _fail_save_entries(
-        self, session: Session, targets: list[EntryPlan], entries: list[dict[str, Any]], now
+        self,
+        session: Session,
+        key: str,
+        targets: list[EntryPlan],
+        entries: list[dict[str, Any]],
+        now,
+        stamp: dict[str, Any] | None = None,
     ) -> tuple[Session, dict[str, Any]]:
         for line in targets:
             entries[line.index]["save"] = _state("failed", None, None, now, "resolve_failed")
-        run = {**_new_run(now, []), "state": "failed", "reason": "resolve_failed"}
+        run = {**_new_run(now, []), **(stamp or {}), "state": "failed", "reason": "resolve_failed"}
         run["finished_at"] = now.isoformat()
-        return await self._write(session, SAVE, run, entries), run
+        return await self._write(session, key, run, entries), run
 
     # ------------------------------------------------------------------ transcripts
 
@@ -729,6 +791,8 @@ class CacheRunner:
             }
             if method == "GET":
                 record["version"] = item["version"]
+            if key == LIVE:
+                record["skip_dirty"] = True  # a live delivery never overwrites unsaved edits
             entries.append(record)
         return render_cache_job(session, settings, key, entries)
 
@@ -836,6 +900,8 @@ class CacheRunner:
         if key in _TX_FIELD:
             return await self._finish_tx(session, key, run, results[0] if results else {})
         by_index = {r.get("index"): r for r in results}
+        if key == LIVE:
+            return await self._finish_live(session, key, run, by_index)
         if _is_restore(key):
             return await self._finish_restore(session, key, run, by_index)
         return await self._finish_save(session, key, run, by_index)
@@ -896,6 +962,52 @@ class CacheRunner:
         await self._warn(session, warnings)
         return session, run
 
+    async def _finish_live(
+        self, session: Session, key: str, run: dict[str, Any], by_index: dict[Any, Any]
+    ) -> tuple[Session, dict[str, Any]]:
+        """Record a live delivery: a restored entry stands on the new version, a skipped one
+        (dirty directory, missing or unreadable object) keeps its own and is not retried for the
+        same version. Rules and skills restored into `claude` are loaded by `reload-skills`."""
+        now = await self._now()
+        entries = self._entries(session)
+        warnings: list[dict[str, Any]] = []
+        first_failure: str | None = None
+        reload = False
+        for item in run.get("plan") or []:
+            index, name, version = item["index"], item["name"], item["version"]
+            result = by_index.get(index) or {}
+            state = result.get("state") or "failed"
+            if state == "restored":
+                entries[index]["version"] = version
+                entries[index]["restore"] = _state("restored", name, version, now)
+                entries[index]["live_delivery"] = _state("delivered", name, version, now)
+                spec_entry = (session.spec.backup or [])[index]
+                reload = reload or (spec_entry.root == "claude" and spec_entry.path in RELOAD_PATHS)
+            elif state in ("skipped_dirty", "missing", "unreadable"):
+                entries[index]["live_delivery"] = _state(state, name, version, now)
+                warning = _warning(index, name, state, "restore")
+                if state == "skipped_dirty":
+                    warning["message"] = DIRTY_MESSAGE
+                warnings.append(warning)
+            else:
+                reason = str(result.get("reason") or "no_outcome")[:REASON_MAX]
+                entries[index]["live_delivery"] = _failed_delivery(
+                    entries[index], name, version, now, reason
+                )
+                warnings.append(_failed_warning(index, name, reason))
+                first_failure = first_failure or reason
+        session, run = await self._finish(
+            session,
+            key,
+            run,
+            "failed" if first_failure else "done",
+            reason=first_failure,
+            entries=entries,
+            extra={"reload_pending": True} if reload else None,
+        )
+        await self._warn(session, warnings)
+        return session, run
+
     async def _finish_save(
         self, session: Session, key: str, run: dict[str, Any], by_index: dict[Any, Any]
     ) -> tuple[Session, dict[str, Any]]:
@@ -907,6 +1019,10 @@ class CacheRunner:
             result = by_index.get(item["index"]) or {}
             record = await self._record_one(session, item, result, now)
             entries[item["index"]]["save"] = record
+            if key == SAVE_NOW and record["state"] in ("saved", "unchanged") and record["version"]:
+                # the saver is not delivered its own version: it now stands on it
+                entries[item["index"]]["version"] = record["version"]
+                entries[item["index"]]["live_delivery"] = None
             if record["state"] in WARN_STATES:
                 warnings.append(_warning(item["index"], item["name"], record["state"], "save"))
             if record["state"] == "failed" and first_failure is None:
@@ -1002,15 +1118,22 @@ class CacheRunner:
         }
         if key in _TX_FIELD:
             run["bytes"] = nbytes
+        warnings: list[dict[str, Any]] = []
         if entries is None and state == "failed" and run.get("plan"):
             entries = self._entries(session)
             field = "restore" if _is_restore(key) else "save"
             for item in run["plan"]:
-                if (entries[item["index"]].get(field) or {}).get("state") == "running":
+                if key == LIVE:  # retried later, bounded (`live.Live._stale`)
+                    entries[item["index"]]["live_delivery"] = _failed_delivery(
+                        entries[item["index"]], item["name"], item["version"], now, reason
+                    )
+                    warnings.append(_failed_warning(item["index"], item["name"], reason))
+                elif (entries[item["index"]].get(field) or {}).get("state") == "running":
                     entries[item["index"]][field] = _state(
                         "failed", item["name"], None, now, reason
                     )
         session = await self._write(session, key, run, entries)
+        await self._warn(session, warnings)
         detail = f": {reason}" if reason else ""
         if state == "failed":
             log.warning("%s of session %s failed%s", _title(key), session.slug, detail)
@@ -1103,6 +1226,22 @@ def _state(
     if reason:
         record["reason"] = reason[:REASON_MAX]
     return record
+
+
+def _failed_delivery(
+    entry: dict[str, Any], name: str, version: str, now: datetime, reason: str | None
+) -> dict[str, Any]:
+    """A failed live delivery record; `attempts` counts the failures of this same version."""
+    last = entry.get("live_delivery") or {}
+    same = last.get("version") == version
+    attempts = int(last.get("attempts") or 0) if same else 0
+    return {**_state("failed", name, version, now, reason), "attempts": attempts + 1}
+
+
+def _failed_warning(index: int, name: str, reason: str | None) -> dict[str, Any]:
+    warning = _warning(index, name, "failed", "restore")
+    warning["message"] = f"live delivery of the new version failed: {reason or 'no_outcome'}"
+    return warning
 
 
 def _warning(index: int, name: str, state: str, direction: str) -> dict[str, Any]:
