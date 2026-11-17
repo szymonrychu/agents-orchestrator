@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from claude_code_wrapper.config import load_config
+from claude_code_wrapper.config import load_config as _wrapper_load_config
 
 from agents_orchestrator import handoff_texts
 from agents_orchestrator.db.sessions import Session
@@ -21,6 +21,28 @@ from agents_orchestrator.k8s import labels, on_start, render
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import SessionSpec
 from agents_orchestrator.tokens import SessionTokens
+
+# Keys the claude-code-wrapper 0.22.0 config knows and the pinned wrapper package (older) refuses
+# (extra="forbid"). Rendered by value in the tests above; stripped before the package validates
+# the rest. Drop this and the `usage` rename below once the package pin reaches 0.22.0.
+_AGNOSTIC_KEYS = {
+    "sessions": ("trailing_marker_pattern",),
+    "notes": ("frame_line",),
+    "pressure": ("head",),
+}
+
+
+def load_config(path):
+    cfg = yaml.safe_load(Path(path).read_text())
+    for section, keys in _AGNOSTIC_KEYS.items():
+        for key in keys:
+            cfg.get(section, {}).pop(key, None)
+    if "endpoint" in cfg.get("usage", {}):
+        cfg["usage"]["url"] = cfg["usage"].pop("endpoint").removesuffix("/usage/v1/samples")
+    stripped = Path(path).with_name(Path(path).name + ".stripped.yaml")
+    stripped.write_text(yaml.safe_dump(cfg))
+    return _wrapper_load_config(stripped)
+
 
 GOLDEN = Path(__file__).parent / "golden"
 TOKENS = SessionTokens(auth="a" * 32, peer="p" * 32, agent="g" * 32)
@@ -601,7 +623,31 @@ def test_alone_session_no_hive_config():
 
 def test_notes_enabled_for_solo_session():
     cfg = config_of(_render(make_session(replicas=1, static=True)))
+    assert cfg["notes"] == {"enabled": True, "frame_line": handoff_texts.NOTES_FRAME_LINE}
+
+
+def test_notes_frame_line_only_for_default_image():
+    other = make_session(image="harbor.example/containers/ccw:0.14.0")
+    settings = make_settings(agent_images=["harbor.example/containers/ccw:0.14.0"])
+    cfg = config_of(render.render_session(other, settings, TOKENS))
     assert cfg["notes"] == {"enabled": True}
+
+
+def test_run_marker_pattern_only_for_default_image():
+    assert _guard_cfg()["sessions"]["trailing_marker_pattern"] == handoff_texts.RUN_MARKER_PATTERN
+    other = make_session(image="harbor.example/containers/ccw:0.14.0")
+    settings = make_settings(agent_images=["harbor.example/containers/ccw:0.14.0"])
+    cfg = config_of(render.render_session(other, settings, TOKENS))
+    assert "trailing_marker_pattern" not in cfg["sessions"]
+
+
+def test_run_marker_pattern_matches_agents_common_marker():
+    import re
+
+    pattern = re.compile(handoff_texts.RUN_MARKER_PATTERN)
+    assert pattern.fullmatch("<!-- agents-webhook:42 -->")
+    assert pattern.fullmatch("<!-- agents-schedule:abc-1 -->")
+    assert not pattern.fullmatch("<!-- other:42 -->")
 
 
 def test_hive_session_config():
@@ -849,6 +895,7 @@ def test_rendered_wrapper_settings_validate(tmp_path, monkeypatch):
 def test_no_wrapper_block_renders_unchanged():
     cfg = config_of(render.render_session(make_session(), make_settings(), TOKENS))
     assert cfg["hooks"] == {"onStart": [cfg["hooks"]["onStart"][0]]}
+    assert cfg["sessions"].pop("trailing_marker_pattern") == handoff_texts.RUN_MARKER_PATTERN
     assert cfg["sessions"] == {
         "max_sessions": 1,
         "resume_on_start": True,
@@ -1158,8 +1205,9 @@ def test_ask_prompt_routes_permissions_to_approvals():
 
 
 def test_render_pressure_only_for_default_image():
-    assert _guard_cfg()["pressure"] == {"enabled": True}
-    assert _guard_cfg(image=IMAGE)["pressure"] == {"enabled": True}
+    pressure = {"enabled": True, "head": handoff_texts.PRESSURE_HEAD}
+    assert _guard_cfg()["pressure"] == pressure
+    assert _guard_cfg(image=IMAGE)["pressure"] == pressure
     assert "pressure" not in _guard_cfg(image="harbor.example/containers/ccw:0.14.0")
 
 

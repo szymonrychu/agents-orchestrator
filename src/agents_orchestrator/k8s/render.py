@@ -647,10 +647,12 @@ def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
                 "handoff_prompt": handoff_texts.SHUTDOWN_REQUEST,
             }
         }
-        cfg["pressure"] = {"enabled": True}
+        cfg["pressure"] = {"enabled": True, "head": handoff_texts.PRESSURE_HEAD}
+        cfg["notes"]["frame_line"] = handoff_texts.NOTES_FRAME_LINE
+        cfg["sessions"]["trailing_marker_pattern"] = handoff_texts.RUN_MARKER_PATTERN
     if forwards_usage(spec, settings):
         cfg["usage"] = {
-            "url": settings.agent_usage_url,
+            "endpoint": settings.agent_usage_url + "/usage/v1/samples",
             "token": "${" + AGENT_USAGE_TOKEN_ENV + "}",
             "agent": "${POD_NAME}",
         }

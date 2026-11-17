@@ -1579,9 +1579,9 @@ With `ORCH_USAGE_URL` and `ORCH_USAGE_TOKEN` set, the api reads the account's Cl
 
 With `ORCH_AGENT_USAGE_URL` and `ORCH_AGENT_USAGE_SECRET` set, the reconciler renders the claude-code-wrapper 0.8.0 `usage` config section into the pods of every session that runs the default image (no `spec.image`, or one equal to `ORCH_AGENT_IMAGE`):
 
-- config.yaml gains `usage: {url: <ORCH_AGENT_USAGE_URL>, token: "${CCW_USAGE_TOKEN}", agent: "${POD_NAME}"}`; the wrapper expands the references from the pod env and forwards the statusLine `rate_limits` to agents-usage.
+- config.yaml gains `usage: {endpoint: <ORCH_AGENT_USAGE_URL>/usage/v1/samples, token: "${CCW_USAGE_TOKEN}", agent: "${POD_NAME}"}`; the wrapper expands the references from the pod env and forwards the statusLine `rate_limits` to agents-usage.
 - The pod env gains `CCW_USAGE_TOKEN` as a `secretKeyRef` to `ORCH_AGENT_USAGE_SECRET` (key `token`), next to `CLAUDE_CODE_OAUTH_TOKEN`. The orchestrator renders only the Secret name; it never reads, stores or logs the token. `CCW_USAGE_TOKEN` is not in `claude.passthrough_env`, so the claude process never sees it.
-- Off by default and additive: with the pair unset nothing in the rendered objects changes. The wrapper config is strict, so the section is rendered only for the default image, which the deployment must pin to 0.8.0 or newer whenever the URL is set. A session on another image does not forward; nothing is lost, because usage is account-wide and the other agents still report it.
+- Off by default and additive: with the pair unset nothing in the rendered objects changes. The wrapper config is strict, so the section is rendered only for the default image, which the deployment must pin to 0.22.0 or newer (`usage.endpoint` replaced `usage.url`) whenever the URL is set. The same default-image sessions also render `sessions.trailing_marker_pattern`, `notes.frame_line` and `pressure.head` (the tatara run marker and deployment texts, byte-identical to the old wrapper built-ins), so the default agent image must be claude-code-wrapper 0.22.0 or newer. A session on another image does not forward; nothing is lost, because usage is account-wide and the other agents still report it.
 - Enabling it changes the config hash, so pods roll to pick it up like any config change (idle pods first, see Reconcile loop).
 
 ## Agent API

@@ -853,8 +853,9 @@ class Settings(BaseSettings):
     @field_validator("agent_usage_url")
     @classmethod
     def _check_agent_usage_url(cls, v: str) -> str:
-        # Written into the agents' wrapper config as usage.url, whose own check also refuses
-        # a trailing slash and a missing host (a pod would fail config load).
+        # Written into the agents' wrapper config as usage.endpoint (with /usage/v1/samples
+        # appended), whose own check also refuses a trailing slash and a missing host (a pod
+        # would fail config load).
         if v:
             try:
                 parsed = urlparse(v)
