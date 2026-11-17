@@ -8,6 +8,7 @@ and false equal:
 - kube_namespace_access (namespace -> tiers map): may shrink or be removed, never grow: no
   namespace or tier may appear that the stored map lacks.
 - discard_hook_url: may be removed, never set to a value other than the stored one.
+- retrospective: may be turned off or removed, never on (it opens every session's history).
 - wrapper.permission_mode: unset means bypassPermissions; may become "auto",
   never any other change.
 - wrapper.permissions.deny: entries may be added, never removed.
@@ -36,6 +37,7 @@ GRANTS: tuple[str, ...] = (
     "kube_namespace_access",
     "docker",
     "discard_hook_url",
+    "retrospective",
 )
 DOCKER_SIZES: tuple[str, ...] = ("docker_storage", "docker_cpu", "docker_memory")
 # discard_hook_url is human-only to set but grants no reach to a started session.
@@ -161,6 +163,9 @@ def human_only_changes(stored: dict[str, Any], new: dict[str, Any]) -> list[str]
             grows = bool(new.get(f)) and not bool(stored.get(f))
         if grows:
             out.append(f)
+
+    if new.get("retrospective") and not stored.get("retrospective"):
+        out.append("retrospective")
 
     hook = new.get("discard_hook_url")
     if hook is not None and hook != stored.get("discard_hook_url"):

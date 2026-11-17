@@ -1,5 +1,6 @@
-"""Superleader reads of the handoff history (S-68): the list of `agent_handoffs` rows and one row
-in full, with its text. Read only. `kind` is the row's trigger (strong, shutdown, voluntary).
+"""Superleader and retrospective reads (reader gate, S-68 step 13) of the handoff history (S-68):
+the list of `agent_handoffs` rows and one row in full, with its text. Read only. `kind` is the
+row's trigger (strong, shutdown, voluntary).
 The `session` filter takes a session id or slug."""
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ from typing import Annotated
 from fastapi import Query
 from pydantic import BaseModel
 
-from agents_orchestrator.api.admin import FORBIDDEN, router
+from agents_orchestrator.api.admin import FORBIDDEN, reader_router
 from agents_orchestrator.api.errors import ApiError
 from agents_orchestrator.api.sessions import Pool
 from agents_orchestrator.db import handoffs
@@ -39,7 +40,8 @@ class HandoffPage(BaseModel):
     has_more: bool
 
 
-@router.get(
+# step 13: reader gate (superleader or retrospective), was the superleader gate
+@reader_router.get(
     "/handoffs",
     response_model=HandoffPage,
     responses={403: FORBIDDEN, 404: _NOT_FOUND},
@@ -66,7 +68,8 @@ async def list_handoffs(
     return HandoffPage(handoffs=[HandoffItem(**r) for r in rows], has_more=more)
 
 
-@router.get(
+# step 13: reader gate (superleader or retrospective), was the superleader gate
+@reader_router.get(
     "/handoffs/{id}",
     response_model=HandoffDetail,
     responses={403: FORBIDDEN, 404: _NOT_FOUND},

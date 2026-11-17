@@ -71,8 +71,8 @@ TAIL_TOOLS = [
 ]
 # Allowed before the pinned plugin ships them; add a name here when the allow-list leads the
 # plugin pin and remove it when the pin offers the tool (project room T-117 O9; project grants
-# T-120). The backups admin tools wait for the plugins release of PR #61 (S-68 step 12);
-# backup_save and backup_status wait for plugins release A (S-68).
+# T-120). The backups, handoff and room notes admin tools wait for the plugins release of PR #61
+# (S-68 steps 12 to 14); backup_save and backup_status wait for plugins release A (S-68).
 PLUGIN_PENDING: set[str] = {
     "backup_save",
     "backup_status",
@@ -83,6 +83,10 @@ PLUGIN_PENDING: set[str] = {
     "backups_cleanup_get",
     "backups_cleanup_preview",
     "backups_cleanup_set",
+    "handoffs_list",
+    "handoff_get",
+    "chat_admin_notes_get",
+    "chat_admin_notes_update",
 }
 ALONE_TOOLS = ["me", "handoff_submit", *TAIL_TOOLS]
 PROPOSAL = [
@@ -118,7 +122,8 @@ ADMIN_TOOLS = [
     "usage_history", "usage_sessions",
     "session_labels_update", "session_scale", "session_lock_reassign", "session_message_cancel",
     "project_update", "backups_cleanup_set", "spec_delete", "spec_suggestion_dismiss",
-    "spec_queue_move",
+    "spec_queue_move", "handoffs_list", "handoff_get", "chat_admin_notes_get",
+    "chat_admin_notes_update",
     *PROPOSAL,
 ]  # fmt: skip
 SECRET = "s3cr3t-token-value"
@@ -736,3 +741,80 @@ def test_entry_allow_follows_mindmap_available():
     configured = make_settings(mindmap_url="http://mm:8082", mindmap_token="t")
     allow = entries(spec, configured)["orchestrator"]["allow"]
     assert allow == on_start.orchestrator_allow(spec, mindmap=True)
+
+
+# ---------------------------------------- retrospective sessions and the subagent reads (S-68)
+
+RETRO = [
+    "history_search", "history_get", "history_records", "sessions_admin_list", "session_get",
+    "session_activity", "session_events", "session_messages", "handoffs_list", "handoff_get",
+    "chat_admin_rooms", "chat_admin_room", "chat_admin_history", "chat_admin_notes_get",
+    "presets_list", "preset_get", "usage_get", "usage_history", "backups_list",
+    "backup_versions", "backup_manifest", "backups_copy", "chat_admin_notes_update",
+]  # fmt: skip
+# Routes of the tools the pinned plugin does not ship yet (any-mcp-tatara-plugins PR #61).
+PENDING_ROUTES = {
+    "backups_list": ("GET", "/agent/v1/admin/backups"),
+    "backup_versions": ("GET", "/agent/v1/admin/backups/{name}/versions"),
+    "backup_manifest": ("GET", "/agent/v1/admin/backups/{name}/versions/{version}/manifest"),
+    "handoffs_list": ("GET", "/agent/v1/admin/handoffs"),
+    "handoff_get": ("GET", "/agent/v1/admin/handoffs/{id}"),
+    "chat_admin_notes_get": ("GET", "/agent/v1/admin/chats/rooms/{room_id}/notes"),
+}
+
+
+@pytest.mark.parametrize("replicas", [1, 2])
+def test_retro_tool_list(replicas):
+    """Exactly the regular set plus the retrospective set: no admin write beyond the backup copy
+    and the notes update (no preset writes, no session create, discard or restart)."""
+    assert on_start.RETRO_TOOLS == RETRO
+    plain = on_start.orchestrator_allow(SessionSpec(replicas=replicas))
+    allow = on_start.orchestrator_allow(SessionSpec(replicas=replicas, retrospective=True))
+    assert len(allow) == len(set(allow))
+    assert set(allow) == set(plain) | set(RETRO)
+    for write in (
+        "preset_create", "preset_replace", "preset_patch", "preset_delete", "preset_copy",
+        "session_create", "session_discard", "session_restart", "agent_restart", "vault_list",
+        "backups_cleanup_set", "chat_room_settings", "webhook_create", "schedule_create",
+    ):  # fmt: skip
+        assert write not in allow, write
+    # session_patch is the session's own spec edit; the API refuses any other target
+    assert [t for t in allow if t in ("session_patch", "session_discard")] == ["session_patch"]
+    superleader = on_start.orchestrator_allow(
+        SessionSpec(replicas=replicas, retrospective=True, session_messaging=True)
+    )
+    assert set(RETRO) <= set(superleader) and "self_close" not in superleader
+
+
+@pytest.mark.parametrize("replicas", [1, 2])
+def test_retro_session_gets_self_close(replicas):
+    allow = on_start.orchestrator_allow(SessionSpec(replicas=replicas, retrospective=True))
+    assert allow[-1] == "self_close"
+
+
+async def _plugin_routes() -> dict[str, tuple[str, str]]:
+    from any_mcp.testing import PluginHarness
+
+    config = {"base_url": "http://orch:8080", "token": "t", "session": "1", "agent": "a0"}
+    async with PluginHarness(OrchestratorPlugin, config={**config, "slug": "s"}) as h:
+        plugin = h._loaded[0].instance
+        return {s.name: (s.http.method, s.http.path) for s in await plugin.load_tools() if s.http}
+
+
+async def test_read_only_tools_map_to_read_routes():
+    """Every tool of READ_ONLY_TOOLS calls a GET route only (the plugin's binding, or the route
+    of a tool the pin does not ship yet); none is a write tool."""
+    routes = {**await _plugin_routes(), **PENDING_ROUTES}
+    for tool in sorted(on_start.READ_ONLY_TOOLS):
+        assert tool in routes, tool
+        method, path = routes[tool]
+        assert method == "GET", (tool, method, path)
+    writes = re.compile(
+        r"_(update|create|set|push|send|ask|claim|next|save|copy|delete|patch|replace|edit"
+        r"|react|close|withdraw|resolve|comment|put|link|order|deps|add|move)$"
+    )
+    assert not [t for t in on_start.READ_ONLY_TOOLS if writes.search(t)]
+    assert set(on_start.RETRO_READ_TOOLS) <= on_start.READ_ONLY_TOOLS
+    assert not {"backups_copy", "chat_admin_notes_update", "self_close"} & (
+        on_start.READ_ONLY_TOOLS
+    )

@@ -35,7 +35,18 @@ def test_every_agent_route_is_classified():
     assert not unclassified, f"agent routes missing from AGENT_SCOPE: {unclassified}"
     stale = sorted(set(AGENT_SCOPE) - routes)
     assert not stale, f"AGENT_SCOPE rows with no route: {stale}"
-    assert set(AGENT_SCOPE.values()) == {"own", "peers", "project", "superleader"}
+    assert set(AGENT_SCOPE.values()) == {
+        "own",
+        "peers",
+        "project",
+        "superleader",
+        "reader",
+        "notes",
+    }
+    # the reader and notes classes are exactly the reader and notes gate routes (S-68 step 13)
+    for cls, router in (("reader", admin.reader_router), ("notes", admin.notes_router)):
+        routes = {(m, r.path) for r in router.routes for m in r.methods}
+        assert {k for k, v in AGENT_SCOPE.items() if v == cls} == routes, cls
     # session-spec-patch and proposals are on the agent port and classified own
     spec_patch = {(m, r.path) for r in admin.session_router.routes for m in r.methods}
     proposals = {(m, r.path) for r in proposal_routes.proposal_router.routes for m in r.methods}

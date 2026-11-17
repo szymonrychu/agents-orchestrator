@@ -1163,6 +1163,46 @@ def test_render_pressure_only_for_default_image():
     assert "pressure" not in _guard_cfg(image="harbor.example/containers/ccw:0.14.0")
 
 
+def test_subagent_allowed_rendered_for_every_session(tmp_path, monkeypatch):
+    """User decision m1223: every session renders its own read tools (READ_ONLY_TOOLS within its
+    allow list) as `claude.subagent_allowed_tools`, never a write tool; the wrapper loads it."""
+    prefix = "mcp__any-mcp__orchestrator_"
+    seen = {}
+    for name, spec in {
+        "alone": {"replicas": 1},
+        "hive": {"replicas": 2},
+        "superleader": {"replicas": 1, "session_messaging": True},
+        "retro": {"replicas": 1, "retrospective": True},
+    }.items():
+        session = make_session(**spec)
+        settings = make_settings(agent_api_url=AGENT_URL)
+        cfg = config_of(render.render_session(session, settings, TOKENS))
+        tools = cfg["claude"]["subagent_allowed_tools"]
+        allow = on_start.orchestrator_allow(session.spec, mindmap=settings.mindmap_available)
+        assert tools == sorted(prefix + t for t in on_start.READ_ONLY_TOOLS & set(allow)), name
+        assert all(t.removeprefix(prefix) in on_start.READ_ONLY_TOOLS for t in tools), name
+        assert prefix + "task_list" in tools and prefix + "task_create" not in tools, name
+        assert cfg["claude"]["main_agent_only_tools"] == [prefix + "*"]
+        seen[name] = {t.removeprefix(prefix) for t in tools}
+    assert "history_search" not in seen["alone"] | seen["hive"]
+    assert "history_search" in seen["retro"] and "history_search" in seen["superleader"]
+    assert "backups_copy" not in seen["retro"]
+    monkeypatch.setenv("CCW_AUTH_TOKEN", TOKENS.auth)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth")
+    monkeypatch.setenv("POD_NAME", "agent-alpha-0")
+    objs = _render(make_session(replicas=1, retrospective=True))
+    path = tmp_path / "config.yaml"
+    path.write_text(by_kind(objs)["ConfigMap"]["data"]["config.yaml"])
+    assert prefix + "history_get" in load_config(path).claude.subagent_allowed_tools
+
+
+def test_subagent_allowed_absent_without_plugin_or_on_another_image():
+    no_url = config_of(render.render_session(make_session(), make_settings(), TOKENS))
+    assert "subagent_allowed_tools" not in no_url["claude"]
+    other = config_of(_render(make_session(image="other.example/agent:1.0.0")))
+    assert "subagent_allowed_tools" not in other["claude"]
+
+
 def test_render_claude_mount_and_wrapper_option():
     objs = render.render_session(make_session(), make_settings(), TOKENS)
     mounts = container_of(objs)["volumeMounts"]

@@ -795,6 +795,10 @@ class SessionSpec(BaseModel):
     # Superleader: the leader may message the leaders of all sessions, and every other
     # session's leader may message it. Sparse: unset is not stored or dumped in a preset.
     session_messaging: bool | None = Field(default=None, strict=True)
+    # Retrospective (S-68, decisions 769, 770, 775): the agents read every session's history,
+    # handoffs, chats, presets and backups, copy backups and update the notes of rooms bound to
+    # a project they hold; human-only, never a superleader. Sparse: unset is not stored or dumped.
+    retrospective: bool | None = Field(default=None, strict=True)
     # Full read-write Kubernetes access in every namespace for the agent pods; refused until
     # ORCH_KUBE_CLUSTER_ACCESS_ENABLED is set. Sparse: unset is not stored or dumped in a preset.
     kube_cluster_access: bool | None = Field(default=None, strict=True)
