@@ -41,6 +41,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from agents_orchestrator.db import events, leadership, status
 from agents_orchestrator.db.pool import notify
+from agents_orchestrator.ingester import chat_envelopes
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.tokens import tokens_for
 from agents_orchestrator.wrapper import Envelope, WrapperClient, WrapperError, WrapperUnreachable
@@ -362,6 +363,15 @@ class _AgentStream:
                 )
                 await status.clear_current_turn(conn, ref.agent_id, turn_id)
                 await status.notify_status(conn, ref.session_id, ref.agent_id)
+        elif env.type == "assistant_text":
+            await chat_envelopes.project_assistant_text(
+                conn,
+                session_id=ref.session_id,
+                agent_id=ref.agent_id,
+                wrapper_session_id=ref.wrapper_session_id,
+                event_seq=env.seq,
+                data=data,
+            )
         # user_message and every other type: stored as an events row only
         return _Projected()
 

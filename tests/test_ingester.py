@@ -22,6 +22,7 @@ from factories import (
 )
 from fakes.fake_wrapper import FakeWrapper
 from psycopg import sql
+from psycopg.types.json import Jsonb
 
 from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import queue, status
@@ -88,7 +89,7 @@ class Listener:
 async def listener(dsn: str) -> AsyncIterator[Listener]:
     lst = Listener()
     conn = await psycopg.AsyncConnection.connect(dsn, autocommit=True)
-    for ch in ("events", "status", "agent_free", LEADERSHIP_CHANNEL):
+    for ch in ("events", "status", "agent_free", "envelope_outbox", LEADERSHIP_CHANNEL):
         await conn.execute(sql.SQL("LISTEN {}").format(sql.Identifier(ch)))
 
     async def pump() -> None:
@@ -1598,3 +1599,134 @@ async def test_auth_failed_event_keeps_first_failed_at(harness, pool) -> None:
     row = await status_row(pool, h.agent_id)
     assert row["auth_failed_at"] == first
     assert row["auth_reason"] == "expired again"
+
+
+# ------------------------------------------------------------------ envelope projection
+
+
+async def outbox_rows(pool, agent_id: uuid.UUID) -> list[dict[str, Any]]:
+    return await fetch(
+        pool, "SELECT * FROM envelope_outbox WHERE agent_id=%s ORDER BY id", (agent_id,)
+    )
+
+
+TEXT = (
+    "thinking\n"
+    '<chat-send room="!r:x" reply_to="m3" files="a/b.png,c.txt">hello\nworld</chat-send>\n'
+    '<chat-react to="m4" key="thumbsup"/>\n'
+    "<chat-status>bad</chat-status>\n"
+)
+
+
+async def test_assistant_text_projects_queued_and_invalid_rows(harness, pool, listener) -> None:
+    h = await harness()
+    await h.start()
+    await h.stored_through(h.last_fake_seq())
+
+    h.fake.emit("assistant_text", {"text": TEXT, "turn_id": "t-1", "sidechain": False})
+    seq = h.last_fake_seq()
+    await h.stored_through(seq)
+
+    rows = await outbox_rows(pool, h.agent_id)
+    assert [(r["envelope_index"], r["kind"], r["status"]) for r in rows] == [
+        (1, "send", "queued"),
+        (2, "react", "queued"),
+        (3, "send", "invalid"),
+    ]
+    send, react, bad = rows
+    assert (send["room"], send["reply_to"], send["files"], send["body"]) == (
+        "!r:x",
+        "m3",
+        ["a/b.png", "c.txt"],
+        "hello\nworld",
+    )
+    assert (react["reply_to"], react["react_key"], react["body"]) == ("m4", "thumbsup", None)
+    assert bad["error_code"] == "parse_error" and bad["error"]
+    for r in rows:
+        assert r["event_seq"] == seq and r["turn_id"] == "t-1"
+        assert r["wrapper_session_id"] == h.wrapper_session_id and r["session_id"] == h.session_id
+    await wait_until(lambda: listener.on("envelope_outbox"))
+    assert listener.on("envelope_outbox")[0] == {"session_id": str(h.session_id)}
+
+
+async def test_plain_text_makes_no_rows(harness, pool) -> None:
+    h = await harness()
+    await h.start()
+    h.fake.emit("assistant_text", {"text": "just talking, no tags"})
+    await h.stored_through(h.last_fake_seq())
+    assert await outbox_rows(pool, h.agent_id) == []
+
+
+async def test_sidechain_and_subagent_text_not_parsed(harness, pool) -> None:
+    h = await harness()
+    await h.start()
+    h.fake.emit("assistant_text", {"text": TEXT, "sidechain": True})
+    h.fake.emit("assistant_text", {"text": TEXT, "agent_id": "sub-1"})
+    await h.stored_through(h.last_fake_seq())
+    assert await outbox_rows(pool, h.agent_id) == []
+
+
+async def test_old_wrapper_without_turn_id_or_sidechain(harness, pool) -> None:
+    h = await harness()
+    await h.start()
+    h.fake.emit("assistant_text", {"text": "<chat-send>hi</chat-send>", "agent_id": None})
+    await h.stored_through(h.last_fake_seq())
+    rows = await outbox_rows(pool, h.agent_id)
+    assert len(rows) == 1 and rows[0]["turn_id"] is None and rows[0]["status"] == "queued"
+
+
+async def test_replay_does_not_duplicate_rows(harness, pool) -> None:
+    h = await harness()
+    await h.start()
+    h.fake.emit("assistant_text", {"text": TEXT})
+    await h.stored_through(h.last_fake_seq())
+    before = await outbox_rows(pool, h.agent_id)
+    await h.stop()
+    h.replay_all = True
+    await h.start()
+    h.fake.emit("assistant_text", {"text": "after"})
+    await h.stored_through(h.last_fake_seq())
+    assert await outbox_rows(pool, h.agent_id) == before
+
+
+async def test_non_leader_gets_not_leader_rows(harness, pool) -> None:
+    h = await harness()
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE sessions SET spec = %s WHERE id = %s",
+            (Jsonb({"replicas": 3}), h.session_id),
+        )
+    other = await insert_agent(pool, h.session_id, ordinal=1, ready=True)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO session_leaders (session_id, agent_id, epoch, since, reason)"
+            " VALUES (%s, %s, 1, now(), 'start')",
+            (h.session_id, other["id"]),
+        )
+    await h.start()
+    h.fake.emit("assistant_text", {"text": TEXT})
+    await h.stored_through(h.last_fake_seq())
+    rows = await outbox_rows(pool, h.agent_id)
+    assert [(r["kind"], r["status"], r["error_code"]) for r in rows[:2]] == [
+        ("send", "invalid", "not_leader"),
+        ("react", "invalid", "not_leader"),
+    ]
+    assert all(r["status"] == "invalid" for r in rows)
+
+
+async def test_leader_of_a_hive_queues(harness, pool) -> None:
+    h = await harness()
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE sessions SET spec = %s WHERE id = %s",
+            (Jsonb({"replicas": 3}), h.session_id),
+        )
+        await conn.execute(
+            "INSERT INTO session_leaders (session_id, agent_id, epoch, since, reason)"
+            " VALUES (%s, %s, 1, now(), 'start')",
+            (h.session_id, h.agent_id),
+        )
+    await h.start()
+    h.fake.emit("assistant_text", {"text": "<chat-send>hi</chat-send>"})
+    await h.stored_through(h.last_fake_seq())
+    assert [r["status"] for r in await outbox_rows(pool, h.agent_id)] == ["queued"]
