@@ -1,0 +1,34 @@
+{
+  "preset": null,
+  "is_preset": true,
+  "cache": {
+    "restore_key": "a",
+    "save_key": "b",
+    "exclude": [
+      "tmp",
+      "*.log"
+    ]
+  },
+  "expected": [
+    {
+      "root": "workspace",
+      "path": ".",
+      "mode": "restore",
+      "name": "a",
+      "exclude": [
+        "tmp",
+        "*.log"
+      ]
+    },
+    {
+      "root": "workspace",
+      "path": ".",
+      "mode": "backup",
+      "name": "b",
+      "exclude": [
+        "tmp",
+        "*.log"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "preset": null,
+  "is_preset": true,
+  "cache": {
+    "restore_key": "x",
+    "save_key": ""
+  },
+  "expected": [
+    {
+      "root": "workspace",
+      "path": ".",
+      "mode": "restore",
+      "name": "x"
+    }
+  ]
+}

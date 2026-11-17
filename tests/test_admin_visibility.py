@@ -16,7 +16,7 @@ from test_api_sessions import client_for as main_client
 
 from agents_orchestrator.api import (  # noqa: F401
     admin,
-    admin_archives,
+    admin_backups,
     admin_relay,
     admin_specs,
     proposal_routes,
@@ -47,6 +47,8 @@ def own_routes() -> list[tuple[str, str]]:
             *admin.router.routes,
             *admin.session_router.routes,
             *proposal_routes.proposal_router.routes,
+            *admin.reader_router.routes,  # S-68 step 13: the retrospective reads and the copy
+            *admin.notes_router.routes,
         ]
         if not r.path.startswith(prefixes)
         for m in r.methods - {"HEAD", "OPTIONS"}

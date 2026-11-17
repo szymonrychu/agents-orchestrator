@@ -407,3 +407,70 @@ def test_config_dir_gate_off_when_not_required(tmp_path: Path) -> None:
     out = io.BytesIO()
     pack(root, out, exclude=[], max_bytes=BIG)
     assert "config/x" in _names(out.getvalue())
+
+
+# ------------------------------------------------------------- manifest and digests
+
+
+def _tree_of(root: Path) -> Path:
+    (root / "sub").mkdir(parents=True)
+    (root / "a.txt").write_text("alpha")
+    (root / "sub" / "run.sh").write_text("#!/bin/sh\n")
+    (root / ".agent-init").mkdir()
+    (root / ".agent-init" / "x").write_text("init")
+    return root
+
+
+def test_manifest_deterministic(tmp_path):
+    import os
+
+    first = _tree_of(tmp_path / "one")
+    second = _tree_of(tmp_path / "two")
+    os.utime(second / "a.txt", (1, 1))
+    m1 = archive.manifest(first, [])
+    m2 = archive.manifest(second, [])
+    assert m1 == m2
+    assert [e.path for e in m1] == ["a.txt", "sub/run.sh"]
+    assert archive.digest(m1) == archive.digest(m2)
+    assert len(archive.digest(m1)) == 64
+    assert archive.digest(archive.manifest(first, ["sub"])) != archive.digest(m1)
+
+
+def test_exec_bit_changes_digest(tmp_path):
+    root = _tree_of(tmp_path / "t")
+    before = archive.digest(archive.manifest(root, []))
+    dir_before = archive.dir_sha256(root, ".", [])
+    (root / "a.txt").chmod(0o755)
+    assert archive.digest(archive.manifest(root, [])) != before
+    assert archive.dir_sha256(root, ".", []) != dir_before
+
+
+def test_dir_sha256_missing_is_none(tmp_path):
+    root = _tree_of(tmp_path / "t")
+    assert archive.dir_sha256(root, "nope", []) == "none"
+    import hashlib
+
+    assert archive.dir_sha256(root, "a.txt", []) == hashlib.sha256(b"alpha").hexdigest()
+    assert archive.dir_sha256(root, "sub", []) != "none"
+
+
+def test_holds_secret(tmp_path):
+    root = tmp_path / "c"
+    (root / "s1" / "config").mkdir(parents=True)
+    assert archive.holds_secret(root)
+    (root / "s1" / ".redacted").write_text("")
+    assert not archive.holds_secret(root)
+    (root / "skills").mkdir()
+    (root / "skills" / ".credentials.json").write_text("{}")
+    assert archive.holds_secret(root)
+    assert not archive.holds_secret(root, ["skills"])
+
+
+@pytest.mark.parametrize("name", [".credentials.json", ".claude.json", ".mcp.json"])
+def test_holds_secret_covers_every_claude_secret_file(tmp_path, name):
+    root = tmp_path / "c"
+    (root / "d").mkdir(parents=True)
+    assert not archive.holds_secret(root)
+    (root / "d" / name).write_text("{}")
+    assert archive.holds_secret(root)
+    assert not archive.holds_secret(root, ["d"])

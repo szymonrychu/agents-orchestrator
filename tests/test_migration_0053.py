@@ -72,7 +72,7 @@ def test_stored_caps_1_to_4_raised_to_5_others_untouched(empty_dsn, tmp_path):
     _upto_0052(empty_dsn, tmp_path)
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         _seed(c)
-    assert run_migrations(empty_dsn) == ["0053"]
+    assert run_migrations(empty_dsn) == ["0053", "0054"]
     with psycopg.connect(empty_dsn) as c:
         for name, want in EXPECTED.items():
             assert _val(_read(c, "sessions", "slug", f"s-{name}")) == want, name

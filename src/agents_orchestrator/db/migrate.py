@@ -7,6 +7,8 @@ from pathlib import Path
 
 import psycopg
 
+from agents_orchestrator.db import migrate_backup_spec
+
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 LOCK_KEY = 0x6F72636853636D61  # fixed advisory-lock key ("orchScma")
 _NAME = re.compile(r"^(\d{4})_.+\.sql$")
@@ -43,6 +45,12 @@ def run_migrations(dsn: str, directory: Path = MIGRATIONS_DIR) -> list[str]:
                     conn.execute(path.read_text())
                     conn.execute("INSERT INTO schema_migrations (version) VALUES (%s)", (version,))
                 applied.append(version)
+            # Python step: the strict spec model needs the old cache blocks rewritten before any
+            # service reads a spec (idempotent; an unmapped row raises and blocks the start).
+            # Only on the complete schema: a partial run (tests) lacks the tables it reads.
+            if {version for version, _ in discover()} <= done | set(applied):
+                with conn.transaction():
+                    migrate_backup_spec.apply(conn)
         finally:
             conn.execute("SELECT pg_advisory_unlock(%s)", (LOCK_KEY,))
     return applied

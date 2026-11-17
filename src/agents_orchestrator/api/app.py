@@ -15,12 +15,13 @@ from psycopg_pool import AsyncConnectionPool
 from agents_orchestrator import __version__
 from agents_orchestrator.api import (
     admin,
-    admin_archives,  # noqa: F401  (registers its routes on admin.router)
+    admin_backups,  # noqa: F401  (registers its routes on admin.router)
+    admin_handoffs,  # noqa: F401  (registers its routes on admin.router)
     admin_relay,
     admin_specs,  # noqa: F401  (registers its routes on admin.router)
     agent,
-    archives,
     autoclose,
+    backups,
     chat,
     credential_sweep,
     errors,
@@ -159,6 +160,8 @@ def create_app(
     app.include_router(project_chat.router)
     app.include_router(admin.router)
     app.include_router(admin.session_router)
+    app.include_router(admin.reader_router)
+    app.include_router(admin.notes_router)
     app.include_router(proposal_routes.proposal_router)
     app.include_router(chat.router)
     app.include_router(tasks.router)
@@ -173,7 +176,7 @@ def create_app(
     app.include_router(projects.router)
     app.include_router(project_chat.main_router)
     app.include_router(templates.router)
-    app.include_router(archives.router)
+    app.include_router(backups.router)
     app.include_router(messages.router)
     app.include_router(streams.router)
     app.include_router(workspace.router)

@@ -16,13 +16,13 @@ from agents_orchestrator.preset_policy import (
 from agents_orchestrator.spec import SessionSpec, WrapperSettings
 
 
-@pytest.mark.parametrize("field", ["kube_cluster_access", "docker"])
+@pytest.mark.parametrize("field", ["kube_cluster_access", "docker", "retrospective"])
 def test_grant_turned_on_is_refused(field):
     assert human_only_changes({}, {field: True}) == [field]
     assert human_only_changes({field: False}, {field: True}) == [field]
 
 
-@pytest.mark.parametrize("field", ["kube_cluster_access", "docker"])
+@pytest.mark.parametrize("field", ["kube_cluster_access", "docker", "retrospective"])
 def test_grant_turned_off_or_removed_is_allowed(field):
     assert human_only_changes({field: True}, {field: False}) == []
     assert human_only_changes({field: True}, {}) == []
@@ -241,7 +241,7 @@ def test_namespace_grant_is_privileged_and_stripped():
         ("static", False, True),
         ("workdir", "a", "b"),
         ("pvc_size", "1Gi", "2Gi"),
-        ("cache", {"save_key": "a"}, {"save_key": "b"}),
+        ("backup", [{"name": "a"}], [{"name": "b"}]),
     ],
 )
 def test_fixed_changes_names_each_field(field, old, new):
@@ -250,7 +250,7 @@ def test_fixed_changes_names_each_field(field, old, new):
 
 
 def test_fixed_changes_unchanged_is_empty():
-    spec = {"replicas": 2, "max_replicas": 4, "workdir": "w", "pvc_size": "1Gi", "cache": {}}
+    spec = {"replicas": 2, "max_replicas": 4, "workdir": "w", "pvc_size": "1Gi", "backup": []}
     assert fixed_changes(spec, dict(spec)) == []
     assert fixed_changes({}, {}) == []
 
@@ -260,8 +260,8 @@ def test_fixed_changes_ignores_other_fields():
 
 
 def test_fixed_changes_sorted():
-    assert fixed_changes({}, {"workdir": "w", "pvc_size": "1Gi", "cache": {"save_key": "a"}}) == [
-        "cache",
+    assert fixed_changes({}, {"workdir": "w", "pvc_size": "1Gi", "backup": [{"name": "a"}]}) == [
+        "backup",
         "pvc_size",
         "workdir",
     ]
@@ -292,9 +292,9 @@ def test_fixed_changes_defaults_equal_absent():
 
 
 def test_fixed_changes_null_equals_absent():
-    assert fixed_changes({}, {"cache": None, "pvc_size": None}) == []
-    assert fixed_changes({"cache": None}, {}) == []
-    assert fixed_changes({"cache": {"save_key": "a"}}, {"cache": None}) == ["cache"]
+    assert fixed_changes({}, {"backup": None, "pvc_size": None}) == []
+    assert fixed_changes({"backup": None}, {}) == []
+    assert fixed_changes({"backup": [{"name": "a"}]}, {"backup": None}) == ["backup"]
 
 
 DEFAULTS = {
@@ -431,7 +431,7 @@ SECURITY = frozenset(
         "env",
         "any_mcp_config",
         "any_mcp_sources",
-        "cache",
+        "backup",
         "wrapper.hooks",
         "wrapper.mcp_servers",
         "wrapper.plugins",
@@ -499,7 +499,7 @@ def test_privileged_target_allows_non_security():
         "wrapper": {"turn_max_seconds": 600, "agent_commands": []},
     }
     assert ptc(stored, new) == []
-    assert ptc(stored, {**new, "cache": {"key": "x"}}) == ["cache"]
+    assert ptc(stored, {**new, "backup": [{"name": "x"}]}) == ["backup"]
 
 
 def test_tighten_autoclose():

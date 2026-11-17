@@ -36,7 +36,7 @@ from agents_orchestrator.preset_policy import (
     strip_grants,
 )
 from agents_orchestrator.settings import Settings
-from agents_orchestrator.spec import Ref, SessionSpec, default_cache_key
+from agents_orchestrator.spec import Ref, SessionSpec
 
 router = APIRouter(prefix="/api/v1")
 
@@ -100,7 +100,7 @@ async def validated_spec(
     preset_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """`check_spec` with the stored spec's exemptions (a model or image that left the allowlist
-    stays accepted while unchanged) and the preset's derived cache key; returns the spec as it is
+    stays accepted while unchanged); returns the spec as it is
     stored (no defaults filled). No agent guard runs here."""
     stored_spec = None
     if stored is not None:
@@ -108,8 +108,7 @@ async def validated_spec(
             stored_spec = SessionSpec.model_validate(stored)
         except ValidationError:
             stored_spec = None
-    derived = default_cache_key(preset_id) if preset_id is not None else None
-    await run_in_threadpool(check_spec, spec, settings, stored_spec, derived_cache_key=derived)
+    await run_in_threadpool(check_spec, spec, settings, stored_spec)
     return spec.model_dump(mode="json", exclude_unset=True)
 
 
@@ -645,16 +644,6 @@ async def delete_preset(preset_id: uuid.UUID, request: Request, pool: Pool) -> R
     return Response(status_code=204)
 
 
-def _without_derived_key(spec: dict[str, Any], preset_id: uuid.UUID) -> dict[str, Any]:
-    """The copy derives its own keys, so keys equal to the source's derived key are dropped."""
-    cache = spec.get("cache")
-    derived = default_cache_key(preset_id)
-    if isinstance(cache, dict) and derived in (cache.get("restore_key"), cache.get("save_key")):
-        keys = ("restore_key", "save_key")
-        return {**spec, "cache": {k: v for k, v in cache.items() if k not in keys}}
-    return spec
-
-
 async def copy(
     conn,
     preset_id: uuid.UUID,
@@ -671,7 +660,7 @@ async def copy(
     if source is None or (superleader and not source.superleader_manageable):
         raise not_found("preset")
     project = source.project if project is None else project
-    spec = _without_derived_key(source.spec, preset_id)
+    spec = source.spec
     if superleader:
         spec, removed = strip_grants(spec)
         if request is not None:

@@ -809,7 +809,7 @@ def test_wrapper_settings_mapped():
     assert s["max_restarts"] == 3
     assert s["restart_continue_prompt"] == "continue please"
     assert s["commands"] == {
-        "client": ["compact", "clear"],
+        "client": ["compact", "clear", "reload-skills"],
         "agent": ["compact", "context"],
         "permission_hold_seconds": 1800,
         "dialog_auto_dismiss_seconds": 300,
@@ -857,7 +857,7 @@ def test_no_wrapper_block_renders_unchanged():
         "restart_continue_prompt": "Claude was restarted. Continue the task where you left off.",
         "interrupt_settle_seconds": 20,
         "commands": {
-            "client": ["compact", "clear"],
+            "client": ["compact", "clear", "reload-skills"],
             "permission_hold_seconds": 1800,
             "dialog_auto_dismiss_seconds": 300,
         },
@@ -923,14 +923,14 @@ def test_hive_with_agent_commands_validates(tmp_path, monkeypatch):
     path.write_text(by_kind(objs)["ConfigMap"]["data"]["config.yaml"])
     commands = load_config(path).sessions.commands
     assert commands.agent == ["compact"]
-    assert commands.client == ["compact", "clear"]
+    assert commands.client == ["compact", "clear", "reload-skills"]
 
 
 def test_client_commands_rendered_without_agent_commands():
     # the orchestrator's own `compact` and `clear` commands need the client allowlist
     cfg = wrapper_cfg({})
     assert cfg["sessions"]["commands"] == {
-        "client": ["compact", "clear"],
+        "client": ["compact", "clear", "reload-skills"],
         "permission_hold_seconds": 1800,
         "dialog_auto_dismiss_seconds": 300,
     }
@@ -1011,6 +1011,21 @@ def test_system_append_has_room_prompt():
     sl = config_of(render.render_session(leader, settings, TOKENS))
     assert render.SUPERLEADER_ROOM_PROMPT in sl["prompts"]["system_append"]
     assert render.PROJECT_ROOM_PROMPT not in sl["prompts"]["system_append"]
+
+
+def test_system_append_tells_to_save_backups_after_editing():
+    settings = make_settings(agent_api_url=AGENT_URL)
+    entry = {"root": "claude", "path": "skills", "mode": "both", "name": "skills/{{ project }}"}
+    cfg = config_of(render.render_session(make_session(backup=[entry]), settings, TOKENS))
+    text = cfg["prompts"]["system_append"]
+    assert render.BACKUP_SAVE_PROMPT in text
+    assert "orchestrator_backup_save" in text and "skill, a rule or a script" in text
+    # nothing to save without a backup entry, and no agent relay means no tool
+    plain = config_of(render.render_session(make_session(), settings, TOKENS))
+    assert render.BACKUP_SAVE_PROMPT not in plain["prompts"]["system_append"]
+    off = make_settings(agent_api_url="")
+    bare = config_of(render.render_session(make_session(backup=[entry]), off, TOKENS))
+    assert render.BACKUP_SAVE_PROMPT not in bare["prompts"]["system_append"]
 
 
 def test_room_prompt_absent_without_agent_api():
@@ -1146,3 +1161,84 @@ def test_render_pressure_only_for_default_image():
     assert _guard_cfg()["pressure"] == {"enabled": True}
     assert _guard_cfg(image=IMAGE)["pressure"] == {"enabled": True}
     assert "pressure" not in _guard_cfg(image="harbor.example/containers/ccw:0.14.0")
+
+
+def test_subagent_allowed_rendered_for_every_session(tmp_path, monkeypatch):
+    """User decision m1223: every session renders its own read tools (READ_ONLY_TOOLS within its
+    allow list) as `claude.subagent_allowed_tools`, never a write tool; the wrapper loads it."""
+    prefix = "mcp__any-mcp__orchestrator_"
+    seen = {}
+    for name, spec in {
+        "alone": {"replicas": 1},
+        "hive": {"replicas": 2},
+        "superleader": {"replicas": 1, "session_messaging": True},
+        "retro": {"replicas": 1, "retrospective": True},
+    }.items():
+        session = make_session(**spec)
+        settings = make_settings(agent_api_url=AGENT_URL)
+        cfg = config_of(render.render_session(session, settings, TOKENS))
+        tools = cfg["claude"]["subagent_allowed_tools"]
+        allow = on_start.orchestrator_allow(session.spec, mindmap=settings.mindmap_available)
+        assert tools == sorted(prefix + t for t in on_start.READ_ONLY_TOOLS & set(allow)), name
+        assert all(t.removeprefix(prefix) in on_start.READ_ONLY_TOOLS for t in tools), name
+        assert prefix + "task_list" in tools and prefix + "task_create" not in tools, name
+        assert cfg["claude"]["main_agent_only_tools"] == [prefix + "*"]
+        seen[name] = {t.removeprefix(prefix) for t in tools}
+    assert "history_search" not in seen["alone"] | seen["hive"]
+    assert "history_search" in seen["retro"] and "history_search" in seen["superleader"]
+    assert "backups_copy" not in seen["retro"]
+    monkeypatch.setenv("CCW_AUTH_TOKEN", TOKENS.auth)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth")
+    monkeypatch.setenv("POD_NAME", "agent-alpha-0")
+    objs = _render(make_session(replicas=1, retrospective=True))
+    path = tmp_path / "config.yaml"
+    path.write_text(by_kind(objs)["ConfigMap"]["data"]["config.yaml"])
+    assert prefix + "history_get" in load_config(path).claude.subagent_allowed_tools
+
+
+def test_subagent_allowed_absent_without_plugin_or_on_another_image():
+    no_url = config_of(render.render_session(make_session(), make_settings(), TOKENS))
+    assert "subagent_allowed_tools" not in no_url["claude"]
+    other = config_of(_render(make_session(image="other.example/agent:1.0.0")))
+    assert "subagent_allowed_tools" not in other["claude"]
+
+
+def test_render_claude_mount_and_wrapper_option():
+    objs = render.render_session(make_session(), make_settings(), TOKENS)
+    mounts = container_of(objs)["volumeMounts"]
+    assert {
+        "name": render.WORKSPACE_VOLUME,
+        "mountPath": "/claude",
+        "subPath": "claude",
+    } in mounts  # read-write: the agent edits skills in place
+    cfg = config_of(objs)
+    assert cfg["paths"]["shared_claude_dir"] == "/claude"
+    # the wrapper validates the option (it links <config>/skills and rules to it)
+    assert render.CLAUDE_ROOT == "/claude"
+
+
+def test_shared_claude_dir_is_distinct_from_the_session_config_dirs():
+    """The wrapper has no guard: a shared dir equal to, or containing or inside, the sessions
+    root (where each session config dir lives) would wipe or loop the skills links."""
+    cfg = config_of(render.render_session(make_session(), make_settings(), TOKENS))
+    shared = Path(cfg["paths"]["shared_claude_dir"])
+    for other in (cfg["paths"]["sessions_root"], cfg["paths"]["workdir_root"]):
+        other_path = Path(other)
+        assert shared != other_path
+        assert other_path not in shared.parents and shared not in other_path.parents
+    # and no volume mount of the agent container nests with the claude mount
+    mounts = [
+        Path(m["mountPath"])
+        for m in container_of(render.render_session(make_session(), make_settings(), TOKENS))[
+            "volumeMounts"
+        ]
+        if m["mountPath"] != "/claude"
+    ]
+    for path in mounts:
+        assert shared not in path.parents and path not in shared.parents and path != shared
+
+
+def test_client_commands_include_reload_skills():
+    assert render.CLIENT_COMMANDS == ("compact", "clear", "reload-skills")
+    cfg = config_of(render.render_session(make_session(), make_settings(), TOKENS))
+    assert "reload-skills" in cfg["sessions"]["commands"]["client"]

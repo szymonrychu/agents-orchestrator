@@ -276,6 +276,14 @@ kubectl -n "$NS" create secret generic postgres-credentials --from-literal="pass
 kubectl -n "$NS" apply -f e2e/manifests/postgres.yaml
 kubectl -n "$NS" rollout status deployment/postgres --timeout=300s
 
+log "the e2e S3 store (backups)"
+kubectl -n "$NS" create secret generic s3-credentials \
+  --from-literal="AWS_ACCESS_KEY_ID=e2es3key" --from-literal="AWS_SECRET_ACCESS_KEY=$(gen_secret)"
+kubectl -n "$NS" apply -f e2e/manifests/s3.yaml
+kubectl -n "$NS" rollout status deployment/s3 --timeout=300s
+kubectl -n "$NS" exec deployment/s3 -- python -c \
+  "import urllib.request as u; u.urlopen(u.Request('http://127.0.0.1:5000/orch-e2e', method='PUT'))"
+
 log "helm install $RELEASE"
 helm install "$RELEASE" chart/agents-orchestrator -n "$NS" -f e2e/values-kind.yaml \
   --set-string "env.ORCH_PVC_STORAGE_CLASS=$STORAGE_CLASS" \

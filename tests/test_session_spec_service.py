@@ -25,7 +25,6 @@ from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.db import sessions as sessions_repo
 from agents_orchestrator.spec import (
     SessionSpec,
-    default_cache_key,
     fill_resource_defaults,
     legacy_context,
 )
@@ -197,31 +196,6 @@ async def test_own_privileged_session_replaces_mcp_args(pool, settings, superlea
     assert await _preset_row(pool, preset_id) == preset_before
 
 
-@pytest.mark.parametrize("cache", ["deleted", "attached"])
-async def test_preset_cache_key_session_patches(pool, settings, cache):
-    """A session whose cache keys are its preset's derived key patches its MCP args, with the
-    preset attached or deleted since (preset_id NULL)."""
-    me = await alone(pool, f"svc-cache-{cache}")
-    if cache == "attached":
-        preset_id = await attach_preset(pool, me.id)
-    else:
-        preset_id = uuid.uuid4()
-    key = default_cache_key(preset_id)
-    extra = {
-        "cache": {"restore_key": key, "save_key": key},
-        "wrapper": {"mcp_servers": {"grafana": GRAFANA}},
-    }
-    await _seed(pool, settings, me, extra)
-    assert (await _row(pool, me.id))["preset_id"] == (preset_id if cache == "attached" else None)
-    before = await _row(pool, me.id)
-    view = await _patch(
-        pool, settings, me, me, {"wrapper": {"mcp_servers": {"grafana": {"args": NEW_ARGS}}}}
-    )
-    assert view.spec.wrapper.mcp_servers["grafana"].args == NEW_ARGS
-    assert view.spec.cache.restore_key == key
-    assert (await _row(pool, me.id))["generation"] == before["generation"] + 1
-
-
 async def test_empty_patch_is_a_no_op(pool, settings):
     me = await alone(pool, "svc-empty")
     await _seed(pool, settings, me, {"wrapper": {"mcp_servers": {"grafana": GRAFANA}}})
@@ -373,7 +347,7 @@ FIXED = [
     ("static", {"static": True}),
     ("workdir", {"workdir": "other"}),
     ("pvc_size", {"pvc_size": "5Gi"}),
-    ("cache", {"cache": {"restore_key": "mine", "save_key": "mine"}}),
+    ("backup", {"backup": [{"root": "claude", "path": "x", "mode": "both", "name": "mine"}]}),
 ]
 
 

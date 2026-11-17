@@ -429,12 +429,14 @@ cache:
     accessKeyIdKey: AWS_ACCESS_KEY_ID
     # Key of the secret access key in existingSecret.
     secretAccessKeyKey: AWS_SECRET_ACCESS_KEY
-    # The api pod's own key pair, for the archives list, download, cleanup preview and delete
-    # routes, read from its own Secret reference by the api container only. The orchestrator code
-    # uses it for list, get and delete only (never a put). It may name the same Secret as
-    # existingSecret when the store has a single identity (least privilege is then enforced in
-    # code, not by the store); a separate store identity is the stronger setup. Empty leaves those
-    # routes answering 503 and renders no ORCH_CACHE_S3_API_* variable.
+    # The api pod's own key pair, for the backups list, versions, manifest, download, copy, delete
+    # and cleanup preview routes, read from its own Secret reference by the api container only.
+    # The copy route is a server-side CopyObject, so the store policy of this key needs
+    # s3:ListBucket, s3:GetObject and s3:DeleteObject on the bucket and s3:PutObject under
+    # <prefix>b/ (without it the copy answers 502 storage_error); the reconciler key needs the
+    # same. It may name the same Secret as existingSecret when the store has a single identity;
+    # a separate store identity is the stronger setup. Empty leaves those routes answering 503
+    # and renders no ORCH_CACHE_S3_API_* variable.
     api:
       existingSecret: ""
       accessKeyIdKey: AWS_ACCESS_KEY_ID
@@ -446,8 +448,9 @@ cache:
   maxBytes: 5368709120
   # Deadline of one cache Job in seconds (60 to 86400).
   timeoutSeconds: 1800
-  # Cleanup sweep of stale archives, run by the reconciler. dryRun only plans and logs: set it
-  # false after reading the preview (GET /api/v1/cache/cleanup/preview). An archive is deleted
+  # Cleanup sweep of stale archives and orphan objects, run by the reconciler. dryRun only plans and
+  # logs and stays true until the object migration (backupMigration) has run and restores are
+  # verified: set it false after reading the preview (GET /api/v1/backups/cleanup/preview). An archive is deleted
   # only when it is beyond the newest keepNewest of its group, older than retentionDays and than
   # graceSeconds, and referenced by no session. These values are only the seed: they apply until
   # the policy is saved in Settings > Backups, and then the database row wins.
@@ -460,3 +463,15 @@ cache:
     intervalSeconds: 21600
     # Archives younger than this are never deleted; empty means timeoutSeconds + 600.
     graceSeconds: ""
+
+# One-off migration to named, versioned backups (S-68): a Helm pre-upgrade hook Job
+# that runs `orch migrate` (init container) and `orch backup migrate` with the reconciler's S3
+# key pair. Needs cache.s3.bucket. Enable it for the one release that switches to backups, with
+# the old api and reconciler scaled to 0 and no session mid-restore or mid-save, then disable it
+# again. deleteOld runs `orch backup migrate --delete-old` instead (legacy objects that have a
+# migration row, never transcripts), after restores were verified.
+backupMigration:
+  enabled: false
+  deleteOld: false
+  # Deadline of the Job in seconds.
+  activeDeadlineSeconds: 3600

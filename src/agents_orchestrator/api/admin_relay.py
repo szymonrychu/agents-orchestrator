@@ -1,13 +1,16 @@
 """Admin relay routes of the agent port: webhooks, schedules, chats and history (D10).
 
-Each route maps 1:1 to an upstream admin route and is registered on the admin router, so the
-superleader gate and the audit cover it. The gate runs first, then the upstream must be configured
+Each route maps 1:1 to an upstream admin route and is registered on an admin router, so a gate
+and the audit cover it: the superleader gate, except the `READER_ROUTES` (the reader gate: a
+superleader or a retrospective session, S-68) and the room notes PUT (the notes writer gate,
+decision 775). The gate runs first, then the upstream must be configured
 (503 `upstream_unconfigured`), then the body is capped at 256 KiB (413 `payload_too_large`). The
 forwarded request carries only the upstream's service bearer and the caller's `X-Orch-Session`,
-`X-Orch-Slug` and `X-Orch-Projects` (see `forward`). The relay is superleader-only, so
-`X-Orch-Projects` is always `*` (`scope.scope_of`, projects plan 3.3). The upstream status and JSON
-body come back unchanged, except for webhook credentials (D9, `credentials` below). A failed call or
-a non-JSON answer is 503 `upstream_unavailable`. The upstream validates the bodies.
+`X-Orch-Slug` and `X-Orch-Projects` (see `forward`). `X-Orch-Projects` is `*` for a superleader,
+and for a retrospective session on a GET (`scope.scope_of`, projects plan 3.3). The upstream
+status and JSON body come back unchanged, except for webhook credentials (D9, `credentials`
+below). A failed call or a non-JSON answer is 503 `upstream_unavailable`. The upstream validates
+the bodies.
 
 The superleader READS every object (decision 388, T-120): GET routes are forwarded as is and
 lists are not filtered (objects without a preset are listed too). WRITES (every method other than
@@ -70,6 +73,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -82,11 +86,20 @@ from pydantic import SecretStr
 
 from agents_orchestrator.api import chat_requests, secret_store, vault_client, vault_refs
 from agents_orchestrator.api import forward as forward_core
-from agents_orchestrator.api.admin import FORBIDDEN, caller_of, router, touched
+from agents_orchestrator.api.admin import (
+    FORBIDDEN,
+    NotesWriter,
+    caller_of,
+    notes_router,
+    reader_router,
+    router,
+    touched,
+)
 from agents_orchestrator.api.errors import ApiError, not_found, not_manageable
 from agents_orchestrator.api.scope import projects_header
 from agents_orchestrator.api.sessions import Cfg
 from agents_orchestrator.db import presets as presets_repo
+from agents_orchestrator.db import sessions as sessions_repo
 from agents_orchestrator.preset_policy import privileged
 from agents_orchestrator.settings import Settings
 
@@ -128,6 +141,8 @@ _CHATS = [
     ("GET", "/rooms/{room_id}/messages", 200),
     ("PUT", "/rooms/{room_id}/settings", 200),
     ("POST", "/rooms/{room_id}/allow", 200),
+    ("GET", "/rooms/{room_id}/notes", 200),
+    ("PUT", "/rooms/{room_id}/notes", 200),
     ("GET", "/users", 200),
     ("POST", "/room-requests", 201),
     ("GET", "/room-requests/{request_id}", 200),
@@ -152,6 +167,22 @@ SERVICES: dict[str, tuple[str, str, str, list[tuple[str, str, int]]]] = {
     "usage": ("/usage", "/usage/v1", "usage admin relay", _USAGE),
 }
 STATE_ATTR = "admin_http"
+# The relay routes behind the retrospective read tools (S-68 step 13): the reader gate admits a
+# superleader or a retrospective session; every other relay route stays superleader-only.
+READER_ROUTES: frozenset[tuple[str, str, str]] = frozenset(
+    {
+        ("connector", "GET", "/rooms"),
+        ("connector", "GET", "/rooms/{room_id}"),
+        ("connector", "GET", "/rooms/{room_id}/messages"),
+        ("connector", "GET", "/rooms/{room_id}/notes"),
+        ("history", "GET", "/sessions"),
+        ("history", "GET", "/sessions/{session_id}"),
+        ("history", "GET", "/sessions/{session_id}/records"),
+        ("usage", "GET", "/history"),
+    }
+)
+# The room notes update: the notes writer gate (decision 775).
+NOTES_ROUTE = ("connector", "PUT", "/rooms/{room_id}/notes")
 
 
 @dataclass(frozen=True)
@@ -203,6 +234,8 @@ GUARDS: dict[tuple[str, str, str], Guard] = {
     ("connector", "GET", "/rooms/{room_id}/messages"): Guard(),
     ("connector", "PUT", "/rooms/{room_id}/settings"): Guard(),
     ("connector", "POST", "/rooms/{room_id}/allow"): Guard(),
+    ("connector", "GET", "/rooms/{room_id}/notes"): Guard(),
+    ("connector", "PUT", "/rooms/{room_id}/notes"): Guard(),
     ("connector", "GET", "/users"): Guard(),
     ("connector", "POST", "/room-requests"): Guard(ask_decision=True),
     ("connector", "GET", "/room-requests/{request_id}"): Guard(),
@@ -326,7 +359,7 @@ async def _upstream_json(request: Request, settings: Settings, service: str, pat
         None,
         str(session.id),
         session.slug,
-        extra_headers=projects_header(session),
+        extra_headers=projects_header(session, "GET"),
     )
     if status == 404:
         raise not_found("object")
@@ -514,7 +547,7 @@ def _handler(service: str, method: str, template: str) -> Callable[..., Awaitabl
             str(session.id),
             session.slug,
             empty_ok=True,
-            extra_headers=projects_header(session),
+            extra_headers=projects_header(session, method),
         )
         if guard.ask_decision and status == 201:
             row = await chat_requests.on_created(request, settings, json.loads(content))
@@ -565,10 +598,47 @@ def _relay_responses(service: str, method: str, template: str) -> dict[int | str
     return responses
 
 
+def _router_for(key: tuple[str, str, str]):
+    """The admin router (and so the gate) of one relay route. The step 12 and 14 relays sat on
+    the superleader router; step 13 moves the retrospective reads to the reader gate and the
+    notes update to the notes writer gate."""
+    if key in READER_ROUTES:
+        return reader_router
+    if key == NOTES_ROUTE:
+        return notes_router
+    return router
+
+
+def _uuid(value: Any) -> uuid.UUID | None:
+    try:
+        return None if value is None else uuid.UUID(str(value))
+    except ValueError:
+        return None
+
+
+async def room_preset(request: Request, settings: Settings, room_id: str) -> uuid.UUID | None:
+    """The preset a chat room routes to: the preset of the session bound to it when that
+    session is known and has one, else the room's configured (effective) preset; None when it
+    has neither. An unlisted room is 404."""
+    room = await _upstream_json(
+        _bare(request), settings, "connector", "/rooms/" + _segment(room_id)
+    )
+    room = room if isinstance(room, dict) else {}
+    binding = room.get("binding")
+    bound = _uuid(binding.get("session_id")) if isinstance(binding, dict) else None
+    if bound is not None:
+        async with request.app.state.pool.connection() as conn:
+            session = await sessions_repo.get(conn, bound)
+        if session is not None and session.preset_id is not None:
+            return session.preset_id
+    return _uuid(room.get("effective_preset_id") or room.get("preset_id"))
+
+
 def _register() -> None:
     for service, (relay_prefix, _, _, routes) in SERVICES.items():
         for method, template, success in routes:
-            router.add_api_route(
+            key = (service, method, template)
+            _router_for(key).add_api_route(
                 relay_prefix + template,
                 _handler(service, method, template),
                 methods=[method],
@@ -578,6 +648,7 @@ def _register() -> None:
                 operation_id="admin_" + service + "_" + method.lower() + _slug(template),
                 summary=f"{method} {service} {template}",
                 tags=["admin"],
+                dependencies=[NotesWriter] if key == NOTES_ROUTE else None,
             )
 
 

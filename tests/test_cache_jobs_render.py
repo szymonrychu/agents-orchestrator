@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fnmatch
 import json
 import uuid
 from datetime import UTC, datetime
@@ -14,12 +13,16 @@ from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.k8s import labels, render
 from agents_orchestrator.reconciler.cache import (
     CACHE_LABEL,
+    RESOLVE_PRE,
+    RESTORE_PRE,
+    SAVE,
+    TX_SAVE,
+    job_name,
     render_cache_job,
-    restore_job_name,
-    save_job_name,
+    render_resolve_job,
 )
 from agents_orchestrator.settings import Settings
-from agents_orchestrator.spec import SESSIONS_EXCLUDE, SessionSpec
+from agents_orchestrator.spec import SessionSpec
 from agents_orchestrator.tokens import SessionTokens
 
 AGENT_IMAGE = "harbor.example/containers/claude-code-wrapper:ca2ddf3"
@@ -27,7 +30,23 @@ SPEC_IMAGE = "harbor.example/containers/custom-agent:1"
 CACHE_IMAGE = "harbor.example/containers/agents-orchestrator:abc1234"
 ACCESS_KEY = "TESTIDEXAMPLEACCESSKEY"
 SECRET_KEY = "s3cr3t-example-secret-access-key"
-URL = "https://s3.example/bucket/workspace-cache/k.tar.zst?X-Amz-Signature=abc"
+URL = "https://s3.example/bucket/workspace-cache/b/n/k.tar.zst?X-Amz-Signature=abc"
+
+
+def entries(root: str = "workspace") -> list[dict[str, Any]]:
+    return [
+        {
+            "index": 0,
+            "root": root,
+            "root_dir": "/workdir/repo" if root == "workspace" else "/claude",
+            "path": ".",
+            "exclude": ["node_modules", "*.log"],
+            "url": URL,
+            "name": "n",
+        }
+    ]
+
+
 TOKENS = SessionTokens(auth="a" * 32, peer="p" * 32, agent="g" * 32)
 
 
@@ -56,11 +75,15 @@ def make_session(slug: str = "alpha", **spec: Any) -> Session:
         "image": SPEC_IMAGE,
         "workdir": "repo",
         "env": {"SPEC_VAR": {"value": "x"}, "AWS_PROFILE": {"value": "agent"}},
-        "cache": {
-            "restore_key": "preset-0123456789abcdef",
-            "save_key": "preset-0123456789abcdef",
-            "exclude": ["node_modules", "*.log"],
-        },
+        "backup": [
+            {
+                "root": "workspace",
+                "path": ".",
+                "mode": "both",
+                "name": "proj/workspace",
+                "exclude": ["node_modules", "*.log"],
+            }
+        ],
         **spec,
     }
     return Session(
@@ -97,11 +120,15 @@ def walk(obj: Any):
 
 def test_restore_job_image_and_command():
     s, settings = make_session(), make_settings()
-    job = render_cache_job(s, settings, "restore", URL)
+    job = render_cache_job(s, settings, RESTORE_PRE, entries())
     assert job["apiVersion"] == "batch/v1" and job["kind"] == "Job"
-    assert job["metadata"]["name"] == restore_job_name("alpha") == "agent-alpha-cache-restore"
+    assert (
+        job["metadata"]["name"]
+        == job_name("alpha", RESTORE_PRE)
+        == "agent-alpha-backup-restore-pre"
+    )
     assert job["metadata"]["namespace"] == settings.namespace
-    want_labels = {**labels.session_labels("alpha"), CACHE_LABEL: "restore"}
+    want_labels = {**labels.session_labels("alpha"), CACHE_LABEL: "backup-restore-pre"}
     assert CACHE_LABEL == "agents.szymonrichert.pl/cache"
     assert job["metadata"]["labels"] == want_labels
     assert job["spec"]["template"]["metadata"]["labels"] == want_labels
@@ -112,48 +139,26 @@ def test_restore_job_image_and_command():
     # Never the session's image, wherever it would appear.
     assert SPEC_IMAGE not in json.dumps(job) and AGENT_IMAGE not in json.dumps(job)
 
-    save = render_cache_job(s, settings, "save", URL)
-    assert save["metadata"]["name"] == save_job_name("alpha") == "agent-alpha-cache-save"
-    assert save["metadata"]["labels"][CACHE_LABEL] == "save"
+    save = render_cache_job(s, settings, SAVE, entries())
+    assert save["metadata"]["name"] == job_name("alpha", SAVE) == "agent-alpha-backup-save"
+    assert save["metadata"]["labels"][CACHE_LABEL] == "backup-save"
     assert container_of(save)["image"] == CACHE_IMAGE
     assert container_of(save)["command"] == ["orch", "cache", "save"]
 
-    unknown: Any = "purge"
-    with pytest.raises(ValueError):
-        render_cache_job(s, settings, unknown, URL)
-    with pytest.raises(ValueError):
-        render_cache_job(make_session(cache=None), settings, "restore", URL)
 
-
-@pytest.mark.parametrize("action", ["restore", "save"])
-def test_sessions_save_excludes_credentials(action):
-    job = render_cache_job(make_session(), make_settings(), action, URL, "sessions")
-    env = {e["name"]: e["value"] for e in container_of(job)["env"]}
-    exclude = json.loads(env["CACHE_EXCLUDE"])
-    assert exclude == list(SESSIONS_EXCLUDE)
-    # a top-level file and a nested one both match a pattern
-    assert any(fnmatch.fnmatchcase(".credentials.json", p) for p in exclude)
-    assert any(fnmatch.fnmatchcase("ses/config/.credentials.json", p) for p in exclude)
-    assert not any(fnmatch.fnmatchcase("ses/config/projects/p/t.jsonl", p) for p in exclude)
-    # the workdir target keeps the spec's own list
-    workdir = render_cache_job(make_session(), make_settings(), action, URL)
-    wenv = {e["name"]: e["value"] for e in container_of(workdir)["env"]}
-    assert json.loads(wenv["CACHE_EXCLUDE"]) == ["node_modules", "*.log"]
-
-
-@pytest.mark.parametrize("action", ["restore", "save"])
-def test_job_env_has_no_credentials(action):
+@pytest.mark.parametrize("key", [RESTORE_PRE, SAVE])
+def test_job_env_has_no_credentials(key):
     s, settings = make_session(), make_settings()
-    job = render_cache_job(s, settings, action, URL)
+    job = render_cache_job(s, settings, key, entries())
     c = container_of(job)
+    state = [{"name": "CACHE_STATE_DIR", "value": "/backup-state"}] if key == RESTORE_PRE else []
     assert c["env"] == [
-        {"name": "CACHE_URL", "value": URL},
-        {"name": "CACHE_DIR", "value": "/workdir/repo"},
+        {"name": "CACHE_ENTRIES", "value": json.dumps(entries())},
         {"name": "CACHE_MAX_BYTES", "value": "1073741824"},
-        {"name": "CACHE_EXCLUDE", "value": json.dumps(["node_modules", "*.log"])},
         {"name": "CACHE_SCRATCH", "value": "/scratch"},
         {"name": "CACHE_VERIFY_TLS", "value": "true"},
         {"name": "HOME", "value": "/tmp"},
+        *state,
     ]
     assert "envFrom" not in c
     keys = [k for k, _ in walk(job)]
@@ -161,23 +166,32 @@ def test_job_env_has_no_credentials(action):
     dumped = json.dumps(job)
     for leaked in (ACCESS_KEY, SECRET_KEY, "SPEC_VAR", "AWS_"):
         assert leaked not in dumped
-    # Exactly one URL: the one given.
+    # Exactly one URL: the entry's.
     assert dumped.count("https://") == 1
 
 
 @pytest.mark.parametrize(("verify", "value"), [(True, "true"), (False, "false")])
 def test_job_env_carries_verify_tls(verify, value):
-    job = render_cache_job(make_session(), make_settings(cache_s3_verify_tls=verify), "save", URL)
+    job = render_cache_job(
+        make_session(), make_settings(cache_s3_verify_tls=verify), SAVE, entries()
+    )
     env = {e["name"]: e["value"] for e in container_of(job)["env"]}
     assert env["CACHE_VERIFY_TLS"] == value
 
 
-def test_save_job_volumes():
+def test_job_volumes_mount_claude_workdir_and_state_for_restores_only():
     s, settings = make_session(), make_settings()
-    save = render_cache_job(s, settings, "save", URL)
     pvc = labels.object_names("alpha")["pvc"]
+    claude = {"name": render.WORKSPACE_VOLUME, "mountPath": "/claude", "subPath": "claude"}
+    state = {
+        "name": render.WORKSPACE_VOLUME,
+        "mountPath": "/backup-state",
+        "subPath": "backup-state",
+    }
+    save = render_cache_job(s, settings, SAVE, entries())
     assert container_of(save)["volumeMounts"] == [
         {**render.workdir_mount(s.spec), "readOnly": True},
+        {**claude, "readOnly": True},
         {"name": "tmp", "mountPath": "/tmp"},
         {"name": "scratch", "mountPath": "/scratch"},
     ]
@@ -187,16 +201,18 @@ def test_save_job_volumes():
         {"name": "scratch", "emptyDir": {"sizeLimit": "1073741824"}},
     ]
 
-    restore = render_cache_job(s, settings, "restore", URL)
+    restore = render_cache_job(s, settings, RESTORE_PRE, entries())
     assert container_of(restore)["volumeMounts"] == [
         render.workdir_mount(s.spec),
+        claude,
+        state,
         {"name": "tmp", "mountPath": "/tmp"},
     ]
     assert pod_of(restore)["volumes"] == [
         {"name": render.WORKSPACE_VOLUME, "persistentVolumeClaim": {"claimName": pvc}},
         {"name": "tmp", "emptyDir": {}},
     ]
-    # The only PVC either Job mounts is the session's workspace; nothing else from the host.
+    # The only PVC any Job mounts is the session's workspace; nothing else from the host.
     for job in (save, restore):
         claims = [v for k, v in walk(job) if k == "persistentVolumeClaim"]
         assert claims == [{"claimName": pvc}]
@@ -204,9 +220,31 @@ def test_save_job_volumes():
             assert set(vol) <= {"name", "persistentVolumeClaim", "emptyDir"}
 
 
-@pytest.mark.parametrize("action", ["restore", "save"])
-def test_job_pod_hardened(action):
-    job = render_cache_job(make_session(), make_settings(), action, URL)
+def test_resolve_job_reads_the_workdir_only():
+    s, settings = make_session(), make_settings()
+    job = render_resolve_job(s, settings, RESOLVE_PRE, [("package-lock.json", 12)])
+    c = container_of(job)
+    assert c["command"] == ["orch", "cache", "resolve"]
+    assert c["volumeMounts"] == [
+        {**render.workdir_mount(s.spec), "readOnly": True},
+        {"name": "tmp", "mountPath": "/tmp"},
+    ]
+    request = json.loads({e["name"]: e["value"] for e in c["env"]}["CACHE_RESOLVE"])
+    assert request == [
+        {"root_dir": "/workdir/repo", "path": "package-lock.json", "length": 12, "exclude": []}
+    ]
+    assert job["metadata"]["labels"][CACHE_LABEL] == "backup-resolve-pre"
+
+
+def test_transcripts_save_job_names():
+    job = render_cache_job(make_session(), make_settings(), TX_SAVE, entries("sessions"))
+    assert job["metadata"]["name"] == "agent-alpha-sessions-save"
+    assert container_of(job)["command"] == ["orch", "cache", "save"]
+
+
+@pytest.mark.parametrize("key", [RESTORE_PRE, SAVE])
+def test_job_pod_hardened(key):
+    job = render_cache_job(make_session(), make_settings(), key, entries())
     pod = pod_of(job)
     assert pod["restartPolicy"] == "Never"
     assert pod["automountServiceAccountToken"] is False
@@ -225,13 +263,15 @@ def test_job_pod_hardened(action):
         "allowPrivilegeEscalation": False,
         "capabilities": {"drop": ["ALL"]},
     }
-    plain = render_cache_job(make_session(), make_settings(image_pull_secret=""), action, URL)
+    plain = render_cache_job(make_session(), make_settings(image_pull_secret=""), key, entries())
     assert "imagePullSecrets" not in pod_of(plain)
 
 
-@pytest.mark.parametrize("action", ["restore", "save"])
-def test_job_limits(action):
-    job = render_cache_job(make_session(), make_settings(cache_timeout_seconds=1234), action, URL)
+@pytest.mark.parametrize("key", [RESTORE_PRE, SAVE])
+def test_job_limits(key):
+    job = render_cache_job(
+        make_session(), make_settings(cache_timeout_seconds=1234), key, entries()
+    )
     assert job["spec"]["backoffLimit"] == 2
     assert job["spec"]["activeDeadlineSeconds"] == 1234
     assert "ttlSecondsAfterFinished" not in job["spec"]

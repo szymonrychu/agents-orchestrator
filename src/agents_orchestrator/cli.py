@@ -232,7 +232,11 @@ def _cmd_bench(args: argparse.Namespace) -> int:
 
 
 def _configure_cache(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("action", choices=["restore", "save"], help="direction of the transfer")
+    parser.add_argument(
+        "action",
+        choices=["restore", "save", "resolve"],
+        help="direction of the transfer, or resolve digests",
+    )
 
 
 def _cmd_cache(args: argparse.Namespace) -> int:
@@ -241,8 +245,105 @@ def _cmd_cache(args: argparse.Namespace) -> int:
 
     from agents_orchestrator.cache import transfer
 
-    run = transfer.restore if args.action == "restore" else transfer.save
+    if args.action == "resolve":
+        return transfer.resolve(os.environ)
+    run = transfer.restore_entries if args.action == "restore" else transfer.save_entries
     return run(os.environ)
+
+
+def _configure_backup(parser: argparse.ArgumentParser) -> None:
+    sub = parser.add_subparsers(dest="backup_command", required=True, metavar="ACTION")
+    migrate = sub.add_parser(
+        "migrate", help="move cache specs and archives to versioned backups (one-off)"
+    )
+    mode = migrate.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print one line per stored spec and UNMAPPED rows; exit 1 when any is unmapped",
+    )
+    mode.add_argument(
+        "--add-entries",
+        action="store_true",
+        help="add the skills, rules and scripts entries to each --preset",
+    )
+    migrate.add_argument(
+        "--preset",
+        action="append",
+        default=[],
+        metavar="ID=PROJECT",
+        help="with --add-entries: a preset (id or name) and the project whose entries it gets",
+    )
+    migrate.add_argument(
+        "--root",
+        choices=["claude", "workspace"],
+        default="claude",
+        help="with --add-entries: the root of the entries (default claude, live)",
+    )
+    mode.add_argument(
+        "--delete-old",
+        action="store_true",
+        help="delete the legacy objects that have a migration row (never transcripts)",
+    )
+
+
+def _cmd_backup(args: argparse.Namespace) -> int:
+    import asyncio
+
+    import psycopg
+
+    from agents_orchestrator.db import migrate_backup_objects as objects
+    from agents_orchestrator.db import migrate_backup_spec as specs
+
+    settings = _settings()
+    if args.dry_run:
+        with psycopg.connect(settings.database_url) as conn:
+            found = specs.report(conn)
+        for finding in found.findings:
+            print(specs.format_line(finding))
+        return 1 if found.unmapped else 0
+    if args.add_entries:
+        pairs = []
+        for item in args.preset:
+            ref, sep, project = item.partition("=")
+            if not sep or not ref or not project:
+                print(f"--preset {item!r} is not ID=PROJECT", file=sys.stderr)
+                return 2
+            pairs.append((ref, project))
+        if not pairs:
+            print("--add-entries needs at least one --preset ID=PROJECT", file=sys.stderr)
+            return 2
+        try:
+            with psycopg.connect(settings.database_url) as conn, conn.transaction():
+                for line in specs.add_entries(conn, pairs, args.root):
+                    print(line)
+        except specs.MigrationError as exc:
+            print(exc, file=sys.stderr)
+            return 1
+        return 0
+    if not settings.cache_available:
+        print("backups are not configured (ORCH_CACHE_S3_BUCKET is unset)", file=sys.stderr)
+        return 2
+
+    async def run():
+        async with await psycopg.AsyncConnection.connect(
+            settings.database_url, autocommit=True
+        ) as conn:
+            if args.delete_old:
+                return await objects.delete_old(conn, settings)
+            return await objects.migrate_objects(conn, settings)
+
+    result = asyncio.run(run())
+    print(
+        f"copied {result.copied}, already migrated {result.skipped}, orphaned {result.orphaned},"
+        f" deleted {result.deleted},"
+        f" invalid {len(result.invalid)}, failed {len(result.failures)}"
+    )
+    for key in result.invalid:
+        print(f"invalid name, not migrated: {key}")
+    for failure in result.failures:
+        print(f"delete failed: {failure}")
+    return 1 if result.failures else 0
 
 
 def _cmd_presets_check(_args: argparse.Namespace) -> int:
@@ -346,6 +447,12 @@ register(
     "print handover tenure and intake statistics as JSON (read-only)",
     _configure_handover_stats,
 )
+register(
+    "backup",
+    _cmd_backup,
+    "one-off migration of cache specs and archives to versioned backups",
+    _configure_backup,
+)
 register("api", _cmd_api, "serve the HTTP API and UI")
 register("dispatcher", _cmd_dispatcher, "dispatch queued messages to agents")
 register("ingester", _cmd_ingester, "store every wrapper event (singleton)")
@@ -359,7 +466,7 @@ register(
 register(
     "cache",
     _cmd_cache,
-    "restore or save the session workspace through CACHE_URL (cache Job)",
+    "restore or save backup entries (CACHE_ENTRIES) or resolve digests (cache Job)",
     _configure_cache,
 )
 

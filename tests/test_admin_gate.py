@@ -13,10 +13,13 @@ from test_agent_session_messaging import alone, hive
 from test_api_agent import client_for, headers, make_settings
 from test_api_sessions import assert_error
 
-from agents_orchestrator.api import admin, admin_archives, admin_specs, proposal_routes  # noqa: F401
+from agents_orchestrator.api import admin, admin_backups, admin_specs, proposal_routes  # noqa: F401
 from agents_orchestrator.api.admin import (
     ADMIN_PREFIX,
+    require_notes_writer,
+    require_reader,
     require_session_editor,
+    require_session_reader,
     require_superleader,
 )
 from agents_orchestrator.api.app import create_app
@@ -29,8 +32,19 @@ GATES = {
     id(admin.router): require_superleader,
     id(admin.session_router): require_session_editor,
     id(proposal_routes.proposal_router): require_proposer,
+    # S-68 step 13: the retrospective reads and the backup copy, and the room notes update
+    id(admin.reader_router): require_reader,
+    id(admin.notes_router): require_notes_writer,
 }
-ROUTERS = (admin.router, admin.session_router, proposal_routes.proposal_router)
+ROUTERS = (
+    admin.router,
+    admin.session_router,
+    proposal_routes.proposal_router,
+    admin.reader_router,
+    admin.notes_router,
+)
+# GET /sessions/{slug} also admits a retrospective session on any slug (S-68 step 13)
+SESSION_READER_ROUTES = {("GET", f"{ADMIN_PREFIX}/sessions/{{slug}}")}
 EDITOR_ROUTES = {
     ("GET", f"{ADMIN_PREFIX}/sessions/{{slug}}"),
     ("PATCH", f"{ADMIN_PREFIX}/sessions/{{slug}}"),
@@ -56,7 +70,9 @@ def admin_routes(app):
         for method in ops
     }
     assert served == {
-        (m, route.path) for _, route in routes for m in route.methods - {"HEAD", "OPTIONS"}
+        (m, route.path.replace(":path}", "}"))
+        for _, route in routes
+        for m in route.methods - {"HEAD", "OPTIONS"}
     }
     return routes
 
@@ -77,8 +93,10 @@ async def mark_trigger(pool, session_id, service="agents-webhook"):
 
 async def test_every_admin_route_carries_its_gate(pool, dsn):
     """Each route carries exactly the gate of its router: the session editor gate on the two
-    session spec routes and the handover withdraw, the proposer gate on the proposal routes, the
-    superleader gate on every other."""
+    session spec routes and the handover withdraw (the session reader gate on the GET), the
+    proposer gate on the proposal routes, the reader gate on the retrospective reads and the
+    backup copy, the notes writer gate on the notes update, the superleader gate on every
+    other."""
     app = create_app(make_settings(dsn), pool)
     routes = admin_routes(app)
     assert len(routes) >= 7
@@ -86,9 +104,11 @@ async def test_every_admin_route_carries_its_gate(pool, dsn):
     for router, route in routes:
         calls = [d.call for d in route.dependant.dependencies]
         gate = GATES[id(router)]
+        if {(m, route.path) for m in route.methods} <= SESSION_READER_ROUTES:
+            gate = require_session_reader
         others = set(GATES.values()) - {gate}
         assert gate in calls and not others & set(calls), route.path
-        if gate is require_session_editor:
+        if gate in (require_session_editor, require_session_reader):
             editor.update((m, route.path) for m in route.methods - {"HEAD", "OPTIONS"})
     assert editor == EDITOR_ROUTES
     proposer = {

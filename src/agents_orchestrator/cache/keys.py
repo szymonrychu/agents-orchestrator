@@ -13,6 +13,7 @@ chronologically by plain string order, which the latest-under-prefix restore and
 from __future__ import annotations
 
 import re
+import secrets
 
 CACHE_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
 MAX_SEGMENTS = 4
@@ -58,6 +59,22 @@ def validate_name(name: str, *, allow_prefix: bool) -> str:
     if segments[0] == RESERVED_FIRST_SEGMENT:
         raise ArchiveNameError(f"archive name must not start with '{RESERVED_FIRST_SEGMENT}/'")
     return name
+
+
+def object_key_for(prefix: str, name: str, now: str, actor: str) -> str:
+    """The immutable version object of one save.
+
+    Layout: `<prefix>b/<name>/<now>-<actor>-<4 random>.tar.zst`.
+
+    `now` is the fixed-width `format_now` value and `actor` a session slug or service name in
+    the segment alphabet; the random tail keeps two saves of the same instant apart. The `b/`
+    layer keeps version objects out of the `sessions/` transcripts namespace.
+    """
+    validate_name(name, allow_prefix=False)
+    for part, value in (("now", now), ("actor", actor)):
+        if not CACHE_KEY_RE.fullmatch(value):
+            raise ArchiveNameError(f"{part} {value!r} must match {CACHE_KEY_RE.pattern}")
+    return f"{prefix}b/{name}/{now}-{actor}-{secrets.token_hex(2)}{SUFFIX}"
 
 
 def object_name_for(prefix: str, name: str) -> str:

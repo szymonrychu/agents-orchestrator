@@ -250,7 +250,7 @@ CANARY_TOKENS = {
 
 
 async def test_superleader_reads_never_leak_tokens_or_values(pool, dsn, tmp_path, caplog):
-    """T-120 slice 2: the new superleader reads (sessions list, meta, archives, activity, events,
+    """T-120 slice 2: the new superleader reads (sessions list, meta, backups, activity, events,
     messages, locks, commands, vault list, usage relay) carry names and ids only. Canary service
     tokens, a readable vault value and an any-mcp config file that names a token env appear in
     no answer and no log record."""
@@ -276,15 +276,15 @@ async def test_superleader_reads_never_leak_tokens_or_values(pool, dsn, tmp_path
     boss = await alone(pool, "canary-reader", superleader=True)
     peer = await alone(pool, "canary-peer")
     bodies: list[str] = []
-    # The fixture has no api S3 pair, so the three archives reads answer 503 `unavailable`
+    # The fixture has no api S3 pair, so the three backups reads answer 503 `unavailable`
     # (their answer is still scanned); every other read has a real backing and must answer 200.
     no_s3 = 503
     gets = {
         f"{ADMIN_PREFIX}/sessions": 200,
         f"{ADMIN_PREFIX}/meta": 200,
-        f"{ADMIN_PREFIX}/archives": no_s3,
-        f"{ADMIN_PREFIX}/archives/settings": 200,
-        f"{ADMIN_PREFIX}/archives/cleanup/preview": no_s3,
+        f"{ADMIN_PREFIX}/backups": no_s3,
+        f"{ADMIN_PREFIX}/backups/cleanup/settings": 200,
+        f"{ADMIN_PREFIX}/backups/cleanup/preview": no_s3,
         f"{ADMIN_PREFIX}/sessions/{peer.slug}/activity": 200,
         f"{ADMIN_PREFIX}/sessions/{peer.slug}/events": 200,
         f"{ADMIN_PREFIX}/sessions/{peer.slug}/messages": 200,
@@ -358,12 +358,12 @@ async def test_superleader_writes_never_leak_tokens_or_values(pool, dsn, caplog)
         ("PUT", f"{S}/labels", {"labels": ["canary-label"]}, 200),
         ("POST", f"{S}/scale", {"replicas": 1}, 202),
         ("POST", f"{S}/locks/reassign", {"path": "src/a.py", "to": pods[1]}, 200),
-        ("PUT", f"{ADMIN_PREFIX}/archives/settings", policy, 200),
+        ("PUT", f"{ADMIN_PREFIX}/backups/cleanup/settings", policy, 200),
         ("PATCH", f"{ADMIN_PREFIX}/projects/canary-proj", {"description": "d"}, 200),
         ("DELETE", f"{S}/messages/{queued['id']}", None, 204),
         ("DELETE", f"{ADMIN_PREFIX}/specs/S-1", None, 204),
         ("POST", f"{ADMIN_PREFIX}/specs/S-1/comments/1/dismiss", None, 204),
-        ("PUT", f"{ADMIN_PREFIX}/archives/settings", {**policy, "retention_days": 0}, 422),
+        ("PUT", f"{ADMIN_PREFIX}/backups/cleanup/settings", {**policy, "retention_days": 0}, 422),
     ]
     bodies: list[str] = []
     async with agent_client(app, boss.leader_ip) as http:

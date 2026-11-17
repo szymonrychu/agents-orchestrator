@@ -135,3 +135,20 @@ def test_fixed_width_now_names_sort_chronologically():
     assert sorted(names)[0] == "proj/20260101t000000z"
     assert sorted(names)[-1] == "proj/20271231t235959z"
     assert sorted(names)[-2] == "proj/20261031t120000z"
+
+
+def test_object_key_layout():
+    import re
+
+    key = keys.object_key_for("ws/", "proj/skills", "20261031t120000z", "sess-1")
+    assert re.fullmatch(r"ws/b/proj/skills/20261031t120000z-sess-1-[0-9a-f]{4}\.tar\.zst", key)
+    with pytest.raises(ArchiveNameError):
+        keys.object_key_for("", "sessions/x", "n", "x")
+    with pytest.raises(ArchiveNameError):
+        keys.object_key_for("", "a", "Bad Now", "x")
+
+
+def test_only_sessions_is_reserved_as_first_segment():
+    assert validate_name("preset-0123456789abcdef", allow_prefix=False)
+    with pytest.raises(ArchiveNameError):
+        validate_name("sessions/x", allow_prefix=False)

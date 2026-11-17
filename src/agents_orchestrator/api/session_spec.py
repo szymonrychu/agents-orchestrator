@@ -31,7 +31,7 @@ from agents_orchestrator.db import sessions as repo
 from agents_orchestrator.db.queue import SessionBeingDeleted
 from agents_orchestrator.preset_policy import changed_paths, fixed_changes, tighten_changes
 from agents_orchestrator.settings import Settings
-from agents_orchestrator.spec import SessionSpec, default_cache_key, legacy_context
+from agents_orchestrator.spec import SessionSpec, legacy_context
 
 # A concurrent spec write (or a deadlock with a preset delete) makes the patch re-read and retry.
 _TRIES = 3
@@ -64,15 +64,8 @@ def refuse_ref_changes(base: dict[str, Any], new: dict[str, Any]) -> None:
 
 async def validated(spec: SessionSpec, settings: Settings, session: repo.Session) -> SessionSpec:
     """`check_spec` against the session's stored spec (models or images that left the allowlist
-    stay accepted when unchanged) and its one derived cache key; the resource defaults filled."""
-    derived = (
-        default_cache_key(session.preset_id)
-        if session.preset_id is not None
-        else (session.spec.cache.restore_key if session.spec.cache is not None else None)
-    )
-    return await run_in_threadpool(
-        check_spec, spec, settings, session.spec, derived_cache_key=derived
-    )
+    stay accepted when unchanged); the resource defaults filled."""
+    return await run_in_threadpool(check_spec, spec, settings, session.spec)
 
 
 async def patch(

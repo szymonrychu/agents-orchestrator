@@ -1,0 +1,12 @@
+{
+  "preset": {
+    "id": "6f1c2a40-0000-4000-8000-000000000001",
+    "name": "My Preset"
+  },
+  "is_preset": false,
+  "cache": {
+    "restore_key": "preset-0123456789abcdef",
+    "save_key": "preset-0123456789abcdef"
+  },
+  "unmapped": "derived"
+}

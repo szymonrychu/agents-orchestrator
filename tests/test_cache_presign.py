@@ -177,13 +177,13 @@ def _tree(root: Path) -> dict[str, str]:
 
 
 def _run(monkeypatch, capsys, action: str, url: str, workdir: Path, scratch: Path) -> dict:
-    monkeypatch.setenv("CACHE_URL", url)
-    monkeypatch.setenv("CACHE_DIR", str(workdir))
-    monkeypatch.setenv("CACHE_EXCLUDE", "[]")
+    entry = {"index": 0, "url": url, "root_dir": str(workdir), "path": ".", "exclude": []}
+    monkeypatch.setenv("CACHE_ENTRIES", json.dumps([entry]))
     monkeypatch.setenv("CACHE_SCRATCH", str(scratch))
+    monkeypatch.setenv("CACHE_STATE_DIR", str(scratch / "state"))
     code = cli.main(["cache", action])
     lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
-    outcome = json.loads(lines[-1])
+    outcome = json.loads(lines[-1])["entries"][0]
     outcome["exit"] = code
     return outcome
 
@@ -197,18 +197,18 @@ def test_round_trip_through_moto(moto_settings, tmp_path, monkeypatch, capsys):
     saved = _run(
         monkeypatch, capsys, "save", presign(moto_settings, "PUT", "k"), src, tmp_path / "s"
     )
-    assert saved["outcome"] == "saved", saved
+    assert saved["state"] == "uploaded", saved
     assert saved["exit"] == 0
-    assert saved["bytes"] > 0
+    assert saved["size"] > 0
 
     dest = tmp_path / "dest"
     dest.mkdir()
     restored = _run(
         monkeypatch, capsys, "restore", presign(moto_settings, "GET", "k"), dest, tmp_path / "r"
     )
-    assert restored["outcome"] == "restored", restored
+    assert restored["state"] == "restored", restored
     assert restored["exit"] == 0
-    assert restored["bytes"] == saved["bytes"]
+    assert restored["size"] == saved["size"]
     assert _tree(dest) == {"a.txt": "alpha", "sub/b.txt": "beta"}
 
 
@@ -224,6 +224,33 @@ def test_missing_object_is_miss(moto_settings, tmp_path, monkeypatch, capsys):
         dest,
         tmp_path / "r",
     )
-    assert outcome["outcome"] == "miss", outcome
+    assert outcome["state"] == "missing", outcome
     assert outcome["exit"] == 0
     assert _tree(dest) == {"keep.txt": "untouched"}
+
+
+def test_copy_object_called_with_keys():
+    calls: list[dict[str, Any]] = []
+
+    class Client:
+        def copy_object(self, **kwargs: Any) -> None:
+            calls.append(kwargs)
+
+    s = _settings()
+    src = "workspace-cache/b/n/20261116t000000z-a-0001.tar.zst"
+    dst = "workspace-cache/b/n/20261116t000100z-b-0002.tar.zst"
+    presign_module.copy_object(s, src, dst, client=Client())
+    assert calls == [{"Bucket": "b", "Key": dst, "CopySource": {"Bucket": "b", "Key": src}}]
+    with pytest.raises(ValueError):
+        presign_module.copy_object(s, "elsewhere/x.tar.zst", dst, client=Client())
+
+
+def test_presign_new_version_key_layout():
+    key, url = presign_module.presign_new_version(_settings(), "proj-x", "20261116t000000z", "me")
+    assert key.startswith("workspace-cache/b/proj-x/20261116t000000z-me-")
+    assert key.endswith(".tar.zst")
+    assert urlsplit(url).path == f"/b/{key}"
+    assert (
+        presign_module.presign_new_version(_settings(), "proj-x", "20261116t000000z", "me")[0]
+        != key
+    )

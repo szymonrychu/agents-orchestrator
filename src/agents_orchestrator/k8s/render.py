@@ -25,19 +25,27 @@ from agents_orchestrator.k8s.labels import (
     session_labels,
     workspace_pvc,
 )
-from agents_orchestrator.k8s.on_start import render_on_start
+from agents_orchestrator.k8s.on_start import READ_ONLY_TOOLS, orchestrator_allow, render_on_start
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import (
     KUBE_TIERS,
     WORKDIR_ROOT,
     SessionSpec,
     WrapperSettings,
+    backups,
     parse_quantity,
 )
 from agents_orchestrator.tokens import SessionTokens
 
 HASH_ANNOTATION = "agents.szymonrichert.pl/config-hash"
 SESSIONS_ROOT = "/sessions"
+# The shared Claude dir of a session (PVC subPath `claude`), the same in every pod and Job. It is
+# distinct from, and neither contains nor lies inside, the sessions root where each session config
+# dir lives: the wrapper links <config>/skills and rules to it and has no guard against equal paths.
+CLAUDE_ROOT = "/claude"
+CLAUDE_SUBPATH = "claude"
+BACKUP_STATE_ROOT = "/backup-state"
+BACKUP_STATE_SUBPATH = "backup-state"
 WORKSPACE_VOLUME = "workspace"
 PROBE_PERIOD = 5
 STARTUP_SLACK = 12
@@ -48,9 +56,10 @@ KUBE_PASSTHROUGH_ENV = ("KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT")
 DOCKER_PASSTHROUGH_ENV = ("DOCKER_HOST",)
 DOCKER_CONFIG_DIR = "/docker-config"
 # The wrapper commands the orchestrator itself sends (`sessions.commands.client`): `compact`
-# (api and dispatcher) and `clear`, the ex-leader reset after a voluntary handover
-# (claude-code-wrapper >= 0.10.0; an older wrapper refuses it with 403 command_denied).
-CLIENT_COMMANDS = ("compact", "clear")
+# (api and dispatcher), `clear`, the ex-leader reset after a voluntary handover
+# (claude-code-wrapper >= 0.10.0; an older wrapper refuses it with 403 command_denied), and
+# `reload-skills`, sent after a live backup delivery.
+CLIENT_COMMANDS = ("compact", "clear", "reload-skills")
 AGENT_PASSTHROUGH_ENV = ("ORCH_AGENT_TOKEN", "ORCH_AGENT_URL", "ORCH_SESSION_ID", "POD_NAME")
 
 AGENT_USAGE_TOKEN_ENV = "CCW_USAGE_TOKEN"
@@ -459,6 +468,14 @@ SUPERLEADER_ROOM_PROMPT = (
 )
 
 
+BACKUP_SAVE_PROMPT = (
+    "After you create or change a skill, a rule or a script that lives in a backed up directory, "
+    "call orchestrator_backup_save (root and path of the backup entry) so the other sessions of "
+    "the project get it; the directory is saved at the end of the session too, but only this "
+    "call shares it while the session runs."
+)
+
+
 def _ask_prompt(settings: Settings) -> str:
     """Questions go through taskboard decisions when the agent relay and taskboard are reachable."""
     if settings.agent_api_url and settings.taskboard_available:
@@ -467,12 +484,32 @@ def _ask_prompt(settings: Settings) -> str:
 
 
 def _system_append(spec: SessionSpec, settings: Settings) -> str:
-    """The ask prompt, plus the project room guidance when the agent relay is reachable."""
+    """The ask prompt, plus the project room guidance and, with backup entries, the save
+    guidance, when the agent relay is reachable."""
     ask = _ask_prompt(settings)
     if not settings.agent_api_url:
         return ask
     room = SUPERLEADER_ROOM_PROMPT if spec.session_messaging else PROJECT_ROOM_PROMPT
-    return f"{ask}\n\n{room}"
+    parts = [ask, room]
+    if backups(spec):
+        parts.append(BACKUP_SAVE_PROMPT)
+    return "\n\n".join(parts)
+
+
+ORCHESTRATOR_TOOL_PREFIX = "mcp__any-mcp__orchestrator_"
+ORCHESTRATOR_TOOL_GLOB = ORCHESTRATOR_TOOL_PREFIX + "*"
+
+
+def subagent_allowed_tools(spec: SessionSpec, settings: Settings) -> list[str]:
+    """The read-only orchestrator tools a subagent may call (user decision m1223), as the
+    wrapper's exact tool names: `READ_ONLY_TOOLS` within this session's own allow list, so every
+    session gets its own reads and never a write. Empty without the orchestrator plugin (no
+    agent API url) or on an image other than the default: the wrapper config is strict and only
+    the default image is known to take the key (wrapper 0.20.0)."""
+    if not settings.agent_api_url or not runs_default_image(spec, settings):
+        return []
+    allowed = set(orchestrator_allow(spec, mindmap=settings.mindmap_available))
+    return [ORCHESTRATOR_TOOL_PREFIX + t for t in sorted(READ_ONLY_TOOLS & allowed)]
 
 
 def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
@@ -500,7 +537,9 @@ def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
         claude["model"] = model
     if effort:
         claude["effort"] = effort
-    claude["main_agent_only_tools"] = ["mcp__any-mcp__orchestrator_*"]
+    claude["main_agent_only_tools"] = [ORCHESTRATOR_TOOL_GLOB]
+    if subagent_tools := subagent_allowed_tools(spec, settings):
+        claude["subagent_allowed_tools"] = subagent_tools
     claude["permissions"] = {"deny": ["EnterPlanMode", "ExitPlanMode", "AskUserQuestion"]}
     claude["mcp_servers"] = {
         "any-mcp": {
@@ -511,7 +550,11 @@ def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
     }
     cfg: dict[str, Any] = {
         "server": {"auth_token": "${CCW_AUTH_TOKEN}"},
-        "paths": {"workdir_root": WORKDIR_ROOT, "sessions_root": SESSIONS_ROOT},
+        "paths": {
+            "workdir_root": WORKDIR_ROOT,
+            "sessions_root": SESSIONS_ROOT,
+            "shared_claude_dir": CLAUDE_ROOT,
+        },
         "claude": claude,
         "hooks": {
             "onStart": [
@@ -735,6 +778,7 @@ def _container(session: Session, settings: Settings, names: dict[str, str]) -> d
                 "mountPath": SESSIONS_ROOT,
                 "subPathExpr": "sessions/$(POD_NAME)",
             },
+            {"name": WORKSPACE_VOLUME, "mountPath": CLAUDE_ROOT, "subPath": CLAUDE_SUBPATH},
             {"name": "mise", "mountPath": "/opt/mise"},
             {"name": "any-mcp", "mountPath": "/opt/any-mcp"},
             {"name": "config", "mountPath": "/etc/ccw"},

@@ -50,10 +50,14 @@ def make_session(session_id: uuid.UUID = SESSION_ID, **spec: Any) -> Session:
         spec=SessionSpec.model_validate(
             {
                 "init_scripts": ["echo hi"],
-                "cache": {
-                    "restore_key": "preset-0123456789abcdef",
-                    "save_key": "preset-0123456789abcdef",
-                },
+                "backup": [
+                    {
+                        "root": "workspace",
+                        "path": ".",
+                        "mode": "both",
+                        "name": "preset-0123456789abcdef",
+                    }
+                ],
                 **spec,
             }
         ),
@@ -101,8 +105,8 @@ def test_jobs_explicit_sa_no_token(
     jobs = [
         render_init_job(session, settings),
         render_job(session, check, settings),
-        render_cache_job(session, settings, "restore", URL),
-        render_cache_job(session, settings, "save", URL),
+        render_cache_job(session, settings, "restore_pre", []),
+        render_cache_job(session, settings, "save", []),
     ]
     for job in jobs:
         assert_explicit_sa_no_token(job["spec"]["template"]["spec"], account)

@@ -364,13 +364,27 @@ class BackupRun(BaseModel):
     bytes: int
 
 
+class EntryPlanView(BaseModel):
+    """What the discard does with one backup entry (`index` -1: the workspace root itself).
+
+    `action` is `save`, `discard` (the directory goes with the session) or `skip` (with `reason`).
+    """
+
+    index: int
+    name_template: str
+    action: Literal["save", "discard", "skip"]
+    reason: str | None
+
+
 class SessionBackup(BaseModel):
     """What a discard would save now; each flag is true only when that save would really run.
 
-    `reason` is null when both run, else `no_session_cache` (no `spec.cache`),
+    `reason` is null when both run, else `no_session_cache` (no workspace backup entry),
     `cache_not_configured` (no S3 cache configured) or the save's skip reason, the workdir's first.
+    `entries` is the per-entry plan the discard dialog shows.
     """
 
+    entries: list[EntryPlanView] = []
     workdir: bool
     transcripts: bool
     reason: str | None
@@ -1018,24 +1032,68 @@ class Withdrawn(BaseModel):
     withdrawn: list[int]
 
 
-class ArchiveView(BaseModel):
-    key: str
-    name: str
+class BackupCurrentView(BaseModel):
+    id: uuid.UUID
     size: int
-    last_modified: datetime
+    saved_at: datetime
+    session_slug: str | None
+    origin: str
+
+
+class BackupNameView(BaseModel):
+    name: str
+    current: BackupCurrentView | None
+    version_count: int
     referenced_by: list[str]
     protected: bool
 
 
-class ArchivePage(BaseModel):
-    items: list[ArchiveView]
+class BackupNamePage(BaseModel):
+    items: list[BackupNameView]
     next_cursor: str | None
+
+
+class BackupVersionView(BaseModel):
+    id: uuid.UUID
+    name: str
+    size: int
+    digest: str
+    saved_at: datetime
+    origin: str
+    state: str
+    current: bool
+    session_slug: str | None
+    created_by: str
+    referenced_by: list[str]
+    protected: bool
+
+
+class BackupVersionPage(BaseModel):
+    items: list[BackupVersionView]
+    next_cursor: str | None
+
+
+class BackupManifestView(BaseModel):
+    name: str
+    version: uuid.UUID
+    #: Path, sha256, size and mode per file; None when the tree was too large to list.
+    files: list[dict[str, Any]] | None
+
+
+class BackupCopyIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source: str
+    source_version: uuid.UUID | None = None
+    target: str
 
 
 class CleanupItem(BaseModel):
     key: str
     size: int
     reason: str
+    name: str | None = None
+    version: uuid.UUID | None = None
 
 
 class CleanupPreview(BaseModel):
@@ -1080,26 +1138,3 @@ class CleanupSettingsView(BaseModel):
     run_requested_at: datetime | None
     run_pending: bool
     last_sweep: dict[str, Any] | None
-
-
-class DeleteArchives(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    keys: list[str] = Field(min_length=1, max_length=1000)
-
-
-class ArchiveRefusal(BaseModel):
-    key: str
-    reason: str
-
-
-class ArchiveDeleteError(BaseModel):
-    key: str
-    code: str
-    message: str
-
-
-class ArchiveDeleteResult(BaseModel):
-    deleted: list[str]
-    refused: list[ArchiveRefusal]
-    errors: list[ArchiveDeleteError]

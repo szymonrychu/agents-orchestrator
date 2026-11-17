@@ -9,7 +9,7 @@ from agents_common import templating
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict
 
-from agents_orchestrator.rendering import SAMPLES, Surface
+from agents_orchestrator.rendering import SAMPLES, Surface, preview_name
 
 router = APIRouter(prefix="/api/v1")
 
@@ -37,4 +37,6 @@ class PreviewOut(BaseModel):
 async def preview(body: PreviewIn) -> dict[str, Any]:
     """Render `template` with the surface's sample context, `context` overriding top-level keys."""
     context = {**SAMPLES[body.surface], **(body.context or {})}
+    if body.surface == "archive_name":
+        return await asyncio.to_thread(preview_name, body.template, context)
     return await asyncio.to_thread(templating.preview, body.template, context)

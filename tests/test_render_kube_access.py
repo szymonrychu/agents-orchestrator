@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 import yaml
-from test_service_accounts import TOKENS, URL, WHEN, make_session, make_settings
+from test_service_accounts import TOKENS, WHEN, make_session, make_settings
 
 from agents_orchestrator.db import queue
 from agents_orchestrator.k8s import render
@@ -69,8 +69,8 @@ def jobs_of(session: Any, settings: Any) -> list[dict[str, Any]]:
     return [
         render_init_job(session, settings),
         render_job(session, check, settings),
-        render_cache_job(session, settings, "restore", URL),
-        render_cache_job(session, settings, "save", URL),
+        render_cache_job(session, settings, "restore_pre", []),
+        render_cache_job(session, settings, "save", []),
     ]
 
 
@@ -141,13 +141,17 @@ def test_sa_name_differs_per_session_id() -> None:
         {"session_messaging": True},
         {"kube_cluster_access": False},
         {
-            "cache": {
-                "restore_key": "preset-0123456789abcdef",
-                "save_key": "preset-0123456789abcdef",
-            }
+            "backup": [
+                {
+                    "root": "workspace",
+                    "path": ".",
+                    "mode": "both",
+                    "name": "preset-0123456789abcdef",
+                }
+            ]
         },
     ],
-    ids=["alone", "hive", "static", "messaging-only", "kube-false", "cache"],
+    ids=["alone", "hive", "static", "messaging-only", "kube-false", "backup"],
 )
 def test_only_cluster_access_yields_privileged_account(spec: dict[str, Any]) -> None:
     session = make_session(**spec)

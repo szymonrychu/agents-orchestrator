@@ -1,0 +1,16 @@
+{
+  "preset": {
+    "id": "6f1c2a40-0000-4000-8000-000000000001",
+    "name": "My Preset"
+  },
+  "is_preset": true,
+  "cache": {},
+  "expected": [
+    {
+      "root": "workspace",
+      "path": ".",
+      "mode": "both",
+      "name": "my-preset/workspace"
+    }
+  ]
+}
