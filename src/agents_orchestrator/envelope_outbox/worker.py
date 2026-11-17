@@ -127,10 +127,6 @@ class EnvelopeRelay:
         wake = asyncio.Event()
         listener = asyncio.create_task(self._listen(wake))
         try:
-            async with self.pool.connection() as conn:
-                swept = await outbox.sweep_stale_sending(conn)
-            if swept:
-                log.warning("envelope relay: %d sending rows became unknown_outcome", swept)
             while not stop.is_set():
                 wake.clear()
                 try:
@@ -167,8 +163,14 @@ class EnvelopeRelay:
                 w.cancel()
 
     async def drain(self) -> bool:
-        """One pass over every queued session that is not backing off; True when a row moved."""
+        """One pass over every queued session that is not backing off; True when a row moved.
+
+        Stale `sending` rows (a send cut off by a restart) are swept first on every pass, or
+        they would block their session's queue for good."""
         async with self.pool.connection() as conn:
+            swept = await outbox.sweep_stale_sending(conn)
+            if swept:
+                log.warning("envelope relay: %d sending rows became unknown_outcome", swept)
             sessions = await outbox.queued_sessions(conn)
         now = self.clock()
         progressed = False

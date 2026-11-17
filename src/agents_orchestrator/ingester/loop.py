@@ -409,11 +409,21 @@ class Ingester:
         """Agents that currently have a stream task (running, or ended by session_closed)."""
         return set(self._tasks)
 
+    async def _relay_forever(self, stop: asyncio.Event) -> None:
+        """Run the envelope relay, restarting it with backoff when it dies."""
+        delay = self.backoff_initial
+        while not stop.is_set():
+            try:
+                await EnvelopeRelay(self.pool, self.settings).run(stop)
+                return
+            except Exception:
+                log.exception("envelope relay died; restarting in %.1f s", delay)
+            await self.sleep(delay)
+            delay = min(delay * 2, self.backoff_max)
+
     async def run(self, stop: asyncio.Event) -> None:
         relay = (
-            asyncio.create_task(EnvelopeRelay(self.pool, self.settings).run(stop))
-            if self.settings.chat_available
-            else None
+            asyncio.create_task(self._relay_forever(stop)) if self.settings.chat_available else None
         )
         try:
             while not stop.is_set():

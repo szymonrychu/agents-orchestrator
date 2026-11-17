@@ -226,3 +226,12 @@ async def test_notice_when_only_another_room_was_delivered(dsn, pool):
     await stop(dsn, pool, c, payload("t1", texts(BAD_ROOM)))
     await stop(dsn, pool, c, payload("t1", texts(BAD_ROOM) + texts("prose", start=2)))
     assert await notices(pool) == [("!r:x", "queued", "t1")]
+
+
+async def test_block_after_an_allowed_stop_clears_allowed_at(dsn, pool):
+    c, a0, _ = await hive(pool)
+    assert (await stop(dsn, pool, c, payload("t1", texts(OK))))["decision"] == "allow"
+    assert await checks(pool) == [("t1", False, True, 1)]
+    out = await stop(dsn, pool, c, payload("t1", texts(OK, BAD, start=1)))
+    assert out["decision"] == "block"
+    assert await checks(pool) == [("t1", True, False, 2)]

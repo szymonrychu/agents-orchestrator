@@ -148,7 +148,7 @@ RETRO_TOOLS = [*RETRO_READ_TOOLS, "backups_copy", "chat_admin_notes_update"]
 READ_ONLY_TOOLS: frozenset[str] = frozenset(
     {
         *RETRO_READ_TOOLS,
-        "me", "activity", "lock_list", "sessions_list", "chat_rooms", "chat_status",
+        "me", "activity", "lock_list", "sessions_list", "chat_rooms",
         "chat_history", "chat_attachment_status", "chat_notes_get", "task_list", "task_get",
         "approval_list", "project_list", "project_summary", "project_chat_read", "spec_list",
         "spec_get", "spec_versions", "spec_comments", "spec_queue_list", "spec_section",

@@ -120,7 +120,8 @@ async def _record_blocked(
     await conn.execute(
         "INSERT INTO envelope_stop_checks (agent_id, turn_id, blocked_at, blocks_seen)"
         " VALUES (%s, %s, now(), %s)"
-        " ON CONFLICT (agent_id, turn_id) DO UPDATE SET blocked_at = now(), blocks_seen = %s",
+        " ON CONFLICT (agent_id, turn_id) DO UPDATE SET blocked_at = now(), blocks_seen = %s,"
+        " allowed_at = NULL",
         (agent_id, turn_id, blocks_seen, blocks_seen),
     )
 

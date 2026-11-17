@@ -353,3 +353,26 @@ async def test_ingester_runs_the_relay_when_chat_is_configured(pool, dsn, monkey
     stop.set()
     await asyncio.wait_for(task, 5)
     assert up.bodies() == [{"text": "msg 1"}]
+
+
+async def test_drain_sweeps_stale_sending_on_every_pass(pool, dsn):
+    s, a = await _seed(pool)
+    await _insert(pool, _row(s, a, 1), _row(s, a, 2))
+    async with pool.connection() as conn:
+        sent = await outbox.claim_next(conn, s["id"])
+        await conn.execute(
+            "UPDATE envelope_outbox SET updated_at = now() - interval '5 seconds' WHERE id = %s",
+            (sent["id"],),
+        )
+    up = Upstream()
+    w = _worker(pool, dsn, up)
+    assert not await w.drain()  # 5 s old: still sending, blocks the session, not swept
+    assert [r[1] for r in await _rows(pool)] == ["sending", "queued"]
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE envelope_outbox SET updated_at = now() - interval '2 minutes' WHERE id = %s",
+            (sent["id"],),
+        )
+    assert await w.drain()  # aged past 60 s: swept, the next row goes out
+    assert [r[1] for r in await _rows(pool)] == ["failed", "accepted"]
+    assert len(up.calls) == 1

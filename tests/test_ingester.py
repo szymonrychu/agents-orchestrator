@@ -1744,3 +1744,40 @@ async def test_parse_error_before_valid_envelope_shares_index_space(harness, poo
     assert len(rows) == 2
     assert sorted(r["status"] for r in rows) == ["invalid", "queued"]
     assert len({r["envelope_index"] for r in rows}) == 2
+
+
+async def test_envelope_relay_crash_is_restarted_with_backoff(pool, dsn, monkeypatch) -> None:
+    from agents_orchestrator.ingester import loop as loop_mod
+    from agents_orchestrator.settings import Settings
+
+    runs: list[int] = []
+
+    class Flaky:
+        def __init__(self, *_a: Any, **_k: Any) -> None:
+            pass
+
+        async def run(self, stop: asyncio.Event) -> None:
+            runs.append(1)
+            if len(runs) == 1:
+                raise RuntimeError("db blip")
+            await stop.wait()
+
+    monkeypatch.setattr(loop_mod, "EnvelopeRelay", Flaky)
+    sleeps: list[float] = []
+
+    async def fast_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        await asyncio.sleep(0.01)
+
+    settings = Settings(
+        database_url=dsn, master_key="k" * 40, chat_url="https://chat.test", chat_token="t"
+    )
+    ing = Ingester(pool, settings, sleep=fast_sleep)
+    stop = asyncio.Event()
+    task = asyncio.create_task(ing.run(stop))
+    try:
+        await wait_until(lambda: len(runs) >= 2)
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, 20)
+    assert sleeps and sleeps[0] == ing.backoff_initial
