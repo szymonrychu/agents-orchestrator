@@ -24,6 +24,7 @@ from agents_orchestrator.api import (
     backups,
     chat,
     credential_sweep,
+    envelope,
     errors,
     forward,
     messages,
@@ -157,6 +158,7 @@ def create_app(
     errors.install(app)
     app.include_router(sessions.router)
     app.include_router(agent.router)
+    app.include_router(envelope.router)
     app.include_router(project_chat.router)
     app.include_router(admin.router)
     app.include_router(admin.session_router)
