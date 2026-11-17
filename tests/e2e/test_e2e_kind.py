@@ -679,7 +679,8 @@ def discarded(
 
 def assert_deployment_texts(config: dict[str, Any]) -> None:
     """The rendered wrapper config carries the orchestrator's deployment texts (default image)."""
-    assert config["notes"] == {"enabled": True, "frame_line": handoff_texts.NOTES_FRAME_LINE}, config
+    notes = {"enabled": True, "frame_line": handoff_texts.NOTES_FRAME_LINE}
+    assert config["notes"] == notes, config
     assert config["pressure"] == {"enabled": True, "head": handoff_texts.PRESSURE_HEAD}, config
     marker = config["sessions"]["trailing_marker_pattern"]
     assert marker == handoff_texts.RUN_MARKER_PATTERN, config
