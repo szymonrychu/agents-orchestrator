@@ -83,7 +83,6 @@ from agents_orchestrator.reconciler.checks import (
     TAIL_LINES,
     container_exit_code,
     job_condition,
-    log_tail,
 )
 from agents_orchestrator.reconciler.init import REASON_MAX, StatusWriter
 from agents_orchestrator.settings import Settings
@@ -107,6 +106,9 @@ WARNING_EVENT = "backup_warning"
 EVENT_SESSION = "backup"  # the events key of the reconciler's own rows (agent_id: the session id)
 LIVE_ATTEMPTS = 3  # deliveries of one version tried before it is given up (state `failed`)
 LIVE_RETRY_SECONDS = 60  # backoff between two attempts of the same version
+# The outcome line carries a per-file manifest (100-200+ KB for a real workspace), far over the
+# 16 KiB diagnostic tail of `log_tail`; this is its own cap. A longer line is treated as bad output.
+OUTCOME_MAX_BYTES = 8 * 1024 * 1024
 WARN_STATES = frozenset({"missing", "unreadable", "refused_secret"})
 # a restored claude path that the agents' Claude Code loads at start: they get `reload-skills`
 RELOAD_PATHS = frozenset({"skills", "."})
@@ -230,6 +232,14 @@ class CacheGate:
         ]
         held = next((g for g in gates if g.hold), None)
         return held or next((g for g in gates if g.degraded), cls())
+
+
+def outcome_line(log_text: str) -> str | None:
+    """The complete last non-empty log line, None when it is over `OUTCOME_MAX_BYTES`."""
+    lines = [ln for ln in log_text.splitlines() if ln.strip()]
+    if not lines or len(lines[-1].encode()) > OUTCOME_MAX_BYTES:
+        return None
+    return lines[-1]
 
 
 def parse_outcome(tail: str | None) -> dict[str, Any] | None:
@@ -864,7 +874,7 @@ class CacheRunner:
         tail: str | None = None
         if pod is not None:
             try:
-                tail = log_tail(
+                tail = outcome_line(
                     await self.kube.read_pod_log(ns, pod["metadata"]["name"], TAIL_LINES)
                 )
             except KubeError as exc:
