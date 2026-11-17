@@ -148,7 +148,12 @@ def _entry_target(entry: Mapping[str, Any]) -> tuple[Path, Path]:
     if path.startswith("/") or ".." in parts or (path != "." and "" in parts):
         raise _BadEnv("entry path must be relative with no '..' segment")
     root = Path(root_dir)
-    return root, (root if path == "." else root / path)
+    here = root
+    for part in [] if path == "." else parts:
+        here = here / part
+        if here.is_symlink():  # lstat: a link is never followed, whatever it points to
+            raise _BadEnv("entry path must not pass through a symlink")
+    return root, here
 
 
 def _entry_exclude(entry: Mapping[str, Any]) -> list[str]:

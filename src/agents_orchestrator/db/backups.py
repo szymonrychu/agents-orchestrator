@@ -336,8 +336,8 @@ async def referencing(conn: psycopg.AsyncConnection) -> list[tuple[uuid.UUID, st
     existing version as restore source or base (same reading as `referenced_versions`)."""
     cur = await conn.execute(
         "SELECT DISTINCT v.id, v.name, s.slug FROM sessions s,"
-        " jsonb_array_elements(CASE WHEN jsonb_typeof(s.status -> 'backup') = 'array'"
-        "   THEN s.status -> 'backup' ELSE '[]'::jsonb END) AS e(value),"
+        " jsonb_array_elements(CASE WHEN jsonb_typeof(s.status #> '{backup,entries}') = 'array'"
+        "   THEN s.status #> '{backup,entries}' ELSE '[]'::jsonb END) AS e(value),"
         " unnest(ARRAY['version', 'base_version']) AS k,"
         " backup_versions v"
         " WHERE jsonb_typeof(e.value) = 'object' AND e.value ->> k = v.id::text"
@@ -351,5 +351,23 @@ async def known_keys(conn: psycopg.AsyncConnection, keys: list[str]) -> set[str]
         return set()
     cur = await conn.execute(
         "SELECT object_key FROM backup_versions WHERE object_key = ANY(%s)", (keys,)
+    )
+    return {r[0] for r in await cur.fetchall()}
+
+
+async def projects_using_name(conn: psycopg.AsyncConnection, name: str) -> set[str]:
+    """Projects of every preset and session whose spec has a backup entry that names `name`.
+
+    A templated entry name (it holds `{`) may render to any name, so it counts as using `name`
+    (the safe side for an ownership check).
+    """
+    cur = await conn.execute(
+        "SELECT project FROM ("
+        " SELECT project, spec FROM presets UNION ALL SELECT project, spec FROM sessions"
+        ") t, jsonb_array_elements(CASE WHEN jsonb_typeof(t.spec -> 'backup') = 'array'"
+        "   THEN t.spec -> 'backup' ELSE '[]'::jsonb END) AS e(value)"
+        " WHERE jsonb_typeof(e.value) = 'object'"
+        "   AND (e.value ->> 'name' = %s OR e.value ->> 'name' LIKE '%%{%%')",
+        (name,),
     )
     return {r[0] for r in await cur.fetchall()}
