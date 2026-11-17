@@ -76,3 +76,15 @@ kubeClusterAccess:
 kubeNamespaceAccess:
   namespaces: [e2e-target]
   tiers: [read, port-forward]
+
+# Backups (S-68): a throwaway MinIO (e2e/manifests/minio.yaml) holds the versions; its root key
+# pair is the Secret scripts/e2e.sh generates. The sweep stays in dry-run (the chart default).
+cache:
+  s3:
+    endpoint: http://minio:9000
+    bucket: orch-e2e
+    prefix: e2e/
+    pathStyle: true
+    existingSecret: minio-credentials
+    api:
+      existingSecret: minio-credentials

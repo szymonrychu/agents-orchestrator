@@ -1,0 +1,77 @@
+{{- if .Values.backupMigration.enabled }}
+{{- $cache := .Values.cache.s3 }}
+{{- if not $cache.bucket }}
+{{- fail "agents-orchestrator: backupMigration.enabled needs cache.s3.bucket (the object store the archives live in)" }}
+{{- end }}
+{{- if not $cache.existingSecret }}
+{{- fail "agents-orchestrator: cache.s3.existingSecret is required when cache.s3.bucket is set (the Secret holding the S3 access key pair)" }}
+{{- end }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "agents-orchestrator.fullname" . }}-backup-migrate
+  labels:
+    {{- include "agents-orchestrator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup-migrate
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ .Values.backupMigration.activeDeadlineSeconds | int64 }}
+  template:
+    metadata:
+      labels:
+        {{- include "agents-orchestrator.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: backup-migrate
+    spec:
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "agents-orchestrator.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: migrate
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["orch"]
+          args: ["migrate"]
+          {{- include "agents-orchestrator.env" . | nindent 10 }}
+      containers:
+        - name: backup-migrate
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["orch"]
+          args:
+            - backup
+            - migrate
+            {{- if .Values.backupMigration.deleteOld }}
+            - --delete-old
+            {{- end }}
+          {{- include "agents-orchestrator.env" . | nindent 10 }}
+            - name: ORCH_CACHE_S3_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $cache.existingSecret }}
+                  key: {{ $cache.accessKeyIdKey | default "AWS_ACCESS_KEY_ID" }}
+            - name: ORCH_CACHE_S3_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $cache.existingSecret }}
+                  key: {{ $cache.secretAccessKeyKey | default "AWS_SECRET_ACCESS_KEY" }}
+{{- end }}

@@ -768,6 +768,19 @@ Release run order (the archives must be in the `b/` layout before a reconciler w
 
 A live session keeps its discard save across the rewrite: each restoring workspace entry records the old workdir restore outcome (`restored`, `miss` as `missing`, `reset` as `unreadable`, `failed`, `running`); a `skipped` or absent old restore leaves the entry restore-pending, as the old rule skipped that save. A session whose preset was deleted keeps the literal `preset-<hash>` name, which is also the name its legacy archive is migrated under.
 
+### Release notes: named backups, retrospective flag, handoff export
+
+What the release that carries S-68 changes for an operator, in one place (the details are in the sections named).
+
+- Backups replace the workspace cache. `spec.backup` entries (root `workspace` or `claude`, see "Spec and key") name versioned directory archives; the per-session `claude` directory is the PVC subPath `claude` at `/claude`, shared by every pod of the session (the wrapper links its config `skills` and `rules` to it). Saves run at discard and on demand (`POST /agent/v1/backup/save`, tool `orchestrator_backup_save`); a restore of a missing or unreadable name is a warning and the session starts; a live entry is kept current while the session runs (see "Live delivery") and a directory with unsaved edits is skipped with a warning, never overwritten.
+- Plain versioning, no merge: the later save becomes the current version, the earlier stays as a version that can be copied back (`POST /api/v1/backups/copy`). Two sessions saving one name at once leave two versions and exactly one current.
+- Retrospective sessions (`spec.retrospective`, human-only) read histories, handoffs, chats, presets, usage and backups, copy backups and update the notes of rooms in their projects; the exact set is in the paragraph beginning "Retrospective sessions" under Architecture. Every session on the default image also gets `claude.subagent_allowed_tools`, so the default agent image must be claude-code-wrapper 0.20.0 or newer before this release is deployed (an older wrapper refuses the key).
+- Handoff rows are exported to agents-history as kind `handoff` at discard (the discard hook streams them before the cascade delete) and the admin handoff routes list and read them.
+- Removed routes (no alias): `/api/v1/cache/archives`, `/api/v1/cache/archives/download`, `/api/v1/cache/cleanup/preview|run|settings` are now `/api/v1/backups...`; `/agent/v1/admin/archives...` is now `/agent/v1/admin/backups...`; the `spec.cache` field is gone. The room `chat/skills` routes stay until the removal release that follows the skill migration.
+- Store policy: the api key's S3 policy needs `s3:PutObject` under `<prefix>b/` besides list, get and delete, because the copy route is a server-side CopyObject (see "Archives and cleanup"; the chart README has the store policy).
+- The cleanup sweep, which also deletes unowned (orphan) objects and old versions, stays in dry-run (`cache.sweep.dryRun: true`, the chart default) until the object migration has run and restores of migrated names are verified; only then set it false.
+- Deploy order: the default agent image is claude-code-wrapper 0.20.0 or newer; no session is mid-restore or mid-save; `orch backup migrate --dry-run` exits 0; the old api and reconciler are scaled to 0; the migration Job (`backupMigration.enabled` in the chart) runs `orch migrate` and `orch backup migrate` before the new api serves; then add entries per preset and, once restores are verified, `orch backup migrate --delete-old`. The numbered run order is under "Migration from the workspace cache".
+
 ### Job CLI
 
 The Jobs run `orch cache restore|save|resolve` with only these variables (no `ORCH_*`):
