@@ -116,14 +116,10 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     # session posts in the occupier's name on relay (T-56, `chat_relay`)
     ("POST", f"{_A}/chat/messages"): "own",
     ("GET", f"{_A}/chat/messages/{{send_id}}"): "own",
-    # room notes and skills: the upstream resolves the room from the caller session's own
+    # room notes: the upstream resolves the room from the caller session's own
     # binding, so a caller reaches only the room its session is bound to
     ("GET", f"{_A}/chat/notes"): "own",
     ("PUT", f"{_A}/chat/notes"): "own",
-    ("GET", f"{_A}/chat/skills"): "own",
-    ("GET", f"{_A}/chat/skills/{{name}}"): "own",
-    ("PUT", f"{_A}/chat/skills/{{name}}"): "own",
-    ("DELETE", f"{_A}/chat/skills/{{name}}"): "own",
     ("GET", f"{_A}/chat/history"): "own",
     ("POST", f"{_A}/chat/attachments"): "own",
     ("GET", f"{_A}/chat/attachments/{{request_id}}"): "own",

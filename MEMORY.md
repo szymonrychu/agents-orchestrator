@@ -724,3 +724,7 @@ in the namespace, so an attached vault value is exposed to it. Decision: attach 
 
 ## 2026-11-18 Invalid envelope rows without turn_id are logged
 - `project_assistant_text` logs a WARNING (agent_id, event_seq, envelope_index, error_code, never the body) for each `invalid` row written with a NULL `turn_id`: the Stop gate and the protocol-failure notice are keyed by turn, so such a row can never be gated or told back to the agent (stop-hook RCA). `insert_rows` returns only a count, so the log names the row by (agent, event_seq, envelope_index) instead of the outbox id. No counter: this area exposes no Prometheus metrics.
+
+## 2026-11-17 chat skills relay removed (S-68 step 26, T-534)
+- `/agent/v1/chat/skills[/{name}]` (4 routes), their scope rows, `ChatSkillIn` and the `chat_skills_*` names in `CHAT_TOOLS` are gone (breaking, no alias): room skills moved to backup entries (T-530). Merge only after the room skills migration is verified, or rooms lose access to their skills. The chat upstream's own skills routes and the plugin's tools are out of scope here; the plugin must drop its four tools in the same rollout.
+- Tests removed because no longer accurate: the skills cases of `MEMORY_ROUTES`, `test_delete_forwards_no_body`, `test_skill_name_is_one_segment`, the skills parts of the parity test and the skill refusal cases. Added `test_chat_skills_routes_404`, `test_chat_tools_have_no_skills`.
