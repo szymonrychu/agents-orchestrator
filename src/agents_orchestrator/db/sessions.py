@@ -1094,13 +1094,19 @@ async def discard_idle(conn: psycopg.AsyncConnection, close_grace_seconds: int) 
     """Flip idle sessions to deleting (request_delete write): those with a pending close request
     that have been idle for `close_grace_seconds`. The only flip of every close kind. An asked
     close (inactivity, autoclose) also waits for its answer window (`close_deadline_at`), so a
-    busy session is never flipped, however long it stays busy; a self-close has no deadline. An
-    inactivity close answered by a message or an update is not flipped. Locked and re-checked per
-    candidate (`_sweep_each`): a message or a `cancel_close` committed first fails the re-check,
-    and a message arriving after the flip is refused."""
-    predicate = (
+    busy session is never flipped, however long it stays busy. An inactivity close answered by a
+    message or an update is not flipped. A self-close (`close_kind` 'self') is forceful: it flips
+    `close_grace_seconds` after the request regardless of activity, agents, messages or init.
+    Locked and re-checked per candidate (`_sweep_each`): a message or a `cancel_close` committed
+    first fails the re-check, and a message arriving after the flip is refused."""
+    asked = (
         f"{_IDLE_PREDICATE} AND (s.close_deadline_at IS NULL OR s.close_deadline_at <= now())"
         f" AND (s.close_kind IS DISTINCT FROM 'inactivity' OR NOT ({_INACTIVITY_CLOSE_CANCELLED}))"
+    )
+    predicate = (
+        "((s.close_kind = 'self' AND s.desired = 'active'"
+        " AND s.close_requested_at + make_interval(secs => %(grace)s::int) <= now())"
+        f" OR (s.close_kind IS DISTINCT FROM 'self' AND ({asked})))"
     )
 
     async def flip(session_id: uuid.UUID, row: dict[str, Any]) -> str:

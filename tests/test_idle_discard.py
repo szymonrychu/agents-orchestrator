@@ -67,9 +67,21 @@ async def _age_close(pool, session_id, seconds: int) -> None:
         )
 
 
-async def _request(pool, session_id, reason="done") -> None:
+async def _self_request(pool, session_id, reason="done") -> None:
+    """A leader's self-close request (close_kind 'self'): reaped by grace alone."""
     async with pool.connection() as conn:
         await sessions.request_close(conn, session_id, reason)
+
+
+async def _request(pool, session_id, reason="done") -> None:
+    """An asked close (kind 'autoclose', answer window over): reaped only when idle."""
+    await _self_request(pool, session_id, reason)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE sessions SET close_kind = 'autoclose',"
+            " close_deadline_at = now() - interval '1 hour' WHERE id = %s",
+            (session_id,),
+        )
 
 
 async def _age_all(pool, session_id, seconds: int) -> None:
@@ -275,7 +287,7 @@ async def test_sweeper_discards_idle_session(dsn, pool, monkeypatch):
 
 async def test_requested_close_flips_after_grace(pool, caplog):
     s, _ = await _idle_session(pool, spec={})
-    await _request(pool, s["id"])
+    await _self_request(pool, s["id"])
     await _age_close(pool, s["id"], 40)
     with caplog.at_level(logging.INFO, logger="agents_orchestrator.db.sessions"):
         assert await _run(pool, grace=30) == [s["id"]]
@@ -286,7 +298,7 @@ async def test_requested_close_flips_after_grace(pool, caplog):
 
 async def test_requested_close_waits_for_grace(pool):
     s, _ = await _idle_session(pool, spec={})
-    await _request(pool, s["id"])  # close_requested_at = now: the grace restarts the clock
+    await _self_request(pool, s["id"])  # close_requested_at = now: the grace restarts the clock
     assert await _run(pool, grace=30) == []
     assert await _desired(pool, s["id"]) == "active"
 
@@ -353,14 +365,14 @@ async def test_requested_close_waits_for_attention_and_init(pool):
 
 async def test_grace_zero_flips_on_next_pass_when_idle(pool):
     s, _ = await _idle_session(pool, spec={})
-    await _request(pool, s["id"])
+    await _self_request(pool, s["id"])
     await _age_close(pool, s["id"], 1)
     assert await _run(pool, grace=0) == [s["id"]]
 
 
 async def test_cancel_before_flip_keeps_session(pool):
     s, _ = await _idle_session(pool, spec={})
-    await _request(pool, s["id"])
+    await _self_request(pool, s["id"])
     await _age_all(pool, s["id"], 120)
     async with pool.connection() as conn:
         await sessions.cancel_close(conn, s["id"])
@@ -372,7 +384,7 @@ async def test_cancel_racing_flip_has_one_outcome(pool):
     """A cancel committed while the discard waits on the row lock wins; a discard that took the
     lock first wins and the cancel is refused."""
     s, _ = await _idle_session(pool, spec={})
-    await _request(pool, s["id"])
+    await _self_request(pool, s["id"])
     await _age_all(pool, s["id"], 120)
     async with pool.connection() as holder:
         async with holder.transaction():
@@ -386,7 +398,7 @@ async def test_cancel_racing_flip_has_one_outcome(pool):
 
     # mirror: the discard holds the lock first, so the cancel queued behind it is refused
     m, _ = await _idle_session(pool, spec={})
-    await _request(pool, m["id"])
+    await _self_request(pool, m["id"])
     await _age_all(pool, m["id"], 120)
 
     async def cancel() -> str:
@@ -435,7 +447,7 @@ async def test_sweep_passes_grace(monkeypatch, pool):
 async def test_sweeper_uses_close_grace_setting(dsn, pool, monkeypatch):
     monkeypatch.setattr(autoclose, "AUTOCLOSE_POLL_SECONDS", 0.1)
     s, _ = await _idle_session(pool, spec={})
-    await _request(pool, s["id"])
+    await _self_request(pool, s["id"])
     await _age_close(pool, s["id"], 15)
     app = create_app(Settings(database_url=dsn, agent_image="img:1", close_grace_seconds=10))
     async with app.router.lifespan_context(app):
@@ -476,3 +488,67 @@ async def test_stale_background_subagent_does_not_block_discard(pool):
     await set_agent_status(pool, a["id"], state="idle", background_subagents={"sa1": stale})
     await _age(pool, s["id"])
     assert await _run(pool) == [s["id"]]
+
+
+# Self-close is forceful: it flips grace seconds after the request, whatever the activity.
+
+
+async def _self_aged(pool, session_id, seconds: int = 120) -> None:
+    await _self_request(pool, session_id)
+    await _age_close(pool, session_id, seconds)
+
+
+async def test_self_close_flips_despite_busy_agent(pool):
+    s, a = await _idle_session(pool)
+    await set_agent_status(pool, a["id"], state="busy")
+    await _self_aged(pool, s["id"])
+    assert await _run(pool) == [s["id"]]
+    assert await _desired(pool, s["id"]) == "deleting"
+
+
+async def test_self_close_flips_despite_running_turn(pool):
+    s, a = await _idle_session(pool)
+    await set_agent_status(pool, a["id"], state="busy", current_turn_id="t1")
+    await _self_aged(pool, s["id"])
+    assert await _run(pool) == [s["id"]]
+
+
+@pytest.mark.parametrize("status", ["queued", "dispatching", "verifying"])
+async def test_self_close_flips_despite_pending_message(pool, status):
+    s, _ = await _idle_session(pool)
+    await insert_message(pool, s["id"], status=status)
+    await _self_aged(pool, s["id"])
+    assert await _run(pool) == [s["id"]]
+
+
+async def test_self_close_flips_despite_init_running(pool):
+    init = {"init": {"state": "running", "started_at": "2999-01-01T00:00:00+00:00"}}
+    s, _ = await _idle_session(pool, status=init)
+    await _self_aged(pool, s["id"])
+    assert await _run(pool) == [s["id"]]
+
+
+async def test_self_close_flips_with_no_or_only_gone_agents(pool):
+    none = await insert_session(pool, spec={})
+    await _self_aged(pool, none["id"])
+    gone, a = await _idle_session(pool)
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE agents SET gone_at = now() WHERE id = %s", (a["id"],))
+    await _self_aged(pool, gone["id"])
+    assert sorted(await _run(pool)) == sorted([none["id"], gone["id"]])
+
+
+async def test_self_close_flips_despite_fresh_activity_after_request(pool):
+    s, a = await _idle_session(pool)
+    await _self_aged(pool, s["id"])
+    await set_agent_status(pool, a["id"], state="idle")  # free_since = now
+    await insert_turn(pool, a["id"], status="completed", completed_at=datetime.now(UTC))
+    await insert_message(pool, s["id"], status="sent")
+    assert await _run(pool) == [s["id"]]
+
+
+async def test_self_close_younger_than_grace_is_not_flipped(pool):
+    s, _ = await _idle_session(pool)
+    await _self_aged(pool, s["id"], 10)
+    assert await _run(pool, grace=30) == []
+    assert await _desired(pool, s["id"]) == "active"
