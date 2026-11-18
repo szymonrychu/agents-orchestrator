@@ -1746,6 +1746,34 @@ async def test_parse_error_before_valid_envelope_shares_index_space(harness, poo
     assert len({r["envelope_index"] for r in rows}) == 2
 
 
+async def test_invalid_envelope_without_turn_id_logs_warning(harness, pool, caplog) -> None:
+    h = await harness()
+    await h.start()
+    with caplog.at_level("WARNING", logger="agents_orchestrator.ingester.chat_envelopes"):
+        h.fake.emit("assistant_text", {"text": "<chat-status>secret body</chat-status>"})
+        await h.stored_through(h.last_fake_seq())
+    rows = await outbox_rows(pool, h.agent_id)
+    assert [(r["status"], r["turn_id"]) for r in rows] == [("invalid", None)]
+    warns = [r for r in caplog.records if "without turn_id" in r.getMessage()]
+    assert len(warns) == 1
+    msg = warns[0].getMessage()
+    assert str(h.agent_id) in msg and "parse_error" in msg
+    assert "secret body" not in msg
+
+
+async def test_invalid_envelope_with_turn_id_does_not_warn(harness, pool, caplog) -> None:
+    h = await harness()
+    await h.start()
+    with caplog.at_level("WARNING", logger="agents_orchestrator.ingester.chat_envelopes"):
+        h.fake.emit(
+            "assistant_text",
+            {"text": "<chat-status>bad</chat-status>", "turn_id": str(uuid.uuid4())},
+        )
+        await h.stored_through(h.last_fake_seq())
+    assert [r["status"] for r in await outbox_rows(pool, h.agent_id)] == ["invalid"]
+    assert not [r for r in caplog.records if "without turn_id" in r.getMessage()]
+
+
 async def test_envelope_relay_crash_is_restarted_with_backoff(pool, dsn, monkeypatch) -> None:
     from agents_orchestrator.ingester import loop as loop_mod
     from agents_orchestrator.settings import Settings
