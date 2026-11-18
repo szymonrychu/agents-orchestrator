@@ -9,6 +9,7 @@ event inserts nothing.
 
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from typing import Any
@@ -21,6 +22,8 @@ from agents_orchestrator.db import sessions as sessions_repo
 from agents_orchestrator.db.envelope_outbox import Row
 
 _ERROR_TAG = re.compile(r"<chat-react\b")
+
+log = logging.getLogger(__name__)
 
 
 def is_main_chain(data: dict[str, Any]) -> bool:
@@ -107,3 +110,15 @@ async def project_assistant_text(
             for r in rows
         ]
     await envelope_outbox.insert_rows(conn, rows)
+    if common["turn_id"] is None:
+        # Without a turn the Stop gate cannot see the row and no notice can reach the agent.
+        for r in rows:
+            if r.status == "invalid":
+                log.warning(
+                    "invalid envelope row without turn_id agent_id=%s event_seq=%s"
+                    " envelope_index=%s error_code=%s",
+                    agent_id,
+                    event_seq,
+                    r.envelope_index,
+                    r.error_code,
+                )
