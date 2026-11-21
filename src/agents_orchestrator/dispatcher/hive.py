@@ -170,32 +170,42 @@ def levels(spec: dict[str, Any], start_tokens: int | None, settings: Settings) -
     )
 
 
+def _floored_below_compaction(
+    pct: float, compact_pct: int, headroom_tokens: int, window_tokens: int
+) -> float:
+    """The smaller of the percent point and the token headroom below compaction; the headroom
+    term never drops below half the percent point, so a low compaction point on a small window
+    does not collapse the level to 0 (and the result stays continuous in the compaction point)."""
+    point = pct / 100 * window_tokens
+    return min(point, max(compact_pct / 100 * window_tokens - headroom_tokens, point / 2))
+
+
 def strong_tokens(lv: Levels, window_tokens: int) -> int:
     """The context size from which level 2 (strong) applies: the smaller of the percent margin
-    below compaction and the headroom in tokens below it, floored at 0."""
-    return max(
-        0,
-        int(
-            min(
-                lv.strong_pct / 100 * window_tokens,
-                lv.compact_pct / 100 * window_tokens - lv.strong_headroom_tokens,
-            )
-        ),
+    below compaction and the headroom in tokens below it, never below half the percent point;
+    0 only for a non-positive percent."""
+    if lv.strong_pct <= 0:
+        return 0
+    return int(
+        _floored_below_compaction(
+            lv.strong_pct, lv.compact_pct, lv.strong_headroom_tokens, window_tokens
+        )
     )
 
 
 def critical_tokens(lv: Levels, window_tokens: int) -> int:
     """The context size from which level 3 (critical) applies: the smaller of the percent margin
-    and the token headroom below compaction, never below the level 2 point."""
-    return max(
-        strong_tokens(lv, window_tokens),
-        int(
-            min(
-                (lv.compact_pct - lv.critical_margin_pct) / 100 * window_tokens,
-                lv.compact_pct / 100 * window_tokens - lv.critical_headroom_tokens,
-            )
-        ),
+    and the token headroom below compaction (same floor), never below the level 2 point plus the
+    gap between the two margins."""
+    strong = strong_tokens(lv, window_tokens)
+    gap = max(0, lv.compact_pct - lv.critical_margin_pct - lv.strong_pct) / 100 * window_tokens
+    crit = _floored_below_compaction(
+        lv.compact_pct - lv.critical_margin_pct,
+        lv.compact_pct,
+        lv.critical_headroom_tokens,
+        window_tokens,
     )
+    return max(int(strong + gap), int(crit))
 
 
 def l1_tokens(lv: Levels, window_tokens: int, l2_tokens: int) -> int:
@@ -272,10 +282,12 @@ def hive_state_payload(
 def handover_advice(lv: Levels, settings: Settings) -> str:
     """The standing handover guidance of the hive-state note."""
     return (
-        "Leadership is yours until you hand it over. Context pressure tells you when: after "
-        f"{round(lv.budget_tokens / 1000)}k tokens of work on top of your context at the start "
-        f"of leadership and at least {round(settings.handover_min_tenure_seconds / 60)} minutes "
-        f"as leader, and always before {lv.strong_pct:g}% context. Hand off with "
+        "Leadership is yours until you hand it over. Context pressure tells you when: plan a "
+        f"handoff after {round(lv.budget_tokens / 1000)}k tokens of work on top of your context "
+        "at the start of leadership (never later than the hand-off point) once you have led "
+        f"{round(settings.handover_min_tenure_seconds / 60)} minutes; hand off at "
+        f"{lv.strong_pct:g}% context; at {lv.compact_pct - lv.critical_margin_pct:g}% it is "
+        f"critical, auto-compaction is at {lv.compact_pct:g}%. Hand off with "
         f"orchestrator_handoff_submit. {REREAD_RULE}"
     )
 

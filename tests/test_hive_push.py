@@ -260,7 +260,7 @@ async def test_hive_state_threshold_hint(env):
     for spec, hard in (({"auto_compact_pct": 80}, 70), ({}, 85), ({"auto_compact_pct": 15}, 5)):
         _, (a0, a1, _a2) = await env.hive(spec=spec)
         await env.push()
-        hint = f"and always before {hard}% context."
+        hint = f"hand off at {hard}% context"
         assert hint in env.notes(a0)[0] and hint in env.notes(a1)[0]
         assert "instead of compacting" not in env.notes(a0)[0]
 
@@ -343,7 +343,17 @@ def test_strong_tokens_rule():
 
     assert strong(95, 200000) == 130000  # min(85% = 170000, 190000 - 60000)
     assert strong(50, 1000000) == 400000  # min(40% = 400000, 500000 - 60000 = 440000)
-    assert strong(95, 50000) == 0  # min(42500, -12500) floored
+    assert strong(95, 50000) == 21250  # min(42500, max(-12500, 42500 / 2)): the floor
+
+
+def test_handover_advice_names_points():
+    lv = _levels(c=25)
+    advice = hive.handover_advice(lv, Settings(database_url=DB0, master_key=KEY))
+    assert "hand off at 15% context" in advice
+    assert "at 20% it is critical" in advice
+    assert "auto-compaction is at 25%" in advice
+    assert f"{round(lv.budget_tokens / 1000)}k tokens" in advice
+    assert "always before" not in advice
 
 
 def test_levels_l1_from_start_plus_budget():
