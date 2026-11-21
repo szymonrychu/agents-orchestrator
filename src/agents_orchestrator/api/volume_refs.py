@@ -127,6 +127,15 @@ async def prepare_volumes(
     atts = attachments_in(spec)
     if not atts:
         return
+    # every referenced row in id order, before any check: FOR SHARE so an attach cannot race a
+    # delete or a project change (they hold FOR UPDATE); FOR UPDATE for a superleader, whose
+    # cross-trust check needs concurrent attaches of one volume to see each other (taking SHARE
+    # first and upgrading later would deadlock two of them)
+    await volumes.lock_rows(
+        conn,
+        [uuid.UUID(str(a["volume"])) for a in atts if _is_uuid(a.get("volume"))],
+        exclusive=superleader,
+    )
     problems = await check_volume_refs(conn, SessionSpec.model_validate(spec), preset_scope)
     if problems:
         raise ApiError(422, "volumes_invalid", "; ".join(problems), extra={"problems": problems})
@@ -139,6 +148,14 @@ async def prepare_volumes(
             att["mount_path"] = effective_mount_path(
                 VolumeAttachment.model_validate(att), found.name
             )
+
+
+def _is_uuid(value: Any) -> bool:
+    try:
+        uuid.UUID(str(value))
+    except ValueError:
+        return False
+    return True
 
 
 def _key(att: dict[str, Any]) -> tuple[str, str, str | None, bool]:

@@ -194,6 +194,43 @@ async def test_patch_refuses_removing_a_project_an_attaching_preset_needs(http, 
     ).status_code == 200
 
 
+@pytest.mark.parametrize("state", ["restoring", "saving"])
+async def test_delete_while_restoring_or_saving_is_409_busy(http, pool, state):
+    v = await ready(http, pool)
+    await set_state(pool, v["id"], state)
+    assert_error(await http.delete(f"{V}/{v['id']}"), 409, "volume_busy")
+    assert (await http.get(f"{V}/{v['id']}")).json()["state"] == state
+
+
+@pytest.mark.parametrize("body", [{"size": "2Gi"}, {"description": "x"}, {"labels": ["a"]}])
+async def test_patch_on_a_deleting_volume_is_409_busy(http, pool, body):
+    v = await ready(http, pool)
+    assert (await http.delete(f"{V}/{v['id']}")).status_code == 202
+    assert_error(await http.patch(f"{V}/{v['id']}", json=body), 409, "volume_busy")
+
+
+async def test_recreated_name_does_not_auto_restore_the_deleted_volumes_data(http, pool):
+    old = await ready(http, pool)
+    await add_version(pool, "volume-data")
+    async with pool.connection() as conn, conn.transaction():
+        await volumes.finish_delete(conn, uuid.UUID(old["id"]))
+    new = await ready(http, pool)
+    got = (await http.get(f"{V}/{new['id']}")).json()
+    assert got["content_version"] == got["current_version"] is not None
+    async with pool.connection() as conn, conn.transaction():
+        decision = await volumes.claim(
+            conn,
+            volume_id=uuid.UUID(new["id"]),
+            session_id=uuid.uuid4(),
+            preset_id=None,
+            mode="rw",
+            backup_restore=True,
+            session_slug="s",
+            current_version=uuid.UUID(got["current_version"]),
+        )
+    assert decision.decision == "proceed"
+
+
 async def test_patch_grow_while_busy_is_409(http, pool):
     v = await make(http)  # still provisioning
     assert_error(await http.patch(f"{V}/{v['id']}", json={"size": "2Gi"}), 409, "volume_busy")

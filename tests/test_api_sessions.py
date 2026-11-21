@@ -403,8 +403,15 @@ async def test_meta_defaults(pool, dsn):
     assert meta["agent_image"] == "img:1"
     assert meta["agent_images"] == ["img:1", "img:2"]
     assert meta["models"] == ["m1", "m2"]
-    caps = {k: v for k, v in meta["caps"].items() if not k.startswith("volume_")}
-    assert caps == {"max_replicas": 4, "max_pvc_size": "50Gi", "max_sessions": 7}
+    assert meta["caps"] == {
+        "max_replicas": 4,
+        "max_pvc_size": "50Gi",
+        "max_sessions": 7,
+        "volume_storage_class": "rook-ceph-rwx",
+        "volume_max_size": "200Gi",
+        "volume_default_size": "10Gi",
+        "volume_max_per_preset": 8,
+    }
     assert meta["discard_hook"] == "url"
 
     async with client_for(create_app(make_settings(dsn), pool)) as c:

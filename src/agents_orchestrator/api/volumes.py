@@ -175,7 +175,7 @@ def _mount_path(attachment: dict[str, Any], name: str) -> str:
         **_ERRORS,
         409: {
             "description": "shrink_refused, project_in_use (an attaching preset would lose its"
-            " scope) or volume_busy (the volume is not ready to grow)"
+            " scope) or volume_busy (the volume is not ready to grow, or is being deleted)"
         },
     },
 )
@@ -232,7 +232,10 @@ class _Refused(Exception):
     response_model=schemas.VolumeView,
     responses={
         **_ERRORS,
-        409: {"description": "volume_attached (a preset attaches it) or volume_mounted"},
+        409: {
+            "description": "volume_attached (a preset attaches it), volume_mounted or volume_busy"
+            " (a restore or save is running)"
+        },
     },
 )
 async def delete_volume(request: Request, pool: Pool, volume_id: uuid.UUID) -> schemas.VolumeView:
@@ -263,6 +266,8 @@ async def delete_volume(request: Request, pool: Pool, volume_id: uuid.UUID) -> s
         raise ApiError(409, refused.code, refused.message) from None
     except repo.VolumeNotFound:
         raise _not_found() from None
+    except repo.VolumeBusy as exc:
+        raise ApiError(409, "volume_busy", str(exc)) from None
     log.info("audit: volume delete requested id=%s by=%s", volume_id, actor)
     return view
 

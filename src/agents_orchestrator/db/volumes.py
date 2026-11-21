@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
@@ -19,6 +20,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from agents_orchestrator.db import backups as backups_repo
 from agents_orchestrator.db.backups import Page
 from agents_orchestrator.db.pool import notify
 from agents_orchestrator.labels import normalize_labels
@@ -220,18 +222,21 @@ async def create(
     detail: dict[str, Any] | None = None,
 ) -> Volume:
     """Insert a `provisioning` volume (PVC name `vol-<name>`); VolumeExists on a live name.
-    `detail` (ids, never content) is added to the `created` event."""
+    `detail` (ids, never content) is added to the `created` event. A re-created name starts at
+    the current backup version of `volume-<name>` (`content_version`), so the deleted volume's
+    data is never restored automatically; an explicit user restore stays possible."""
     projects, labels = validate_new(name, projects, size, labels, exclude, max_size)
     # serialise creators of one name: the partial unique index alone would abort the transaction
     await conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"volume:{name}",))
     if await by_name(conn, name) is not None:
         raise VolumeExists(name)
     vid = uuid.uuid4()
+    inherited = await backups_repo.current(conn, f"{backups_repo.RESERVED_PREFIX}{name}")
     rows = await _rows(
         conn,
         f"INSERT INTO volumes (id, name, projects, labels, description, exclude, size,"
-        f" storage_class, pvc_name, state, created_by)"
-        f" VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'provisioning',%s)"
+        f" storage_class, pvc_name, state, created_by, content_version)"
+        f" VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'provisioning',%s,%s)"
         f" RETURNING {_COLUMNS}",
         (
             vid,
@@ -244,6 +249,7 @@ async def create(
             storage_class,
             f"vol-{name}",
             created_by,
+            inherited.id if inherited else None,
         ),
         Volume,
     )
@@ -266,6 +272,21 @@ async def get_locked(conn: psycopg.AsyncConnection, id: uuid.UUID) -> Volume | N
         return await _lock(conn, id)
     except VolumeNotFound:
         return None
+
+
+async def lock_rows(
+    conn: psycopg.AsyncConnection, ids: Iterable[uuid.UUID], *, exclusive: bool = False
+) -> None:
+    """Lock the live rows of `ids` in id order (no deadlock between savers): FOR SHARE, or FOR
+    UPDATE with `exclusive`. A caller holding SHARE must not later want UPDATE on the same row."""
+    ordered = sorted(set(ids))
+    if ordered:
+        mode = "UPDATE" if exclusive else "SHARE"
+        await conn.execute(
+            "SELECT 1 FROM volumes WHERE id = ANY(%s) AND deleted_at IS NULL ORDER BY id"
+            f" FOR {mode}",
+            (ordered,),
+        )
 
 
 async def get(conn: psycopg.AsyncConnection, id: uuid.UUID) -> Volume | None:
@@ -311,6 +332,8 @@ async def update(
     equal to the current one is a no-op, a larger one sets `resizing` and only from `ready`
     (VolumeBusy in any other state)."""
     cur = await _lock(conn, id)
+    if cur.state == "deleting":
+        raise VolumeBusy("a deleting volume cannot be changed")
     sets: dict[str, Any] = {}
     events: list[tuple[str, dict[str, Any]]] = []
     if size is not None:
@@ -385,6 +408,9 @@ async def set_state(
 
 
 async def mark_deleting(conn: psycopg.AsyncConnection, id: uuid.UUID) -> None:
+    """Set `deleting`; VolumeBusy while a restore or save Job owns the volume."""
+    if (await _lock(conn, id)).state in ("restoring", "saving"):
+        raise VolumeBusy("a restoring or saving volume cannot be deleted yet")
     await set_state(conn, id, "deleting")
 
 
