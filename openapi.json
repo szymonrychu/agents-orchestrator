@@ -6176,6 +6176,20 @@
               }
             ]
           },
+          "volumes": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/VolumeAttachment"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Volumes"
+          },
           "workdir": {
             "default": "workdir",
             "maxLength": 63,
@@ -6554,6 +6568,20 @@
                 "type": "null"
               }
             ]
+          },
+          "volumes": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/VolumeAttachment"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Volumes"
           },
           "workdir": {
             "default": "workdir",
@@ -7712,6 +7740,47 @@
           "protected"
         ],
         "title": "VaultPinView",
+        "type": "object"
+      },
+      "VolumeAttachment": {
+        "additionalProperties": false,
+        "description": "One shared volume mounted into the session pod. `mount_path` unset means\n`/volumes/<volume name>`, filled at preset save. `backup_restore` opts this attachment into\nthe volume's automatic restore and save-on-last-release.",
+        "properties": {
+          "backup_restore": {
+            "default": false,
+            "title": "Backup Restore",
+            "type": "boolean"
+          },
+          "mode": {
+            "enum": [
+              "ro",
+              "rw"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "mount_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mount Path"
+          },
+          "volume": {
+            "format": "uuid",
+            "title": "Volume",
+            "type": "string"
+          }
+        },
+        "required": [
+          "volume",
+          "mode"
+        ],
+        "title": "VolumeAttachment",
         "type": "object"
       },
       "WebhookHook": {

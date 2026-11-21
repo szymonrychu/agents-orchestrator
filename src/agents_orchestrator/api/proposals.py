@@ -52,6 +52,11 @@ from agents_orchestrator.api import presets as presets_api
 from agents_orchestrator.api.errors import ApiError, not_found
 from agents_orchestrator.api.sessions import PLACE_ATTEMPTS, hold_project
 from agents_orchestrator.api.spec_edit import merged_spec, note_fields
+from agents_orchestrator.api.volume_refs import (
+    attachments_in,
+    audit_volume_attachments,
+    prepare_volumes,
+)
 from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.db import proposals as repo
 from agents_orchestrator.db import sessions as sessions_repo
@@ -998,8 +1003,12 @@ async def _apply(
     except ApiError as exc:
         raise ApiError(422, "invalid_spec", exc.message) from None
     await presets_api.check_vault(request, spec, preset.labels, preset.project)
+    await prepare_volumes(conn, new, (preset.project, *preset.extra_projects))
     await presets_repo.update(
         conn, preset.id, preset.name, new, expected_updated_at=preset.updated_at
+    )
+    await audit_volume_attachments(
+        conn, preset.id, attachments_in(preset.spec), attachments_in(new), "user", "user"
     )
 
 

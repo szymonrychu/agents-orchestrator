@@ -436,6 +436,10 @@ async def create(
         body_spec = body.spec
         if body_spec.vault_refs:
             raise vault_refs_not_allowed(sorted(body_spec.vault_refs))
+        if body_spec.volumes:
+            raise ApiError(
+                422, "volumes_preset_only", "volumes come from the preset only; attach in a preset"
+            )
         spec = await run_in_threadpool(check_spec, body_spec, settings)
     if body.slug is not None:
         try:

@@ -27,6 +27,11 @@ from agents_orchestrator.api.vault_refs import (
     refs_in,
     unavailable,
 )
+from agents_orchestrator.api.volume_refs import (
+    attachments_in,
+    audit_volume_attachments,
+    prepare_volumes,
+)
 from agents_orchestrator.db import presets as repo
 from agents_orchestrator.db import projects
 from agents_orchestrator.db import proposals as proposals_repo
@@ -174,15 +179,28 @@ async def _save(
     save: Callable[[], Awaitable[repo.Preset]],
     actor: str = "user",
     old_refs: dict[str, Ref] | None = None,
+    old_volumes: list[dict[str, Any]] | None = None,
+    extra_projects: tuple[str, ...] = (),
 ) -> repo.Preset:
     """Save the preset row in one transaction, the preset's `project` checked and held first
-    (`hold_project`). In the same transaction: the names the new spec defines leave the preset's
-    re-attach list, and the vault refs attached or detached against `old_refs` are recorded as
-    events by `actor`.
+    (`hold_project`). In the same transaction: the volume attachments are checked against the
+    project scope (`project` plus `extra_projects`) and get their default mount path (422
+    `volumes_invalid`), the names the new spec defines leave the preset's re-attach list, the
+    vault refs attached or detached against `old_refs` and the volume attachments against
+    `old_volumes` are recorded as events by `actor`.
     """
     async with conn.transaction():
         await hold_project(conn, project)
+        await prepare_volumes(conn, spec, (project, *extra_projects))
         preset = await _after_save(conn, await save(), spec, actor, old_refs or {})
+        await audit_volume_attachments(
+            conn,
+            preset.id,
+            old_volumes,
+            attachments_in(spec),
+            "user" if actor == "user" else "agent",
+            actor,
+        )
     note_vault(request, *ref_diff(old_refs or {}, refs_in(spec)))
     return preset
 
@@ -331,6 +349,8 @@ async def replace(
             ),
             _actor(request, superleader),
             refs_in(stored.spec),
+            attachments_in(stored.spec),
+            stored.extra_projects,
         )
     except repo.PresetNotFound:
         raise not_found("preset") from None
@@ -488,6 +508,8 @@ async def _edit_refs(
                 ),
                 _actor(request, True),
                 refs_in(stored.spec),
+                attachments_in(stored.spec),
+                stored.extra_projects,
             )
         except repo.PresetNotFound:
             raise not_found("preset") from None
@@ -554,6 +576,8 @@ async def patch(
                 save,
                 _actor(request, True),
                 refs_in(stored.spec),
+                attachments_in(stored.spec),
+                stored.extra_projects,
             )
         except repo.PresetNotFound:
             raise not_found("preset") from None
@@ -673,16 +697,22 @@ async def copy(
         try:
             async with conn.transaction():
                 await hold_project(conn, project)
+                if attachments_in(spec):
+                    spec = {**spec, "volumes": [dict(a) for a in attachments_in(spec)]}
+                await prepare_volumes(conn, spec, (project,))
                 created = await repo.create(
                     conn, name, spec, source.superleader_manageable, source.labels, project
                 )
                 attached, _ = ref_diff({}, refs_in(spec))
-                await record_ref_events(
+                actor = _actor(request, superleader) if request else "user"
+                await record_ref_events(conn, created.id, actor, attached, [])
+                await audit_volume_attachments(
                     conn,
                     created.id,
-                    _actor(request, superleader) if request else "user",
-                    attached,
-                    [],
+                    None,
+                    attachments_in(spec),
+                    "user" if actor == "user" else "agent",
+                    actor,
                 )
             return _view(created)
         except repo.PresetExists:

@@ -432,6 +432,7 @@ SECURITY = frozenset(
         "any_mcp_config",
         "any_mcp_sources",
         "backup",
+        "volumes",
         "wrapper.hooks",
         "wrapper.mcp_servers",
         "wrapper.plugins",

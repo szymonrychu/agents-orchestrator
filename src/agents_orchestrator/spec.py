@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import posixpath
 import re
 import secrets
 import string
@@ -694,6 +695,60 @@ def _backup_problems(spec: SessionSpec) -> list[str]:
     return errors
 
 
+VOLUME_PATH_MAX = 200
+
+
+class VolumeAttachment(_Strict):
+    """One shared volume mounted into the session pod. `mount_path` unset means
+    `/volumes/<volume name>`, filled at preset save. `backup_restore` opts this attachment into
+    the volume's automatic restore and save-on-last-release."""
+
+    volume: uuid.UUID
+    mount_path: str | None = None
+    mode: Literal["ro", "rw"]
+    backup_restore: bool = False
+
+
+def effective_mount_path(att: VolumeAttachment, volume_name: str) -> str:
+    return att.mount_path if att.mount_path is not None else f"/volumes/{volume_name}"
+
+
+def _mount_path_problem(path: str) -> str | None:
+    if not path.startswith("/"):
+        return "must be absolute"
+    if ".." in path.split("/"):
+        return "must not contain '..'"
+    if path == "/":
+        return "must not be '/'"
+    if len(path) > VOLUME_PATH_MAX:
+        return f"is longer than {VOLUME_PATH_MAX} characters"
+    if posixpath.normpath(path) != path:
+        return "must be normalised (no '//', '.', or trailing '/')"
+    return None
+
+
+def _volume_problems(spec: SessionSpec, max_per_preset: int) -> list[str]:
+    """Shape rules of `spec.volumes`; existence, scope and default paths are the save's."""
+    atts = spec.volumes or []
+    errors: list[str] = []
+    if len(atts) > max_per_preset:
+        errors.append(f"volumes: at most {max_per_preset} entries")
+    seen_volumes: set[uuid.UUID] = set()
+    seen_paths: set[str] = set()
+    for i, att in enumerate(atts):
+        if att.volume in seen_volumes:
+            errors.append(f"volumes[{i}]: volume {att.volume} is attached more than once")
+        seen_volumes.add(att.volume)
+        if att.mount_path is None:
+            continue
+        if (problem := _mount_path_problem(att.mount_path)) is not None:
+            errors.append(f"volumes[{i}].mount_path: {problem}")
+        elif att.mount_path in seen_paths:
+            errors.append(f"volumes[{i}].mount_path: {att.mount_path} is used more than once")
+        seen_paths.add(att.mount_path)
+    return errors
+
+
 class UsageQuota(_Strict):
     """Per-preset ceilings, in percent of the account's usage windows, below the default
     (`ORCH_USAGE_QUOTA_DEFAULT`) at which starting or growing a session is refused. A metric
@@ -829,6 +884,8 @@ class SessionSpec(BaseModel):
     # Named directory backups in S3, restored at start and saved at discard; presence enables
     # them. Sparse: unset is not stored or dumped. No built-in default entries.
     backup: list[BackupEntry] | None = None
+    # Shared volumes mounted into the pod (S-77); presets only, a session body may not carry them.
+    volumes: list[VolumeAttachment] | None = None
     # env names of a stored session's legacy pins (`legacy_context`); never input or output
     _legacy_env: frozenset[str] = PrivateAttr(default_factory=frozenset)
 
@@ -1129,6 +1186,7 @@ def validate_spec(spec: SessionSpec, settings: Settings, stored: SessionSpec | N
     ):
         errors.append("backups are not configured (ORCH_CACHE_S3_BUCKET is unset)")
     errors.extend(_backup_problems(spec))
+    errors.extend(_volume_problems(spec, settings.volume_max_per_preset))
     if (
         spec.kube_cluster_access
         and not settings.kube_cluster_access_available
