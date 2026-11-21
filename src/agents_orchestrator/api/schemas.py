@@ -615,6 +615,10 @@ class MetaCaps(BaseModel):
     max_replicas: int
     max_pvc_size: str
     max_sessions: int
+    volume_storage_class: str
+    volume_max_size: str
+    volume_default_size: str
+    volume_max_per_preset: int
 
 
 class MetaCache(BaseModel):
@@ -1138,3 +1142,89 @@ class CleanupSettingsView(BaseModel):
     run_requested_at: datetime | None
     run_pending: bool
     last_sweep: dict[str, Any] | None
+
+
+class VolumeCreateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    projects: list[str] = Field(min_length=1)
+    size: str | None = None
+    description: str = ""
+    labels: list[str] = Field(default_factory=list)
+    exclude: list[str] = Field(default_factory=list)
+
+
+class VolumePatchIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    size: str | None = None
+    description: str | None = None
+    labels: list[str] | None = None
+    projects: list[str] | None = Field(default=None, min_length=1)
+    exclude: list[str] | None = None
+
+
+class VolumeRestoreIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: uuid.UUID
+
+
+class VolumeView(BaseModel):
+    id: uuid.UUID
+    name: str
+    projects: list[str]
+    description: str
+    labels: list[str]
+    exclude: list[str]
+    size: str
+    storage_class: str
+    state: str
+    state_reason: str | None
+    attachments: int
+    mounted: int
+    current_version: uuid.UUID | None
+    content_version: uuid.UUID | None
+    last_save_at: datetime | None
+    created_at: datetime
+
+
+class VolumeAttachmentView(BaseModel):
+    preset_id: uuid.UUID
+    preset_name: str
+    mode: str
+    mount_path: str
+    backup_restore: bool
+
+
+class VolumeClaimView(BaseModel):
+    session_slug: str | None
+    mode: str
+
+
+class VolumeVersionView(BaseModel):
+    id: uuid.UUID
+    created_at: datetime
+    origin: str
+    live: bool
+
+
+class VolumeDetail(VolumeView):
+    presets: list[VolumeAttachmentView]
+    claims: list[VolumeClaimView]
+    versions: list[VolumeVersionView]
+
+
+class VolumeEventView(BaseModel):
+    id: int
+    at: datetime
+    actor_kind: str
+    actor: str
+    kind: str
+    detail: dict[str, Any]
+
+
+class VolumeEventPage(BaseModel):
+    items: list[VolumeEventView]
+    next_cursor: str | None

@@ -310,6 +310,10 @@ async def meta(settings: Cfg) -> schemas.Meta:
             max_replicas=settings.max_replicas,
             max_pvc_size=settings.max_pvc_size,
             max_sessions=settings.max_sessions,
+            volume_storage_class=settings.volume_storage_class,
+            volume_max_size=settings.volume_max_size,
+            volume_default_size=settings.volume_default_size,
+            volume_max_per_preset=settings.volume_max_per_preset,
         ),
         discard_hook=hook.kind if hook else "none",
         cache=schemas.MetaCache(

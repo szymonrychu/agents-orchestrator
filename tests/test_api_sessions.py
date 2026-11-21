@@ -111,7 +111,7 @@ async def test_patch_session_retired_405(http):
         if path.startswith("/api/v1")
         and "PATCH" in methods
         and not path.endswith(("/labels", "/project"))
-        and not path.startswith("/api/v1/projects/")
+        and not path.startswith(("/api/v1/projects/", "/api/v1/volumes/"))
     ]
     spec = (await http.get("/api/v1/openapi.json")).json()
     assert not [
@@ -120,7 +120,7 @@ async def test_patch_session_retired_405(http):
         if p.startswith("/api/v1")
         and "patch" in ops
         and not p.endswith(("/labels", "/project"))
-        and not p.startswith("/api/v1/projects/")
+        and not p.startswith(("/api/v1/projects/", "/api/v1/volumes/"))
     ]
 
 
@@ -403,7 +403,8 @@ async def test_meta_defaults(pool, dsn):
     assert meta["agent_image"] == "img:1"
     assert meta["agent_images"] == ["img:1", "img:2"]
     assert meta["models"] == ["m1", "m2"]
-    assert meta["caps"] == {"max_replicas": 4, "max_pvc_size": "50Gi", "max_sessions": 7}
+    caps = {k: v for k, v in meta["caps"].items() if not k.startswith("volume_")}
+    assert caps == {"max_replicas": 4, "max_pvc_size": "50Gi", "max_sessions": 7}
     assert meta["discard_hook"] == "url"
 
     async with client_for(create_app(make_settings(dsn), pool)) as c:

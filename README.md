@@ -1057,7 +1057,7 @@ Error codes: `bad_request` (400), `forbidden` (403), `forbidden_origin` (403, `O
 
 ### `GET /api/v1/meta`
 
-Defaults and limits for forms: `defaults` (model, effort, replicas, auto_compact_pct, pvc_size, storage_class, max_attempts), `agent_image`, `agent_images` (the image allowlist), `models`, `caps` (`max_replicas`, `max_pvc_size`, `max_sessions`, from `ORCH_MAX_REPLICAS`, `ORCH_MAX_PVC_SIZE`, `ORCH_MAX_SESSIONS`) `discard_hook` (`none`, `command`, `url`), `cache` (`available`, `max_bytes`; see Workspace cache) `kube_cluster_access` (`available`: true when `ORCH_KUBE_CLUSTER_ACCESS_ENABLED` is set, so `spec.kube_cluster_access: true` is accepted), `kube_namespace_access` (`available`: true when both the namespace allowlist and the tier list are set; `namespaces` and `tiers`, the allowlist and the enabled tiers in canonical order; see Session configuration), `docker` (`available`: true when `ORCH_DOCKER_IMAGE` is set; `storage`, the default `/var/lib/docker` size, and the caps `max_storage`, `max_cpu`, `max_memory`). Response 200. `permission_modes` lists the values of `spec.wrapper.permission_mode` with their labels: `[{"value": "bypassPermissions", "label": "Allow all"}, {"value": "auto", "label": "Auto"}]`. `usage` is `{"configured": <bool>, "quota_default_pct": <int>}`: `configured` is true when `ORCH_USAGE_URL` is set (the usage gate is on), `quota_default_pct` is `ORCH_USAGE_QUOTA_DEFAULT` (see Usage gate). `inactivity` is `{"reminder_seconds": <int>, "close_seconds": <int>, "handoff_seconds": <int>}`: `ORCH_INACTIVITY_REMINDER_SECONDS`, `ORCH_INACTIVITY_CLOSE_SECONDS` and `ORCH_INACTIVITY_HANDOFF_SECONDS` (0 means off for the first two).
+Defaults and limits for forms: `defaults` (model, effort, replicas, auto_compact_pct, pvc_size, storage_class, max_attempts), `agent_image`, `agent_images` (the image allowlist), `models`, `caps` (`max_replicas`, `max_pvc_size`, `max_sessions`, from `ORCH_MAX_REPLICAS`, `ORCH_MAX_PVC_SIZE`, `ORCH_MAX_SESSIONS`; and `volume_storage_class`, `volume_max_size`, `volume_default_size`, `volume_max_per_preset`, from the `ORCH_VOLUME_*` settings) `discard_hook` (`none`, `command`, `url`), `cache` (`available`, `max_bytes`; see Workspace cache) `kube_cluster_access` (`available`: true when `ORCH_KUBE_CLUSTER_ACCESS_ENABLED` is set, so `spec.kube_cluster_access: true` is accepted), `kube_namespace_access` (`available`: true when both the namespace allowlist and the tier list are set; `namespaces` and `tiers`, the allowlist and the enabled tiers in canonical order; see Session configuration), `docker` (`available`: true when `ORCH_DOCKER_IMAGE` is set; `storage`, the default `/var/lib/docker` size, and the caps `max_storage`, `max_cpu`, `max_memory`). Response 200. `permission_modes` lists the values of `spec.wrapper.permission_mode` with their labels: `[{"value": "bypassPermissions", "label": "Allow all"}, {"value": "auto", "label": "Auto"}]`. `usage` is `{"configured": <bool>, "quota_default_pct": <int>}`: `configured` is true when `ORCH_USAGE_URL` is set (the usage gate is on), `quota_default_pct` is `ORCH_USAGE_QUOTA_DEFAULT` (see Usage gate). `inactivity` is `{"reminder_seconds": <int>, "close_seconds": <int>, "handoff_seconds": <int>}`: `ORCH_INACTIVITY_REMINDER_SECONDS`, `ORCH_INACTIVITY_CLOSE_SECONDS` and `ORCH_INACTIVITY_HANDOFF_SECONDS` (0 means off for the first two).
 
 ### `GET /api/v1/presets`
 
@@ -1170,6 +1170,38 @@ Replaces the whole policy. Body (all six fields required, extra fields rejected)
 ### `POST /api/v1/backups/cleanup/run`
 
 Asks the reconciler for one sweep now (no body). It uses the stored policy, the same planner and every safety guard (the protected set, the grace period, `dry_run`), and runs even when the policy is disabled. Repeated requests before the sweep starts collapse into one. Response 202 with the same body as `GET` (`run_pending` true, `run_requested_at` set), `Cache-Control: no-store`; poll `GET /api/v1/backups/cleanup/settings` for `run_pending` and `last_sweep`. Writes an `audit:` log line with the caller. Needs only the database; the sweep itself needs the reconciler's S3 key pair, and without it the request stays pending.
+
+### `GET /api/v1/volumes`
+
+The live shared volumes, by name. Optional `project` keeps those whose `projects` contain it. Response 200: a list of `{"id", "name", "projects", "description", "labels", "exclude", "size", "storage_class", "state", "state_reason", "attachments" (presets attaching it), "mounted" (unreleased session claims), "current_version" (current backup version of `volume-<name>` or null), "content_version", "last_save_at", "created_at"}`. `state` is one of provisioning, ready, resizing, restoring, saving, deleting, failed.
+
+### `POST /api/v1/volumes`
+
+Body `{"name", "projects", "size" (optional, default `ORCH_VOLUME_DEFAULT_SIZE`), "description", "labels", "exclude"}` (extra fields rejected). `name` matches `^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$`; `exclude` is a list of relative globs that only shrink the backup (never the volume). 201 with the volume view in state `provisioning`; the reconciler applies the PVC. Errors: 409 `volume_exists` (a live volume has the name; a deleted name is reusable), 422 `invalid_request` (grammar, size over `ORCH_VOLUME_MAX_SIZE`, a `project:` label, empty `projects`, a bad exclude).
+
+### `GET /api/v1/volumes/{volume_id}`
+
+The volume view plus `presets` (`{"preset_id", "preset_name", "mode", "mount_path", "backup_restore"}` of every preset attaching it), `claims` (`{"session_slug", "mode"}` of the unreleased claims) and `versions` (the newest 20 backup versions of `volume-<name>`: `{"id", "created_at", "origin", "live"}`). 404 `volume_not_found`.
+
+### `PATCH /api/v1/volumes/{volume_id}`
+
+Body (any of, extra fields rejected) `{"size", "description", "labels", "projects", "exclude"}`. Size only grows: equal to the current size (units compared as bytes, so `1Gi` equals `1024Mi`) is a 200 no-op, larger sets `resizing` (only from `ready`). Errors: 404 `volume_not_found`, 409 `shrink_refused`, 409 `volume_busy` (grow while not ready), 409 `project_in_use` (a removed project leaves an attaching preset without a shared project), 422 `invalid_request` (over the cap, bad labels or exclude).
+
+### `DELETE /api/v1/volumes/{volume_id}`
+
+202 with the volume view in state `deleting`; the reconciler removes the PVC and the name becomes reusable, the backup versions of `volume-<name>` are kept. 409 `volume_attached` (any preset attaches it), 409 `volume_mounted` (an unreleased claim); a refusal writes the event `delete_refused` and changes nothing. 404 `volume_not_found`.
+
+### `GET /api/v1/volumes/{volume_id}/events`
+
+The audit trail, newest first: `{"items": [{"id", "at", "actor_kind", "actor", "kind", "detail"}], "next_cursor"}`; query `before` (an event id, the previous `next_cursor`) and `limit` (1 to 200, default 50). Details never hold file names or content. 404 `volume_not_found`.
+
+### `POST /api/v1/volumes/{volume_id}/save`
+
+Saves the volume to its backup name `volume-<name>` now (no body). 202 with the volume view in state `saving`. 409 `volume_busy` unless the volume is `ready`; 404 `volume_not_found`.
+
+### `POST /api/v1/volumes/{volume_id}/restore`
+
+Body `{"version": "<uuid>"}`: restores that version of `volume-<name>` over the volume. 202 with the volume view in state `restoring`. 404 `volume_not_found` or `version_not_found` (the version belongs to another name); 409 `volume_mounted` (HARD RULE: a volume a session has mounted is never restored, no option relaxes it), 409 `volume_busy` (not `ready` or `failed`). The reconciler also checks for pods before it starts the restore Job.
 
 ### `GET /api/v1/sessions`
 

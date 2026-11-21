@@ -43,6 +43,7 @@ from agents_orchestrator.api import (
     streams,
     tasks,
     templates,
+    volumes,
     workspace,
 )
 from agents_orchestrator.api.allowlist import PortGate, SourceAllowlist
@@ -179,6 +180,7 @@ def create_app(
     app.include_router(project_chat.main_router)
     app.include_router(templates.router)
     app.include_router(backups.router)
+    app.include_router(volumes.router)
     app.include_router(messages.router)
     app.include_router(streams.router)
     app.include_router(workspace.router)

@@ -849,3 +849,46 @@ async def claimed_volume_ids(
         (session_id,),
     )
     return {r[0] for r in await cur.fetchall()}
+
+
+@dataclass
+class Attaching:
+    """A preset that attaches a volume: its id, name, project scope and the attachment dict."""
+
+    preset_id: uuid.UUID
+    name: str
+    project: str
+    extra_projects: list[str]
+    attachment: dict[str, Any]
+
+    @property
+    def scope(self) -> set[str]:
+        return {self.project, *self.extra_projects}
+
+
+async def attaching_presets(conn: psycopg.AsyncConnection, volume_id: uuid.UUID) -> list[Attaching]:
+    """Presets whose `spec.volumes` names the volume (read-only join over the presets table)."""
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT p.id, p.name, p.project, p.extra_projects, a.att FROM presets p,"
+            " jsonb_array_elements(CASE WHEN jsonb_typeof(p.spec -> 'volumes') = 'array'"
+            " THEN p.spec -> 'volumes' ELSE '[]'::jsonb END) AS a(att)"
+            " WHERE a.att ->> 'volume' = %s ORDER BY p.name, p.id",
+            (str(volume_id),),
+        )
+        return [
+            Attaching(r["id"], r["name"], r["project"], [*r["extra_projects"]], r["att"])
+            for r in await cur.fetchall()
+        ]
+
+
+async def claim_slugs(
+    conn: psycopg.AsyncConnection, volume_id: uuid.UUID
+) -> list[tuple[Claim, str | None]]:
+    """Unreleased claims with the slug of their session (None once the row is gone)."""
+    out = []
+    for c in await unreleased_claims(conn, volume_id):
+        cur = await conn.execute("SELECT slug FROM sessions WHERE id = %s", (c.session_id,))
+        row = await cur.fetchone()
+        out.append((c, row[0] if row else None))
+    return out

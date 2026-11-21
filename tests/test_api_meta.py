@@ -39,3 +39,21 @@ async def test_meta_mindmap_flag(pool, dsn):
     settings = make_settings(dsn, mindmap_url="http://mm:8082", mindmap_token="t")
     async with client_for(create_app(settings, pool)) as c:
         assert (await c.get("/api/v1/meta")).json()["mindmap"] is True
+
+
+async def test_meta_reports_volume_caps(pool, dsn):
+    settings = make_settings(
+        dsn,
+        volume_storage_class="fast-rwx",
+        volume_default_size="5Gi",
+        volume_max_size="50Gi",
+        volume_max_per_preset=3,
+    )
+    async with client_for(create_app(settings, pool)) as c:
+        caps = (await c.get("/api/v1/meta")).json()["caps"]
+    assert {k: v for k, v in caps.items() if k.startswith("volume_")} == {
+        "volume_storage_class": "fast-rwx",
+        "volume_default_size": "5Gi",
+        "volume_max_size": "50Gi",
+        "volume_max_per_preset": 3,
+    }
