@@ -89,26 +89,11 @@ def background_busy(alias: str) -> str:
 
 BACKGROUND_BUSY = background_busy("s")
 
-# Hard limit: the effective compaction point (the spec's `auto_compact_pct`, else `%(compact)s`,
-# ORCH_DEFAULT_AUTO_COMPACT_PCT) less FIRM_MARGIN_PCT. Alias `c` (sessions).
-# `pressure_levels.levels` is the same formula in Python.
-FIRM_MARGIN_PCT = 5
-HARD_PCT = f"(coalesce((c.spec->>'auto_compact_pct')::int, %(compact)s) - {FIRM_MARGIN_PCT})"
-
-# A successor must start with room: its context at least MIN_HEADROOM_TOKENS below the hard limit
-# (MIN_HEADROOM_PCT points when the token gauge is unknown), so it is not due at once. Aliases
-# `s` (LEFT JOINed agent_status) and `c` (sessions).
-MIN_HEADROOM_TOKENS = 50000
-MIN_HEADROOM_PCT = 10
-_HARD_TOKENS = f"({HARD_PCT} / 100.0 * s.context_window_tokens)"
-# The margin is clamped to half the hard limit, so a small window or a low compaction point never
-# drives the threshold negative.
-HEADROOM = (
-    "(CASE WHEN s.context_used_tokens IS NOT NULL AND s.context_window_tokens > 0"
-    f" THEN s.context_used_tokens <= {_HARD_TOKENS}"
-    f" - least({MIN_HEADROOM_TOKENS}, 0.5 * {_HARD_TOKENS})"
-    f" ELSE coalesce(s.context_pct, 0) <= {HARD_PCT} - {MIN_HEADROOM_PCT} END)"
-)
+# The agent's gauge predates its last clear (a `session_cleared` after the last status update), so
+# it still shows the old context and is read as no gauge. Aliases `a` (agents) and `s` (its LEFT
+# JOINed agent_status row).
+GAUGE_STALE = """EXISTS (SELECT 1 FROM events x WHERE x.agent_id = a.id
+        AND x.type = 'session_cleared' AND x.created_at > coalesce(s.updated_at, '-infinity'))"""
 
 # True when the agent's pod awaits its rollout (its ordinal is in `status.rollout.pending`, JSON
 # ints). Aliases `a` (agents) and `c` (sessions).
