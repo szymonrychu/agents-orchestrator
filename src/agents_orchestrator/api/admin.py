@@ -139,8 +139,8 @@ async def require_session_reader(
 async def require_notes_writer(
     request: Request, agent: Caller, pool: Pool, room_id: str
 ) -> sessions_repo.Session:
-    """PUT /chats/rooms/{room_id}/notes/sections/{section}: a superleader on any room; a retrospective session only
-    on a room whose bound (else configured) preset sits in a project the session holds, its home
+    """PUT /chats/rooms/{room_id}/notes/sections/{section}: a superleader on any room; a
+    retrospective session only on a room whose bound (else configured) preset sits in a project the session holds, its home
     or a granted one (decision 775), else 403 `forbidden`; anyone else 403 `not_superleader`."""
     async with pool.connection() as conn:
         session = await sessions_repo.get(conn, agent.session_id)
