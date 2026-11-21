@@ -64,11 +64,7 @@ class Dispatcher:
         self.verifier = Verifier(pool, settings, self._wrapper)
         self.hive = hive.HiveState()
         self._push_wake = asyncio.Event()
-        self._pass_policy = leadership.PassPolicy(
-            settings.default_auto_compact_pct,
-            settings.rollout_max_defer_seconds,
-            settings.handover_max_wait_seconds,
-        )
+        self._pass_policy = leadership.PassPolicy.from_settings(settings)
         self._handoff_policy = handoff.HandoffPolicy.from_settings(settings)
         self._handoff_at: float | None = None
         self._chat_pruned_at: float | None = None

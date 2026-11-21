@@ -6,6 +6,7 @@ import uuid
 
 import httpx
 import pytest
+from fakes.fake_chat import FakeChat
 
 from agents_orchestrator.chat_client import ChatUnavailable, room_notes
 from agents_orchestrator.settings import Settings
@@ -38,6 +39,24 @@ async def test_notes_body_with_the_session_identity():
     assert request.headers["authorization"] == f"Bearer {TOKEN}"
     assert request.headers["x-orch-session"] == str(SESSION)
     assert request.headers["x-orch-slug"] == "slug"
+
+
+async def test_notes_body_is_the_rendered_sections_of_the_chat():
+    """The handoff package reads the whole `body` of a sectioned GET /notes (no `section`)."""
+    chat = FakeChat(TOKEN)
+    transport = httpx.ASGITransport(app=chat.app)
+    headers = {
+        "Authorization": f"Bearer {TOKEN}",
+        "X-Orch-Session": str(SESSION),
+        "X-Orch-Slug": "slug",
+    }
+    async with httpx.AsyncClient(transport=transport, base_url="http://chat") as http:
+        for key, text in (("preferences", "short answers"), ("requests", "ship friday")):
+            put = {"body": text, "expected_version": 0}
+            r = await http.put(f"/chat/v1/notes/sections/{key}", json=put, headers=headers)
+            assert r.status_code == 200, r.text
+    body = await room_notes(settings(), SESSION, "slug", transport=transport)
+    assert body == "## Preferences\nshort answers\n\n## Requests\nship friday"
 
 
 @pytest.mark.parametrize("status", [401, 409, 503])

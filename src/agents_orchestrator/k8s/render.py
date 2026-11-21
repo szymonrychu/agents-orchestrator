@@ -15,7 +15,6 @@ import yaml
 from agents_orchestrator import handoff_texts, rendering, runaway
 from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.db.volumes import Volume
-from agents_orchestrator.dispatcher.hive import compact_pct
 from agents_orchestrator.k8s.labels import (
     VOLUME_FINALIZER,
     VOLUME_PROJECTS_ANNOTATION,
@@ -32,6 +31,7 @@ from agents_orchestrator.k8s.labels import (
     workspace_pvc,
 )
 from agents_orchestrator.k8s.on_start import READ_ONLY_TOOLS, orchestrator_allow, render_on_start
+from agents_orchestrator.pressure_levels import compact_pct
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import (
     KUBE_TIERS,

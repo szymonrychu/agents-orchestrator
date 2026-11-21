@@ -255,6 +255,9 @@ class Settings(BaseSettings):
     # is earlier; never below the L2 point.
     handover_critical_margin_pct: int = Field(default=5, ge=1, le=50)
     handover_critical_headroom_tokens: int = Field(default=25000, ge=0, le=500000)
+    #: A `limit` handover goes only to a peer whose context is at most its L2 point minus this many
+    #: tokens (the handover's own cost must not tip it over); with none the leader clears itself.
+    handover_successor_margin_tokens: int = Field(default=30000, ge=0, le=500000)
     #: Handoff submit quality check and in-flight gate (handoff_quality.py, handoff_gate.py):
     #: the least characters over all fields, the least share of letters, digits and whitespace,
     #: the rejected submits that count as stuck, and the seconds to wait for the wrapper's

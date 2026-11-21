@@ -7,7 +7,7 @@ import json
 import shlex
 from typing import Any
 
-from agents_orchestrator.dispatcher.hive import compact_pct
+from agents_orchestrator.pressure_levels import compact_pct
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import SessionSpec, source_plugin_name
 

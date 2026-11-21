@@ -15,7 +15,7 @@ from typing import Any, Literal
 
 from agents_orchestrator import handoff_texts
 from agents_orchestrator.db.handoffs import Handoff
-from agents_orchestrator.dispatcher.hive import Levels, critical_tokens, l1_tokens, strong_tokens
+from agents_orchestrator.pressure_levels import Levels, critical_tokens, l1_tokens, strong_tokens
 from agents_orchestrator.wrapper.models import blocking_items
 
 # The window the token thresholds are computed for when the gauge has none yet: the percent
@@ -85,6 +85,9 @@ def build(
     }
     state = handoff_state(row)
     texts = handoff_texts.level_texts(profile, hive)
+    if not window_tokens or window_tokens <= 0:
+        extra = " " + handoff_texts.window_unknown_text()
+        texts = {k: {f: t + extra for f, t in v.items()} for k, v in texts.items()}
     waiting = waiting_on(row)
     if state == "blocked":
         extra = " " + handoff_texts.waiting_on_text()

@@ -23,6 +23,7 @@ from agents_orchestrator import (
     handoff_gate,
     handoff_profile,
     handoff_quality,
+    pressure_levels,
     pressure_policy,
     taskboard_client,
 )
@@ -194,16 +195,16 @@ async def _pressure_view(
         return None
     window = subject.window_tokens or pressure_policy.DEFAULT_WINDOW_TOKENS
     lv = subject.levels
-    l2 = hive_push.strong_tokens(lv, window)
+    l2 = pressure_levels.strong_tokens(lv, window)
     row = await handoffs.open_row(conn, agent.id)
     return PressureView(
         level=max(subject.level, row.level) if row else subject.level,
         context_pct=subject.context_pct,
         used_tokens=subject.used_tokens,
         window_tokens=subject.window_tokens,
-        l1_tokens=hive_push.l1_tokens(lv, window, l2),
+        l1_tokens=pressure_levels.l1_tokens(lv, window, l2),
         l2_tokens=l2,
-        l3_tokens=hive_push.critical_tokens(lv, window),
+        l3_tokens=pressure_levels.critical_tokens(lv, window),
         compact_tokens=int(lv.compact_pct / 100 * window),
         phase=row.phase if row else None,
         profile=row.profile if row else None,

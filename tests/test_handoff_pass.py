@@ -552,6 +552,49 @@ async def test_rejected_limit_request_falls_back_to_solo_order(env):
     assert len(await env.commands(a0["id"])) == 1
 
 
+# compact 95 on the 200k window: L2 130k less the 30k successor margin leaves 100k
+ROOM = 100000
+
+
+@pytest.mark.parametrize(
+    ("peer", "named", "moves"),
+    [
+        (ROOM + 1, False, False),  # above L2 minus the margin: the leader clears itself
+        (CRITICAL, False, False),
+        (ROOM + 1, True, False),  # a `to` naming the full peer is ignored, nobody else
+        (ROOM, False, True),
+        ("stale", False, True),  # a gauge from before the peer's last clear is no reading
+        (None, False, True),  # no gauge at all
+    ],
+)
+async def test_limit_move_needs_successor_headroom(env, peer, named, moves):
+    c, (a0, a1) = await env.hive(2)
+    if peer is None:
+        await env.run(
+            "UPDATE agent_status SET context_used_tokens = NULL, context_window_tokens = NULL,"
+            " context_pct = NULL WHERE agent_id = %s",
+            (a1["id"],),
+        )
+    else:
+        await env.gauge(a1["id"], CRITICAL if peer == "stale" else peer)
+    if peer == "stale":
+        await env.run(
+            "UPDATE agent_status SET updated_at = now() - interval '1 minute' WHERE agent_id = %s",
+            (a1["id"],),
+        )
+        await env.cleared(c["id"], a1["id"])
+    assert await env.step(c["id"]) == [f"pressuring:{a0['id']}"]
+    assert await env.submit(a0, to=a1["pod_name"] if named else None)
+    if moves:
+        assert await env.step(c["id"]) == [f"moving:{a0['id']}"]
+        (lr,) = await env.requests(c["id"])
+        assert lr["reason"] == handoff.LIMIT_REASON
+        return
+    assert await env.step(c["id"]) == [f"clearing:{a0['id']}"]
+    assert await env.requests(c["id"]) == []
+    assert len(await env.commands(a0["id"])) == 1
+
+
 async def test_single_live_hive_follows_solo_order(env):
     c, (a0, a1) = await env.hive(2)
     await env.run("UPDATE agents SET ready = false WHERE id = %s", (a1["id"],))
@@ -744,10 +787,11 @@ async def test_ex_leader_policy_removed_once_its_row_closed(env):
 # ---------------------------------------------------------------- closing before moving
 
 
-async def test_two_agent_ping_pong_closes_the_returning_leaders_row(env):
+async def test_limit_move_back_closes_the_returning_leaders_row(env):
     # a 2-agent hive: A hands to B and stays busy (discussing), then B's limit move goes back
-    # to A. A's discussing row closes cancelled leader_again in the move: A is never cleared
-    # as an ex-leader while it leads (B's handoff would be lost) and opens its own cycle
+    # to A (A's gauge has headroom again). A's discussing row closes cancelled leader_again in
+    # the move: A is never cleared as an ex-leader while it leads (B's handoff would be lost)
+    # and opens its own cycle
     c, (a, b) = await env.hive(n=2)
     assert await env.step(c["id"]) == [f"pressuring:{a['id']}"]
     assert await env.submit(a)
@@ -755,6 +799,7 @@ async def test_two_agent_ping_pong_closes_the_returning_leaders_row(env):
     assert (await env.lpass(c["id"])).agent_id == b["id"]
     a_row = await env.row(a["id"])
     assert a_row.phase == "discussing"
+    await env.gauge(a["id"], LOW)
     await env.busy(a["id"])
     await env.gauge(b["id"], STRONG)
     assert await env.step(c["id"]) == [f"pressuring:{b['id']}"]
@@ -2035,3 +2080,13 @@ async def test_reinject_reminder_once_after_compaction_then_empty(env):
     assert env.policy_of(a)["reinject_text"] == ""  # discarded after one push
     await env.push()
     assert env.policy_of(a)["reinject_text"] == ""
+
+
+async def test_limit_move_to_full_named_peer_is_not_redirected(env):
+    # a `to` naming a peer without headroom is rejected, never swapped for another peer
+    c, (a0, a1, a2) = await env.hive(3)
+    await env.gauge(a1["id"], ROOM + 1)
+    assert await env.step(c["id"]) == [f"pressuring:{a0['id']}"]
+    assert await env.submit(a0, to=a1["pod_name"])
+    assert await env.step(c["id"]) == [f"clearing:{a0['id']}"]
+    assert await env.requests(c["id"]) == []

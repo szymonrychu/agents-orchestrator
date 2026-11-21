@@ -21,6 +21,7 @@ from fakes import fake_wrapper
 from fakes.fake_wrapper import FakeWrapper
 from psycopg.rows import dict_row
 
+from agents_orchestrator import pressure_levels as pl
 from agents_orchestrator.db import handoffs, leadership, queue
 from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE
 from agents_orchestrator.dispatcher import Dispatcher, hive
@@ -260,7 +261,7 @@ async def test_hive_state_threshold_hint(env):
     for spec, hard in (({"auto_compact_pct": 80}, 70), ({}, 85), ({"auto_compact_pct": 15}, 5)):
         _, (a0, a1, _a2) = await env.hive(spec=spec)
         await env.push()
-        hint = f"and always before {hard}% context."
+        hint = f"hand off at {hard}% context"
         assert hint in env.notes(a0)[0] and hint in env.notes(a1)[0]
         assert "instead of compacting" not in env.notes(a0)[0]
 
@@ -332,65 +333,75 @@ async def test_no_feed_note(env):
 
 def _levels(start=40000, c=50, budget=150000):
     spec = {"auto_compact_pct": c}
-    return hive.levels(
+    return pl.levels(
         spec, start, Settings(database_url=DB0, master_key=KEY, handover_budget_tokens=budget)
     )
 
 
 def test_strong_tokens_rule():
     def strong(c, window):
-        return hive.strong_tokens(_levels(c=c), window)
+        return pl.strong_tokens(_levels(c=c), window)
 
     assert strong(95, 200000) == 130000  # min(85% = 170000, 190000 - 60000)
     assert strong(50, 1000000) == 400000  # min(40% = 400000, 500000 - 60000 = 440000)
-    assert strong(95, 50000) == 0  # min(42500, -12500) floored
+    assert strong(95, 50000) == 21250  # min(42500, max(-12500, 42500 / 2)): the floor
+
+
+def test_handover_advice_names_points():
+    lv = _levels(c=25)
+    advice = hive.handover_advice(lv, Settings(database_url=DB0, master_key=KEY))
+    assert "hand off at 15% context" in advice
+    assert "at 20% it is critical" in advice
+    assert "auto-compaction is at 25%" in advice
+    assert f"{round(lv.budget_tokens / 1000)}k tokens" in advice
+    assert "always before" not in advice
 
 
 def test_levels_l1_from_start_plus_budget():
     lv = _levels()  # C 50: strong 40%, weak fallback 35%, weak = 40000 + 150000
     assert (lv.strong_pct, lv.fallback_pct) == (40, 35)
-    assert hive.due_level(lv, 189999, 1000000, 19.0, 1200, 1200, False) == "none"
-    assert hive.due_level(lv, 190000, 1000000, 19.0, 1200, 1200, False) == "l1"
+    assert pl.due_level(lv, 189999, 1000000, 19.0, 1200, 1200, False) == "none"
+    assert pl.due_level(lv, 190000, 1000000, 19.0, 1200, 1200, False) == "l1"
 
 
 def test_due_level_l1_is_todays_soft_rule():
     lv = _levels()
-    assert hive.due_level(lv, 190000, 1000000, 19.0, 1199, 1200, False) == "none"  # tenure
-    assert hive.due_level(lv, 190000, 1000000, 19.0, 1200, 1200, True) == "none"  # rollout
-    assert hive.due_level(lv, 190000, 1000000, 19.0, 1200, 1200, False) == "l1"
+    assert pl.due_level(lv, 190000, 1000000, 19.0, 1199, 1200, False) == "none"  # tenure
+    assert pl.due_level(lv, 190000, 1000000, 19.0, 1200, 1200, True) == "none"  # rollout
+    assert pl.due_level(lv, 190000, 1000000, 19.0, 1200, 1200, False) == "l1"
 
 
 def test_l1_clamped_to_l2():
     lv = _levels(start=30000)  # window 200000: start + budget 180000, strong tokens 40000
-    assert hive.due_level(lv, 39999, 200000, 19.99, 1200, 1200, False) == "none"
-    assert hive.due_level(lv, 40000, 200000, 20.0, 1200, 1200, False) == "l2"
+    assert pl.due_level(lv, 39999, 200000, 19.99, 1200, 1200, False) == "none"
+    assert pl.due_level(lv, 40000, 200000, 20.0, 1200, 1200, False) == "l2"
 
 
 def test_due_level_l2_ignores_tenure_and_rollout():
     lv = _levels()
-    assert hive.due_level(lv, 400000, 1000000, 40.0, 0, 1200, False) == "l2"
-    assert hive.due_level(lv, 400000, 1000000, 40.0, 0, 1200, True) == "l2"
-    assert hive.due_level(lv, 399999, 1000000, 39.9, 0, 1200, True) == "none"
+    assert pl.due_level(lv, 400000, 1000000, 40.0, 0, 1200, False) == "l2"
+    assert pl.due_level(lv, 400000, 1000000, 40.0, 0, 1200, True) == "l2"
+    assert pl.due_level(lv, 399999, 1000000, 39.9, 0, 1200, True) == "none"
 
 
 def test_null_start_falls_back_to_percent():
-    lv = hive.levels({}, None, Settings(database_url=DB0, master_key=KEY))  # C 95: fallback 80
-    assert hive.due_level(lv, None, None, 80.0, 1200, 1200, False) == "l1"
-    assert hive.due_level(lv, None, None, 79.0, 1200, 1200, False) == "none"
+    lv = pl.levels({}, None, Settings(database_url=DB0, master_key=KEY))  # C 95: fallback 80
+    assert pl.due_level(lv, None, None, 80.0, 1200, 1200, False) == "l1"
+    assert pl.due_level(lv, None, None, 79.0, 1200, 1200, False) == "none"
     # tokens known but no start: still the percent rule
-    assert hive.due_level(lv, 790000, 1000000, 79.0, 1200, 1200, False) == "none"
+    assert pl.due_level(lv, 790000, 1000000, 79.0, 1200, 1200, False) == "none"
 
 
 def test_due_level_pct_fallback_l2():
-    lv = hive.levels({}, None, Settings(database_url=DB0, master_key=KEY))  # C 95: strong 85
-    assert hive.due_level(lv, None, None, 85.0, 0, 1200, False) == "l2"
-    assert hive.due_level(lv, None, None, 84.9, 0, 1200, False) == "none"
+    lv = pl.levels({}, None, Settings(database_url=DB0, master_key=KEY))  # C 95: strong 85
+    assert pl.due_level(lv, None, None, 85.0, 0, 1200, False) == "l2"
+    assert pl.due_level(lv, None, None, 84.9, 0, 1200, False) == "none"
 
 
 def test_rollout_pending_suppresses_l1_not_l2():
-    lv = hive.levels({}, None, Settings(database_url=DB0, master_key=KEY))
-    assert hive.due_level(lv, None, None, 82.0, 1200, 1200, True) == "none"
-    assert hive.due_level(lv, None, None, 85.0, 1200, 1200, True) == "l2"
+    lv = pl.levels({}, None, Settings(database_url=DB0, master_key=KEY))
+    assert pl.due_level(lv, None, None, 82.0, 1200, 1200, True) == "none"
+    assert pl.due_level(lv, None, None, 85.0, 1200, 1200, True) == "l2"
 
 
 async def test_start_tokens_filled_once(env):

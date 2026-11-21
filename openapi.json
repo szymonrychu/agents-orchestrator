@@ -10227,9 +10227,11 @@
           "admin",
           "admin"
         ]
-      },
+      }
+    },
+    "/agent/v1/admin/chats/rooms/{room_id}/notes/sections/{section}": {
       "put": {
-        "operationId": "admin_connector_put_rooms_room_id_notes",
+        "operationId": "admin_connector_put_rooms_room_id_notes_sections_section",
         "parameters": [
           {
             "in": "path",
@@ -10288,7 +10290,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "PUT connector /rooms/{room_id}/notes",
+        "summary": "PUT connector /rooms/{room_id}/notes/sections/{section}",
         "tags": [
           "admin",
           "admin"
@@ -17181,6 +17183,24 @@
         "operationId": "notes_get_agent_v1_chat_notes_get",
         "parameters": [
           {
+            "description": "Read only this section (the upstream validates the key)",
+            "in": "query",
+            "name": "section",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Read only this section (the upstream validates the key)",
+              "title": "Section"
+            }
+          },
+          {
             "in": "header",
             "name": "authorization",
             "required": false,
@@ -17246,10 +17266,21 @@
         "tags": [
           "agent"
         ]
-      },
+      }
+    },
+    "/agent/v1/chat/notes/sections/{section}": {
       "put": {
-        "operationId": "notes_put_agent_v1_chat_notes_put",
+        "operationId": "notes_section_put_agent_v1_chat_notes_sections__section__put",
         "parameters": [
+          {
+            "in": "path",
+            "name": "section",
+            "required": true,
+            "schema": {
+              "title": "Section",
+              "type": "string"
+            }
+          },
           {
             "in": "header",
             "name": "authorization",
@@ -17288,7 +17319,7 @@
             "application/json": {
               "schema": {
                 "additionalProperties": false,
-                "description": "A notes replacement as the upstream reads it (OpenAPI only; the upstream validates it).",
+                "description": "A replacement of one notes section as the upstream reads it (OpenAPI only; the upstream\nvalidates it, the section key included).",
                 "properties": {
                   "body": {
                     "title": "Body",
@@ -17303,7 +17334,7 @@
                   "body",
                   "expected_version"
                 ],
-                "title": "ChatNotesIn",
+                "title": "ChatNoteSectionIn",
                 "type": "object"
               }
             }
@@ -17342,7 +17373,7 @@
             "description": "chat_unconfigured or chat_unavailable"
           }
         },
-        "summary": "Replace the notes of the room bound to the caller's session (leader only)",
+        "summary": "Replace one section of the notes of the room bound to the caller's session (leader only)",
         "tags": [
           "agent"
         ]

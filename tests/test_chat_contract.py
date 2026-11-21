@@ -94,7 +94,7 @@ def test_relay_routes_exist_upstream():
             ("POST", "/reactions"),
             ("GET", "/messages/{send_id}"),
             ("GET", "/notes"),
-            ("PUT", "/notes"),
+            ("PUT", "/notes/sections/{section}"),
             ("GET", "/history"),
             ("POST", "/attachments"),
             ("GET", "/attachments/{request_id}"),
@@ -133,12 +133,11 @@ async def test_fake_chat_matches_vendored_schema():
     valid = {
         ("POST", "/chat/v1/messages"): {"text": "hello", "room": "!dm:hs"},
         ("POST", "/chat/v1/reactions"): {"to": "m3", "key": "\U0001f44d"},
-        ("PUT", "/chat/v1/notes"): {"body": "likes tea", "expected_version": 0},
-        ("PUT", "/chat/v1/skills/{name}"): {"description": "d", "body": "b", "expected_version": 0},
+        ("PUT", "/chat/v1/notes/sections/{section}"): {"body": "likes tea", "expected_version": 0},
         ("POST", "/chat/v1/attachments"): {"id": "m2"},
     }
-    notes_put = valid[("PUT", "/chat/v1/notes")]
-    skill_put = valid[("PUT", "/chat/v1/skills/{name}")]
+    notes_put = valid[("PUT", "/chat/v1/notes/sections/{section}")]
+    prefs = "/chat/v1/notes/sections/preferences"
     # success answers
     assert (await call("GET", "/chat/v1/rooms")).status_code == 200
     sent = await call("POST", "/chat/v1/messages", json=valid[("POST", "/chat/v1/messages")])
@@ -153,31 +152,20 @@ async def test_fake_chat_matches_vendored_schema():
     assert own.status_code == 200
     assert own.json()["id"] == sent.json()["id"] and own.json()["kind"] == "message"
 
-    # the room memory routes: notes and skills round trip through their versions
-    assert (await call("GET", "/chat/v1/notes")).json()["version"] == 0
-    saved = await call("PUT", "/chat/v1/notes", json=notes_put)
+    # the room memory routes: notes sections round trip through their versions
+    template = "/chat/v1/notes/sections/{section}"
+    assert [x["version"] for x in (await call("GET", "/chat/v1/notes")).json()["sections"]] == [
+        0
+    ] * 5
+    saved = await call("PUT", template, prefs, json=notes_put)
     assert saved.status_code == 200
-    assert (saved.json()["version"], saved.json()["body"]) == (1, "likes tea")
-    assert (await call("PUT", "/chat/v1/notes", json=notes_put)).status_code == 409
-    big = {**notes_put, "expected_version": 1, "body": "x" * 8001}
-    assert (await call("PUT", "/chat/v1/notes", json=big)).status_code == 413
-    assert (await call("GET", "/chat/v1/skills")).json()["skills"] == []
-    made = await call("PUT", "/chat/v1/skills/{name}", json=skill_put)
-    assert (made.status_code, made.json()["version"]) == (200, 1)
-    assert (await call("PUT", "/chat/v1/skills/{name}", json=skill_put)).status_code == 409
-    listed = (await call("GET", "/chat/v1/skills")).json()["skills"]
-    assert [s["name"] for s in listed] == ["demo"] and "body" not in listed[0]
-    assert (await call("GET", "/chat/v1/skills/{name}")).json()["body"] == "b"
-    assert (await call("DELETE", "/chat/v1/skills/{name}")).json()["deleted"] is True
-    assert (await call("DELETE", "/chat/v1/skills/{name}")).status_code == 404
-    bad = "/chat/v1/skills/Bad_Name"
-    bad_name = await call("PUT", "/chat/v1/skills/{name}", bad, json=skill_put)
-    assert bad_name.status_code == 422
-    for n in range(20):
-        path = f"/chat/v1/skills/s{n}"
-        assert (await call("PUT", "/chat/v1/skills/{name}", path, json=skill_put)).is_success
-    over = await call("PUT", "/chat/v1/skills/{name}", "/chat/v1/skills/s20", json=skill_put)
-    assert (over.status_code, over.json()["error"]["code"]) == (409, "skill_limit")
+    assert saved.json()["body"] == "## Preferences\nlikes tea"
+    assert [x["version"] for x in saved.json()["sections"]][:2] == [1, 0]
+    assert (await call("PUT", template, prefs, json=notes_put)).status_code == 409
+    big = {**notes_put, "expected_version": 1, "body": "x" * 4001}
+    assert (await call("PUT", template, prefs, json=big)).status_code == 413
+    only = (await call("GET", "/chat/v1/notes", "/chat/v1/notes?section=preferences")).json()
+    assert [x["key"] for x in only["sections"]] == ["preferences"]
 
     # history and attachment fetches: the page, the narrowing query and the fetch round trip
     page = (await call("GET", "/chat/v1/history")).json()

@@ -1,9 +1,11 @@
 """Property test of the cooperative handoff (decision 716): over seeded random event orders, no
 `clear` command and no `limit` leadership request for an agent ever exists without a gate-clear
 accepted submit of the same cycle, and an ex-leader only after a move made by that submit's own
-`limit` request (a rollout or user move never leads to a clear); no row stays open past a
-compaction before `moving`; at most one open row per agent; no handoff notice or request
-message is ever queued.
+`limit` request (a rollout or user move never leads to a clear); every `limit` request goes to
+a successor with headroom (`pressure_levels.successor_has_room` by the gauges the run set when
+it was inserted), so a 2-agent hive never bounces leadership between two full agents: with no
+such peer the leader clears itself; no row stays open past a compaction before `moving`; at
+most one open row per agent; no handoff notice or request message is ever queued.
 
 The pass runs after every event against Postgres; the wrapper's in-flight inventory is a stub
 the events drive, and submits are written the way the submit route writes them.
@@ -17,7 +19,7 @@ import uuid
 from factories import insert_agent, insert_event, insert_session, set_agent_status
 from psycopg.rows import dict_row
 
-from agents_orchestrator import handoff_gate
+from agents_orchestrator import handoff_gate, pressure_levels
 from agents_orchestrator.db import handoffs, leadership
 from agents_orchestrator.dispatcher import handoff
 from agents_orchestrator.settings import Settings
@@ -60,6 +62,8 @@ class Run:
         self.pool, self.settings, self.rng = pool, settings, rng
         self.policy = handoff.HandoffPolicy.from_settings(settings)
         self.bg: dict[uuid.UUID, bool] = {}
+        # per agent: the tokens of the gauge the run set last
+        self.used: dict[uuid.UUID, int] = {}
         # per row id: whether its latest accepted submit had the in-flight gate clear
         self.clear_submit: dict[int, bool] = {}
         self.seen_commands: set[int] = set()
@@ -95,6 +99,7 @@ class Run:
 
     async def gauge(self, agent_id, level: str) -> None:
         used = GAUGES[level]
+        self.used[agent_id] = used
         await set_agent_status(
             self.pool,
             agent_id,
@@ -290,13 +295,26 @@ class Run:
                 assert cmd["agent_id"] != await self.subject(), self.fail(f"leader cleared {cmd}")
             assert not self.bg[cmd["agent_id"]], self.fail(f"clear with work in flight {cmd}")
         for req in await self.q(
-            "SELECT id, from_agent_id FROM leadership_requests"
+            "SELECT id, from_agent_id, to_agent_id FROM leadership_requests"
             " WHERE session_id = %s AND reason = 'limit'",
             (sid,),
         ):
             if req["id"] in self.seen_requests:
                 continue
             self.seen_requests.add(req["id"])
+            # the named target, else the pass's pick: the only peer of the 2-agent hive
+            target = req["to_agent_id"] or next(
+                a["id"] for a in self.agents if a["id"] != req["from_agent_id"]
+            )
+            used = self.used[target]
+            room = pressure_levels.successor_has_room(
+                pressure_levels.levels({}, None, self.settings),
+                used,
+                WINDOW,
+                100 * used / WINDOW,
+                self.settings.handover_successor_margin_tokens,
+            )
+            assert room, self.fail(f"limit to a full successor {req} ({used} tokens)")
             (row,) = await self.q(
                 "SELECT id FROM agent_handoffs WHERE leadership_request_id = %s", (req["id"],)
             )
@@ -346,7 +364,7 @@ class Run:
 async def test_no_clear_without_accepted_submit(pool, dsn):
     settings = Settings(database_url=dsn, master_key=KEY)
     rng = random.Random(716)
-    proceeded = ping_pong = clearing_again = 0
+    proceeded = hive_solo_clears = 0
     for _ in range(RUNS):
         run = Run(pool, settings, rng)
         await run.setup()
@@ -355,20 +373,14 @@ async def test_no_clear_without_accepted_submit(pool, dsn):
             await run.event(rng.choice(EVENTS))
             await run.step()
         proceeded += len(run.seen_commands) + len(run.seen_requests)
-        ping_pong += len(
-            await run.q(
-                "SELECT id FROM agent_handoffs WHERE session_id = %s"
-                " AND close_reason = 'leader_again'",
-                (run.session["id"],),
+        if run.hive:
+            hive_solo_clears += len(
+                await run.q(
+                    "SELECT id FROM agent_handoffs WHERE session_id = %s"
+                    " AND clear_command_id IS NOT NULL AND discuss_since IS NULL",
+                    (run.session["id"],),
+                )
             )
-        )
-        clearing_again += len(
-            await run.q(
-                "SELECT id FROM agent_handoffs WHERE session_id = %s"
-                " AND close_reason = 'leader_again' AND clear_command_id IS NOT NULL",
-                (run.session["id"],),
-            )
-        )
     assert proceeded > 0  # the property is not vacuous: some cycles did clear or move
-    assert ping_pong > 0  # some ex-leaders led again (the 2-agent ping-pong)
-    assert clearing_again > 0  # some led again with their clear queued or refused
+    # some hive leaders with no peer with headroom cleared themselves (the solo order)
+    assert hive_solo_clears > 0

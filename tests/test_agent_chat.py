@@ -483,17 +483,22 @@ async def test_occupier_never_reaches_agent(monkeypatch):
 
 MEMORY_ROUTES = (
     ("GET", "/agent/v1/chat/notes", "/chat/v1/notes", None),
-    ("PUT", "/agent/v1/chat/notes", "/chat/v1/notes", {"body": "tea", "expected_version": 0}),
+    (
+        "PUT",
+        "/agent/v1/chat/notes/sections/preferences",
+        "/chat/v1/notes/sections/preferences",
+        {"body": "tea", "expected_version": 0},
+    ),
 )
 
 
 async def test_notes_get_relayed_with_identity(monkeypatch):
     rig = make_rig(monkeypatch)
     secret = agent_token(rig.session.id)
-    r = await rig.call("GET", "/agent/v1/chat/notes?a=1")
+    r = await rig.call("GET", "/agent/v1/chat/notes?section=requests&a=1")
     assert r.status_code == 200, r.text
     (sent,) = rig.upstream.seen
-    assert (sent.method, sent.url.raw_path) == ("GET", b"/chat/v1/notes?a=1")
+    assert (sent.method, sent.url.raw_path) == ("GET", b"/chat/v1/notes?section=requests&a=1")
     assert sent.headers["authorization"] == f"Bearer {CHAT_TOKEN}"
     assert sent.headers["x-orch-session"] == str(rig.session.id)
     assert sent.headers["x-orch-slug"] == "chat-caller"
@@ -501,25 +506,34 @@ async def test_notes_get_relayed_with_identity(monkeypatch):
     assert all(secret not in v for v in sent.headers.values())
 
 
-async def test_notes_put_forwards_body(monkeypatch):
+async def test_notes_section_put_forwards_path_and_body(monkeypatch):
     rig = make_rig(monkeypatch)
     # whitespace and key order are the caller's: the bytes go through untouched
     body = '{ "expected_version":3,\n "body" : "caf\u00e9 \\u00e9 \U0001f600" }'.encode()
     inbound = {**rig.headers(), "Content-Type": "x/y"}
-    r = await rig.call("PUT", "/agent/v1/chat/notes", content=body, headers=inbound)
+    r = await rig.call(
+        "PUT", "/agent/v1/chat/notes/sections/work-in-progress", content=body, headers=inbound
+    )
     assert r.status_code == 200, r.text
     (sent,) = rig.upstream.seen
-    assert (sent.method, sent.url.path) == ("PUT", "/chat/v1/notes")
+    assert (sent.method, sent.url.path) == ("PUT", "/chat/v1/notes/sections/work-in-progress")
     assert sent.content == body
     assert sent.headers["content-type"] == "application/json"
     assert sent.headers["authorization"] == f"Bearer {CHAT_TOKEN}"
     assert sent.headers["x-orch-session"] == str(rig.session.id)
 
 
+async def test_whole_body_notes_put_is_gone(monkeypatch):
+    rig = make_rig(monkeypatch)
+    r = await rig.call("PUT", "/agent/v1/chat/notes", json={"body": "x", "expected_version": 0})
+    assert r.status_code == 405
+    assert rig.upstream.seen == []
+
+
 async def test_notes_put_body_cap(monkeypatch):
     rig = make_rig(monkeypatch)
     cap = chat.MAX_BODY_BYTES
-    for path in ("/agent/v1/chat/notes",):
+    for path in ("/agent/v1/chat/notes/sections/preferences",):
         big = b"a" * (cap + 1)
         assert_error(await rig.call("PUT", path, content=big), 413, "payload_too_large")
 
@@ -529,7 +543,8 @@ async def test_notes_put_body_cap(monkeypatch):
 
         assert_error(await rig.call("PUT", path, content=chunks()), 413, "payload_too_large")
     assert rig.upstream.seen == []
-    assert (await rig.call("PUT", "/agent/v1/chat/notes", content=b"a" * cap)).status_code == 200
+    put = await rig.call("PUT", "/agent/v1/chat/notes/sections/preferences", content=b"a" * cap)
+    assert put.status_code == 200
     assert len(rig.upstream.seen[0].content) == cap
 
 
@@ -596,8 +611,9 @@ async def test_memory_upstream_refusals_pass_through(monkeypatch):
     rig = make_rig(monkeypatch)
     cases = [
         ("GET", "/agent/v1/chat/notes", 409, "room_unbound"),
-        ("PUT", "/agent/v1/chat/notes", 413, "notes_too_large"),
-        ("PUT", "/agent/v1/chat/notes", 409, "version_conflict"),
+        ("PUT", "/agent/v1/chat/notes/sections/preferences", 413, "section_too_large"),
+        ("PUT", "/agent/v1/chat/notes/sections/preferences", 413, "notes_too_large"),
+        ("PUT", "/agent/v1/chat/notes/sections/preferences", 409, "version_conflict"),
     ]
     for method, path, status, code in cases:
         raw = json.dumps({"error": {"code": code, "message": "m"}}).encode()
@@ -801,7 +817,7 @@ def test_readme_documents_chat_routes():
         ("POST", "/agent/v1/chat/reactions"),
         ("GET", "/agent/v1/chat/messages/{send_id}"),
         ("GET", "/agent/v1/chat/notes"),
-        ("PUT", "/agent/v1/chat/notes"),
+        ("PUT", "/agent/v1/chat/notes/sections/{section}"),
         ("GET", "/agent/v1/chat/history"),
         ("POST", "/agent/v1/chat/attachments"),
         ("GET", "/agent/v1/chat/attachments/{request_id}"),
@@ -881,9 +897,9 @@ async def check_chat_tools_parity(target: Target) -> None:
         status = await h.call("chat_status", {"id": "s1"})
         missing = await h.call("chat_status", {"id": "s99"})
         notes0 = await h.call("chat_notes_get")
-        notes1 = await h.call("chat_notes_update", {"body": "likes tea", "expected_version": 0})
-        stale = await h.call("chat_notes_update", {"body": "x", "expected_version": 0})
-    for result in (rooms, sent, reacted, status, notes0, notes1):
+    # the plugin's chat_notes_update still sends the whole-body PUT until the plugins pin moves
+    # to the section release (S-79 step 7), so only the read goes through the plugin here
+    for result in (rooms, sent, reacted, status, notes0):
         assert not result.is_error, result.text
     direct_rooms = await target.direct("GET", "/agent/v1/chat/rooms")
     assert rooms.structured == direct_rooms.json() == {"rooms": fake.rooms}
@@ -906,14 +922,10 @@ async def check_chat_tools_parity(target: Target) -> None:
     assert missing.is_error
     assert missing.structured["error"]["status"] == 404
     assert missing.structured["error"]["code"] == direct_missing.json()["error"]["code"]
-    # notes through the plugin equal the direct route answers
-    assert notes0.structured["body"] == "" and notes0.structured["version"] == 0
-    assert notes1.structured["body"] == "likes tea" and notes1.structured["version"] == 1
-    assert stale.is_error and stale.structured["error"]["status"] == 409
-    assert stale.structured["error"]["code"] == "version_conflict"
+    # the notes read through the plugin equals the direct route answer
     direct_notes = await target.direct("GET", "/agent/v1/chat/notes")
-    # the fake stamps updated_at on every read, so it is the one field compared out
-    assert {**direct_notes.json(), "updated_at": 0} == {**notes1.structured, "updated_at": 0}
+    assert notes0.structured["body"] == "" and len(notes0.structured["sections"]) == 5
+    assert {**direct_notes.json(), "sections": []} == {**notes0.structured, "sections": []}
     # the plugin sent the same bodies as the direct calls and the same identity headers
     plugin_calls = [c for c in fake.calls if c.method == "POST"][:2]
     assert plugin_calls[0].json() == {"text": "hello from the plugin", "room": DEFAULT_ROOM}
@@ -930,7 +942,6 @@ async def check_chat_tools_parity(target: Target) -> None:
             ("chat_react", {"to": "m1", "key": "x"}),
             ("chat_status", {"id": "s1"}),
             ("chat_notes_get", {}),
-            ("chat_notes_update", {"body": "x", "expected_version": 0}),
         ):
             refused = await h.call(name, args)
             assert refused.is_error, name

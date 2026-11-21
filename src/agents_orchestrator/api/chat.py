@@ -15,7 +15,7 @@ The upstream status and JSON body come back unchanged, except that the `occupier
 409 `room_bound` never reaches the agent, and `POST /messages` answered 409 `room_bound` with an
 occupier is relayed through the occupier's session (`chat_relay`, 202 `relayed`); a connection
 error, a timeout or a non-JSON answer is 503 `chat_unavailable`.
-The room notes routes (`/notes`) are relayed the same way;
+The room notes routes (`/notes`, `/notes/sections/{section}`) are relayed the same way;
 the upstream resolves the room from the caller's session binding, so no route takes a room.
 The history and attachment routes (`GET /history`, `POST /attachments`, `GET /attachments/{id}`)
 are relayed like notes: the query string of a history read goes through as is, the room comes from
@@ -27,11 +27,11 @@ carry the method, path and status only, never a token or a body.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import quote
 
 import httpx
-from fastapi import APIRouter, FastAPI, Request, Response
+from fastapi import APIRouter, FastAPI, Query, Request, Response
 from pydantic import BaseModel, ConfigDict
 
 from agents_orchestrator import chat_client
@@ -76,8 +76,9 @@ class ChatMessageIn(BaseModel):
     reply_to: str | None = None
 
 
-class ChatNotesIn(BaseModel):
-    """A notes replacement as the upstream reads it (OpenAPI only; the upstream validates it)."""
+class ChatNoteSectionIn(BaseModel):
+    """A replacement of one notes section as the upstream reads it (OpenAPI only; the upstream
+    validates it, the section key included)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -236,18 +237,32 @@ def _segment(name: str) -> str:
     summary="The notes of the room bound to the caller's session (leader only)",
     responses={200: _PASS_THROUGH, **_RESPONSES},
 )
-async def notes_get(request: Request, agent: Caller, pool: Pool, settings: Cfg) -> Response:
+async def notes_get(
+    request: Request,
+    agent: Caller,
+    pool: Pool,
+    settings: Cfg,
+    section: Annotated[
+        str | None,
+        Query(description="Read only this section (the upstream validates the key)"),
+    ] = None,
+) -> Response:
     return await _relay(request, agent, pool, settings, "GET", "/notes")
 
 
 @router.put(
-    "/notes",
-    summary="Replace the notes of the room bound to the caller's session (leader only)",
+    "/notes/sections/{section}",
+    summary="Replace one section of the notes of the room bound to the caller's session"
+    " (leader only)",
     responses={200: _PASS_THROUGH, **_POST_RESPONSES},
-    openapi_extra=_json_body(ChatNotesIn),
+    openapi_extra=_json_body(ChatNoteSectionIn),
 )
-async def notes_put(request: Request, agent: Caller, pool: Pool, settings: Cfg) -> Response:
-    return await _relay(request, agent, pool, settings, "PUT", "/notes")
+async def notes_section_put(
+    section: str, request: Request, agent: Caller, pool: Pool, settings: Cfg
+) -> Response:
+    return await _relay(
+        request, agent, pool, settings, "PUT", f"/notes/sections/{_segment(section)}"
+    )
 
 
 @router.get(
