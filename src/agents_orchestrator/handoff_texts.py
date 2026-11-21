@@ -110,6 +110,11 @@ def level_texts(profile: Profile, hive: bool) -> dict[str, dict[str, str]]:
     return out
 
 
+def window_unknown_text() -> str:
+    """Appended to every level text while the gauge reports no context window."""
+    return "The context window size is not reported yet: the level follows the context percentage."
+
+
 def nudge_text(level: int) -> str:
     """The one message per level to an idle agent with nothing in flight."""
     return (

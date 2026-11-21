@@ -1,5 +1,6 @@
 """pressure_policy.build: thresholds, handoff state mapping, the hash, the wrapper schema."""
 
+import math
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -185,3 +186,41 @@ def test_steering_texts_have_no_time_words():
     ):
         assert not re.search(r"minute|deadline|second", text, re.I), text
         assert not re.search(r"\bin \d+", text), text
+
+
+def _wrapper_level(th, used, pct, window):
+    """The wrapper rule: tokens with a known window, else percents; highest level reached."""
+    if window:
+        vals, points = used, (th["l1_tokens"], th["l2_tokens"], th["l3_tokens"])
+    else:
+        vals, points = pct, (th["l1_pct"], th["l2_pct"], th["l3_pct"])
+    level = 0
+    for i, point in enumerate(points, start=1):
+        if vals is not None and point is not None and vals >= point:
+            level = i
+    return level
+
+
+@pytest.mark.parametrize("compact", [25, 95])
+@pytest.mark.parametrize("window", [None, 200_000, 1_000_000])
+@pytest.mark.parametrize("fraction", [0.05, 0.14, 0.3, 0.6, 0.8, 0.88, 0.93])
+def test_due_level_matches_wrapper_rule(compact, window, fraction):
+    lv = hive.levels({"auto_compact_pct": compact}, None, SETTINGS)
+    body = pp.build(lv, window, True, "work", None, hive=True, version=1, extras=EXTRAS)
+    th = body["thresholds"]
+    eff = window or pp.DEFAULT_WINDOW_TOKENS
+    used = int(fraction * compact / 100 * eff / 0.95) if window else None
+    pct = fraction * 100 if not window else None
+    if window:
+        pct = used / window * 100
+    got = hive.due_level(lv, used if window else None, window, pct, math.inf, 0, False)
+    names = ["none", "l1", "l2", "l3"]
+    assert names.index(got) == _wrapper_level(th, used, pct, window)
+
+
+@pytest.mark.parametrize(("window", "present"), [(None, True), (0, True), (1_000_000, False)])
+def test_window_unknown_sentence(window, present):
+    body = _build(window=window)
+    texts = [t for v in body["texts"].values() for t in v.values()]
+    assert texts
+    assert all((handoff_texts.window_unknown_text() in t) is present for t in texts)

@@ -2,6 +2,8 @@
 
 import math
 
+import pytest
+
 from agents_orchestrator.dispatcher import hive
 from agents_orchestrator.settings import Settings
 
@@ -29,7 +31,27 @@ def test_l3_never_below_l2_small_window():
     for window in (10_000, 50_000, 80_000, 100_000):
         assert hive.critical_tokens(lv, window) >= hive.strong_tokens(lv, window)
     big_headroom = _lv(handover_critical_headroom_tokens=500_000)
-    assert hive.critical_tokens(big_headroom, 200_000) == hive.strong_tokens(big_headroom, 200_000)
+    gap = 200_000 * 5 // 100  # strong margin 10 minus critical margin 5
+    assert hive.critical_tokens(big_headroom, 200_000) == (
+        hive.strong_tokens(big_headroom, 200_000) + gap
+    )
+
+
+@pytest.mark.parametrize(
+    ("compact", "window", "l2", "l3"),
+    [
+        (25, 200_000, 15_000, 25_000),
+        (95, 200_000, 130_000, 165_000),
+        (95, 1_000_000, 850_000, 900_000),
+        (25, 1_000_000, 150_000, 200_000),
+        (50, 200_000, 40_000, 75_000),
+    ],
+)
+def test_levels_floor(compact, window, l2, l3):
+    lv = hive.levels(
+        {"auto_compact_pct": compact}, None, Settings(database_url="postgresql://u:p@db/o")
+    )
+    assert (hive.strong_tokens(lv, window), hive.critical_tokens(lv, window)) == (l2, l3)
 
 
 def _due(lv, used, window=200_000, pct=None, tenure=math.inf, min_tenure=0, rollout=False):
