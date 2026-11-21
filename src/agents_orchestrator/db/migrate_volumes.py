@@ -18,7 +18,8 @@ a name whose `volume-<name>` backup exists (a pre-existing reserved name, logged
 always empty here and the seed is recorded after the create.
 
 It works on the raw stored JSON (no BackupEntry model), one transaction and one audited edit per
-preset. The api runs it once at startup under a try-advisory-lock (`startup`); a preset with no
+preset. The api runs it once at startup as a background task (`startup`) under a
+try-advisory-lock, with a per-copy timeout and an overall deadline; a preset with no
 entries is skipped, so a second run changes nothing. A preset that cannot be migrated (a seed
 object missing, no S3, an invalid result, a concurrent edit) is left untouched and logged, and a
 later startup retries it. Logs carry preset and volume names and counts only.
@@ -123,9 +124,13 @@ def is_template(name: str) -> bool:
     return any(m in name for m in rendering.MARKERS)
 
 
-def template_pattern(template: str) -> re.Pattern[str]:
-    """Names a template can render: literal parts kept, every tag matches any text."""
-    return re.compile(".*".join(re.escape(p) for p in _TAG.split(template)))
+def template_pattern(template: str) -> re.Pattern[str] | None:
+    """Names a template can render: literal parts kept, every tag matches any text. None when
+    the template has no literal part (a wildcard-only pattern reaches every backup)."""
+    parts = _TAG.split(template)
+    if not any(parts):
+        return None
+    return re.compile(".*".join(re.escape(p) for p in parts))
 
 
 def mount_path(spec: dict[str, Any], entry: dict[str, Any]) -> str:
@@ -181,14 +186,26 @@ async def _unique(conn: psycopg.AsyncConnection, base: str, taken: set[str]) -> 
 
 
 async def _seed(
-    conn: psycopg.AsyncConnection, preset_id: uuid.UUID, names: list[str]
+    conn: psycopg.AsyncConnection,
+    preset_id: uuid.UUID,
+    names: list[str],
+    others: list[str],
 ) -> backups.Version | None:
-    """The newest current version among the backups the entry names reach."""
+    """The newest current version among the backups this entry's names reach. `others` are the
+    names of the preset's other mount groups: a template never takes their backups, nor any
+    `volume-` backup, and a template with no literal part takes nothing (logged by count)."""
     found: list[backups.Version] = []
-    templates = [template_pattern(n) for n in names if is_template(n)]
+    templates: list[re.Pattern[str]] = []
     for name in names:
-        if not is_template(name) and (v := await backups.current(conn, name)) is not None:
-            found.append(v)
+        if not is_template(name):
+            if (v := await backups.current(conn, name)) is not None:
+                found.append(v)
+        elif (pat := template_pattern(name)) is None:
+            log.warning("volume migration: a wildcard-only template name seeds nothing")
+        else:
+            templates.append(pat)
+    foreign = [p for p in (template_pattern(n) for n in others if is_template(n)) if p]
+    plain = {n for n in others if not is_template(n)}
     if templates:
         cur = await conn.execute(
             "SELECT b.name FROM backups b JOIN backup_versions v ON v.id = b.current_version"
@@ -196,6 +213,10 @@ async def _seed(
             (preset_id,),
         )
         for (name,) in await cur.fetchall():
+            if name.startswith(backups.RESERVED_PREFIX) or name in plain:
+                continue
+            if any(p.fullmatch(name) for p in foreign):
+                continue
             if any(p.fullmatch(name) for p in templates):
                 v = await backups.current(conn, name)
                 if v is not None:
@@ -215,8 +236,10 @@ async def _plan(conn: psycopg.AsyncConnection, row: dict[str, Any], taken: set[s
     for path, group in groups.items():
         names = list(dict.fromkeys(e["name"] for e in group))
         exclude = sorted({str(x) for e in group for x in e.get("exclude") or []})
+        others = [e["name"] for p, g in groups.items() if p != path for e in g]
         name = await _unique(conn, name_base(row["name"], names[0]), taken)
-        planned.append(Planned(name, path, names, exclude, await _seed(conn, row["id"], names)))
+        seed = await _seed(conn, row["id"], names, others)
+        planned.append(Planned(name, path, names, exclude, seed))
     dropped = {k: sum(1 for e in entries if e.get(k)) for k in ("live", "after_init")}
     return PresetPlan(row["id"], row["name"], row["project"], spec, len(entries), planned, dropped)
 
@@ -266,8 +289,11 @@ async def _copy_seeds(plan: PresetPlan, settings: Settings) -> None:
             settings.cache_s3_prefix, backups.RESERVED_PREFIX + p.name, stamp, ACTOR
         )
         try:
-            await asyncio.to_thread(
-                s3.copy_object, settings, p.seed.object_key, key, credentials=_creds(settings)
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    s3.copy_object, settings, p.seed.object_key, key, credentials=_creds(settings)
+                ),
+                settings.volume_migration_copy_timeout_seconds,
             )
         except Exception as exc:  # noqa: BLE001 - botocore errors: the preset waits for a retry
             await _drop_copies(plan, settings)
@@ -387,7 +413,11 @@ async def migrate(
         try:
             return await _migrate(conn, settings, dry_run)
         finally:
+            # an aborted transaction would make the unlock fail and leave the lock on a pooled
+            # connection
+            await conn.rollback()
             await conn.execute("SELECT pg_advisory_unlock(%s)", (LOCK_KEY,))
+            await conn.commit()
 
 
 async def _migrate(conn: psycopg.AsyncConnection, settings: Settings, dry_run: bool) -> Result:
@@ -402,6 +432,7 @@ async def _migrate(conn: psycopg.AsyncConnection, settings: Settings, dry_run: b
     rows = await _rows(conn)
     await conn.commit()  # pool connections are not autocommit: each preset commits on its own
     for row in rows:
+        plan: PresetPlan | None = None
         try:
             try:
                 plan = await _plan(conn, row, taken)
@@ -422,6 +453,17 @@ async def _migrate(conn: psycopg.AsyncConnection, settings: Settings, dry_run: b
         except Skip as exc:
             res.skipped.append(row["name"])
             log.warning("volume migration: preset=%s left untouched: %s", row["name"], exc)
+            continue
+        except Exception as exc:  # noqa: BLE001 - one preset must not stop the others
+            await conn.rollback()
+            if plan is not None:
+                await _drop_copies(plan, settings)
+            res.skipped.append(row["name"])
+            log.warning(
+                "volume migration: preset=%s left untouched: failed (%s)",
+                row["name"],
+                type(exc).__name__,
+            )
             continue
         _log_plan(plan, dry_run)
         res.presets += 1
@@ -444,6 +486,11 @@ async def startup(pool: AsyncConnectionPool, settings: Settings) -> None:
     """The api's one-shot startup run: never raises (a failure is logged and retried at the
     next start)."""
     try:
-        await migrate(pool, settings, dry_run=settings.volume_migration_dry_run)
+        await asyncio.wait_for(
+            migrate(pool, settings, dry_run=settings.volume_migration_dry_run),
+            settings.volume_migration_deadline_seconds,
+        )
+    except TimeoutError:
+        log.error("volume migration passed its deadline; the rest is retried at the next start")
     except Exception as exc:  # noqa: BLE001 - startup must not crash on the migration
         log.error("volume migration failed (%s); retried at the next start", type(exc).__name__)

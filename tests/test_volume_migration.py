@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 
@@ -297,8 +298,27 @@ async def test_api_startup_runs_the_migration(pool, dsn, s3, dry_run):
     pid = await add_preset(pool, "Bot", [entry()])
     app = create_app(settings_for(dsn, volume_migration_dry_run=dry_run), pool)
     async with app.router.lifespan_context(app):
-        pass
+        await app.state.volume_migration_task
     assert ("backup" in await spec_of(pool, pid)) is dry_run
+
+
+async def test_api_startup_does_not_wait_for_the_migration(pool, dsn, s3, monkeypatch):
+    from agents_orchestrator.api.app import create_app
+
+    gate = asyncio.Event()
+    started = asyncio.Event()
+
+    async def slow(*a, **kw):
+        started.set()
+        await gate.wait()
+
+    monkeypatch.setattr(mv, "migrate", slow)
+    app = create_app(settings_for(dsn), pool)
+    async with app.router.lifespan_context(app):
+        await asyncio.wait_for(started.wait(), 5)
+        assert not app.state.volume_migration_task.done()
+        gate.set()
+        await app.state.volume_migration_task
 
 
 async def test_api_startup_survives_a_failing_migration(pool, dsn, s3, monkeypatch):
@@ -310,7 +330,7 @@ async def test_api_startup_survives_a_failing_migration(pool, dsn, s3, monkeypat
     monkeypatch.setattr(mv, "migrate", boom)
     app = create_app(settings_for(dsn), pool)
     async with app.router.lifespan_context(app):
-        pass
+        await app.state.volume_migration_task
 
 
 async def test_legacy_backup_rows_still_migrate_and_load_without_the_entry_model(
@@ -337,3 +357,52 @@ async def test_legacy_backup_rows_still_migrate_and_load_without_the_entry_model
     async with pool.connection() as conn:
         loaded = await sessions.get(conn, created.id)
     assert loaded is not None and "backup" not in loaded.spec.model_dump(exclude_unset=True)
+
+
+async def test_wildcard_template_never_takes_other_entries_or_volume_backups(pool, settings, s3):
+    pid = await add_preset(
+        pool,
+        "Bot",
+        [entry(name="{{ session.slug }}"), entry(name="other/tree", path="sub")],
+    )
+    await add_version(pool, "s-aaa", "sha:wild", pid)  # matches nothing: wildcard-only seeds none
+    await add_version(pool, "other/tree", "sha:other", pid)
+    await add_version(pool, "volume-x", "sha:vol", pid, volume_writer=True)
+    res = await mv.migrate(pool, settings)
+    assert res.volumes == ["bot", "bot-other-tree"] and res.seeds == 1
+    async with pool.connection() as conn:
+        assert await backups.current(conn, "volume-bot") is None
+        assert (await backups.current(conn, "volume-bot-other-tree")).digest == "sha:other"
+
+
+async def test_template_with_literal_part_skips_other_groups_names(pool, settings, s3):
+    pid = await add_preset(
+        pool, "Bot", [entry(name="{{ session.slug }}/ws"), entry(name="x/ws", path="sub")]
+    )
+    await add_version(pool, "s-aaa/ws", "sha:mine", pid)
+    await add_version(pool, "x/ws", "sha:theirs", pid)
+    await mv.migrate(pool, settings)
+    async with pool.connection() as conn:
+        assert (await backups.current(conn, "volume-bot-ws")).digest == "sha:mine"
+        assert (await backups.current(conn, "volume-bot-x-ws")).digest == "sha:theirs"
+
+
+async def test_unexpected_error_in_one_preset_does_not_stop_the_others(
+    pool, settings, s3, monkeypatch
+):
+    await add_version(pool, "fine", "sha:f")
+    bad = await add_preset(pool, "a", [entry(name="fine")])
+    ok = await add_preset(pool, "b", [entry(name="fine")])
+    real = backups.record_save
+
+    async def flaky(conn, **kw):
+        if kw["name"].startswith("volume-a"):
+            raise KeyError("boom")
+        return await real(conn, **kw)
+
+    monkeypatch.setattr(mv.backups, "record_save", flaky)
+    res = await mv.migrate(pool, settings)
+    assert res.skipped == ["a"] and res.volumes == ["b-fine"]
+    assert "backup" in await spec_of(pool, bad) and "backup" not in await spec_of(pool, ok)
+    # the lock was released: a second run takes it
+    assert await mv.migrate(pool, settings) is not None

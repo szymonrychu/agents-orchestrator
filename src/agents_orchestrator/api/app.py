@@ -108,9 +108,13 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if owns_pool:
             app.state.pool = await open_pool(settings.database_url)
-        # one-shot: preset backup entries become volumes (S-77); never raises
-        await migrate_volumes.startup(app.state.pool, settings)
         await listener.start()
+        # one-shot, in the background so the api serves meanwhile: preset backup entries become
+        # volumes (S-77); never raises
+        migration = asyncio.create_task(
+            migrate_volumes.startup(app.state.pool, settings), name="volume_migration"
+        )
+        app.state.volume_migration_task = migration
         sweeper = asyncio.create_task(autoclose.sweep(app.state.pool, settings), name="autoclose")
         app.state.autoclose_task = sweeper
         proposal_sweeper = asyncio.create_task(proposal_sweep.sweep(app), name="proposal_sweep")
@@ -122,7 +126,7 @@ def create_app(
         try:
             yield
         finally:
-            for task in (sweeper, proposal_sweeper, post_sweeper, cred_sweeper):
+            for task in (migration, sweeper, proposal_sweeper, post_sweeper, cred_sweeper):
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task

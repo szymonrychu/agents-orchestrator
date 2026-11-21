@@ -170,6 +170,9 @@ class Settings(BaseSettings):
     volume_max_per_preset: int = Field(default=8, ge=1, le=64)
     #: The startup migration of preset backup entries to volumes only plans and logs.
     volume_migration_dry_run: bool = False
+    #: Per seed copy and for the whole startup migration (it runs in the background).
+    volume_migration_copy_timeout_seconds: float = Field(default=120.0, gt=0)
+    volume_migration_deadline_seconds: float = Field(default=1800.0, gt=0)
     claude_secret_name: str = "agents-orchestrator-claude"
     image_pull_secret: str = "regcred"
     any_mcp_config_file: str = ""
