@@ -366,6 +366,26 @@ async def finish_delete(conn: psycopg.AsyncConnection, id: uuid.UUID) -> None:
     await notify(conn, CHANGED_CHANNEL, {"id": str(id)})
 
 
+async def refuse_delete(conn: psycopg.AsyncConnection, id: uuid.UUID, *, reason: str) -> None:
+    """A `deleting` volume found mounted by the reconciler goes back to `ready` (the one way out
+    of `deleting` besides `finish_delete`); event `delete_refused`."""
+    cur = await _lock(conn, id)
+    if cur.state != "deleting":
+        raise VolumeBusy("only a deleting volume can refuse a delete")
+    await conn.execute(
+        "UPDATE volumes SET state = 'ready', state_reason = NULL WHERE id = %s", (id,)
+    )
+    await record_event(
+        conn,
+        id,
+        "delete_refused",
+        actor_kind="system",
+        actor="reconciler",
+        detail={"reason": reason},
+    )
+    await _touch(conn, id)
+
+
 @dataclass
 class ClaimDecision:
     """What `claim` decided: `proceed` (claimed, mount), `restore` (claimed, volume now
@@ -613,6 +633,17 @@ async def unreleased_claims(conn: psycopg.AsyncConnection, volume_id: uuid.UUID)
         f"SELECT {_CLAIM_COLUMNS} FROM volume_mounts WHERE volume_id = %s AND released_at IS NULL"
         " ORDER BY id",
         (volume_id,),
+        Claim,
+    )
+
+
+async def orphan_claims(conn: psycopg.AsyncConnection) -> list[Claim]:
+    """Unreleased claims whose session row no longer exists (a purge without release)."""
+    return await _rows(
+        conn,
+        f"SELECT {_CLAIM_COLUMNS} FROM volume_mounts m WHERE released_at IS NULL"
+        " AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.id = m.session_id) ORDER BY id",
+        (),
         Claim,
     )
 

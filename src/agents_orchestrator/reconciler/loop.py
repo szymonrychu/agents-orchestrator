@@ -82,6 +82,7 @@ from agents_orchestrator.reconciler.init import InitGate, InitRunner
 from agents_orchestrator.reconciler.live import Live
 from agents_orchestrator.reconciler.rollout import BUSY, LEADS, Replacer, agent_pods, terminating
 from agents_orchestrator.reconciler.sweeper import CacheSweeper
+from agents_orchestrator.reconciler.volumes import VolumeReconciler
 from agents_orchestrator.reconciler.wrapper_sessions import WrapperSessionBootstrapper
 from agents_orchestrator.settings import DiscardHook, Settings
 from agents_orchestrator.spec import parse_quantity
@@ -236,6 +237,7 @@ class Reconciler:
         self.cache = CacheRunner(pool, kube, settings, write_status=self._write_status)
         self.live = Live(self.cache, wrapper_factory, self._session_lock)
         self.sweeper = CacheSweeper(pool, settings)
+        self.volumes = VolumeReconciler(pool, kube, settings)
         self.replacer = Replacer(pool, kube, settings)
         self.bootstrapper = (
             WrapperSessionBootstrapper(pool, wrapper_factory)
@@ -269,6 +271,7 @@ class Reconciler:
         listener_task = asyncio.create_task(listener())
         stop_wait = asyncio.create_task(stop.wait())
         sweep_task = asyncio.create_task(self.sweeper.run(stop))
+        volume_task = asyncio.create_task(self.volumes.run(stop))
         command_task = asyncio.create_task(self._command_loop(stop, command_wake))
         try:
             while not stop.is_set():
@@ -296,6 +299,9 @@ class Reconciler:
             sweep_task.cancel()  # a sweep cut short is idempotent: the next one replans
             with contextlib.suppress(asyncio.CancelledError):
                 await sweep_task
+            volume_task.cancel()  # every pass is idempotent: the next one resumes
+            with contextlib.suppress(asyncio.CancelledError):
+                await volume_task
             # a command cut short stays `running` until the next start fails it (run)
             command_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
