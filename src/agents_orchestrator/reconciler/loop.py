@@ -642,7 +642,7 @@ class Reconciler:
         problems: list[str] = []
         gates = (volume_gate, sessions_gate, cache_gate, gate, post_gate)
         if any(g.hold for g in gates):  # sessions wait for the restores and the init run
-            phase = "degraded" if any(g.hold and g.degraded for g in gates) else "pending"
+            phase = "degraded" if volume_gate.hold and volume_gate.degraded else "pending"
         else:
             problems = await self._bootstrap_wrapper_sessions(session)
             if any(g.degraded for g in gates):  # a failed restore or init starts them anyway

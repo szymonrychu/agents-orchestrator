@@ -179,6 +179,24 @@ async def test_deleting_volume_holds_a_new_session_degraded(pool, kube, rec, vre
     assert "volume data is being deleted" in got.status["message"]
 
 
+@pytest.mark.parametrize(
+    ("volume_deleting", "init_scripts", "phase"),
+    [(False, ["echo hi"], "pending"), (True, [], "degraded")],
+)
+async def test_only_a_refused_volume_holds_the_session_degraded(
+    pool, kube, rec, vrec, volume_deleting, init_scripts, phase
+):
+    vol = await _volume(pool, kube, vrec)
+    if volume_deleting:
+        async with pool.connection() as conn, conn.transaction():
+            await volumes.mark_deleting(conn, vol.id)
+    s = await _session(pool, "alpha", vol, init_scripts=init_scripts)
+    await rec.reconcile_once()
+    async with pool.connection() as conn:
+        got = await sessions.get(conn, s.id)
+    assert got.status["phase"] == phase
+
+
 async def test_running_session_keeps_its_pods_while_its_volume_resizes(pool, kube, rec, vrec):
     vol = await _volume(pool, kube, vrec)
     await _session(pool, "alpha", vol)
