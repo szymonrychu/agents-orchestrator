@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import psycopg
 from psycopg.rows import dict_row
@@ -43,8 +43,8 @@ from agents_orchestrator.db.eligibility import (
     BACKGROUND_BUSY,
     DEAD,
     ELIGIBLE,
+    GAUGE_STALE,
     HANDOVER_TRIGGER,
-    HEADROOM,
     LEAVING,
     NOT_STOPPING,
     READY_STAYS,
@@ -52,6 +52,10 @@ from agents_orchestrator.db.eligibility import (
 )
 from agents_orchestrator.db.pool import notify
 from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE
+from agents_orchestrator.pressure_levels import Levels, levels_of, successor_has_room
+
+if TYPE_CHECKING:
+    from agents_orchestrator.settings import Settings
 
 CHANNEL = "leadership_requested"
 LEADER_CHANGED_CHANNEL = "leader_changed"
@@ -166,13 +170,59 @@ class LeaderChange:
 
 @dataclass(frozen=True)
 class PassPolicy:
-    """The settings the pass reads: the pods' default compaction point (the successor
-    threshold of a spec without `auto_compact_pct`) and the deadlines of queued handovers: the
-    rollout deferral cap for the reconciler's `rollout` request, the max wait for any other."""
+    """The settings the pass reads: the pods' default compaction point (for a spec without
+    `auto_compact_pct`), the deadlines of queued handovers (the rollout deferral cap for the
+    reconciler's `rollout` request, the max wait for any other) and the handover levels a
+    successor's headroom is judged by (`successor_has_room`). Defaults equal the Settings'."""
 
     default_auto_compact_pct: int = 95
     rollout_max_defer_seconds: int = 14400
     handover_max_wait_seconds: int = 1800
+    strong_margin_pct: int = 10
+    strong_headroom_tokens: int = 60000
+    critical_margin_pct: int = 5
+    critical_headroom_tokens: int = 25000
+    budget_tokens: int = 150000
+    successor_margin_tokens: int = 30000
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> PassPolicy:
+        return cls(
+            default_auto_compact_pct=settings.default_auto_compact_pct,
+            rollout_max_defer_seconds=settings.rollout_max_defer_seconds,
+            handover_max_wait_seconds=settings.handover_max_wait_seconds,
+            strong_margin_pct=settings.handover_strong_margin_pct,
+            strong_headroom_tokens=settings.handover_strong_headroom_tokens,
+            critical_margin_pct=settings.handover_critical_margin_pct,
+            critical_headroom_tokens=settings.handover_critical_headroom_tokens,
+            budget_tokens=settings.handover_budget_tokens,
+            successor_margin_tokens=settings.handover_successor_margin_tokens,
+        )
+
+    def levels(self, spec: dict[str, Any]) -> Levels:
+        """A candidate's levels for its session spec (L2 does not depend on a tenure start)."""
+        compact = spec.get("auto_compact_pct")
+        return levels_of(
+            self.default_auto_compact_pct if compact is None else compact,
+            None,
+            strong_margin_pct=self.strong_margin_pct,
+            strong_headroom_tokens=self.strong_headroom_tokens,
+            budget_tokens=self.budget_tokens,
+            critical_margin_pct=self.critical_margin_pct,
+            critical_headroom_tokens=self.critical_headroom_tokens,
+        )
+
+    def has_room(self, candidate: dict[str, Any]) -> bool:
+        """`successor_has_room` for a `_GAUGES` row (a stale gauge is no reading)."""
+        if candidate["gauge_stale"]:
+            return True
+        return successor_has_room(
+            self.levels(candidate["spec"] or {}),
+            candidate["context_used_tokens"],
+            candidate["context_window_tokens"],
+            candidate["context_pct"],
+            self.successor_margin_tokens,
+        )
 
 
 DEFAULT_POLICY = PassPolicy()
@@ -202,16 +252,19 @@ WHERE c.desired = 'active' AND {HIVE} AND (
 ORDER BY c.id
 """
 
-# The successor (eligibility.SUCCESSOR_ORDER) for every pick that names nobody: agents with
-# headroom (eligibility.HEADROOM) first, so a forced pick falls back to the best agent without it
-# only when every peer lacks it. Any idle state is acceptable: a hive whose other members are all
-# busy still gets a leader.
-_SUCCESSOR = f"""
-SELECT a.id FROM agents a LEFT JOIN agent_status s ON s.agent_id = a.id
+# An agent's gauge and session spec, what `PassPolicy.has_room` judges. Aliases as below.
+_GAUGES = f"""
+SELECT a.id, c.spec, s.context_used_tokens, s.context_window_tokens, s.context_pct,
+    {GAUGE_STALE} AS gauge_stale
+FROM agents a LEFT JOIN agent_status s ON s.agent_id = a.id
 JOIN sessions c ON c.id = a.session_id
+"""
+# Every pick that names nobody chooses among these, in eligibility.SUCCESSOR_ORDER: agents with
+# headroom (`successor_has_room`) first (`successor`). Any idle state is acceptable: a hive whose
+# other members are all busy still gets a leader.
+_CANDIDATES_FOR_SUCCESSION = f"""{_GAUGES}
 WHERE a.session_id = %(session)s AND {ELIGIBLE} AND a.id <> %(other)s
-ORDER BY NOT {HEADROOM}, {SUCCESSOR_ORDER}
-LIMIT 1
+ORDER BY {SUCCESSOR_ORDER}
 """
 
 
@@ -271,17 +324,26 @@ async def successor(
     session_id: uuid.UUID,
     other_than: uuid.UUID,
     policy: PassPolicy,
+    *,
+    require_room: bool = False,
 ) -> uuid.UUID | None:
-    row = await _one(
-        conn,
-        _SUCCESSOR,
-        {
-            "session": session_id,
-            "other": other_than,
-            "compact": policy.default_auto_compact_pct,
-        },
+    """The first eligible peer with headroom; without one, None when `require_room` (a `limit`
+    move), else the first eligible peer (any other pick still needs a leader)."""
+    candidates = await _all(
+        conn, _CANDIDATES_FOR_SUCCESSION, {"session": session_id, "other": other_than}
     )
-    return row["id"] if row else None
+    for candidate in candidates:
+        if policy.has_room(candidate):
+            return candidate["id"]
+    if require_room or not candidates:
+        return None
+    return candidates[0]["id"]
+
+
+async def has_room(conn: psycopg.AsyncConnection, agent_id: uuid.UUID, policy: PassPolicy) -> bool:
+    """The agent has headroom to take over (`successor_has_room`)."""
+    row = await _one(conn, f"{_GAUGES} WHERE a.id = %(agent)s", {"agent": agent_id})
+    return row is not None and policy.has_room(row)
 
 
 async def _target_ready(
@@ -385,13 +447,19 @@ async def _judge(
     if req["epoch"] != leader["epoch"]:
         return "stale_epoch", None, ""
     reason = f"handover: {req['reason']}"
+    # a `limit` move only goes to a peer with headroom; with none the leader clears itself
+    limit = req["reason"] == handoffs.LIMIT_REASON
     if req["to_agent_id"] is not None:
         target = req["to_agent_id"]
         if target == current or not await _target_ready(conn, session_id, target):
             return "target_not_ready", None, ""
+        if limit and not await has_room(conn, target, policy):
+            return "no_headroom", None, ""
         return None, target, reason
-    picked = await successor(conn, session_id, current, policy)
+    picked = await successor(conn, session_id, current, policy, require_room=limit)
     if picked is None:
+        if limit and await successor(conn, session_id, current, policy) is not None:
+            return "no_headroom", None, ""
         return "no_peers", None, ""
     return None, picked, reason
 

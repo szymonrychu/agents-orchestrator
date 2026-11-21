@@ -65,6 +65,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from agents_orchestrator import handoff_texts
 from agents_orchestrator.db import handoffs, leadership
+from agents_orchestrator.db.eligibility import GAUGE_STALE
 from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE
 from agents_orchestrator.dispatcher import feed
 from agents_orchestrator.handover_transcript import REREAD_RULE
@@ -290,7 +291,7 @@ async def _read(
             "SELECT a.id, a.pod_name, a.url, a.wrapper_session_id, a.ready,"
             " coalesce(s.state, 'unknown') AS state, s.context_pct,"
             " s.context_used_tokens, s.context_window_tokens,"
-            f" {_GAUGE_STALE} AS gauge_stale"
+            f" {GAUGE_STALE} AS gauge_stale"
             " FROM agents a LEFT JOIN agent_status s ON s.agent_id = a.id"
             " WHERE a.session_id = %s AND a.gone_at IS NULL ORDER BY a.ordinal",
             (cid,),
@@ -514,9 +515,7 @@ async def _push_session(
 # hive) keeps them in `agent_limits`; a row older than the agent's last `session_cleared` is
 # stale (the context was cleared since), so its start is unknown again and is recorded afresh.
 # For both, a gauge not updated since the clear still shows the old context and is read as no
-# gauge (`_GAUGE_STALE`, aliases `a` the agent and `s` its agent_status row).
-_GAUGE_STALE = """EXISTS (SELECT 1 FROM events x WHERE x.agent_id = a.id
-        AND x.type = 'session_cleared' AND x.created_at > coalesce(s.updated_at, '-infinity'))"""
+# gauge (`eligibility.GAUGE_STALE`).
 _SUBJECT_COLUMNS = """
     c.id AS session_id, c.slug, c.spec, c.status, a.id AS agent_id, a.ordinal, a.pod_name,
     a.url, a.wrapper_session_id, a.ready,
@@ -524,7 +523,7 @@ _SUBJECT_COLUMNS = """
     s.context_used_tokens, s.context_window_tokens
 """
 _HIVE_SUBJECTS = f"""
-SELECT {_SUBJECT_COLUMNS}, false AS solo, {_GAUGE_STALE} AS gauge_stale, l.epoch,
+SELECT {_SUBJECT_COLUMNS}, false AS solo, {GAUGE_STALE} AS gauge_stale, l.epoch,
     l.start_context_tokens AS start_tokens,
     extract(epoch FROM now() - l.since) AS tenure
 FROM sessions c
@@ -534,7 +533,7 @@ LEFT JOIN agent_status s ON s.agent_id = a.id
 WHERE c.desired = 'active' AND {leadership.HIVE}
 """
 _SOLO_SUBJECTS = f"""
-SELECT {_SUBJECT_COLUMNS}, true AS solo, 0 AS epoch, {_GAUGE_STALE} AS gauge_stale,
+SELECT {_SUBJECT_COLUMNS}, true AS solo, 0 AS epoch, {GAUGE_STALE} AS gauge_stale,
     CASE WHEN fresh.ok THEN lim.start_context_tokens END AS start_tokens,
     CASE WHEN fresh.ok THEN extract(epoch FROM now() - lim.since) ELSE 0 END AS tenure
 FROM sessions c
@@ -653,7 +652,7 @@ async def _fill_solo_start(
 # gauge and session, to build their policy.
 _ROW_AGENTS = f"""
 SELECT c.id AS session_id, c.spec, a.id AS agent_id, a.url, a.wrapper_session_id,
-    s.context_used_tokens, s.context_window_tokens, {_GAUGE_STALE} AS gauge_stale
+    s.context_used_tokens, s.context_window_tokens, {GAUGE_STALE} AS gauge_stale
 FROM agents a JOIN sessions c ON c.id = a.session_id
 LEFT JOIN agent_status s ON s.agent_id = a.id
 WHERE a.id = ANY(%(agents)s) AND a.gone_at IS NULL AND c.desired = 'active'

@@ -40,16 +40,38 @@ class Levels:
 
 def levels(spec: dict[str, Any], start_tokens: int | None, settings: Settings) -> Levels:
     """The levels of an agent whose context was `start_tokens` when its tenure began."""
-    compact = compact_pct(spec.get("auto_compact_pct"), settings)
-    return Levels(
-        strong_pct=compact - settings.handover_strong_margin_pct,
+    return levels_of(
+        compact_pct(spec.get("auto_compact_pct"), settings),
+        start_tokens,
+        strong_margin_pct=settings.handover_strong_margin_pct,
         strong_headroom_tokens=settings.handover_strong_headroom_tokens,
-        compact_pct=compact,
-        fallback_pct=max(compact - HANDOVER_MARGIN_PCT, 1),
-        start_tokens=start_tokens,
         budget_tokens=settings.handover_budget_tokens,
         critical_margin_pct=settings.handover_critical_margin_pct,
         critical_headroom_tokens=settings.handover_critical_headroom_tokens,
+    )
+
+
+def levels_of(
+    compact: int,
+    start_tokens: int | None,
+    *,
+    strong_margin_pct: float,
+    strong_headroom_tokens: int,
+    budget_tokens: int,
+    critical_margin_pct: float,
+    critical_headroom_tokens: int,
+) -> Levels:
+    """The levels for an effective compaction point and the handover values (the one formula
+    `levels` and the leadership pass's policy share)."""
+    return Levels(
+        strong_pct=compact - strong_margin_pct,
+        strong_headroom_tokens=strong_headroom_tokens,
+        compact_pct=compact,
+        fallback_pct=max(compact - HANDOVER_MARGIN_PCT, 1),
+        start_tokens=start_tokens,
+        budget_tokens=budget_tokens,
+        critical_margin_pct=critical_margin_pct,
+        critical_headroom_tokens=critical_headroom_tokens,
     )
 
 
@@ -132,3 +154,21 @@ def due_level(
     if hit and tenure_seconds >= min_tenure_seconds and not rollout_pending:
         return "l1"
     return "none"
+
+
+def successor_has_room(
+    lv: Levels,
+    used_tokens: int | None,
+    window_tokens: int | None,
+    pct: float | None,
+    margin_tokens: int,
+) -> bool:
+    """A successor must start with room, so it is not due at once and the handover's own cost
+    does not tip it over: its context at most its L2 point minus `margin_tokens`. Without a
+    token gauge (or window) the percent fallback decides (at most `fallback_pct`); with no
+    reading at all (or a gauge stale since the last clear, passed as None) it has room."""
+    if used_tokens is not None and window_tokens is not None and window_tokens > 0:
+        return used_tokens <= strong_tokens(lv, window_tokens) - margin_tokens
+    if pct is not None:
+        return pct <= lv.fallback_pct
+    return True

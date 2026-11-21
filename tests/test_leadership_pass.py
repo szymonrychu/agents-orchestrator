@@ -299,30 +299,6 @@ async def test_successor_needs_token_headroom(pool):
     assert change is not None and change.agent_id == a2["id"]
 
 
-async def test_headroom_margin_clamped_on_small_window(pool):
-    # compaction 40 on a 200k window: hard 70k, margin min(50k, 35k) = 35k, so 30k used qualifies
-    # (an unclamped 50k margin would make the limit 20k and nobody would qualify)
-    c, (a0, a1, a2) = await hive(pool)
-    await run(
-        pool,
-        "UPDATE sessions SET spec = spec || jsonb_build_object('auto_compact_pct', 40)"
-        " WHERE id = %s",
-        (c["id"],),
-    )
-    await set_leader(pool, c["id"], a0["id"], epoch=3)
-    await status(pool, a1["id"], "idle", 15)
-    await status(pool, a2["id"], "idle", 5)
-    await run(
-        pool,
-        "UPDATE agent_status SET context_window_tokens = 200000, context_used_tokens ="
-        " CASE agent_id WHEN %s THEN 30000 ELSE 100000 END WHERE agent_id IN (%s, %s)",
-        (a1["id"], a1["id"], a2["id"]),
-    )
-    await request(pool, c["id"], "handover", a0["id"], None, "done", 3)
-    change = await lpass(pool, c["id"])
-    assert change is not None and change.agent_id == a1["id"]
-
-
 async def test_headroom_percent_fallback(pool):
     # tokens unknown: hard 20% less 10 pct of headroom leaves 10%
     c, (a0, a1, a2) = await hive(pool)
@@ -1296,3 +1272,33 @@ async def test_ex_leader_leading_again_closes_its_discussing_row(pool, reason):
     (row,) = await handoff_rows(pool, a0["id"])
     assert (row["id"], row["phase"], row["close_reason"]) == (a0_row, "cancelled", "leader_again")
     assert await commands_of(pool, a0["id"]) == []
+
+
+@pytest.mark.parametrize(
+    ("reason", "named", "outcome"),
+    [
+        ("limit", False, ("rejected", "no_headroom")),
+        ("limit", True, ("rejected", "no_headroom")),
+        ("rollout", False, ("applied", None)),  # other picks still fall back to the order
+    ],
+)
+async def test_limit_request_rejected_without_headroom(pool, reason, named, outcome):
+    # compact 95 on a 200k window: L2 130k, so a successor needs at most 100k; the only peer
+    # holds 150k (an uncleared ex-leader)
+    c, (a0, a1) = await hive(pool, 2)
+    await set_leader(pool, c["id"], a0["id"], epoch=3)
+    await run(
+        pool,
+        "UPDATE agent_status SET context_window_tokens = 200000, context_used_tokens = 150000,"
+        " context_pct = 75 WHERE agent_id = %s",
+        (a1["id"],),
+    )
+    to = a1["id"] if named else None
+    if reason == "limit":
+        row_id = await open_pressure_row(pool, c["id"], a0["id"], "moving")
+        rid = await own_request(pool, row_id, c["id"], a0["id"], to, 3)
+    else:
+        rid = await request(pool, c["id"], "handover", a0["id"], to, reason, 3)
+    change = await lpass(pool, c["id"])
+    assert await decided(pool, rid) == outcome
+    assert (change.agent_id if change else None) == (a1["id"] if outcome[1] is None else None)

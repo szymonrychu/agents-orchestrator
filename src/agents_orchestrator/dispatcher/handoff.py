@@ -30,23 +30,27 @@ The pressure itself is the policy the push loop puts to the wrapper (`hive._push
    - blocked before, clear now: stored with `resubmit` (the policy tells the agent to submit
      again, results may change the handoff); the row stays until the agent re-submits.
    - accepted clear (the route stored a non-blocking inventory) and still clear: a hive leader
-     with an eligible successor gets a `handover` request with reason `limit` (to the submit's
-     `to` when that agent is eligible), `moving`; a solo agent, or a hive leader that is the only
-     live agent, gets a `clear` once it is idle (no current turn, no background subagent, no
-     running background task in the inventory), `clearing`.
+     with an eligible successor with headroom (`pressure_levels.successor_has_room`: at most
+     its L2 point minus ORCH_HANDOVER_SUCCESSOR_MARGIN_TOKENS) gets a `handover` request with
+     reason `limit` (to the submit's `to` when that agent is eligible and has headroom),
+     `moving`; a solo agent, or a hive leader with no such peer, gets a `clear` once it is idle
+     (no current turn, no background subagent, no running background task in the inventory),
+     `clearing`. A `limit` move only goes to a peer with headroom; with none the leader clears
+     itself.
 4. moving: the leadership pass's `handoffs.on_leader_moved` carries the row to `discussing`. A
-   `limit` request rejected while the agent still leads falls back to the solo order (a clear
-   once idle and the gate clear); one rejected after leadership moved closes the row
-   `cancelled not_leader`.
+   `limit` request rejected while the agent still leads (`no_headroom` included: its peer grew
+   before the pass) falls back to the solo order (a clear once idle and the gate clear); one
+   rejected after leadership moved closes the row `cancelled not_leader`.
 5. discussing (hive ex-leader): cleared only when the session is quiet (`_QUIET`;
    `quiet_cap_seconds` after the move only drops the session-quiet requirement, never the
    ex-leader's own: past the cap it is still cleared only once idle) AND its own in-flight gate
    is clear; until then it keeps its policy (`accepted`, with `waiting_on`). Only the row's own
    `limit` move or the leader's voluntary handover reaches this phase: a rollout or user move
    closes the row before it (`handoffs.on_leader_moved`), so it is never cleared. An ex-leader
-   that leads again (a 2-agent hive's ping-pong, a user pick, a leader_lost move) has its row
-   closed `cancelled leader_again` in that move, so it is never cleared while it leads; so does
-   a `clearing` row whose clear is still queued (the clear cancelled with it).
+   that leads again (a `limit` move back once it has headroom, a user pick, a leader_lost move)
+   has its row closed `cancelled leader_again` in that move, so it is never cleared while it
+   leads; so does a `clearing` row whose clear is still queued (the clear cancelled with it).
+   A `limit` move only goes to a peer with headroom; with none the leader clears itself.
 6. clearing: a `session_cleared` after the clear closes the row `done cleared` (hive order) or,
    solo, queues the accepted handoff back (`handoff_texts.return_text`) with the move to
    `returning`, exactly once. A clear refused with `subagents_running` or lost (no
@@ -325,7 +329,8 @@ SELECT k.status, k.result,
 FROM commands k LEFT JOIN agent_status s ON s.agent_id = k.agent_id WHERE k.id = %(command)s
 """
 
-# The submit's preferred successor when it is eligible (aliases as in `leadership._SUCCESSOR`).
+# The submit's preferred successor when it is eligible (aliases as in
+# `leadership._CANDIDATES_FOR_SUCCESSION`).
 _TARGET = f"""
 SELECT a.id FROM agents a LEFT JOIN agent_status s ON s.agent_id = a.id
 JOIN sessions c ON c.id = a.session_id
@@ -499,11 +504,7 @@ class _Pass:
         return True
 
     def _pass_policy(self) -> leadership.PassPolicy:
-        return leadership.PassPolicy(
-            self.settings.default_auto_compact_pct,
-            self.settings.rollout_max_defer_seconds,
-            self.settings.handover_max_wait_seconds,
-        )
+        return leadership.PassPolicy.from_settings(self.settings)
 
     def gate(self, row: handoffs.Handoff) -> handoff_gate.GateResult:
         """The in-flight gate of the row's agent as of this pass (no answer: blocked)."""
@@ -813,18 +814,23 @@ class _Pass:
         await self.clear_when_idle(row, ["submitted"], facts)
 
     async def request_move(self, row: handoffs.Handoff, leader: leadership.Leader) -> bool:
-        """A `limit` handover to the submit's `to` (when eligible) or the pass's pick; False
-        when no successor exists (the leader is the only live agent: the solo order)."""
+        """A `limit` handover to the submit's `to` (when eligible and with headroom) or the
+        pass's pick among the peers with headroom; False when there is none (the leader is the
+        only live agent, or every peer is too full to take over: the solo order)."""
         session_id = self.session["id"]
+        policy = self._pass_policy()
         to = (row.handoff or {}).get("to")
         target = None
         if to:
             got = await _one(
                 self.conn, _TARGET, {"session": session_id, "pod": to, "other": row.agent_id}
             )
-            target = got["id"] if got is not None else None
+            if got is not None and await leadership.has_room(self.conn, got["id"], policy):
+                target = got["id"]
         if target is None and (
-            await leadership.successor(self.conn, session_id, row.agent_id, self._pass_policy())
+            await leadership.successor(
+                self.conn, session_id, row.agent_id, policy, require_room=True
+            )
             is None
         ):
             return False
