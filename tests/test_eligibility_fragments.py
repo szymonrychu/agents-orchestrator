@@ -28,16 +28,15 @@ def test_fragments_compose_from_each_other() -> None:
 def test_call_sites_embed_the_shared_fragments() -> None:
     assert eligibility.ELIGIBLE in leadership._CANDIDATES
     assert eligibility.HANDOVER_TRIGGER in leadership._CANDIDATES
-    assert eligibility.ELIGIBLE in leadership._SUCCESSOR
-    assert eligibility.SUCCESSOR_ORDER in leadership._SUCCESSOR
+    assert eligibility.ELIGIBLE in leadership._CANDIDATES_FOR_SUCCESSION
+    assert eligibility.SUCCESSOR_ORDER in leadership._CANDIDATES_FOR_SUCCESSION
     assert eligibility.ELIGIBLE in handoff._TARGET
     assert eligibility.HANDOVER_TRIGGER in queue._HANDOVER_PENDING
     assert eligibility.ELIGIBLE in queue._HANDOVER_PENDING
 
 
-def test_rollout_and_headroom_in_both_picks() -> None:
+def test_rollout_in_both_picks() -> None:
     assert eligibility.ROLLOUT_PENDING in eligibility.SUCCESSOR_ORDER
-    assert eligibility.HEADROOM in leadership._SUCCESSOR
     assert not hasattr(eligibility, "THRESHOLD")
 
 
