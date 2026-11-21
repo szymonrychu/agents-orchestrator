@@ -103,6 +103,7 @@ from agents_orchestrator import (
     handoff_profile,
     handoff_quality,
     handoff_texts,
+    pressure_levels,
     taskboard_client,
 )
 from agents_orchestrator.api.scope import scope_of
@@ -602,7 +603,7 @@ class _Pass:
         if used is None and pct is None:
             return False  # no reading: nothing to judge by
         lv = hive._row_level(subject, self.settings)[0]
-        level = hive.due_level(
+        level = pressure_levels.due_level(
             lv, used, subject["context_window_tokens"], pct, math.inf, 0, rollout_pending=False
         )
         return level == "none"
