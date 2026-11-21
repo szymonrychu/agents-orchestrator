@@ -11,7 +11,7 @@ from psycopg.rows import dict_row
 from agents_orchestrator.db.eligibility import HOLDS_SESSION
 from agents_orchestrator.db.sessions import Session, quiet_clock_sql
 from agents_orchestrator.db.start_state import start_state
-from agents_orchestrator.dispatcher.hive import compact_pct
+from agents_orchestrator.pressure_levels import compact_pct
 from agents_orchestrator.settings import Settings
 
 _AGGREGATES = f"""

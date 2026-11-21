@@ -15,7 +15,7 @@ from typing import Any, Literal
 
 from agents_orchestrator import handoff_texts
 from agents_orchestrator.db.handoffs import Handoff
-from agents_orchestrator.dispatcher.hive import Levels, critical_tokens, l1_tokens, strong_tokens
+from agents_orchestrator.pressure_levels import Levels, critical_tokens, l1_tokens, strong_tokens
 from agents_orchestrator.wrapper.models import blocking_items
 
 # The window the token thresholds are computed for when the gauge has none yet: the percent

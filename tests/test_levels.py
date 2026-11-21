@@ -4,36 +4,36 @@ import math
 
 import pytest
 
-from agents_orchestrator.dispatcher import hive
+from agents_orchestrator import pressure_levels as pl
 from agents_orchestrator.settings import Settings
 
 
 def _lv(start=None, **over):
     s = Settings(database_url="postgresql://u:p@db/o", **over)
-    return hive.levels({}, start, s)
+    return pl.levels({}, start, s)
 
 
 def test_levels_200k_window():
     lv = _lv()
-    assert hive.strong_tokens(lv, 200_000) == 130_000
-    assert hive.critical_tokens(lv, 200_000) == 165_000
+    assert pl.strong_tokens(lv, 200_000) == 130_000
+    assert pl.critical_tokens(lv, 200_000) == 165_000
     assert int(lv.compact_pct / 100 * 200_000) == 190_000
 
 
 def test_levels_1m_window():
     lv = _lv()
-    assert hive.strong_tokens(lv, 1_000_000) == 850_000
-    assert hive.critical_tokens(lv, 1_000_000) == 900_000
+    assert pl.strong_tokens(lv, 1_000_000) == 850_000
+    assert pl.critical_tokens(lv, 1_000_000) == 900_000
 
 
 def test_l3_never_below_l2_small_window():
     lv = _lv()
     for window in (10_000, 50_000, 80_000, 100_000):
-        assert hive.critical_tokens(lv, window) >= hive.strong_tokens(lv, window)
+        assert pl.critical_tokens(lv, window) >= pl.strong_tokens(lv, window)
     big_headroom = _lv(handover_critical_headroom_tokens=500_000)
     gap = 200_000 * 5 // 100  # strong margin 10 minus critical margin 5
-    assert hive.critical_tokens(big_headroom, 200_000) == (
-        hive.strong_tokens(big_headroom, 200_000) + gap
+    assert pl.critical_tokens(big_headroom, 200_000) == (
+        pl.strong_tokens(big_headroom, 200_000) + gap
     )
 
 
@@ -48,14 +48,17 @@ def test_l3_never_below_l2_small_window():
     ],
 )
 def test_levels_floor(compact, window, l2, l3):
-    lv = hive.levels(
+    lv = pl.levels(
         {"auto_compact_pct": compact}, None, Settings(database_url="postgresql://u:p@db/o")
     )
-    assert (hive.strong_tokens(lv, window), hive.critical_tokens(lv, window)) == (l2, l3)
+    assert (
+        pl.strong_tokens(lv, window),
+        pl.critical_tokens(lv, window),
+    ) == (l2, l3)
 
 
 def _due(lv, used, window=200_000, pct=None, tenure=math.inf, min_tenure=0, rollout=False):
-    return hive.due_level(lv, used, window, pct, tenure, min_tenure, rollout)
+    return pl.due_level(lv, used, window, pct, tenure, min_tenure, rollout)
 
 
 def test_due_level_l1_needs_tenure_and_no_rollout():
@@ -92,6 +95,6 @@ def test_due_level_pct_ignored_when_tokens_and_window_known():
 
 def test_due_level_l1_pct_threshold_when_start_unknown():
     lv = _lv()  # fallback 80% of 1M = 800k, below L2 at 850k
-    assert hive.l1_tokens(lv, 1_000_000, hive.strong_tokens(lv, 1_000_000)) == 800_000
+    assert pl.l1_tokens(lv, 1_000_000, pl.strong_tokens(lv, 1_000_000)) == 800_000
     assert _due(lv, 800_000, window=1_000_000, pct=10.0) == "l1"
     assert _due(lv, 799_999, window=1_000_000, pct=99.0) == "none"

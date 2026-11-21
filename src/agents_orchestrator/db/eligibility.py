@@ -91,7 +91,7 @@ BACKGROUND_BUSY = background_busy("s")
 
 # Hard limit: the effective compaction point (the spec's `auto_compact_pct`, else `%(compact)s`,
 # ORCH_DEFAULT_AUTO_COMPACT_PCT) less FIRM_MARGIN_PCT. Alias `c` (sessions).
-# `dispatcher/hive.levels` is the same formula in Python.
+# `pressure_levels.levels` is the same formula in Python.
 FIRM_MARGIN_PCT = 5
 HARD_PCT = f"(coalesce((c.spec->>'auto_compact_pct')::int, %(compact)s) - {FIRM_MARGIN_PCT})"
 
@@ -123,7 +123,3 @@ SUCCESSOR_ORDER = (
     f"({ROLLOUT_PENDING}), ({BACKGROUND_BUSY}), (s.state = 'idle') IS NOT TRUE,"
     " s.context_pct ASC NULLS LAST, a.ordinal"
 )
-
-# Context % margin below the compaction point used as the percent fallback of the soft handover
-# rule (a leader whose token gauge is unknown). `dispatcher/hive.levels` applies it.
-HANDOVER_MARGIN_PCT = 15
