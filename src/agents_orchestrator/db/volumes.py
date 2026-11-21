@@ -369,7 +369,7 @@ async def finish_delete(conn: psycopg.AsyncConnection, id: uuid.UUID) -> None:
 @dataclass
 class ClaimDecision:
     """What `claim` decided: `proceed` (claimed, mount), `restore` (claimed, volume now
-    `restoring`: run the pod check, then the restore Job), `wait` (restoring or saving, nothing
+    `restoring`: run the pod check, then the restore Job), `wait` (an unsettled state, nothing
     claimed, retry next reconcile) or `refuse` (deleting, nothing claimed). `volume` is the row
     after the decision; `claim` is None for wait and refuse."""
 
@@ -434,17 +434,21 @@ async def claim(
     current_version: uuid.UUID | None,
 ) -> ClaimDecision:
     """The HARD RULE guard (spec 8.3): claim the volume for a session and decide whether it is
-    restored first. Under the volume row lock: `deleting` refuses, `restoring`/`saving` waits
-    (no claim); else the claim is inserted, and a wanted restore (`backup_restore`, a
-    `current_version` that differs from `content_version`) starts only when no other session
-    holds an unreleased claim (sessions in deleting count until released); otherwise
-    `restore_skipped_mounted` is recorded and the session proceeds. `current_version` is
-    `backups.current(volume-<name>)`, read by the caller."""
+    restored first. Under the volume row lock: `deleting` refuses, any state but `ready` and
+    `failed` (provisioning, resizing, restoring, saving) waits (no claim); else the claim is
+    inserted, and a wanted restore (`backup_restore`, a `current_version` that differs from
+    `content_version`, volume `ready`) starts only when no other session holds an unreleased
+    claim (sessions in deleting count until released); otherwise `restore_skipped_mounted` is
+    recorded and the session proceeds. `current_version` is `backups.current(volume-<name>)`,
+    read by the caller.
+
+    Locks one volume row: a caller claiming more than one volume must use `claim_all` (ascending
+    id order), or it can deadlock with `release_claims`."""
     async with conn.transaction():
         vol = await _lock(conn, volume_id)
         if vol.state == "deleting":
             return ClaimDecision("refuse", vol, None)
-        if vol.state in ("restoring", "saving"):
+        if vol.state not in ("ready", "failed"):
             return ClaimDecision("wait", vol, None)
         mine, created = await _upsert_claim(
             conn, volume_id, session_id, preset_id, mode, backup_restore
@@ -452,6 +456,7 @@ async def claim(
         decision: Decision = "proceed"
         if (
             backup_restore
+            and vol.state == "ready"
             and current_version is not None
             and current_version != vol.content_version
         ):
@@ -500,6 +505,43 @@ async def claim(
         after = await get(conn, volume_id)
         assert after is not None
         return ClaimDecision(decision, after, mine)
+
+
+@dataclass
+class ClaimRequest:
+    """One volume of a `claim_all` call (the arguments of `claim`)."""
+
+    volume_id: uuid.UUID
+    session_id: uuid.UUID
+    preset_id: uuid.UUID | None
+    mode: str
+    backup_restore: bool
+    session_slug: str
+    current_version: uuid.UUID | None
+
+
+async def claim_all(
+    conn: psycopg.AsyncConnection, claims: list[ClaimRequest]
+) -> list[ClaimDecision]:
+    """`claim` for a set of volumes in one transaction, taking the volume row locks in ascending
+    volume id order (the order `release_claims` uses), so concurrent claimers and releasers of
+    the same volumes cannot deadlock. Callers with more than one volume must use this, not
+    repeated `claim` calls. Decisions come back in the order of `claims`."""
+    out: dict[int, ClaimDecision] = {}
+    async with conn.transaction():
+        for i in sorted(range(len(claims)), key=lambda i: claims[i].volume_id):
+            c = claims[i]
+            out[i] = await claim(
+                conn,
+                volume_id=c.volume_id,
+                session_id=c.session_id,
+                preset_id=c.preset_id,
+                mode=c.mode,
+                backup_restore=c.backup_restore,
+                session_slug=c.session_slug,
+                current_version=c.current_version,
+            )
+    return [out[i] for i in range(len(claims))]
 
 
 async def abort_restore(

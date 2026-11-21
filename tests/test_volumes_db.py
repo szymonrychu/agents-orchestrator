@@ -97,6 +97,7 @@ async def test_list_by_project_matches_any_of_several(pool):
 async def test_release_claims_sets_released_at_and_writes_event(pool):
     async with pool.connection() as conn:
         v = await _create(conn)
+        await volumes.set_state(conn, v.id, "ready")
         session = uuid.uuid4()
         await volumes.claim(
             conn,
@@ -182,6 +183,7 @@ async def test_hostile_size_refused(pool, bad):
 async def test_claim_event_only_when_created_or_reopened_and_reclaim_clears_release(pool):
     async with pool.connection() as conn:
         v = await _create(conn)
+        await volumes.set_state(conn, v.id, "ready")
         s = uuid.uuid4()
         kw = dict(
             volume_id=v.id,

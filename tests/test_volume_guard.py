@@ -143,7 +143,14 @@ async def test_restore_condition(pool, content, current, backup_restore, decisio
 
 
 @pytest.mark.parametrize(
-    ("state", "decision"), [("restoring", "wait"), ("saving", "wait"), ("deleting", "refuse")]
+    ("state", "decision"),
+    [
+        ("restoring", "wait"),
+        ("saving", "wait"),
+        ("provisioning", "wait"),
+        ("resizing", "wait"),
+        ("deleting", "refuse"),
+    ],
 )
 async def test_busy_or_deleting_volume_inserts_no_claim(pool, state, decision):
     v = await _volume(pool, state=state)
@@ -151,6 +158,40 @@ async def test_busy_or_deleting_volume_inserts_no_claim(pool, state, decision):
         got = await _claim(conn, v.id, uuid.uuid4())
         assert (got.decision, got.claim) == (decision, None)
         assert await volumes.unreleased_claims(conn, v.id) == []
+
+
+async def test_claim_all_locks_in_id_order_so_it_does_not_deadlock_with_release(pool):
+    for i in range(10):
+        va = await _volume(pool, name=f"ord-a{i}")
+        vb = await _volume(pool, name=f"ord-b{i}")
+        s = await insert_session(pool)
+        async with pool.connection() as conn:  # s holds both, so release_claims locks both
+            await _claim(conn, va.id, s["id"], backup_restore=False)
+            await _claim(conn, vb.id, s["id"], backup_restore=False)
+        hi, lo = sorted([va.id, vb.id], reverse=True)
+        t = uuid.uuid4()
+
+        async def claim_both(hi=hi, lo=lo, t=t):
+            async with pool.connection() as conn:
+                reqs = [volumes.ClaimRequest(v, t, None, "rw", False, "t", None) for v in (hi, lo)]
+                return await volumes.claim_all(conn, reqs)
+
+        async def release(sid=s["id"]):
+            async with pool.connection() as conn, conn.transaction():
+                await volumes.release_claims(conn, sid, actor_kind="system", actor="x")
+
+        got, _ = await asyncio.wait_for(asyncio.gather(claim_both(), release()), 20)
+        assert [d.volume.id for d in got] == [hi, lo]
+
+
+async def test_restore_skipped_mounted_written_once_per_new_claim(pool):
+    v = await _volume(pool)
+    other, me = uuid.uuid4(), uuid.uuid4()
+    async with pool.connection() as conn:
+        await _claim(conn, v.id, other, backup_restore=False)
+        for _ in range(3):
+            assert (await _claim(conn, v.id, me)).decision == "proceed"
+    assert (await _kinds(pool, v.id)).count("restore_skipped_mounted") == 1
 
 
 async def test_abort_restore_returns_to_ready_with_reason(pool):
