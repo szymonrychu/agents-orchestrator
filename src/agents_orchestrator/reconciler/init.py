@@ -205,8 +205,9 @@ class InitRunner:
         self.pool, self.kube, self.settings = pool, kube, settings
         self.write_status = write_status
 
-    async def step(self, session: Session) -> InitGate:
-        """Advance the one init run by at most one transition; the wrapper-session gate."""
+    async def step(self, session: Session, volumes: VolumeAttachments = ()) -> InitGate:
+        """Advance the one init run by at most one transition; the wrapper-session gate.
+        `volumes` are the resolved attachments, mounted into the Job as into the pod."""
         init = session.status.get("init")
         if init is None:
             if not session.spec.init_scripts:
@@ -224,7 +225,7 @@ class InitRunner:
                     "job": None,
                 }
                 await self._write(session, init)
-                init = await self._start(session, init)
+                init = await self._start(session, init, volumes)
         elif init.get("state") == "running":
             init = await self._observe(session, init)
         elif init.get("state") in ("succeeded", "failed") and init.get("job"):
@@ -233,7 +234,9 @@ class InitRunner:
 
     # ------------------------------------------------------------------ transitions
 
-    async def _start(self, session: Session, init: dict[str, Any]) -> dict[str, Any]:
+    async def _start(
+        self, session: Session, init: dict[str, Any], volumes: VolumeAttachments = ()
+    ) -> dict[str, Any]:
         ns, name = self.settings.namespace, init_job_name(session.slug)
         existing = await self.kube.get_job(ns, name)
         if existing is not None:
@@ -247,7 +250,9 @@ class InitRunner:
                     session, init, "failed", reason=f"template_error: {exc.message}"[:REASON_MAX]
                 )
             try:
-                await self.kube.create_job(render_init_job(session, self.settings, scripts))
+                await self.kube.create_job(
+                    render_init_job(session, self.settings, scripts, volumes)
+                )
             except Exception as exc:
                 log.exception("creating the init Job of session %s failed", session.slug)
                 reason = f"job_create_failed: {exc}"[:REASON_MAX]

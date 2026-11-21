@@ -463,11 +463,11 @@ async def claim(
     """The HARD RULE guard (spec 8.3): claim the volume for a session and decide whether it is
     restored first. Under the volume row lock: `deleting` refuses, any state but `ready` and
     `failed` (provisioning, resizing, restoring, saving) waits (no claim); else the claim is
-    inserted, and a wanted restore (`backup_restore`, a `current_version` that differs from
-    `content_version`, volume `ready`) starts only when no other session holds an unreleased
-    claim (sessions in deleting count until released); otherwise `restore_skipped_mounted` is
-    recorded and the session proceeds. `current_version` is `backups.current(volume-<name>)`,
-    read by the caller.
+    inserted, and a wanted restore (`backup_restore`, a new or re-opened claim, a
+    `current_version` that differs from `content_version`, volume `ready`) starts only when no
+    other session holds an unreleased claim (sessions in deleting count until released);
+    otherwise `restore_skipped_mounted` is recorded and the session proceeds. `current_version`
+    is `backups.current(volume-<name>)`, read by the caller.
 
     Locks one volume row: a caller claiming more than one volume must use `claim_all` (ascending
     id order), or it can deadlock with `release_claims`."""
@@ -483,6 +483,7 @@ async def claim(
         decision: Decision = "proceed"
         if (
             backup_restore
+            and created  # a re-claim is a running claimant: never restore under its pods
             and vol.state == "ready"
             and current_version is not None
             and current_version != vol.content_version
@@ -492,7 +493,7 @@ async def claim(
                 for c in await unreleased_claims(conn, volume_id)
                 if c.session_id != session_id
             ]
-            if others and created:  # once per claim, not on every reconcile's re-claim
+            if others:  # once per claim, not on every reconcile's re-claim
                 await record_event(
                     conn,
                     volume_id,
@@ -837,3 +838,14 @@ async def finish_save(
         await record_event(
             conn, volume_id, kind, actor_kind="system", actor="reconciler", detail=detail
         )
+
+
+async def claimed_volume_ids(
+    conn: psycopg.AsyncConnection, session_id: uuid.UUID
+) -> set[uuid.UUID]:
+    """The volumes a session holds an unreleased claim on."""
+    cur = await conn.execute(
+        "SELECT volume_id FROM volume_mounts WHERE session_id = %s AND released_at IS NULL",
+        (session_id,),
+    )
+    return {r[0] for r in await cur.fetchall()}

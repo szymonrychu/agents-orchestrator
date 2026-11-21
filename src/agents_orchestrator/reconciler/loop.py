@@ -75,6 +75,7 @@ from agents_orchestrator.k8s.labels import (
     workspace_pvc,
 )
 from agents_orchestrator.k8s.render import pod_url, render_session
+from agents_orchestrator.reconciler import session_volumes
 from agents_orchestrator.reconciler.cache import CacheGate, CacheRunner
 from agents_orchestrator.reconciler.checks import CheckRunner
 from agents_orchestrator.reconciler.discard_hook import HookResult, resolve_hooks, run_discard_hook
@@ -585,7 +586,11 @@ class Reconciler:
             if applied == replicas
             else replace(session, spec=session.spec.model_copy(update={"replicas": applied}))
         )
-        objs = render_session(rendered, self.settings, tokens_for(self.settings, session.id))
+        async with self.pool.connection() as conn:
+            attached, missing = await session_volumes.resolve(conn, session)
+        objs = render_session(
+            rendered, self.settings, tokens_for(self.settings, session.id), attached
+        )
 
         foreign, live = await self._foreign(session, objs)
         if foreign:
@@ -596,6 +601,10 @@ class Reconciler:
             )
             return
 
+        # Every attached volume is claimed (the HARD RULE guard) before any pod or init Job of
+        # the session exists; both wait while a volume is unsettled or being restored.
+        volume_gate = await session_volumes.claim_step(self.pool, session, attached, missing)
+
         # The Claude transcripts are restored before any agent pod starts: the StatefulSet stays
         # at zero replicas until that restore has an outcome (D7). It comes first, so a crash
         # after the StatefulSet apply never reads as a session whose pods already existed.
@@ -604,18 +613,23 @@ class Reconciler:
         )
         for obj in objs:
             reason = "scale-down"
-            if sessions_gate.hold and obj["kind"] == "StatefulSet":
+            if (sessions_gate.hold or volume_gate.hold) and obj["kind"] == "StatefulSet":
                 obj = {**obj, "spec": {**obj["spec"], "replicas": 0}}
-                reason = "held for the transcripts restore"
+                reason = (
+                    "held for the transcripts restore"
+                    if sessions_gate.hold
+                    else "held for the attached volumes"
+                )
             await self._apply(obj, live.get(obj_key(obj)), reason)
         desired = {obj_key(o) for o in objs}
         await self._prune(slug, desired, reason="no longer rendered")
         session, cache_gate = await self.cache.restore_step(session, "pre")
         # init waits for the restore, so a script never runs on a workspace about to be replaced
-        gate = await self.init.step(session) if not cache_gate.hold else InitGate()
+        held = cache_gate.hold or volume_gate.hold
+        gate = await self.init.step(session, attached) if not held else InitGate()
         # the after_init entries are restored over what the init run built
         post_gate = CacheGate()
-        if not cache_gate.hold and not gate.hold:
+        if not held and not gate.hold:
             session, post_gate = await self.cache.restore_step(session, "post")
 
         ready = await self._observe(session)
@@ -626,15 +640,18 @@ class Reconciler:
             phase = "pending" if ready == 0 else "degraded"
             message = f"{ready} of {replicas} pods ready"
         problems: list[str] = []
-        gates = (sessions_gate, cache_gate, gate, post_gate)
+        gates = (volume_gate, sessions_gate, cache_gate, gate, post_gate)
         if any(g.hold for g in gates):  # sessions wait for the restores and the init run
-            phase = "pending"
+            phase = "degraded" if any(g.hold and g.degraded for g in gates) else "pending"
         else:
             problems = await self._bootstrap_wrapper_sessions(session)
             if any(g.degraded for g in gates):  # a failed restore or init starts them anyway
                 phase = "degraded"
         rollout = await self.replacer.step(session)  # outdated pods roll one idle pod a tick
         fields: dict[str, Any] = {"phase": phase, "ready": ready, "replicas": replicas}
+        waited = set(session.status.get("volume_restores_waited") or [])
+        if not waited.issuperset(volume_gate.waited_restore):
+            fields["volume_restores_waited"] = sorted(waited | set(volume_gate.waited_restore))
         if rollout is not None:
             fields["rollout"] = rollout
         drain = ""
@@ -944,6 +961,9 @@ class Reconciler:
             )
             return
         async with self.pool.connection() as conn, conn.transaction():
+            # every pod is gone: the volume claims end with the row (the volume PVCs never carry
+            # the session label, so the prune above never touched them)
+            await session_volumes.release(conn, session)
             await sessions.purge(conn, session.id)
             await notify(conn, "status", {"session_id": str(session.id)})
         log.info("session %s discarded", slug)
@@ -1018,8 +1038,10 @@ class Reconciler:
         name = object_names(slug)["statefulset"]
         sts = await self.kube.get_object("StatefulSet", ns, name)
         if sts is not None and is_owned(sts, slug) and (sts.get("spec") or {}).get("replicas") != 0:
+            async with self.pool.connection() as conn:
+                attached, _ = await session_volumes.resolve(conn, session)
             for obj in render_session(
-                session, self.settings, tokens_for(self.settings, session.id)
+                session, self.settings, tokens_for(self.settings, session.id), attached
             ):
                 if obj["kind"] == "StatefulSet":
                     obj["spec"]["replicas"] = 0

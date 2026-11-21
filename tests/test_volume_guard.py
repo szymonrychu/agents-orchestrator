@@ -252,3 +252,15 @@ async def test_pods_using_finds_label_or_claim_name_and_skips_finished_and_own()
     )
     assert sorted(got) == ["by-claim", "by-label"]
     assert label == "agents.szymonrichert.pl/vol-01234567"
+
+
+async def test_active_claimant_is_never_restored_under_on_a_re_claim(pool):
+    """A running session re-claims every pass; a newer current version (a promote) or a failed
+    restore must not start a restore under its pods."""
+    v = await _volume(pool)
+    me = uuid.uuid4()
+    async with pool.connection() as conn:
+        assert (await _claim(conn, v.id, me, current=CONTENT)).decision == "proceed"
+        got = await _claim(conn, v.id, me, current=NEWER)
+        assert (got.decision, got.volume.state) == ("proceed", "ready")
+    assert "restore_started" not in await _kinds(pool, v.id)
