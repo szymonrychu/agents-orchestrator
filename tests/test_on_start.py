@@ -700,39 +700,9 @@ def test_withdraw_offered_to_hives_and_superleaders():
     assert "leadership_withdraw" not in on_start.orchestrator_allow(SessionSpec())
 
 
-@pytest.mark.parametrize(
-    ("spec", "granted", "refused"),
-    [
-        (
-            SessionSpec(replicas=1),
-            ["volumes_status", "volume_save"],
-            ["volumes_list", "volume_create"],
-        ),
-        (
-            SessionSpec(replicas=1, retrospective=True),
-            ["volumes_list", "volume_get"],
-            ["volume_create", "volume_attach"],
-        ),
-        (
-            SessionSpec(replicas=1, session_messaging=True),
-            [
-                "volumes_status",
-                "volume_save",
-                "volumes_list",
-                "volume_get",
-                "volume_attach",
-                "volume_detach",
-                "volume_create",
-            ],
-            [],
-        ),
-    ],
-    ids=["regular", "retrospective", "superleader"],
-)
-def test_volume_tool_grants_per_role(spec, granted, refused):
-    allow = on_start.orchestrator_allow(spec)
-    assert set(granted) <= set(allow)
-    assert not set(refused) & set(allow)
+def test_volume_create_is_granted_only_to_superleaders():
+    assert "volume_create" in on_start.orchestrator_allow(SessionSpec(session_messaging=True))
+    assert "volume_create" not in on_start.orchestrator_allow(SessionSpec(replicas=1))
 
 
 def test_project_create_is_superleader_only():

@@ -238,6 +238,45 @@ async def test_a_share_the_user_made_does_not_block_other_superleader_edits(app,
     assert (await stored(pool, other)).spec["volumes"][0]["volume"] == str(v.id)
 
 
+async def test_detach_then_attach_is_refused_while_a_live_session_still_mounts(app, pool, boss):
+    """Laundering path: detaching from an unprivileged preset leaves its session mounting."""
+    from factories import insert_session
+
+    v = await vol(pool, "data")
+    q = await preset(pool, "q", {"volumes": [att(v, mount_path="/volumes/data")]})
+    sess = await insert_session(pool, spec={})
+    async with pool.connection() as conn:
+        await volumes.set_state(conn, v.id, "ready")
+        await volumes.claim(
+            conn,
+            volume_id=v.id,
+            session_id=sess["id"],
+            preset_id=q.id,
+            mode="rw",
+            backup_restore=False,
+            session_slug=sess["slug"],
+            current_version=None,
+        )
+    assert (await agent(app, boss, "DELETE", f"/presets/{q.id}/volumes/{v.id}")).status_code == 200
+    p = await preset(pool, "p", PRIV)
+    body = {"mode": "ro"}
+    r = await agent(app, boss, "POST", f"/presets/{p.id}/volumes/{v.id}", json=body)
+    assert r.status_code == 202, r.text  # a proposal for the user, the preset is unchanged
+    assert "volumes" not in (await stored(pool, p)).spec
+    async with pool.connection() as conn:
+        await volumes.release_claims(conn, sess["id"], actor_kind="system", actor="t")
+    r = await agent(app, boss, "POST", f"/presets/{p.id}/volumes/{v.id}", json=body)
+    assert r.status_code == 200, r.text
+
+
+async def test_detail_hides_attaching_presets_of_other_projects(app, pool, boss):
+    v = await vol(pool, "both", ("a", "b"))
+    await preset(pool, "mine", {"volumes": [att(v)]})
+    await preset(pool, "theirs", {"volumes": [att(v)]}, project="b")
+    detail = await agent(app, boss, "GET", f"/volumes/{v.id}")
+    assert [p["preset_name"] for p in detail.json()["presets"]] == ["mine"]
+
+
 # ---------------------------------------------------------------- create by proposal
 
 BODY = {"name": "fresh", "projects": ["a"], "size": "2Gi", "reason": "the hive needs a cache"}

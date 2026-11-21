@@ -66,14 +66,16 @@ async def check_volume_refs(
 async def other_attaching_specs(
     conn: psycopg.AsyncConnection, volume_id: uuid.UUID, preset_id: uuid.UUID | None
 ) -> list[Any]:
-    """The specs of the presets other than `preset_id` that attach the volume (a vanished preset
-    reads as None, which the policy counts as privileged)."""
+    """The specs of the presets other than `preset_id` that attach the volume, plus those of the
+    sessions that still mount it (a detached preset's live session keeps its mount). A vanished
+    row reads as None, which the policy counts as privileged."""
     ids = sorted({a.preset_id for a in await volumes.attaching_presets(conn, volume_id)})
     out: list[Any] = []
     for other_id in ids:
         if other_id != preset_id:
             other = await presets_repo.get(conn, other_id)
             out.append(other.spec if other is not None else None)
+    out.extend(await volumes.claim_specs(conn, volume_id, except_preset=preset_id))
     return out
 
 

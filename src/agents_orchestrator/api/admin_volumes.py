@@ -84,6 +84,7 @@ async def get_volume(
                 backup_restore=bool(a.attachment.get("backup_restore", False)),
             )
             for a in await repo.attaching_presets(conn, v.id)
+            if set(caller.projects) & {a.project, *a.extra_projects}
         ]
     return schemas.AdminVolumeDetail(**base.model_dump(), presets=presets)
 

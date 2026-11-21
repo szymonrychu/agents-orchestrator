@@ -943,3 +943,19 @@ async def claim_slugs(
         row = await cur.fetchone()
         out.append((c, row[0] if row else None))
     return out
+
+
+async def claim_specs(
+    conn: psycopg.AsyncConnection, volume_id: uuid.UUID, *, except_preset: uuid.UUID | None = None
+) -> list[dict[str, Any] | None]:
+    """The spec of each session holding an unreleased claim (its own, else its preset's now;
+    None when neither row is left), skipping sessions started from `except_preset`."""
+    cur = await conn.execute(
+        "SELECT COALESCE(s.spec, p.spec) FROM volume_mounts m"
+        " LEFT JOIN sessions s ON s.id = m.session_id"
+        " LEFT JOIN presets p ON p.id = m.preset_id"
+        " WHERE m.volume_id = %s AND m.released_at IS NULL"
+        " AND m.preset_id IS DISTINCT FROM %s ORDER BY m.id",
+        (volume_id, except_preset),
+    )
+    return [r[0] if isinstance(r[0], dict) else None for r in await cur.fetchall()]

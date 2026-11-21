@@ -24622,7 +24622,7 @@
             "description": "Unknown or deleted volume"
           },
           "409": {
-            "description": "volume_attached (a preset attaches it) or volume_mounted"
+            "description": "volume_attached (a preset attaches it), volume_mounted or volume_busy (a restore or save is running)"
           },
           "422": {
             "content": {
@@ -24717,7 +24717,7 @@
             "description": "Unknown or deleted volume"
           },
           "409": {
-            "description": "shrink_refused, project_in_use (an attaching preset would lose its scope) or volume_busy (the volume is not ready to grow)"
+            "description": "shrink_refused, project_in_use (an attaching preset would lose its scope) or volume_busy (the volume is not ready to grow, or is being deleted)"
           },
           "422": {
             "content": {
