@@ -168,6 +168,8 @@ class Settings(BaseSettings):
     volume_default_size: str = "10Gi"
     volume_max_size: str = "200Gi"
     volume_max_per_preset: int = Field(default=8, ge=1, le=64)
+    #: The startup migration of preset backup entries to volumes only plans and logs.
+    volume_migration_dry_run: bool = False
     claude_secret_name: str = "agents-orchestrator-claude"
     image_pull_secret: str = "regcred"
     any_mcp_config_file: str = ""

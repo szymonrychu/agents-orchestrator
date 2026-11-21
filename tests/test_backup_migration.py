@@ -462,3 +462,11 @@ def test_apply_withdraws_open_proposals_that_patch_cache(dsn):
     assert outcomes == {ids[0]: "withdrawn", ids[1]: None}
     notes = dict(_sql(dsn, "SELECT proposal_id, note FROM change_proposal_items"))
     assert "spec.backup" in notes[ids[0]] and notes[ids[1]] is None
+
+
+def test_object_migration_skips_reserved_volume_names(dsn, s3, monkeypatch):
+    _s3_settings(s3, dsn, monkeypatch)
+    _put(s3, f"{P}volume-x.tar.zst")
+    _put(s3, f"{P}volume-y/20261030t100000z.tar.zst")
+    assert cli.main(["backup", "migrate"]) == 0
+    assert _sql(dsn, "SELECT count(*) FROM backups")[0][0] == 0

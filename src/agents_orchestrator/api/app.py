@@ -55,6 +55,7 @@ from agents_orchestrator.api.secret_store import KubeApi
 from agents_orchestrator.api.service_auth import ServiceGate
 from agents_orchestrator.api.usage_gate import UsageSource
 from agents_orchestrator.api.vault_client import VaultClient
+from agents_orchestrator.db import migrate_volumes
 from agents_orchestrator.db.pool import open_pool
 from agents_orchestrator.settings import Settings
 
@@ -107,6 +108,8 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if owns_pool:
             app.state.pool = await open_pool(settings.database_url)
+        # one-shot: preset backup entries become volumes (S-77); never raises
+        await migrate_volumes.startup(app.state.pool, settings)
         await listener.start()
         sweeper = asyncio.create_task(autoclose.sweep(app.state.pool, settings), name="autoclose")
         app.state.autoclose_task = sweeper
