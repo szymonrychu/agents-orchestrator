@@ -929,3 +929,22 @@ def test_credential_notice_project_slug(monkeypatch):
         Settings()
     monkeypatch.setenv("ORCH_CREDENTIAL_NOTICE_PROJECT", "agents")
     assert Settings().credential_notice_project == "agents"
+
+
+def test_volume_settings_defaults_and_env(monkeypatch):
+    s = Settings()
+    assert (s.volume_storage_class, s.volume_default_size) == ("rook-ceph-rwx", "10Gi")
+    assert (s.volume_max_size, s.volume_max_per_preset) == ("200Gi", 8)
+    monkeypatch.setenv("ORCH_VOLUME_STORAGE_CLASS", "fast")
+    monkeypatch.setenv("ORCH_VOLUME_DEFAULT_SIZE", "1Gi")
+    monkeypatch.setenv("ORCH_VOLUME_MAX_SIZE", "50Gi")
+    monkeypatch.setenv("ORCH_VOLUME_MAX_PER_PRESET", "3")
+    s = Settings()
+    assert (s.volume_storage_class, s.volume_default_size) == ("fast", "1Gi")
+    assert (s.volume_max_size, s.volume_max_per_preset) == ("50Gi", 3)
+
+
+def test_volume_default_size_above_max_is_refused(monkeypatch):
+    monkeypatch.setenv("ORCH_VOLUME_DEFAULT_SIZE", "300Gi")
+    with pytest.raises(SettingsError, match="ORCH_VOLUME_DEFAULT_SIZE"):
+        Settings()

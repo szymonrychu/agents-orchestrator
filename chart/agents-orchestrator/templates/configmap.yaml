@@ -38,6 +38,12 @@ data:
   {{- if .Values.credentialNoticeProject }}
   ORCH_CREDENTIAL_NOTICE_PROJECT: {{ .Values.credentialNoticeProject | quote }}
   {{- end }}
+  {{- if .Values.agentVolumes.storageClass }}
+  ORCH_VOLUME_STORAGE_CLASS: {{ .Values.agentVolumes.storageClass | quote }}
+  {{- end }}
+  ORCH_VOLUME_DEFAULT_SIZE: {{ .Values.agentVolumes.defaultSize | quote }}
+  ORCH_VOLUME_MAX_SIZE: {{ .Values.agentVolumes.maxSize | quote }}
+  ORCH_VOLUME_MAX_PER_PRESET: {{ .Values.agentVolumes.maxPerPreset | int64 | toString | quote }}
   ORCH_SERVICE_PORT: {{ .Values.serviceApi.port | toString | quote }}
   ORCH_AGENT_API_URL: {{ include "agents-orchestrator.agentApiUrl" . | quote }}
   ORCH_AGENT_SERVICE_ACCOUNT: {{ ternary (printf "%s-agent" (include "agents-orchestrator.fullname" .)) "default" .Values.serviceAccount.create | quote }}

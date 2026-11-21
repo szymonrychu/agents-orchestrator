@@ -48,6 +48,10 @@ Every process reads `ORCH_*` variables (the contract `agents-orchestrator-settin
 | `ORCH_DEFAULT_RESTART_CONTINUE_PROMPT` | `Claude was restarted. Continue the task where you left off.` | reconciler | `sessions.restart_continue_prompt` rendered into every agent wrapper config unless `spec.wrapper.restart_continue_prompt` is set: the prompt that continues a turn cut off by a claude crash or a wrapper shutdown (pod restart) instead of failing it; `$` is escaped like a `spec.wrapper` string; empty disables the continuation |
 | `ORCH_PVC_STORAGE_CLASS` | `rook-ceph-rwx` | api, reconciler | RWX storage class |
 | `ORCH_PVC_SIZE` | `20Gi` | api, reconciler | workspace PVC size |
+| `ORCH_VOLUME_STORAGE_CLASS` | `rook-ceph-rwx` | api, reconciler | storage class of every shared volume PVC |
+| `ORCH_VOLUME_DEFAULT_SIZE` | `10Gi` | api | size of a volume created without one; at most `ORCH_VOLUME_MAX_SIZE` |
+| `ORCH_VOLUME_MAX_SIZE` | `200Gi` | api | cap on a volume size (volumes only grow) |
+| `ORCH_VOLUME_MAX_PER_PRESET` | `8` | api | most volumes one preset may attach |
 | `ORCH_CLAUDE_SECRET_NAME` | `agents-orchestrator-claude` | api, reconciler | Secret holding Claude credentials |
 | `ORCH_IMAGE_PULL_SECRET` | `regcred` | api, reconciler | imagePullSecret name; empty means none |
 | `ORCH_ANY_MCP_CONFIG_FILE` | empty | api, reconciler | path to default any-mcp config; empty means {} |

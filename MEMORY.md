@@ -729,3 +729,10 @@ in the namespace, so an attached vault value is exposed to it. Decision: attach 
 ## 2026-11-17 chat skills relay removed (S-68 step 26, T-534)
 - `/agent/v1/chat/skills[/{name}]` (4 routes), their scope rows, `ChatSkillIn` and the `chat_skills_*` names in `CHAT_TOOLS` are gone (breaking, no alias): room skills moved to backup entries (T-530). Merge only after the room skills migration is verified, or rooms lose access to their skills. The chat upstream's own skills routes and the plugin's tools are out of scope here; the plugin must drop its four tools in the same rollout.
 - Tests removed because no longer accurate: the skills cases of `MEMORY_ROUTES`, `test_delete_forwards_no_body`, `test_skill_name_is_one_segment`, the skills parts of the parity test and the skill refusal cases. Added `test_chat_skills_routes_404`, `test_chat_tools_have_no_skills`.
+
+## 2026-11-21 Volumes data layer (S-77 step 1)
+- Migration 0056 and `db/volumes.py` (sole writer of `volumes`, `volume_mounts`, `volume_events`). `pvc_name` is unique only among live rows (partial index like `name`): a plain unique would block reusing a name after `finish_delete`, which the spec requires.
+- `volumes.state_reason` holds the fixed failure string of `set_state(..., reason=)`; it is cleared by the next state change. `volume_mounts.session_id` has no FK to sessions: a claim outlives the session row until the prune releases it.
+- `update` and `create` take `max_size` (default 200Gi) instead of reading settings: the db layer stays settings-free; API callers pass `settings.volume_max_size`. Sizes compare as bytes through `spec.parse_quantity` (10Gi equals 10240Mi, a no-op).
+- `ORCH_VOLUME_DEFAULT_SIZE` defaults to 10Gi (the repo had no volume default; the backup/workspace PVC default is 20Gi, too big for a typical shared data volume) and must not exceed `ORCH_VOLUME_MAX_SIZE`. Chart values live under `agentVolumes` because `volumes` is already the pod volume passthrough.
+- `create` takes an advisory lock on the name so two creators of one name get `VolumeExists`, not a unique violation that aborts the transaction.
