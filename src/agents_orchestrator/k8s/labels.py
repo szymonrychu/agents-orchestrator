@@ -11,6 +11,11 @@ SESSION_LABEL = f"{DOMAIN}/session"
 SESSION_ID_LABEL = f"{DOMAIN}/session-id"
 MANAGED_BY_LABEL = "app.kubernetes.io/managed-by"
 MANAGED_BY = "agents-orchestrator"
+COMPONENT_LABEL = f"{DOMAIN}/component"
+VOLUME_COMPONENT = "volume"
+VOLUME_ID_LABEL = f"{DOMAIN}/volume-id"
+VOLUME_PROJECTS_ANNOTATION = f"{DOMAIN}/projects"
+VOLUME_FINALIZER = f"{DOMAIN}/volume-protection"
 
 
 def prefix(slug: str) -> str:
@@ -42,6 +47,15 @@ def namespace_binding_name(slug: str, session_id: uuid.UUID, tier: str) -> str:
 def volume_pod_label(volume_id: uuid.UUID) -> str:
     """The pod template label key marking a pod that mounts a volume (value `ro` or `rw`)."""
     return f"{DOMAIN}/vol-{volume_id.hex[:8]}"
+
+
+def volume_labels(volume_id: uuid.UUID) -> dict[str, str]:
+    """Labels of a volume PVC: never the session label, so no session selector finds it."""
+    return {
+        MANAGED_BY_LABEL: MANAGED_BY,
+        COMPONENT_LABEL: VOLUME_COMPONENT,
+        VOLUME_ID_LABEL: str(volume_id),
+    }
 
 
 def selector(slug: str) -> dict[str, dict[str, str]]:

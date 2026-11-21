@@ -7,14 +7,18 @@ import hashlib
 import json
 import math
 import re
+from collections.abc import Sequence
 from typing import Any
 
 import yaml
 
 from agents_orchestrator import handoff_texts, rendering, runaway
 from agents_orchestrator.db.sessions import Session
+from agents_orchestrator.db.volumes import Volume
 from agents_orchestrator.dispatcher.hive import compact_pct
 from agents_orchestrator.k8s.labels import (
+    VOLUME_FINALIZER,
+    VOLUME_PROJECTS_ANNOTATION,
     cluster_binding_name,
     kube_labels,
     kube_service_account,
@@ -23,6 +27,8 @@ from agents_orchestrator.k8s.labels import (
     prefix,
     selector,
     session_labels,
+    volume_labels,
+    volume_pod_label,
     workspace_pvc,
 )
 from agents_orchestrator.k8s.on_start import READ_ONLY_TOOLS, orchestrator_allow, render_on_start
@@ -31,8 +37,10 @@ from agents_orchestrator.spec import (
     KUBE_TIERS,
     WORKDIR_ROOT,
     SessionSpec,
+    VolumeAttachment,
     WrapperSettings,
     backups,
+    effective_mount_path,
     parse_quantity,
 )
 from agents_orchestrator.tokens import SessionTokens
@@ -662,6 +670,58 @@ def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
     return cfg
 
 
+VolumeAttachments = Sequence[tuple[VolumeAttachment, Volume]]
+"""A session's resolved volume attachments: (preset attachment, volume row), in spec order."""
+
+
+def render_volume_pvc(volume: Volume, settings: Settings) -> dict[str, Any]:
+    """The RWX PVC of one volume. No session label; the finalizer keeps a stray delete Terminating
+    until the volume delete path removes it."""
+    return {
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {
+            "name": volume.pvc_name,
+            "namespace": settings.namespace,
+            "labels": volume_labels(volume.id),
+            "annotations": {VOLUME_PROJECTS_ANNOTATION: ",".join(volume.projects)},
+            "finalizers": [VOLUME_FINALIZER],
+        },
+        "spec": {
+            "accessModes": ["ReadWriteMany"],
+            "storageClassName": volume.storage_class,
+            "resources": {"requests": {"storage": volume.size}},
+        },
+    }
+
+
+def volume_pod_parts(
+    attachments: VolumeAttachments,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, str]]:
+    """(pod volumes, container volumeMounts, pod labels) of the attachments: whole volume, no
+    subPath, readOnly on both the pod volume and the mount for `ro`."""
+    volumes: list[dict[str, Any]] = []
+    mounts: list[dict[str, Any]] = []
+    pod_labels: dict[str, str] = {}
+    for n, (att, vol) in enumerate(attachments):
+        name, read_only = f"vol-{n}", att.mode == "ro"
+        volumes.append(
+            {
+                "name": name,
+                "persistentVolumeClaim": {"claimName": vol.pvc_name, "readOnly": read_only},
+            }
+        )
+        mounts.append(
+            {
+                "name": name,
+                "mountPath": effective_mount_path(att, vol.name),
+                "readOnly": read_only,
+            }
+        )
+        pod_labels[volume_pod_label(vol.id)] = att.mode
+    return volumes, mounts, pod_labels
+
+
 def _meta(slug: str, kind_name: str, settings: Settings) -> dict[str, Any]:
     return {
         "name": kind_name,
@@ -758,7 +818,12 @@ def env_entries(session: Session) -> list[dict[str, Any]]:
     return [{"name": name, **out[name]} for name in sorted(out)]
 
 
-def _container(session: Session, settings: Settings, names: dict[str, str]) -> dict[str, Any]:
+def _container(
+    session: Session,
+    settings: Settings,
+    names: dict[str, str],
+    volume_mounts: list[dict[str, Any]],
+) -> dict[str, Any]:
     spec, slug = session.spec, session.slug
     port = settings.wrapper_port
     env: list[dict[str, Any]] = [
@@ -813,6 +878,7 @@ def _container(session: Session, settings: Settings, names: dict[str, str]) -> d
             {"name": "mise", "mountPath": "/opt/mise"},
             {"name": "any-mcp", "mountPath": "/opt/any-mcp"},
             {"name": "config", "mountPath": "/etc/ccw"},
+            *volume_mounts,
         ],
     }
     if docker_enabled(spec, settings):
@@ -851,7 +917,10 @@ def _container(session: Session, settings: Settings, names: dict[str, str]) -> d
 
 
 def render_session(
-    session: Session, settings: Settings, tokens: SessionTokens
+    session: Session,
+    settings: Settings,
+    tokens: SessionTokens,
+    volumes: VolumeAttachments = (),
 ) -> list[dict[str, Any]]:
     spec, slug = session.spec, session.slug
     names = {**object_names(slug), "pvc": workspace_pvc(slug, session.status)}
@@ -907,6 +976,7 @@ def render_session(
             ],
         },
     }
+    att_volumes, att_mounts, att_labels = volume_pod_parts(volumes)
     pod_spec: dict[str, Any] = {
         **pod_identity(session, settings),
         "securityContext": {
@@ -915,12 +985,13 @@ def render_session(
             "fsGroupChangePolicy": "OnRootMismatch",
         },
         "terminationGracePeriodSeconds": settings.agent_termination_grace_seconds,
-        "containers": [_container(session, settings, names)],
+        "containers": [_container(session, settings, names, att_mounts)],
         "volumes": [
             {"name": WORKSPACE_VOLUME, "persistentVolumeClaim": {"claimName": names["pvc"]}},
             {"name": "config", "configMap": {"name": names["configmap"]}},
             {"name": "mise", "emptyDir": {}},
             {"name": "any-mcp", "emptyDir": {}},
+            *att_volumes,
         ],
     }
     if docker_enabled(spec, settings):
@@ -942,7 +1013,10 @@ def render_session(
             "serviceName": names["service"],
             "selector": selector(slug),
             "template": {
-                "metadata": {"labels": dict(labels), "annotations": {HASH_ANNOTATION: config_hash}},
+                "metadata": {
+                    "labels": {**labels, **att_labels},
+                    "annotations": {HASH_ANNOTATION: config_hash},
+                },
                 "spec": pod_spec,
             },
         },

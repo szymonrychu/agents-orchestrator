@@ -36,8 +36,10 @@ from agents_orchestrator.k8s.kube import KubeApi, KubeError, Obj, is_owned
 from agents_orchestrator.k8s.labels import prefix, session_labels, workspace_pvc
 from agents_orchestrator.k8s.render import (
     WORKSPACE_VOLUME,
+    VolumeAttachments,
     agent_identity,
     env_entries,
+    volume_pod_parts,
     workdir_mount,
     workdir_path,
 )
@@ -105,14 +107,21 @@ def render_init_sh(slug: str, scripts: list[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def render_init_job(session: Session, settings: Settings, scripts: list[str] | None = None) -> Obj:
-    """The Job; `scripts` are the rendered scripts (rendered here when not given)."""
+def render_init_job(
+    session: Session,
+    settings: Settings,
+    scripts: list[str] | None = None,
+    volumes: VolumeAttachments = (),
+) -> Obj:
+    """The Job; `scripts` are the rendered scripts (rendered here when not given). It mounts the
+    attached `volumes` as the session pod does, so the scripts see the tree the pod will."""
     spec, slug = session.spec, session.slug
     labels = init_labels(slug)
     if scripts is None:
         scripts = rendering.render_init_scripts(session)
     init_sh = render_init_sh(slug, scripts)
     chunks = [init_sh[i : i + ARG_CHUNK_CHARS] for i in range(0, len(init_sh), ARG_CHUNK_CHARS)]
+    att_volumes, att_mounts, _ = volume_pod_parts(volumes)
     container: dict[str, Any] = {
         "name": "init",
         "image": spec.image or settings.agent_image,
@@ -121,7 +130,7 @@ def render_init_job(session: Session, settings: Settings, scripts: list[str] | N
             *env_entries(session),
             {"name": WORKDIR_ENV, "value": workdir_path(spec)},
         ],
-        "volumeMounts": [workdir_mount(spec)],
+        "volumeMounts": [workdir_mount(spec), *att_mounts],
     }
     if spec.resources is not None:  # as the agent container
         resources = {k: v for k, v in spec.resources.model_dump().items() if v}
@@ -140,7 +149,8 @@ def render_init_job(session: Session, settings: Settings, scripts: list[str] | N
             {
                 "name": WORKSPACE_VOLUME,
                 "persistentVolumeClaim": {"claimName": workspace_pvc(session.slug, session.status)},
-            }
+            },
+            *att_volumes,
         ],
     }
     if settings.image_pull_secret:
