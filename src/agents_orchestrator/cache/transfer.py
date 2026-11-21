@@ -1,10 +1,10 @@
-"""Job-side backup transfer: `orch cache restore|save|resolve` (contract orch-cache-job-cli).
+"""Job-side backup transfer: `orch cache restore|save` (contract orch-cache-job-cli).
 
 Runs in the hardened cache Job with only the `CACHE_*` env: `CACHE_ENTRIES` (a JSON list of
 entries, each with its own presigned URL), `CACHE_MAX_BYTES`, `CACHE_SCRATCH` (where a save writes
 its archive), `CACHE_STATE_DIR` and `CACHE_VERIFY_TLS` (`false` turns off certificate checks for a
 private-CA endpoint; unset is `true`). It never builds `Settings` or reads `ORCH_*`. The last
-stdout line is one JSON object `{"entries": [...]}` (or `{"digests": {...}}` for resolve) that the
+stdout line is one JSON object `{"entries": [...]}` that the
 reconciler reads from the pod log tail; nothing is printed after it.
 
 Restore streams the GET body straight into `archive.unpack`; save packs into a scratch file and
@@ -223,32 +223,6 @@ def _merge_into(temp: Path, target: Path) -> None:
     shutil.rmtree(temp, ignore_errors=True)
 
 
-def _read_state_digest(state_dir: Path | None, entry: Mapping[str, Any]) -> str | None:
-    """The digest the last restore or save left in `backup-state/<index>.json`, or None."""
-    if state_dir is None:
-        return None
-    try:
-        body = json.loads((state_dir / f"{entry['index']}.json").read_text())
-    except (OSError, ValueError, KeyError):
-        return None
-    digest = body.get("digest") if isinstance(body, dict) else None
-    return digest if isinstance(digest, str) else None
-
-
-def _is_dirty(
-    entry: Mapping[str, Any], target: Path, exclude: list[str], state_dir: Path | None
-) -> bool:
-    """The directory differs from what the last restore or save put there (unsaved edits).
-
-    Without a recorded state any file in the directory counts as unsaved.
-    """
-    files = archive.manifest(target, exclude) if target.is_dir() else []
-    recorded = _read_state_digest(state_dir, entry)
-    if recorded is None:
-        return bool(files)
-    return archive.digest(files) != recorded
-
-
 def _restore_one(
     entry: Mapping[str, Any],
     client: httpx.Client,
@@ -267,8 +241,6 @@ def _restore_one(
         exclude = _entry_exclude(entry)
         if not url:
             raise _BadEnv("entry has no url")
-        if entry.get("skip_dirty") and _is_dirty(entry, target, exclude, state_dir):
-            return {**result, "state": "skipped_dirty"}  # live delivery never overwrites edits
         with client.stream("GET", url) as response:
             if response.status_code == 404:
                 return {**result, "state": "missing"}
@@ -332,9 +304,8 @@ def restore_entries(env: Mapping[str, str], *, transport: httpx.BaseTransport | 
     """Restore every entry of `CACHE_ENTRIES`; print `{"entries": [...]}`; exit 1 on a failure.
 
     Each entry ends `restored`, `missing` (404, nothing touched), `unreadable` (extraction failed
-    in a temp dir that is removed, nothing touched), `skipped_dirty` (a live delivery found unsaved
-    local edits: `skip_dirty` on the entry, nothing downloaded or touched) or `failed`. Missing,
-    unreadable and skipped_dirty are warnings for the caller: the exit code stays 0.
+    in a temp dir that is removed, nothing touched) or `failed`. Missing and unreadable are
+    warnings for the caller: the exit code stays 0.
     """
     try:
         entries = _load_list(env, "CACHE_ENTRIES")
@@ -425,30 +396,3 @@ def save_entries(env: Mapping[str, str], *, transport: httpx.BaseTransport | Non
         results = [_save_one(e, client, scratch, max_bytes, state_dir) for e in entries]
     _emit_entries(results)
     return EXIT_FAILED if any(r["state"] == "failed" for r in results) else EXIT_OK
-
-
-def resolve(env: Mapping[str, str]) -> int:
-    """Digest the paths a name template asks for (`CACHE_RESOLVE`, PVC mounted read-only).
-
-    Input `[{root_dir, path, length, exclude}]`; output `{"digests": {"<path>:<length>": hex}}`
-    where hex is the first `length` characters of `archive.dir_sha256` (`none` stays `none`).
-    No URL, no write.
-    """
-    try:
-        entries = _load_list(env, "CACHE_RESOLVE")
-        digests: dict[str, str] = {}
-        for entry in entries:
-            root, _ = _entry_target(entry)
-            path = entry["path"]
-            length = entry.get("length", 16)
-            if not isinstance(length, int) or isinstance(length, bool) or length < 1:
-                raise _BadEnv("entry length is a positive integer")
-            full = archive.dir_sha256(root, path, _entry_exclude(entry))
-            digests[f"{path}:{length}"] = full if full == archive.NO_PATH_DIGEST else full[:length]
-    except (_BadEnv, KeyError) as exc:
-        sys.stderr.flush()
-        print(json.dumps({"digests": {}, "reason": f"bad_env: {exc}"}), flush=True)
-        return EXIT_FAILED
-    sys.stderr.flush()
-    print(json.dumps({"digests": digests}), flush=True)
-    return EXIT_OK

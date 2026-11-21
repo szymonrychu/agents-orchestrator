@@ -22673,6 +22673,9 @@
             },
             "description": "Successful Response"
           },
+          "409": {
+            "description": "preset_migration_pending: the preset still carries the removed `backup` entries and the volume migration has not moved them yet"
+          },
           "422": {
             "content": {
               "application/json": {

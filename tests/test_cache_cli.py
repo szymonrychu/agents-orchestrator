@@ -214,40 +214,6 @@ def test_claude_entry_with_secret_refused(tmp_path, capsys):
     assert rec.requests == []
 
 
-def test_resolve_outputs_digests(tmp_path, capsys):
-    import hashlib
-
-    root = tmp_path / "root"
-    root.mkdir()
-    (root / "f.txt").write_text("alpha")
-    env = {
-        "CACHE_RESOLVE": json.dumps(
-            [
-                {"root_dir": str(root), "path": "f.txt", "length": 8, "exclude": []},
-                {"root_dir": str(root), "path": "gone", "length": 8, "exclude": []},
-            ]
-        )
-    }
-    assert transfer.resolve(env) == 0
-    digests = json.loads(capsys.readouterr().out.splitlines()[-1])["digests"]
-    assert digests == {
-        "f.txt:8": hashlib.sha256(b"alpha").hexdigest()[:8],
-        "gone:8": "none",
-    }
-
-
-def test_cli_dispatches_entries_and_resolve(tmp_path, capsys, monkeypatch):
-    root = tmp_path / "root"
-    root.mkdir()
-    (root / "f.txt").write_text("alpha")
-    monkeypatch.setenv(
-        "CACHE_RESOLVE",
-        json.dumps([{"root_dir": str(root), "path": "f.txt", "length": 4, "exclude": []}]),
-    )
-    assert cli.main(["cache", "resolve"]) == 0
-    assert "f.txt:4" in capsys.readouterr().out
-
-
 # ---------------------------------------------------------- command and transport
 
 

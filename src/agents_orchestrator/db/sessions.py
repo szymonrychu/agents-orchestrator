@@ -29,7 +29,7 @@ from agents_orchestrator.inactivity import (
 from agents_orchestrator.runaway import NOTICE_PARKED, AgentWindow, Breach
 from agents_orchestrator.spec import (
     SessionSpec,
-    legacy_context,
+    load_stored_spec,
     validate_slug,
     without_legacy_backup,
 )
@@ -129,9 +129,7 @@ def _from_row(row: dict[str, Any]) -> Session:
     return Session(
         id=row["id"],
         slug=row["slug"],
-        spec=SessionSpec.model_validate(
-            without_legacy_backup(row["spec"]), context=legacy_context(row["secret_versions"])
-        ),
+        spec=load_stored_spec(row["spec"], row["secret_versions"]),
         generation=row["generation"],
         observed_generation=row["observed_generation"],
         desired=row["desired"],
@@ -238,11 +236,12 @@ async def get_for_update(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -
 async def get_stored(
     conn: psycopg.AsyncConnection, session_id: uuid.UUID
 ) -> tuple[Session, dict[str, Any]] | None:
-    """The session and its spec JSONB as stored (the `expected` of `replace_spec`)."""
+    """The session and its spec JSONB as stored, without the removed `backup` key (the `expected`
+    of `replace_spec`, which compares the same way)."""
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute("SELECT * FROM sessions WHERE id = %s", (session_id,))
         row = await cur.fetchone()
-    return None if row is None else (_from_row(row), row["spec"])
+    return None if row is None else (_from_row(row), without_legacy_backup(row["spec"]))
 
 
 async def get_by_slug(conn: psycopg.AsyncConnection, slug: str) -> Session | None:
@@ -1241,18 +1240,25 @@ async def replace_spec(
     """
     async with conn.transaction():
         row = await _lock_row(conn, session_id)
-        if row["spec"] != expected:
+        stored = without_legacy_backup(row["spec"])
+        if stored != expected:
             raise SpecChanged(str(session_id))
         # decided before the recheck, which gets the stored dict itself
         dumped = _dump(spec)
-        unchanged = dumped.obj == row["spec"]
-        await recheck(LockedSession(row["spec"], row["preset_id"], row["secret_versions"] or {}))
+        unchanged = dumped.obj == stored
+        await recheck(LockedSession(stored, row["preset_id"], row["secret_versions"] or {}))
         if unchanged:
             return _from_row(row), False
+        # the legacy key rides along untouched: a workspace entry keeps the transcripts target
+        written = (
+            Jsonb({**dumped.obj, "backup": row["spec"]["backup"]})
+            if "backup" in row["spec"]
+            else dumped
+        )
         rows = await _fetch(
             conn,
             "UPDATE sessions SET spec = %s, generation = generation + 1 WHERE id = %s RETURNING *",
-            (dumped, session_id),
+            (written, session_id),
         )
         await _notify(conn, session_id)
     return rows[0], True

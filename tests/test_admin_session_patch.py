@@ -8,6 +8,7 @@ import pytest
 from factories import attach_preset
 from fakes.fake_kube import FakeKube
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 from test_admin_gate import mark_trigger
 from test_agent_session_messaging import Sess, alone, hive
 from test_api_agent import client_for, headers, make_settings
@@ -85,6 +86,21 @@ async def test_wrong_pod_ip_403(app, pool):
 async def test_regular_alone_agent_on_its_own_slug(app, pool, settings):
     me = await alone(pool, "sp-alone")
     await _patched(pool, app, settings, me, me)
+
+
+async def test_patch_of_a_session_stored_with_the_removed_backup_key(app, pool, settings):
+    me = await alone(pool, "sp-legacy-backup")
+    await _seed(pool, settings, me, {})
+    entry = {"root": "workspace", "path": ".", "mode": "both", "name": "k"}
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE sessions SET spec = spec || %s WHERE id = %s",
+            (Jsonb({"backup": [entry]}), me.id),
+        )
+    r = await call(app, me, "PATCH", me.slug, json=PEERS_OFF)
+    assert r.status_code == 200, r.text
+    assert r.json()["spec"]["peers"] is False
+    assert (await _row(pool, me.id))["spec"]["backup"] == [entry]
 
 
 async def test_regular_hive_leader_on_its_own_slug(app, pool, settings):

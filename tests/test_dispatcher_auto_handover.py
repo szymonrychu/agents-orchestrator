@@ -143,6 +143,28 @@ async def test_scale_down_moves_without_poll(env):
     assert (row["epoch"], row["reason"]) == (2, "scale_down")
 
 
+async def test_a_session_stored_with_the_removed_backup_key_still_hands_over(env):
+    stays = await env.agent(0, free_ago=100)
+    leader = await env.agent(1)
+    await env.exec(
+        "UPDATE sessions SET spec = jsonb_set(spec, '{replicas}', '2')"
+        ' || \'{"backup": [{"root": "workspace", "path": "."}]}\' WHERE id=%s',
+        (env.cid,),
+    )
+    await env.lead(leader["id"])
+    stop, task = await running(env)
+    try:
+        async with env.pool.connection() as conn:
+            await sessions.set_replicas(conn, env.cid, 1)
+
+        async def moved() -> bool:
+            return (await env.leader())["agent_id"] == stays["id"]
+
+        await env.wait_for(moved, "leadership moved to the agent that stays")
+    finally:
+        await finish(stop, task)
+
+
 async def test_compacted_leader_takes_next_message(env):
     leader = await env.agent(0, state="busy")
     await env.agent(1, free_ago=100)

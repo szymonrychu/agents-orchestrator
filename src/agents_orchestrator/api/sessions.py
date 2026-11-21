@@ -507,7 +507,17 @@ async def _queue_start_prompt(conn, session: repo.Session) -> None:
         )
 
 
-@router.post("/sessions", status_code=201, response_model=schemas.SessionView)
+@router.post(
+    "/sessions",
+    status_code=201,
+    response_model=schemas.SessionView,
+    responses={
+        409: {
+            "description": "preset_migration_pending: the preset still carries the removed "
+            "`backup` entries and the volume migration has not moved them yet"
+        }
+    },
+)
 async def create_session(
     body: schemas.CreateSession,
     request: Request,
@@ -638,6 +648,13 @@ async def _create_from_preset(
     ):
         raise ApiError(409, "conflict", "the preset changed meanwhile; retry")
     raw = dict(preset.spec)
+    if "backup" in raw:
+        raise ApiError(
+            409,
+            "preset_migration_pending",
+            f"preset '{preset.name}' still has backup entries; the volume migration has not "
+            "moved them yet",
+        )
     raw.setdefault("replicas", settings.default_replicas)
     try:
         spec = await run_in_threadpool(

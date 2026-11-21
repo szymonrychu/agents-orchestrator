@@ -254,3 +254,53 @@ async def test_a_spec_write_leaves_the_pins_as_they_are(pool):
             conn, s.id, stored, BASE.model_copy(update={"image": "img:2"}), _noop
         )
     assert written is True and out.secret_versions == pins
+
+
+LEGACY_BACKUP = [{"root": "workspace", "path": ".", "mode": "both", "name": "k"}]
+
+
+async def _legacy(pool, entries=LEGACY_BACKUP):
+    """A session whose stored spec still carries the removed `backup` key."""
+    s = await _created(pool)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE sessions SET spec = spec || %s WHERE id = %s",
+            (Jsonb({"backup": entries}), s.id),
+        )
+    return s
+
+
+async def test_a_stored_legacy_backup_key_is_invisible_to_the_spec_write(pool, dsn):
+    s = await _legacy(pool)
+    async with pool.connection() as conn:
+        found = await sessions.get_stored(conn, s.id)
+    assert found is not None and "backup" not in found[1]
+    stored = found[1]
+    _, gen, _ = await _row(pool, s.id)
+    # an equal spec is still no write, though the stored row carries the key
+    async with pool.connection() as conn:
+        out, written = await sessions.replace_spec(conn, s.id, stored, BASE, _noop)
+    assert written is False and out.generation == gen
+    # a changed spec writes, and the stored key rides along (it still marks the transcripts target)
+    new = BASE.model_copy(update={"image": "img:2"})
+    async with pool.connection() as conn:
+        _, written = await sessions.replace_spec(conn, s.id, stored, new, _noop)
+    assert written is True
+    assert (await _row(pool, s.id))[0]["backup"] == LEGACY_BACKUP
+
+
+@pytest.mark.parametrize(
+    ("entries", "enabled"),
+    [
+        (LEGACY_BACKUP, True),
+        ([{"root": "claude", "path": ".", "mode": "both", "name": "k"}], False),
+        (None, False),
+    ],
+)
+async def test_a_legacy_workspace_entry_keeps_the_transcripts_target(pool, entries, enabled):
+    from agents_orchestrator.spec import transcripts_enabled
+
+    s = await _legacy(pool, entries) if entries else await _created(pool)
+    async with pool.connection() as conn:
+        loaded = await sessions.get(conn, s.id)
+    assert transcripts_enabled(loaded.spec) is enabled

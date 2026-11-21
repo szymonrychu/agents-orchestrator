@@ -268,22 +268,6 @@ def preview_name(template: str, context: dict[str, Any]) -> dict[str, Any]:
     return {"rendered": rendered, "error": None, "variables": variables}
 
 
-def name_problem(template: str) -> tuple[str | None, str | None]:
-    """(error, rendered) for a name template as a spec field: allowed variables, syntax, a dry
-    trial render against the sample context."""
-    allowed = set(SAMPLES["archive_name"])
-    try:
-        unknown = sorted(set(_name_variables(template)) - allowed)
-        if unknown:
-            names, ok = ", ".join(unknown), ", ".join(sorted(allowed))
-            return f"undeclared variable(s) {names}; allowed: {ok}", None
-        if not any(m in template for m in MARKERS):
-            return None, template
-        return None, _run_name(template, SAMPLES["archive_name"], None)[0]
-    except TemplateError as exc:
-        return exc.message, None
-
-
 def render_text(template: str, context: dict[str, Any]) -> str:
     """Render `template`; text without Jinja markers is returned as is (no child process)."""
     if not any(m in template for m in MARKERS):

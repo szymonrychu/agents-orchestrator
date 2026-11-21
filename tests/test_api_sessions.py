@@ -849,3 +849,15 @@ async def test_existing_session_keeps_working_after_project_archived(http):
     assert (await http.get(f"{S}/{sid}")).json()["project"] == "alpha"
     r = await http.patch(f"{S}/{sid}/labels", json={"labels": ["kept"]})
     assert r.status_code == 200, r.text
+
+
+async def test_create_from_an_unmigrated_preset_is_409_preset_migration_pending(http, pool):
+    entry = {"root": "workspace", "path": ".", "mode": "both", "name": "k"}
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE presets SET spec = %s WHERE id = %s",
+            (Jsonb({"backup": [entry]}), "00000000-0000-0000-0000-000000000001"),
+        )
+    r = await http.post(S, json={"preset_id": "00000000-0000-0000-0000-000000000001"})
+    assert_error(r, 409, "preset_migration_pending")
+    assert "raw" not in r.json()["error"]["message"] and "extra_forbidden" not in r.text

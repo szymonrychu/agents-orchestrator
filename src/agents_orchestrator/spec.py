@@ -327,7 +327,10 @@ def transcripts_enabled(spec: SessionSpec) -> bool:
     """True when the session keeps its Claude transcripts in the object store: a read-write
     `backup_restore` volume is mounted at the workdir or below it (the successor of the old
     workspace backup entry that enabled the transcripts target; the startup migration mounts a
-    workspace entry exactly there)."""
+    workspace entry exactly there), or the stored spec still carried a workspace entry when it
+    was loaded (a session alive across the removal; see `load_stored_spec`)."""
+    if spec._legacy_transcripts:
+        return True
     workdir = f"{WORKDIR_ROOT}/{spec.workdir}"
     return any(
         a.backup_restore
@@ -345,6 +348,18 @@ def without_legacy_backup(raw: dict[str, Any]) -> dict[str, Any]:
     entries to volumes from the raw JSON, and every other read drops the key so the row loads.
     """
     return {k: v for k, v in raw.items() if k != "backup"} if "backup" in raw else raw
+
+
+def load_stored_spec(raw: dict[str, Any], pins: Mapping[str, Any] | None) -> SessionSpec:
+    """The one loader of a stored session spec: the legacy `backup` key dropped, the legacy pins
+    as validation context, and the transcripts flag kept when a workspace entry was dropped (the
+    old transcripts target rode on it), so a session alive across the removal keeps saving its
+    transcripts."""
+    spec = SessionSpec.model_validate(without_legacy_backup(raw), context=legacy_context(pins))
+    spec._legacy_transcripts = any(
+        isinstance(e, dict) and e.get("root") == "workspace" for e in raw.get("backup") or []
+    )
+    return spec
 
 
 class Ref(NamedTuple):
@@ -732,6 +747,9 @@ class RunawayLimits(_Strict):
 
 class SessionSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    # Set only by `load_stored_spec`: a legacy workspace backup entry was dropped on load.
+    _legacy_transcripts: bool = PrivateAttr(default=False)
 
     replicas: int = Field(default=1, ge=1, le=16)
     max_replicas: int | None = Field(default=None, ge=1, le=16)

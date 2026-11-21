@@ -772,18 +772,17 @@ What the release that carries S-68 changes for an operator, in one place (the de
 
 ### Job CLI
 
-The Jobs run `orch cache restore|save|resolve` with only these variables (no `ORCH_*`):
+The Jobs run `orch cache restore|save` with only these variables (no `ORCH_*`):
 
 | Variable | Meaning |
 |---|---|
 | `CACHE_ENTRIES` | JSON list of entries `{index, root, root_dir, path, exclude, url, name, version}` (a restore carries the version it reads) |
-| `CACHE_RESOLVE` | resolve only: JSON list `{root_dir, path, length, exclude}` |
-| `CACHE_STATE_DIR` | restore only: `/backup-state`, where each restored entry's manifest is kept for the dirty check |
+| `CACHE_STATE_DIR` | restore only: `/backup-state`, where each restored entry's manifest is kept |
 | `CACHE_MAX_BYTES` | the size cap |
 | `CACHE_SCRATCH` | where a save writes its archives (`/scratch`, an emptyDir sized to the cap) |
 | `CACHE_VERIFY_TLS` | `false` skips certificate checks for a private-CA endpoint; unset is `true` |
 
-The last stdout line is one JSON object read by the reconciler from the pod log tail: `{"entries": [{"index", "state", ...}]}` (restore states `restored`, `missing`, `unreadable`, `failed`; save states `uploaded` with `size`, `digest` and `manifest`, `skipped` with reason `no_dir`, `refused_secret`, `failed`) or `{"digests": {"<path>:<length>": "<hex>"}}` for resolve. The query string of each URL (the signature) is stripped from every reason and log line.
+The last stdout line is one JSON object read by the reconciler from the pod log tail: `{"entries": [{"index", "state", ...}]}` (restore states `restored`, `missing`, `unreadable`, `failed`; save states `uploaded` with `size`, `digest` and `manifest`, `skipped` with reason `no_dir`, `refused_secret`, `failed`). The query string of each URL (the signature) is stripped from every reason and log line.
 
 ### Settings
 
