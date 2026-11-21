@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from agents_orchestrator.db.sessions import Session
+from agents_orchestrator.db.volumes import Volume
 from agents_orchestrator.k8s import labels, render
 from agents_orchestrator.reconciler.cache import (
     CACHE_LABEL,
@@ -20,6 +21,7 @@ from agents_orchestrator.reconciler.cache import (
     job_name,
     render_cache_job,
     render_resolve_job,
+    render_volume_job,
 )
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import SessionSpec
@@ -292,3 +294,42 @@ def test_agent_pods_carry_no_cache_credentials():
     dumped = json.dumps(objs)
     for leaked in (ACCESS_KEY, SECRET_KEY, CACHE_IMAGE, "agents-workspace-cache"):
         assert leaked not in dumped
+
+
+def make_volume() -> Volume:
+    now = datetime(2026, 11, 21, tzinfo=UTC)
+    return Volume(
+        id=uuid.UUID("22222222-2222-2222-2222-222222222222"),
+        name="data",
+        projects=["p"],
+        labels=[],
+        description="",
+        exclude=[],
+        size="10Gi",
+        storage_class="rook-ceph-rwx",
+        pvc_name="vol-data",
+        state="restoring",
+        state_reason=None,
+        content_version=None,
+        created_by="alice",
+        created_at=now,
+        updated_at=now,
+        deleted_at=None,
+    )
+
+
+@pytest.mark.parametrize(("action", "read_only"), [("restore", False), ("save", True)])
+def test_volume_job_mounts_the_pvc_at_volume_and_is_not_a_session_job(action, read_only):
+    vol, settings = make_volume(), make_settings()
+    job = render_volume_job(vol, settings, action=action, version=None, n=7, url=URL)
+    assert job["metadata"]["name"] == f"vol-data-{action}-7"
+    assert labels.SESSION_LABEL not in job["metadata"]["labels"]
+    assert job["metadata"]["labels"][labels.VOLUME_ID_LABEL] == str(vol.id)
+    assert job["spec"]["activeDeadlineSeconds"] == settings.cache_timeout_seconds
+    pod = pod_of(job)
+    claim = next(v for v in pod["volumes"] if "persistentVolumeClaim" in v)
+    assert claim["persistentVolumeClaim"].get("claimName") == "vol-data"
+    assert claim["persistentVolumeClaim"].get("readOnly", False) is read_only
+    mount = next(m for m in container_of(job)["volumeMounts"] if m["mountPath"] == "/volume")
+    assert mount.get("readOnly", False) is read_only
+    assert pod["securityContext"]["fsGroupChangePolicy"] == "OnRootMismatch"

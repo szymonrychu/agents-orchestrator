@@ -46,7 +46,7 @@ from agents_orchestrator.reconciler.cache import (
     _state,
     get_run,
 )
-from agents_orchestrator.spec import backups, restores
+from agents_orchestrator.spec import BackupEntry, backups, restores
 from agents_orchestrator.tokens import tokens_for
 from agents_orchestrator.wrapper.models import WrapperError, WrapperUnreachable
 
@@ -61,6 +61,12 @@ NOT_RETRIED = frozenset({"skipped_dirty", "missing", "unreadable"})
 
 def _running(run: dict[str, Any] | None) -> bool:
     return run is not None and run.get("state") == "running"
+
+
+def deliverable(entry: BackupEntry) -> bool:
+    """A live entry of the session's own roots; a volume root is never live-delivered (a write
+    into running pods is what the HARD RULE forbids for a volume)."""
+    return entry.live and entry.root in ("workspace", "claude")
 
 
 class Live:
@@ -102,7 +108,7 @@ class Live:
     def _wants(session: Session) -> bool:
         status = session.status
         return (
-            any(e.live for _, e in restores(session.spec))
+            any(deliverable(e) for _, e in restores(session.spec))
             or "backup_save" in status
             or _running(get_run(status, LIVE))
             or _running(get_run(status, SAVE_NOW))
@@ -169,7 +175,7 @@ class Live:
         out: list[tuple[int, str, backups_repo.Version]] = []
         async with self.pool.connection() as conn:
             for index, entry in restores(session.spec):
-                if not entry.live:
+                if not deliverable(entry):
                     continue
                 record = entries[index]
                 restore = record.get("restore") or {}

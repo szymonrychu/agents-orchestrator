@@ -697,3 +697,93 @@ async def events(
     more = len(rows) > limit
     items = rows[:limit]
     return Page(items=items, next_cursor=str(items[-1].id) if more else None)
+
+
+SaveTrigger = Literal["user", "agent", "release"]
+
+
+async def request_save(
+    conn: psycopg.AsyncConnection,
+    volume_id: uuid.UUID,
+    *,
+    trigger: SaveTrigger,
+    session_slug: str | None,
+    actor: str,
+    actor_kind: str = "user",
+) -> Volume | None:
+    """Start a save under the volume row lock (spec 6.3): `saving` and `save_started`, whose
+    detail says whether a claim was unreleased (`live`), who triggered it and the session slug.
+
+    A volume that is not `ready` is busy: VolumeBusy for a user or agent request, a coalesced
+    no-op (None) for the automatic `release` trigger. `deleting` refuses every trigger
+    (VolumeBusy; None for release)."""
+    async with conn.transaction():
+        vol = await _lock(conn, volume_id)
+        if vol.state != "ready":
+            if trigger == "release":
+                return None
+            raise VolumeBusy(f"cannot save a volume that is {vol.state}")
+        live = bool(await unreleased_claims(conn, volume_id))
+        await conn.execute(
+            "UPDATE volumes SET state = 'saving', state_reason = NULL WHERE id = %s", (volume_id,)
+        )
+        await record_event(
+            conn,
+            volume_id,
+            "save_started",
+            actor_kind=actor_kind,
+            actor=actor,
+            detail={"live": live, "trigger": trigger, "session_slug": session_slug},
+        )
+        await _touch(conn, volume_id)
+        after = await get(conn, volume_id)
+        assert after is not None
+        return after
+
+
+async def finish_restore(
+    conn: psycopg.AsyncConnection,
+    volume_id: uuid.UUID,
+    *,
+    version: uuid.UUID | None,
+    reason: str | None = None,
+) -> None:
+    """End a restore: `ready`; `restored` and the new `content_version` on success, or
+    `restore_failed` with the fixed `reason` and `content_version` unchanged (`version` None)."""
+    async with conn.transaction():
+        vol = await _lock(conn, volume_id)
+        if vol.state != "restoring":
+            raise VolumeBusy(f"cannot finish a restore of a volume that is {vol.state}")
+        await set_state(conn, volume_id, "ready", content_version=version)
+        if version is not None:
+            kind, detail = "restored", {"version": str(version)}
+        else:
+            kind, detail = "restore_failed", {"reason": reason or "failed"}
+        await record_event(
+            conn, volume_id, kind, actor_kind="system", actor="reconciler", detail=detail
+        )
+
+
+async def finish_save(
+    conn: psycopg.AsyncConnection,
+    volume_id: uuid.UUID,
+    *,
+    kind: Literal["saved", "save_unchanged", "save_failed"],
+    version: uuid.UUID | None = None,
+    reason: str | None = None,
+) -> None:
+    """End a save: always back to `ready`. `saved` and `save_unchanged` set `content_version` to
+    `version` (the new or the current one); `save_failed` leaves it and carries `reason`."""
+    async with conn.transaction():
+        vol = await _lock(conn, volume_id)
+        if vol.state != "saving":
+            raise VolumeBusy(f"cannot finish a save of a volume that is {vol.state}")
+        await set_state(
+            conn, volume_id, "ready", content_version=None if kind == "save_failed" else version
+        )
+        detail: dict[str, Any] = {"reason": reason or "failed"} if kind == "save_failed" else {}
+        if version is not None and kind != "save_failed":
+            detail["version"] = str(version)
+        await record_event(
+            conn, volume_id, kind, actor_kind="system", actor="reconciler", detail=detail
+        )

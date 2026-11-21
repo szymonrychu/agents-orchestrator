@@ -94,6 +94,7 @@ async def add_version(pool, name, *, age=OLD, digest=None, size=100, manifest=No
             project="p",
             created_by="actor",
             orphan=False,
+            volume_writer=name.startswith(backups.RESERVED_PREFIX),
         )
         await conn.execute("UPDATE backup_versions SET created_at = %s WHERE id = %s", (age, v.id))
     return v

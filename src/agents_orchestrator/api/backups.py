@@ -246,6 +246,8 @@ async def copy_backup(
     """
     creds = require_s3(settings)
     source, target = valid_name(body.source), valid_name(body.target)
+    if repo.is_reserved(target):
+        raise ApiError(403, "reserved_name", "volume- names are written only by volumes")
     async with pool.connection() as conn:
         src = (
             await _version_or_404(conn, source, body.source_version)

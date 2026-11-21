@@ -1,14 +1,16 @@
 """The volume reconciler against the real test Postgres and the fake kube."""
 
+import json
 import uuid
 
 import pytest
 from factories import insert_session
 from fakes.fake_kube import FakeKube
 
-from agents_orchestrator.db import volumes
+from agents_orchestrator.db import backups, volumes
 from agents_orchestrator.k8s.kube import KubeError
 from agents_orchestrator.k8s.labels import VOLUME_FINALIZER, volume_pod_label
+from agents_orchestrator.reconciler import volumes as volumes_mod
 from agents_orchestrator.reconciler.volumes import VolumeReconciler
 from agents_orchestrator.settings import Settings
 
@@ -23,14 +25,24 @@ def kube():
 
 @pytest.fixture
 def rec(pool, kube, dsn):
-    settings = Settings(database_url=dsn, master_key=KEY, agent_image="img:1")
+    settings = Settings(
+        database_url=dsn,
+        master_key=KEY,
+        agent_image="img:1",
+        cache_s3_endpoint="http://rgw.example:80",
+        cache_s3_bucket="bucket",
+        cache_s3_access_key_id="TESTIDEXAMPLEACCESSKEY",
+        cache_s3_secret_access_key="s3cr3t-example-secret-access-key",
+        cache_image="img:cache",
+    )
     return VolumeReconciler(pool, kube, settings)
 
 
-async def _make(pool, *, name="data", size="10Gi"):
+async def _make(pool, *, name="data", size="10Gi", **kw):
     async with pool.connection() as conn, conn.transaction():
         return await volumes.create(
             conn,
+            **kw,
             name=name,
             projects=["p"],
             size=size,
@@ -204,3 +216,203 @@ async def test_orphan_claim_released_by_system_only_when_no_pod_remains(pool, ku
     async with pool.connection() as conn:
         assert [c.session_id for c in await volumes.unreleased_claims(conn, v.id)] == [alive["id"]]
     assert ("released", "system", "reconciler") in await _kinds(pool, v.id)
+
+
+# ------------------------------------------------------------------ restore and save Jobs
+
+DIGEST = "d" * 64
+
+
+async def _version(pool, vol, digest=DIGEST, *, slug="writer"):
+    async with pool.connection() as conn, conn.transaction():
+        _, v = await backups.record_save(
+            conn,
+            name=f"volume-{vol.name}",
+            object_key=f"pre/b/volume-{vol.name}/{digest[:8]}-{uuid.uuid4().hex[:4]}.tar.zst",
+            size=5,
+            digest=digest,
+            manifest=None,
+            base_version=None,
+            origin="save",
+            session_slug=slug,
+            preset_id=None,
+            project="p",
+            created_by=slug,
+            orphan=False,
+            volume_writer=True,
+        )
+    return v
+
+
+async def _restore(pool, vol, version):
+    async with pool.connection() as conn, conn.transaction():
+        await volumes.begin_explicit_restore(conn, vol.id, version=version, actor="alice")
+
+
+async def _save(pool, vol, trigger="user", slug=None):
+    async with pool.connection() as conn, conn.transaction():
+        return await volumes.request_save(
+            conn, vol.id, trigger=trigger, session_slug=slug, actor="alice"
+        )
+
+
+def _jobs(kube):
+    return [o for (kind, _ns, _n), o in kube.objects.items() if kind == "Job"]
+
+
+def _outcome(**result):
+    return json.dumps({"entries": [{"index": 0, **result}]})
+
+
+def _uploaded(digest=DIGEST):
+    return _outcome(state="uploaded", size=7, digest=digest, manifest=[{"path": "a"}])
+
+
+async def test_restore_with_a_foreign_pod_aborts_and_creates_no_job(pool, kube, rec):
+    v = await _ready(pool, kube, rec)
+    ver = await _version(pool, v)
+    kube.seed(
+        {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {"name": "x-0", "labels": {volume_pod_label(v.id): "rw"}},
+            "status": {"phase": "Running"},
+        }
+    )
+    await _restore(pool, v, ver.id)
+    await rec.tick()
+    assert _jobs(kube) == []
+    got = await _get(pool, v.id)
+    assert (got.state, got.content_version) == ("ready", None)
+    kinds = [k for k, *_ in await _kinds(pool, v.id)]
+    assert kinds[-2:] == ["restore_started", "restore_skipped_mounted"]
+    async with pool.connection() as conn:
+        last = (await volumes.events(conn, v.id, limit=1)).items[0]
+    assert last.detail == {"reason": "pod_found"}
+
+
+async def test_successful_restore_sets_content_version(pool, kube, rec):
+    v = await _ready(pool, kube, rec)
+    ver = await _version(pool, v)
+    await _restore(pool, v, ver.id)
+    await rec.tick()
+    (job,) = _jobs(kube)
+    assert await _state(pool, v.id) == "restoring"
+    kube.finish_job(job["metadata"]["name"], log=_outcome(state="restored"))
+    await rec.tick()
+    got = await _get(pool, v.id)
+    assert (got.state, got.content_version) == ("ready", ver.id)
+    assert (await _kinds(pool, v.id))[-1][0] == "restored"
+    assert _jobs(kube) == []
+
+
+@pytest.mark.parametrize(
+    "finish",
+    [
+        {"exit_code": 1},
+        {"deadline_exceeded": True},
+        {"log": _outcome(state="unreadable", reason="bad archive")},
+    ],
+)
+async def test_failed_restore_keeps_content_version_and_turns_ready(pool, kube, rec, finish):
+    v = await _ready(pool, kube, rec)
+    ver = await _version(pool, v)
+    await _restore(pool, v, ver.id)
+    await rec.tick()
+    (job,) = _jobs(kube)
+    kube.finish_job(job["metadata"]["name"], **finish)
+    await rec.tick()
+    got = await _get(pool, v.id)
+    assert (got.state, got.content_version) == ("ready", None)
+    assert (await _kinds(pool, v.id))[-1][0] == "restore_failed"
+
+
+async def test_save_with_a_new_digest_moves_current_and_content_version(pool, kube, rec):
+    v = await _ready(pool, kube, rec)
+    await _version(pool, v, "a" * 64)
+    await _save(pool, v, "agent", "s-1")
+    await rec.tick()
+    (job,) = _jobs(kube)
+    assert job["metadata"]["name"].startswith("vol-data-save-")
+    kube.finish_job(job["metadata"]["name"], log=_uploaded())
+    await rec.tick()
+    async with pool.connection() as conn:
+        cur = await backups.current(conn, "volume-data")
+    got = await _get(pool, v.id)
+    assert (got.state, got.content_version) == ("ready", cur.id)
+    assert cur.digest == DIGEST and cur.origin == "save"
+    assert (cur.session_slug, cur.project, cur.preset_id) == ("s-1", "p", None)
+    assert cur.manifest == {"files": [{"path": "a"}]}
+    assert (await _kinds(pool, v.id))[-1][0] == "saved"
+
+
+async def test_save_with_an_unchanged_digest_keeps_current_and_deletes_the_object(
+    pool, kube, rec, monkeypatch
+):
+    deleted = []
+    monkeypatch.setattr(volumes_mod, "delete_keys", lambda _s, keys: deleted.extend(keys) or [])
+    v = await _ready(pool, kube, rec)
+    cur = await _version(pool, v)
+    await _save(pool, v)
+    await rec.tick()
+    (job,) = _jobs(kube)
+    kube.finish_job(job["metadata"]["name"], log=_uploaded())
+    await rec.tick()
+    got = await _get(pool, v.id)
+    assert (got.state, got.content_version) == ("ready", cur.id)
+    assert (await _kinds(pool, v.id))[-1][0] == "save_unchanged"
+    assert len(deleted) == 1
+    async with pool.connection() as conn:
+        assert (await backups.current(conn, "volume-data")).id == cur.id
+
+
+async def test_failed_save_turns_ready_and_changes_nothing(pool, kube, rec):
+    v = await _ready(pool, kube, rec)
+    await _save(pool, v)
+    await rec.tick()
+    (job,) = _jobs(kube)
+    kube.finish_job(job["metadata"]["name"], exit_code=1)
+    await rec.tick()
+    got = await _get(pool, v.id)
+    assert (got.state, got.content_version) == ("ready", None)
+    assert (await _kinds(pool, v.id))[-1][0] == "save_failed"
+    async with pool.connection() as conn:
+        assert await backups.current(conn, "volume-data") is None
+
+
+async def test_save_while_a_claim_exists_marks_the_manifest_live(pool, kube, rec):
+    v = await _ready(pool, kube, rec)
+    await _claim(pool, v.id, uuid.uuid4())
+    await _save(pool, v)
+    await rec.tick()
+    (job,) = _jobs(kube)
+    kube.finish_job(job["metadata"]["name"], log=_uploaded())
+    await rec.tick()
+    async with pool.connection() as conn:
+        cur = await backups.current(conn, "volume-data")
+    assert cur.manifest["live"] is True
+
+
+async def test_save_job_carries_the_volume_excludes_and_restore_ignores_them(pool, kube, rec):
+    v = await _make(pool, exclude=["node_modules", "*.log"])
+    await rec.tick()
+    kube.set_pvc(v.pvc_name, "Bound", "10Gi")
+    await rec.tick()
+    ver = await _version(pool, v)
+    await _save(pool, v)
+    await rec.tick()
+    (job,) = _jobs(kube)
+    name = job["metadata"]["name"]
+
+    def entry(job):
+        (c,) = job["spec"]["template"]["spec"]["containers"]
+        env = {e["name"]: e["value"] for e in c["env"]}
+        return json.loads(env["CACHE_ENTRIES"])[0]
+
+    assert entry(job)["exclude"] == ["node_modules", "*.log"]
+    kube.finish_job(name, exit_code=1)
+    await rec.tick()
+    await _restore(pool, v, ver.id)
+    await rec.tick()
+    (rjob,) = _jobs(kube)
+    assert entry(rjob)["exclude"] == []

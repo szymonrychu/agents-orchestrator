@@ -15,7 +15,7 @@ from agents_orchestrator.cache import sweep
 from agents_orchestrator.cache.policy import SweepPolicy
 from agents_orchestrator.cache.presign import ArchiveObject, DeleteFailure
 from agents_orchestrator.cache.sweep import References, plan_sweep, references, run_sweep
-from agents_orchestrator.db import backups, sessions
+from agents_orchestrator.db import backups, sessions, volumes
 from agents_orchestrator.spec import SessionSpec
 
 NOW = datetime(2026, 10, 31, 12, tzinfo=UTC)
@@ -233,6 +233,42 @@ async def test_a_deleted_session_references_nothing(pool, dsn):
         await sessions.purge(conn, gone.id)
         refs = await references(conn, settings_for(dsn))
     assert refs.names == {} and refs.transcripts == set()
+
+
+async def test_content_version_and_current_of_volume_names_survive_a_sweep(pool, dsn):
+    loose = await add_version(pool, "volume-data", digest="c" * 64, age=NOW - 350 * DAY)
+    old = await add_version(pool, "volume-data", digest="a" * 64, age=NOW - 400 * DAY)
+    newer = await add_version(pool, "volume-data", digest="b" * 64, age=NOW - 300 * DAY)
+    async with pool.connection() as conn, conn.transaction():
+        v = await volumes.create(
+            conn,
+            name="data",
+            projects=["p"],
+            size="1Gi",
+            description="",
+            storage_class="c",
+            created_by="a",
+            actor_kind="user",
+            actor="a",
+        )
+        await conn.execute("UPDATE volumes SET content_version = %s WHERE id = %s", (old.id, v.id))
+        refs = await references(conn, settings_for(dsn))
+        assert await backups.referenced_versions(conn) >= {old.id, newer.id}
+        found = await backups.all_versions(conn)
+    assert set(refs.versions) == {old.id, newer.id}
+    p = plan_sweep(
+        versions=found,
+        activity={},
+        objects=[],
+        refs=refs,
+        now=NOW + 1000 * DAY,
+        retention_days=30,
+        keep_newest=0,
+        grace_seconds=600,
+        prefix=PRE,
+    )
+    deleted = {d.key for d in p.decisions if d.delete}
+    assert deleted == {loose.object_key}
 
 
 # ------------------------------------------------------------------ executor

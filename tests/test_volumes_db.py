@@ -1,5 +1,6 @@
 """db.volumes: named shared volumes, claims and audit events (Postgres)."""
 
+import asyncio
 import uuid
 
 import pytest
@@ -222,3 +223,29 @@ async def test_labels_normalised_and_invalid_refused(pool):
         for bad in (["has space"], ["project:x"]):
             with pytest.raises(ValueError):
                 await volumes.update(conn, v.id, labels=bad, actor_kind="user", actor="alice")
+
+
+async def test_two_on_demand_saves_one_starts_and_one_is_busy(pool):
+    async with pool.connection() as conn:
+        v = await _create(conn)
+        await volumes.set_state(conn, v.id, "ready")
+
+    async def attempt(trigger):
+        async with pool.connection() as conn:
+            try:
+                return await volumes.request_save(
+                    conn, v.id, trigger=trigger, session_slug=None, actor="alice"
+                )
+            except volumes.VolumeBusy:
+                return "busy"
+
+    results = await asyncio.gather(attempt("user"), attempt("agent"))
+    assert sorted(r if r == "busy" else "started" for r in results) == ["busy", "started"]
+    async with pool.connection() as conn:
+        assert (await _kinds(conn, v.id)).count("save_started") == 1
+        assert (
+            await volumes.request_save(
+                conn, v.id, trigger="release", session_slug="s", actor="system"
+            )
+            is None
+        )

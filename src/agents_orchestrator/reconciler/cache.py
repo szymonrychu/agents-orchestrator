@@ -65,8 +65,9 @@ from agents_orchestrator.cache.save_rule import EntryPlan, save_plan, transcript
 from agents_orchestrator.db import backups as backups_repo
 from agents_orchestrator.db import events as events_repo
 from agents_orchestrator.db.sessions import Session
+from agents_orchestrator.db.volumes import Volume
 from agents_orchestrator.k8s.kube import KubeApi, KubeError, Obj, is_owned
-from agents_orchestrator.k8s.labels import prefix, session_labels, workspace_pvc
+from agents_orchestrator.k8s.labels import prefix, session_labels, volume_labels, workspace_pvc
 from agents_orchestrator.k8s.render import (
     BACKUP_STATE_ROOT,
     BACKUP_STATE_SUBPATH,
@@ -100,6 +101,8 @@ log = logging.getLogger(__name__)
 CACHE_LABEL = "agents.szymonrichert.pl/cache"
 BACKOFF_LIMIT = 2
 TMP_DIR = "/tmp"
+BACKUP_PREFIX = backups_repo.RESERVED_PREFIX
+VOLUME_ROOT = "/volume"  # where a volume Job pod sees the volume PVC
 SCRATCH_DIR = "/scratch"
 SESSIONS_SUBPATH = "sessions"  # the PVC subtree holding every agent pod's /sessions
 WARNING_EVENT = "backup_warning"
@@ -162,7 +165,9 @@ def _is_resolve(key: str) -> bool:
 
 
 def root_dir(spec: SessionSpec, root: str) -> str:
-    """Where the Job pod sees the root of an entry."""
+    """Where the Job pod sees the root of an entry (`volume` is the fixed `/volume`)."""
+    if root == "volume":
+        return VOLUME_ROOT
     return workdir_path(spec) if root == "workspace" else CLAUDE_ROOT
 
 
@@ -315,6 +320,106 @@ def _pvc_volume(session: Session) -> Obj:
     }
 
 
+def _cache_env(settings: Settings, entries: list[dict[str, Any]]) -> list[dict[str, str]]:
+    return [
+        {"name": "CACHE_ENTRIES", "value": json.dumps(entries)},
+        {"name": "CACHE_MAX_BYTES", "value": str(settings.cache_max_bytes)},
+        {"name": "CACHE_SCRATCH", "value": SCRATCH_DIR},
+        {"name": "CACHE_VERIFY_TLS", "value": str(settings.cache_s3_verify_tls).lower()},
+        {"name": "HOME", "value": TMP_DIR},
+    ]
+
+
+def _cache_container(
+    settings: Settings, action: str, env: list[dict[str, str]], mounts: list[dict[str, Any]]
+) -> dict[str, Any]:
+    return {
+        "name": "cache",
+        "image": settings.cache_image,
+        "command": ["orch", "cache", action],
+        "env": env,
+        "securityContext": {
+            "readOnlyRootFilesystem": True,
+            "allowPrivilegeEscalation": False,
+            "capabilities": {"drop": ["ALL"]},
+        },
+        "volumeMounts": mounts,
+    }
+
+
+def volume_job_name(volume_name: str, action: str, n: int) -> str:
+    return f"vol-{volume_name}-{action}-{n}"
+
+
+def render_volume_job(
+    volume: Volume,
+    settings: Settings,
+    *,
+    action: Literal["restore", "save"],
+    version: uuid.UUID | None,
+    n: int,
+    url: str,
+    annotations: dict[str, str] | None = None,
+) -> Obj:
+    """The restore or save Job of a volume (S-77): the PVC `vol-<name>` at `/volume`, read-write
+    for a restore and read-only for a save, one presigned URL, the cache Job's hardening and
+    deadline. No session label (the session prune never matches it). A save carries the volume's
+    `exclude` globs as the entry's tar excludes; a restore ignores them."""
+    save = action == "save"
+    entry: dict[str, Any] = {
+        "index": 0,
+        "root": "volume",
+        "root_dir": VOLUME_ROOT,
+        "path": ".",
+        "exclude": list(volume.exclude) if save else [],
+        "url": url,
+        "name": f"{BACKUP_PREFIX}{volume.name}",
+    }
+    if version is not None and not save:
+        entry["version"] = str(version)
+    mounts: list[dict[str, Any]] = [
+        {"name": "volume", "mountPath": VOLUME_ROOT, **({"readOnly": True} if save else {})},
+        {"name": "tmp", "mountPath": TMP_DIR},
+    ]
+    volumes: list[Obj] = [
+        {
+            "name": "volume",
+            "persistentVolumeClaim": {
+                "claimName": volume.pvc_name,
+                **({"readOnly": True} if save else {}),
+            },
+        },
+        {"name": "tmp", "emptyDir": {}},
+    ]
+    if save:
+        mounts.append({"name": "scratch", "mountPath": SCRATCH_DIR})
+        volumes.append(
+            {"name": "scratch", "emptyDir": {"sizeLimit": str(settings.cache_max_bytes)}}
+        )
+    container = _cache_container(settings, action, _cache_env(settings, [entry]), mounts)
+    labels = {**volume_labels(volume.id), CACHE_LABEL: f"volume-{action}"}
+    metadata: dict[str, Any] = {
+        "name": volume_job_name(volume.name, action, n),
+        "namespace": settings.namespace,
+        "labels": dict(labels),
+    }
+    if annotations:
+        metadata["annotations"] = dict(annotations)
+    return {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": metadata,
+        "spec": {
+            "backoffLimit": BACKOFF_LIMIT,
+            "activeDeadlineSeconds": settings.cache_timeout_seconds,
+            "template": {
+                "metadata": {"labels": dict(labels)},
+                "spec": _hardened(settings, container, volumes),
+            },
+        },
+    }
+
+
 def render_cache_job(
     session: Session, settings: Settings, key: str, entries: list[dict[str, Any]]
 ) -> Obj:
@@ -354,27 +459,10 @@ def render_cache_job(
         volumes.append(
             {"name": "scratch", "emptyDir": {"sizeLimit": str(settings.cache_max_bytes)}}
         )
-    env: list[dict[str, str]] = [
-        {"name": "CACHE_ENTRIES", "value": json.dumps(entries)},
-        {"name": "CACHE_MAX_BYTES", "value": str(settings.cache_max_bytes)},
-        {"name": "CACHE_SCRATCH", "value": SCRATCH_DIR},
-        {"name": "CACHE_VERIFY_TLS", "value": str(settings.cache_s3_verify_tls).lower()},
-        {"name": "HOME", "value": TMP_DIR},
-    ]
+    env = _cache_env(settings, entries)
     if (not save or key == SAVE_NOW) and key not in _TX_FIELD:
         env.append({"name": "CACHE_STATE_DIR", "value": BACKUP_STATE_ROOT})
-    container: dict[str, Any] = {
-        "name": "cache",
-        "image": settings.cache_image,
-        "command": ["orch", "cache", action],
-        "env": env,
-        "securityContext": {
-            "readOnlyRootFilesystem": True,
-            "allowPrivilegeEscalation": False,
-            "capabilities": {"drop": ["ALL"]},
-        },
-        "volumeMounts": mounts,
-    }
+    container = _cache_container(settings, action, env, mounts)
     return _job(session, settings, key, _hardened(settings, container, volumes), labels)
 
 

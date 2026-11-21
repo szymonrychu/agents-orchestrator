@@ -17,6 +17,8 @@ from agents_orchestrator.db import backups as backups_repo
 from agents_orchestrator.db import sessions
 from agents_orchestrator.reconciler import cache as cache_mod
 from agents_orchestrator.reconciler.cache import LIVE, RESTORE_POST, RESTORE_PRE, SAVE_NOW, job_name
+from agents_orchestrator.reconciler.live import deliverable
+from agents_orchestrator.spec import BackupEntry
 from agents_orchestrator.wrapper.models import WrapperUnreachable
 
 pytestmark = pytest.mark.asyncio
@@ -352,3 +354,11 @@ async def test_status_write_keeps_a_save_request_set_concurrently(env):
     await env.rec._write_status(stale, {"message": "x"}, stale.observed_generation)
     status = await env.status(c.id)
     assert status["message"] == "x" and "backup_save" in status
+
+
+@pytest.mark.parametrize(
+    ("root", "delivered"), [("workspace", True), ("claude", True), ("volume", False)]
+)
+async def test_a_volume_root_is_not_live_delivered(root, delivered):
+    e = BackupEntry.model_construct(root=root, path=".", mode="restore", name="n", live=True)
+    assert deliverable(e) is delivered
