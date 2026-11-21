@@ -100,6 +100,13 @@ async def test_save_validates_spec_against_settings(http, spec):
     assert (await http.get(f"{P}/{ok['id']}")).json()["spec"] == {}
 
 
+async def test_a_preset_spec_with_backup_entries_is_refused(http):
+    entry = {"root": "workspace", "path": ".", "mode": "both", "name": "k"}
+    r = await http.post(P, json={"name": "legacy", "spec": {"backup": [entry]}})
+    assert_error(r, 422, "invalid_request")
+    assert "backup" in r.json()["error"]["message"]
+
+
 async def test_put_replaces_and_default_not_renamed(http):
     made = await make(http, "one", {"replicas": 2, "model": "claude-opus-5-5"})
     r = await http.put(f"{P}/{made['id']}", json={"name": "two", "spec": {"replicas": 3}})

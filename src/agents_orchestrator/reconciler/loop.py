@@ -76,11 +76,10 @@ from agents_orchestrator.k8s.labels import (
 )
 from agents_orchestrator.k8s.render import pod_url, render_session
 from agents_orchestrator.reconciler import session_volumes
-from agents_orchestrator.reconciler.cache import CacheGate, CacheRunner
+from agents_orchestrator.reconciler.cache import CacheRunner
 from agents_orchestrator.reconciler.checks import CheckRunner
 from agents_orchestrator.reconciler.discard_hook import HookResult, resolve_hooks, run_discard_hook
 from agents_orchestrator.reconciler.init import InitGate, InitRunner
-from agents_orchestrator.reconciler.live import Live
 from agents_orchestrator.reconciler.rollout import BUSY, LEADS, Replacer, agent_pods, terminating
 from agents_orchestrator.reconciler.sweeper import CacheSweeper
 from agents_orchestrator.reconciler.volumes import VolumeReconciler
@@ -92,7 +91,7 @@ from agents_orchestrator.wrapper.models import describe_exception
 
 log = logging.getLogger(__name__)
 
-CHANNELS = ("session_changed", "backups_current")
+CHANNELS = ("session_changed",)
 # The per-session Kubernetes access objects; each carries the session id (`SESSION_ID_LABEL`).
 KUBE_KINDS = frozenset({"ServiceAccount", "RoleBinding", "ClusterRoleBinding"})
 GUARDED_KINDS = (
@@ -236,7 +235,6 @@ class Reconciler:
         self.checks = CheckRunner(pool, kube, settings)
         self.init = InitRunner(pool, kube, settings, write_status=self._write_status)
         self.cache = CacheRunner(pool, kube, settings, write_status=self._write_status)
-        self.live = Live(self.cache, wrapper_factory, self._session_lock)
         self.sweeper = CacheSweeper(pool, settings)
         self.volumes = VolumeReconciler(pool, kube, settings)
         self.replacer = Replacer(pool, kube, settings)
@@ -390,7 +388,6 @@ class Reconciler:
             except Exception as exc:
                 log.exception("reconcile of session %s failed", session.slug)
                 await self._record_error(session, exc)
-        await self.live.deliver()
 
     async def pre_discard(self, session: Session) -> bool:
         """The gate before a discard deletes anything (D15): True lets the deletion proceed.
@@ -623,14 +620,8 @@ class Reconciler:
             await self._apply(obj, live.get(obj_key(obj)), reason)
         desired = {obj_key(o) for o in objs}
         await self._prune(slug, desired, reason="no longer rendered")
-        session, cache_gate = await self.cache.restore_step(session, "pre")
-        # init waits for the restore, so a script never runs on a workspace about to be replaced
-        held = cache_gate.hold or volume_gate.hold
-        gate = await self.init.step(session, attached) if not held else InitGate()
-        # the after_init entries are restored over what the init run built
-        post_gate = CacheGate()
-        if not held and not gate.hold:
-            session, post_gate = await self.cache.restore_step(session, "post")
+        # init waits for the volume restores, so a script never runs on a tree about to be replaced
+        gate = await self.init.step(session, attached) if not volume_gate.hold else InitGate()
 
         ready = await self._observe(session)
         draining = await self._draining(session.id, replicas)
@@ -640,7 +631,7 @@ class Reconciler:
             phase = "pending" if ready == 0 else "degraded"
             message = f"{ready} of {replicas} pods ready"
         problems: list[str] = []
-        gates = (volume_gate, sessions_gate, cache_gate, gate, post_gate)
+        gates = (volume_gate, sessions_gate, gate)
         if any(g.hold for g in gates):  # sessions wait for the restores and the init run
             phase = "degraded" if volume_gate.hold and volume_gate.degraded else "pending"
         else:
@@ -919,14 +910,6 @@ class Reconciler:
         session = await self._abandon_forced(session)
         if not await self._quiesce(session):
             return
-        session, saved = await self.cache.save_step(session)
-        if not saved:
-            await self._write_status(
-                session,
-                {"phase": "deleting", "message": "saving the backup entries"},
-                session.observed_generation,
-            )
-            return
         session, saved = await self.cache.transcripts_save_step(session)
         if not saved:
             await self._write_status(
@@ -1019,7 +1002,7 @@ class Reconciler:
         """Stop the agents and let the ingester drain before the history is exported or saved.
 
         Only when an export is still owed (a hook that has not delivered) or a workdir or
-        transcripts save is (a workspace backup entry, no save outcome yet). The StatefulSet is
+        transcripts save is (a backup_restore volume, no save outcome yet). The StatefulSet is
         scaled to zero; once no agent pod is left, the ingester gets `discard_drain_seconds` to
         store the last events of their streams. The wait is bounded by
         `discard_quiesce_timeout_seconds` from the first pass, after which the discard goes on
@@ -1027,7 +1010,7 @@ class Reconciler:
         """
         status = session.status
         hook_owed = bool(self._owed_hooks(session)[1])
-        save_owed = self.cache.save_owed(session) or self.cache.transcripts_save_owed(session)
+        save_owed = self.cache.transcripts_save_owed(session)
         if not hook_owed and not save_owed:
             return True
         ns, slug = self.settings.namespace, session.slug
@@ -1186,10 +1169,8 @@ class Reconciler:
         agent = replace(agent, wrapper_session_id=None, wrapper_session_created_at=None)
         if self.bootstrapper is None or not agent.ready:
             return "done", {"cleared": True, "bootstrapped": False}
-        cache_gate = CacheGate.of_restores(session.spec, session.status)
-        gate = InitGate.of(session.status.get("init"), session.spec.init_scripts)
-        held = cache_gate if cache_gate.hold else gate
-        if held.hold:  # the converge bootstraps it once the restore and the init run are over
+        held = InitGate.of(session.status.get("init"), session.spec.init_scripts)
+        if held.hold:  # the converge bootstraps it once the init run is over
             return "done", {"cleared": True, "bootstrapped": False, "message": held.message}
         token = tokens_for(self.settings, session.id).auth
         problem = await self.bootstrapper.bootstrap(agent, session.spec, token)

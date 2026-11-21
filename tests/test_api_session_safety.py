@@ -15,17 +15,20 @@ from agents_orchestrator.cache.save_rule import transcripts_skip
 from agents_orchestrator.db.pool import notify
 
 T0 = datetime(2026, 10, 28, 9, 0, tzinfo=UTC)
-CACHED = {"backup": [{"root": "workspace", "path": ".", "mode": "both", "name": "k1"}]}
+VOLUME = "11111111-1111-4111-8111-111111111111"
+# a read-write backup_restore volume at the workdir: the transcripts target and the saved workdir
+CACHED = {
+    "volumes": [
+        {"volume": VOLUME, "mount_path": "/workdir/workdir", "mode": "rw", "backup_restore": True}
+    ]
+}
 RESTORED = {"state": "restored", "finished_at": T0.isoformat(), "bytes": 10, "reason": None}
 
 
-def _status(entry_restore=None, tx_restore=None, tx_save=None, **extra) -> dict:
-    """A session status: the workspace entry's restore record and the transcripts runs."""
+def _status(tx_restore=None, tx_save=None, **extra) -> dict:
+    """A session status: the transcripts runs."""
     transcripts = {k: v for k, v in (("restore", tx_restore), ("save", tx_save)) if v is not None}
-    backup: dict = {"transcripts": transcripts}
-    if entry_restore is not None:
-        backup["entries"] = [{"index": 0, "restore": entry_restore, "save": None}]
-    return {"backup": backup, **extra}
+    return {"backup": {"transcripts": transcripts}, **extra}
 
 
 SAVED = {
@@ -129,106 +132,78 @@ async def test_message_status_frame_carries_oldest_queued_at(srv, pool):
 
 
 async def test_backup_view_when_cache_configured(pool, dsn):
-    status = _status({"state": "restored"}, {**RESTORED}, replicas=1)
+    status = _status({**RESTORED}, replicas=1)
     backup = await _backup(pool, dsn, CACHED, status)
     assert backup == {
-        "entries": [{"index": 0, "name_template": "k1", "action": "save", "reason": None}],
         "workdir": True,
         "transcripts": True,
         "reason": None,
         "last_transcripts_backup": None,
     }
-    for state in ("missing", "unreadable"):
-        status = _status({"state": state}, {"state": "miss"}, replicas=1)
+    for state in ("miss", "unreadable"):
+        status = _status({"state": state}, replicas=1)
         backup = await _backup(pool, dsn, CACHED, status)
         assert (backup["workdir"], backup["transcripts"], backup["reason"]) == (True, True, None)
 
 
 async def test_backup_view_without_cache(pool, dsn):
-    status = _status({"state": "restored"}, RESTORED, replicas=1)
+    status = _status(RESTORED, replicas=1)
     backup = await _backup(pool, dsn, {}, status)
     assert (backup["workdir"], backup["transcripts"]) == (False, False)
     assert backup["reason"] == "no_session_cache"
-    assert backup["entries"] == [
-        {"index": -1, "name_template": "", "action": "discard", "reason": "workspace_not_listed"}
-    ]
 
     backup = await _backup(pool, dsn, CACHED, status, cache=False)
-    assert (backup["workdir"], backup["transcripts"]) == (False, False)
+    assert (backup["workdir"], backup["transcripts"]) == (True, False)
     assert backup["reason"] == "cache_not_configured"
 
 
-async def test_backup_view_lists_each_entry(pool, dsn):
-    spec = {
-        "backup": [
-            {"root": "claude", "path": "skills", "mode": "backup", "name": "skills/{{ project }}"},
-            {"root": "workspace", "path": "src", "mode": "restore", "name": "src"},
-        ]
-    }
-    backup = await _backup(pool, dsn, spec, _status(None, RESTORED, replicas=1))
-    assert backup["entries"] == [
-        {"index": 0, "name_template": "skills/{{ project }}", "action": "save", "reason": None},
-        {"index": 1, "name_template": "src", "action": "discard", "reason": "restore-only"},
-        {"index": -1, "name_template": "", "action": "discard", "reason": "workspace_not_listed"},
-    ]
-    assert backup["workdir"] is False  # no workspace entry is saved
+async def test_backup_view_workdir_is_a_saved_volume_at_or_below_the_workdir(pool, dsn):
+    att = CACHED["volumes"][0]
+    status = _status(RESTORED, replicas=1)
+    for volumes, workdir in (
+        ([{**att, "mount_path": "/volumes/data"}], False),
+        ([{**att, "mount_path": "/workdir/workdir/sub"}], True),
+        ([{**att, "mount_path": "/workdir/other"}], False),
+        ([{**att, "mode": "ro"}], False),
+        ([{**att, "backup_restore": False}], False),
+        ([att], True),
+    ):
+        backup = await _backup(pool, dsn, {"volumes": volumes}, status)
+        assert backup["workdir"] is workdir
 
 
 @pytest.mark.parametrize(
-    ("restore", "sessions_restore", "workdir", "transcripts", "reason"),
+    ("sessions_restore", "transcripts", "reason"),
     [
-        (None, RESTORED, False, True, "restore_pending"),
-        ({"state": "running"}, RESTORED, False, True, "restore_pending"),
-        ({"state": "failed", "reason": "HTTP 403"}, RESTORED, True, True, None),
-        ({"state": "restored"}, {"state": "running"}, True, False, "restore_running"),
-        ({"state": "restored"}, {"state": "failed", "reason": "timeout"}, True, False, "timeout"),
-        (
-            {"state": "restored"},
-            {"state": "skipped", "reason": "not_configured"},
-            True,
-            False,
-            "restore_skipped",
-        ),
-        ({"state": "restored"}, {"state": "skipped", "reason": "pods_exist"}, True, True, None),
-        ({"state": "restored"}, None, True, True, None),
-        (
-            {"state": "running"},
-            {"state": "failed", "reason": "timeout"},
-            False,
-            False,
-            "restore_pending",
-        ),
+        (RESTORED, True, None),
+        ({"state": "running"}, False, "restore_running"),
+        ({"state": "failed", "reason": "timeout"}, False, "timeout"),
+        ({"state": "skipped", "reason": "not_configured"}, False, "restore_skipped"),
+        ({"state": "skipped", "reason": "pods_exist"}, True, None),
+        (None, True, None),
     ],
 )
-async def test_backup_view_reports_skipped_save(
-    pool, dsn, restore, sessions_restore, workdir, transcripts, reason
-):
-    status = _status(restore, sessions_restore, replicas=1)  # converged: its pods ran
+async def test_backup_view_reports_skipped_save(pool, dsn, sessions_restore, transcripts, reason):
+    status = _status(sessions_restore, replicas=1)  # converged: its pods ran
     backup = await _backup(pool, dsn, CACHED, status)
-    assert (backup["workdir"], backup["transcripts"]) == (workdir, transcripts)
+    assert backup["transcripts"] is transcripts
     assert backup["reason"] == reason
     assert transcripts == (transcripts_skip(True, status) is None)
 
 
 async def test_backup_view_never_converged_session_has_no_saves(pool, dsn):
-    """No converge yet: the reconciler skips every save (no PVC to read)."""
-    status = _status({"state": "restored"}, RESTORED)
+    """No converge yet: the reconciler skips the save (no PVC to read)."""
+    status = _status()
     backup = await _backup(pool, dsn, CACHED, status)
-    assert (backup["workdir"], backup["transcripts"]) == (False, True)
+    assert backup["transcripts"] is False
     assert backup["reason"] == "never_converged"
-    assert backup["entries"][0]["action"] == "skip"
-    status = _status({"state": "restored"})
     assert transcripts_skip(True, status) == "never_converged"
     converged = await _backup(pool, dsn, CACHED, {**status, "replicas": 1})
-    assert (converged["workdir"], converged["transcripts"], converged["reason"]) == (
-        True,
-        True,
-        None,
-    )
+    assert (converged["transcripts"], converged["reason"]) == (True, None)
 
 
 async def test_backup_view_last_transcripts_backup(pool, dsn):
-    status = _status({"state": "restored"}, RESTORED, SAVED)
+    status = _status(RESTORED, SAVED)
     backup = await _backup(pool, dsn, CACHED, status)
     last = backup["last_transcripts_backup"]
     assert set(last) == {"finished_at", "bytes"}
@@ -240,5 +215,5 @@ async def test_backup_view_last_transcripts_backup(pool, dsn):
         {**SAVED, "state": "skipped", "reason": "restore_running", "bytes": None},
         {**SAVED, "state": "failed", "reason": "too_large", "bytes": None},
     ):
-        status = _status(None, RESTORED, unfinished)
+        status = _status(RESTORED, unfinished)
         assert (await _backup(pool, dsn, CACHED, status))["last_transcripts_backup"] is None

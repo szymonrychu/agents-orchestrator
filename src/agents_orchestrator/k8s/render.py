@@ -39,7 +39,6 @@ from agents_orchestrator.spec import (
     SessionSpec,
     VolumeAttachment,
     WrapperSettings,
-    backups,
     effective_mount_path,
     parse_quantity,
 )
@@ -52,8 +51,6 @@ SESSIONS_ROOT = "/sessions"
 # dir lives: the wrapper links <config>/skills and rules to it and has no guard against equal paths.
 CLAUDE_ROOT = "/claude"
 CLAUDE_SUBPATH = "claude"
-BACKUP_STATE_ROOT = "/backup-state"
-BACKUP_STATE_SUBPATH = "backup-state"
 WORKSPACE_VOLUME = "workspace"
 PROBE_PERIOD = 5
 STARTUP_SLACK = 12
@@ -66,7 +63,7 @@ DOCKER_CONFIG_DIR = "/docker-config"
 # The wrapper commands the orchestrator itself sends (`sessions.commands.client`): `compact`
 # (api and dispatcher), `clear`, the ex-leader reset after a voluntary handover
 # (claude-code-wrapper >= 0.10.0; an older wrapper refuses it with 403 command_denied), and
-# `reload-skills`, sent after a live backup delivery.
+# `reload-skills` (granted to the client; no live delivery sends it any more).
 CLIENT_COMMANDS = ("compact", "clear", "reload-skills")
 AGENT_PASSTHROUGH_ENV = ("ORCH_AGENT_TOKEN", "ORCH_AGENT_URL", "ORCH_SESSION_ID", "POD_NAME")
 
@@ -501,13 +498,6 @@ CHAT_ENVELOPE_PROMPT = (
     "silent, write no envelope."
 )
 
-BACKUP_SAVE_PROMPT = (
-    "After you create or change a skill, a rule or a script that lives in a backed up directory, "
-    "call orchestrator_backup_save (root and path of the backup entry) so the other sessions of "
-    "the project get it; the directory is saved at the end of the session too, but only this "
-    "call shares it while the session runs."
-)
-
 VOLUME_SAVE_PROMPT = (
     "A volume mounted with backup_restore is saved when the last session releases it; to share "
     "files you changed in it sooner, call orchestrator_volume_save with the volume name "
@@ -523,7 +513,7 @@ def _ask_prompt(settings: Settings) -> str:
 
 
 def _system_append(spec: SessionSpec, settings: Settings) -> str:
-    """The ask prompt, plus the project room guidance and, with backup entries, the save
+    """The ask prompt, plus the project room guidance and, with backup_restore volumes, the save
     guidance, when the agent relay is reachable."""
     ask = _ask_prompt(settings)
     if not settings.agent_api_url:
@@ -532,8 +522,6 @@ def _system_append(spec: SessionSpec, settings: Settings) -> str:
     parts = [ask, room]
     if settings.chat_available:
         parts.append(CHAT_ENVELOPE_PROMPT)
-    if backups(spec):
-        parts.append(BACKUP_SAVE_PROMPT)
     if any(a.backup_restore for a in spec.volumes or []):
         parts.append(VOLUME_SAVE_PROMPT)
     return "\n\n".join(parts)

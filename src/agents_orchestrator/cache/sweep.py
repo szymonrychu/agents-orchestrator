@@ -8,8 +8,8 @@ delete's re-check. Per backup name:
 - The current version is never deleted, nor any version a stored session status references
   (`status.backup[*].version` / `base_version`), nor a version younger than the grace period (a
   save may still be recording it).
-- A name not restored or saved for the retention period, with no referenced version, no session
-  spec rendering to it and nothing inside the grace period, is deleted whole (every version).
+- A name not restored or saved for the retention period, with no referenced version and nothing
+  inside the grace period, is deleted whole (every version).
 - Otherwise the newest K non-current versions stay and older non-current ones go once past the
   retention period.
 - An object under `<prefix>b/` that no version row owns is an orphan (a save the reconciler
@@ -38,8 +38,6 @@ from typing import Any
 import psycopg
 from psycopg_pool import AsyncConnectionPool
 
-from agents_orchestrator import rendering
-from agents_orchestrator.cache.keys import ArchiveNameError, validate_name
 from agents_orchestrator.cache.policy import SweepPolicy
 from agents_orchestrator.cache.presign import (
     SUFFIX,
@@ -51,9 +49,8 @@ from agents_orchestrator.cache.presign import (
 )
 from agents_orchestrator.db import backups as backups_repo
 from agents_orchestrator.db import sessions as sessions_repo
-from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.settings import Settings
-from agents_orchestrator.spec import has_workspace_entry
+from agents_orchestrator.spec import transcripts_enabled
 
 log = logging.getLogger(__name__)
 
@@ -97,15 +94,14 @@ class SweepPlan:
 
 @dataclass
 class References:
-    """What stored sessions point at: version ids and names (with the slugs) and transcripts."""
+    """What stored sessions point at: version ids (with the slugs) and transcripts."""
 
     versions: dict[uuid.UUID, list[str]] = field(default_factory=dict)
-    names: dict[str, list[str]] = field(default_factory=dict)
     transcripts: set[str] = field(default_factory=set)
     planned_keys: set[str] = field(default_factory=set)  # in-flight saves: no version row yet
 
-    def slugs_of(self, name: str, ids: Iterable[uuid.UUID]) -> list[str]:
-        found = set(self.names.get(name, ()))
+    def slugs_of(self, ids: Iterable[uuid.UUID]) -> list[str]:
+        found: set[str] = set()
         for vid in ids:
             found.update(self.versions.get(vid, ()))
         return sorted(found)
@@ -174,7 +170,7 @@ def _plan_name(
         return Decision(v.object_key, v.size, delete, reason, name, v.id, whole)
 
     last = activity or max(v.created_at for v in group)
-    pinned = name in refs.names or any(v.id in refs.versions for v in group)
+    pinned = any(v.id in refs.versions for v in group)
     if last <= old and not pinned and all(v.created_at <= fresh for v in group):
         why = "name not restored or saved for longer than the retention period"
         return [verdict(v, True, why, whole=True) for v in group]
@@ -203,22 +199,6 @@ def _plan_name(
 # ------------------------------------------------------------------ the references
 
 
-def _spec_names(session: Session) -> set[str]:
-    """Names a session's spec entries render to before the reconciler resolves them (an exact
-    render only; a template needing save-time values renders no name). Blocking (the sandbox is
-    a child process): run in a thread."""
-    ctx = rendering.session_context("archive_name", session)
-    found: set[str] = set()
-    for entry in session.spec.backup or []:
-        try:
-            found.add(
-                validate_name(rendering.render_name(entry.name, ctx, dry=True), allow_prefix=False)
-            )
-        except ArchiveNameError:
-            continue
-    return found
-
-
 def _run_plan_keys(status: dict[str, Any]) -> set[str]:
     """Object keys in `status.backup.runs[*].plan[].key`: saves in flight that have no version
     row yet."""
@@ -240,20 +220,15 @@ async def references(conn: psycopg.AsyncConnection, settings: Settings) -> Refer
     discard finished (its save included), so "present in the table" is non-terminal."""
     found = await sessions_repo.list_sessions(conn)
     prefix = settings.cache_s3_prefix
-    per_session = await asyncio.to_thread(lambda: [_spec_names(s) for s in found])
     refs = References()
     versions: dict[uuid.UUID, set[str]] = defaultdict(set)
     for vid, _name, slug in await backups_repo.referencing(conn):
         versions[vid].add(slug)
     refs.versions = {vid: sorted(slugs) for vid, slugs in versions.items()}
-    names: dict[str, list[str]] = defaultdict(list)
-    for session, rendered in zip(found, per_session, strict=True):
+    for session in found:
         refs.planned_keys |= _run_plan_keys(session.status)
-        if has_workspace_entry(session.spec):
+        if transcripts_enabled(session.spec):
             refs.transcripts.add(f"{prefix}{SESSIONS_GROUP}{session.slug}{SUFFIX}")
-        for name in rendered:
-            names[name].append(session.slug)
-    refs.names = {n: sorted(s) for n, s in names.items()}
     return refs
 
 
@@ -343,11 +318,7 @@ async def _drop_rows(
             async with conn.transaction():
                 rows = await backups_repo.name_versions(conn, name)
                 planned = {d.version_id for d in ds}
-                if (
-                    {v.id for v in rows} != planned
-                    or name in late.names
-                    or planned & late.versions.keys()
-                ):
+                if {v.id for v in rows} != planned or planned & late.versions.keys():
                     result.skipped_protected += len(ds)
                     continue
                 await backups_repo.delete_name(conn, name)

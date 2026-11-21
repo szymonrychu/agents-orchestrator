@@ -56,7 +56,6 @@ PLAN_TOOLS = [
     "plan_step_deps", "plan_steps_order", "plan_step_next", "plan_step_update", "plan_gate",
     "spec_section", "plan_steps_push", "plan_export", "plan_questions_ask",
 ]  # fmt: skip
-BACKUP_TOOLS = ["backup_save", "backup_status"]
 VOLUME_TOOLS = ["volumes_status", "volume_save"]
 TAIL_TOOLS = [
     *SESSION_TOOLS,
@@ -67,13 +66,12 @@ TAIL_TOOLS = [
     *SPEC_TOOLS,
     *PLAN_TOOLS,
     *on_start.PROJECT_CHAT_TOOLS,
-    *BACKUP_TOOLS,
     *VOLUME_TOOLS,
 ]
 # Allowed before the pinned plugin ships them; add a name here when the allow-list leads the
 # plugin pin and remove it when the pin offers the tool (project room T-117 O9; project grants
 # T-120). The backups, handoff and room notes admin tools wait for the plugins release of PR #61
-# (S-68 steps 12 to 14); backup_save and backup_status wait for plugins release A (S-68).
+# (S-68 steps 12 to 14).
 PLUGIN_PENDING: set[str] = {
     "volumes_status",
     "volume_save",
@@ -82,8 +80,6 @@ PLUGIN_PENDING: set[str] = {
     "volume_attach",
     "volume_detach",
     "volume_create",
-    "backup_save",
-    "backup_status",
     "backups_list",
     "backup_versions",
     "backup_manifest",
@@ -633,10 +629,17 @@ def test_alone_session_allow_is_the_literal_e2e_list():
         "plan_step_deps", "plan_steps_order", "plan_step_next", "plan_step_update", "plan_gate",
         "spec_section", "plan_steps_push", "plan_export", "plan_questions_ask",
         "project_chat_send", "project_chat_read",
-        "backup_save", "backup_status", "volumes_status", "volume_save",
+        "volumes_status", "volume_save",
         "session_get", "session_patch", "proposal_create", "proposal_revise", "proposals_list",
         "proposal_get", "proposal_withdraw", "self_close",
     ]  # fmt: skip
+
+
+def test_entry_backup_tools_are_no_longer_granted():
+    for spec in (SessionSpec(), SessionSpec(replicas=2)):
+        allow = on_start.orchestrator_allow(spec)
+        assert "backup_save" not in allow and "backup_status" not in allow
+        assert {"volumes_status", "volume_save"} <= set(allow)
 
 
 def test_hive_session_gets_task_tools_once():

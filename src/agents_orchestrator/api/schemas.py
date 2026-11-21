@@ -381,27 +381,14 @@ class BackupRun(BaseModel):
     bytes: int
 
 
-class EntryPlanView(BaseModel):
-    """What the discard does with one backup entry (`index` -1: the workspace root itself).
-
-    `action` is `save`, `discard` (the directory goes with the session) or `skip` (with `reason`).
-    """
-
-    index: int
-    name_template: str
-    action: Literal["save", "discard", "skip"]
-    reason: str | None
-
-
 class SessionBackup(BaseModel):
     """What a discard would save now; each flag is true only when that save would really run.
 
-    `reason` is null when both run, else `no_session_cache` (no workspace backup entry),
-    `cache_not_configured` (no S3 cache configured) or the save's skip reason, the workdir's first.
-    `entries` is the per-entry plan the discard dialog shows.
+    `workdir` is true when a read-write backup_restore volume is mounted at the workdir or below it.
+    `reason` is null when the transcripts save runs, else `no_session_cache` (no backup_restore
+    volume), `cache_not_configured` (no S3 cache configured) or the save's skip reason.
     """
 
-    entries: list[EntryPlanView] = []
     workdir: bool
     transcripts: bool
     reason: str | None

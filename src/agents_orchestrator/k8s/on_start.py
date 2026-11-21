@@ -87,9 +87,6 @@ MINDMAP_TOOLS = [
     "mindmap_task_nodes", "mindmap_direction_list", "mindmap_direction_create",
     "mindmap_direction_update",
 ]  # fmt: skip
-# Backup tools (S-68): every session saves one of its own backup entries on demand and reads its
-# backup status (`POST /agent/v1/backup/save`, `GET /agent/v1/backup`; any agent of the session).
-BACKUP_TOOLS = ["backup_save", "backup_status"]
 # Volume tools (S-77): every session lists the volumes it mounts and saves one on demand (the
 # route answers 403 backup_not_enabled unless its attachment has backup_restore).
 VOLUME_TOOLS = ["volumes_status", "volume_save"]
@@ -196,7 +193,6 @@ def orchestrator_allow(spec: SessionSpec, *, mindmap: bool = False) -> list[str]
         *PLAN_TOOLS,
         *PROJECT_CHAT_TOOLS,
         *(MINDMAP_TOOLS if mindmap else []),
-        *BACKUP_TOOLS,
         *VOLUME_TOOLS,
         *(ADMIN_TOOLS if spec.session_messaging else _regular_tools(spec)),
     ]

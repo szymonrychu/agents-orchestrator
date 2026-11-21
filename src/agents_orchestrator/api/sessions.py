@@ -20,8 +20,7 @@ from agents_orchestrator.api.errors import ApiError, not_found, not_manageable, 
 from agents_orchestrator.api.service_auth import calling_service
 from agents_orchestrator.api.usage_gate import UsageSource
 from agents_orchestrator.api.vault_client import Pin, VaultClient
-from agents_orchestrator.cache.keys import ArchiveNameError
-from agents_orchestrator.cache.save_rule import save_plan, transcripts_run, transcripts_skip
+from agents_orchestrator.cache.save_rule import transcripts_run, transcripts_skip
 from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import leadership, presets, projects, queue, views
 from agents_orchestrator.db import sessions as repo
@@ -37,8 +36,8 @@ from agents_orchestrator.spec import (
     SpecInvalid,
     fill_resource_defaults,
     generated_slug,
-    has_workspace_entry,
     init_scripts_hash,
+    transcripts_enabled,
     validate_slug,
     validate_spec,
 )
@@ -110,28 +109,18 @@ def _last_backup(run: object) -> schemas.BackupRun | None:
 
 
 def session_backup(session: repo.Session, settings: Settings) -> schemas.SessionBackup:
-    """What the discard would save, by the reconciler's own rules (`save_plan`)."""
-    plan = save_plan(session, settings.cache_available)
-    backup = session.spec.backup or []
-    workdir = any(
-        p.action == "save" and backup[p.index].root == "workspace" for p in plan if p.index >= 0
-    )
-    if not has_workspace_entry(session.spec):
+    """What a discard would save: the transcripts, by the reconciler's own rule
+    (`transcripts_skip`), and whether the workdir is a saved volume."""
+    spec = session.spec
+    if not transcripts_enabled(spec):
         transcripts, reason = False, "no_session_cache"
     elif not settings.cache_available:
         transcripts, reason = False, "cache_not_configured"
     else:
         skip = transcripts_skip(True, session.status)
-        transcripts = skip is None
-        reason = next((p.reason for p in plan if p.action == "skip"), None) or skip
+        transcripts, reason = skip is None, skip
     return schemas.SessionBackup(
-        entries=[
-            schemas.EntryPlanView(
-                index=p.index, name_template=p.name_template, action=p.action, reason=p.reason
-            )
-            for p in plan
-        ],
-        workdir=workdir,
+        workdir=transcripts_enabled(spec),
         transcripts=transcripts,
         reason=reason,
         last_transcripts_backup=_last_backup(transcripts_run(session.status, "save")),
@@ -580,42 +569,7 @@ async def _pin_preset(
     return Pinned(session_id, refs, labels, pins)
 
 
-def check_archive_names(
-    slug: str,
-    spec: SessionSpec,
-    preset_name: str | None,
-    created_by_service: str | None,
-    project: str,
-) -> None:
-    """Render every backup entry name with this session's real context; 422 on a bad name.
-
-    `validate_spec` already rendered them against the preview sample, which cannot see a slug,
-    preset name or project that squeezes to nothing (`{{ preset_name }}` for a name of only
-    symbols). A `sha256` call renders as a placeholder here; names render again at restore and
-    save time.
-    """
-    if not spec.backup:
-        return
-    context = rendering.archive_context(
-        slug, preset_name, created_by_service, datetime.now(UTC), project
-    )
-    for i, entry in enumerate(spec.backup):
-        try:
-            rendering.render_name(entry.name, context, dry=True)
-        except ArchiveNameError as exc:
-            where = f" (line {exc.line})" if exc.line else ""
-            raise ApiError(422, "invalid_request", f"backup[{i}].name{where}: {exc}") from None
-
-
 async def _insert(conn, slug: str, spec: SessionSpec, **provenance) -> repo.Session:
-    await run_in_threadpool(
-        check_archive_names,
-        slug,
-        spec,
-        provenance.get("preset_name"),
-        provenance.get("created_by_service"),
-        provenance.get("project", projects.DEFAULT),
-    )
     try:
         return await repo.create(conn, slug, spec, **provenance)
     except repo.SessionExists:
@@ -710,14 +664,6 @@ async def _create_from_preset(
         return await _insert(conn, slug, spec, **provenance)
     for _ in range(_SLUG_ATTEMPTS):
         generated = generated_slug(preset.name)
-        await run_in_threadpool(
-            check_archive_names,
-            generated,
-            spec,
-            preset.name,
-            created_by_service,
-            project,
-        )
         try:
             return await repo.create(conn, generated, spec, **provenance)
         except repo.SessionExists:

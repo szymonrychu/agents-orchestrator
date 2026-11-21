@@ -241,7 +241,6 @@ def test_namespace_grant_is_privileged_and_stripped():
         ("static", False, True),
         ("workdir", "a", "b"),
         ("pvc_size", "1Gi", "2Gi"),
-        ("backup", [{"name": "a"}], [{"name": "b"}]),
     ],
 )
 def test_fixed_changes_names_each_field(field, old, new):
@@ -250,7 +249,7 @@ def test_fixed_changes_names_each_field(field, old, new):
 
 
 def test_fixed_changes_unchanged_is_empty():
-    spec = {"replicas": 2, "max_replicas": 4, "workdir": "w", "pvc_size": "1Gi", "backup": []}
+    spec = {"replicas": 2, "max_replicas": 4, "workdir": "w", "pvc_size": "1Gi"}
     assert fixed_changes(spec, dict(spec)) == []
     assert fixed_changes({}, {}) == []
 
@@ -260,9 +259,9 @@ def test_fixed_changes_ignores_other_fields():
 
 
 def test_fixed_changes_sorted():
-    assert fixed_changes({}, {"workdir": "w", "pvc_size": "1Gi", "backup": [{"name": "a"}]}) == [
-        "backup",
+    assert fixed_changes({}, {"workdir": "w", "pvc_size": "1Gi", "static": True}) == [
         "pvc_size",
+        "static",
         "workdir",
     ]
 
@@ -292,9 +291,9 @@ def test_fixed_changes_defaults_equal_absent():
 
 
 def test_fixed_changes_null_equals_absent():
-    assert fixed_changes({}, {"backup": None, "pvc_size": None}) == []
-    assert fixed_changes({"backup": None}, {}) == []
-    assert fixed_changes({"backup": [{"name": "a"}]}, {"backup": None}) == ["backup"]
+    assert fixed_changes({}, {"workdir": None, "pvc_size": None}) == []
+    assert fixed_changes({"pvc_size": None}, {}) == []
+    assert fixed_changes({"pvc_size": "1Gi"}, {"pvc_size": None}) == ["pvc_size"]
 
 
 DEFAULTS = {
@@ -431,7 +430,6 @@ SECURITY = frozenset(
         "env",
         "any_mcp_config",
         "any_mcp_sources",
-        "backup",
         "volumes",
         "wrapper.hooks",
         "wrapper.mcp_servers",
@@ -500,7 +498,7 @@ def test_privileged_target_allows_non_security():
         "wrapper": {"turn_max_seconds": 600, "agent_commands": []},
     }
     assert ptc(stored, new) == []
-    assert ptc(stored, {**new, "backup": [{"name": "x"}]}) == ["backup"]
+    assert ptc(stored, {**new, "volumes": [{"volume": "x", "mode": "rw"}]}) == ["volumes"]
 
 
 def test_tighten_autoclose():

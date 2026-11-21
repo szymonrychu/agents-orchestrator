@@ -18,7 +18,7 @@ from agents_orchestrator import cli
 from agents_orchestrator.db import migrate_backup_spec as bm
 from agents_orchestrator.db.migrate import run_migrations
 from agents_orchestrator.settings import Settings
-from agents_orchestrator.spec import SessionSpec
+from agents_orchestrator.spec import SessionSpec, without_legacy_backup
 
 GOLDEN = Path(__file__).parent / "golden" / "backup_migration"
 CASES = sorted(p for p in GOLDEN.glob("*.json") if not p.name.startswith("unmapped_"))
@@ -93,31 +93,6 @@ def test_map_status_leaves_a_skipped_or_absent_restore_pending():
         assert bm.map_status(cache, [WS])["entries"][0]["restore"] is None
 
 
-def test_live_session_keeps_its_discard_save(dsn):
-    """A session running across the deploy, discarded later, still saves its workspace."""
-    from test_cache_jobs_render import make_session
-
-    from agents_orchestrator.cache.save_rule import save_plan
-
-    pid = _preset_row(dsn, "Live", {"cache": {}})
-    derived = bm.legacy_cache_key(pid)
-    restore = {"state": "restored", "finished_at": "2026-11-01T10:00:00+00:00"}
-    sid = _session_row(
-        dsn,
-        {"cache": {"restore_key": derived, "save_key": derived}},
-        pid,
-        {"replicas": 1, "init": {"state": "succeeded"}, "cache": {"restore": restore}},
-    )
-    with psycopg.connect(dsn) as conn:
-        bm.apply(conn)
-    spec = _spec_of(dsn, "sessions", sid)
-    status = _sql(dsn, "SELECT status FROM sessions WHERE id = %s", (sid,))[0][0]
-    session = make_session(backup=spec["backup"])
-    session.status.update(status)
-    plan = save_plan(session)
-    assert [(p.index, p.action, p.reason) for p in plan] == [(0, "save", None)]
-
-
 # ---------------------------------------------------------------------- stored specs
 
 
@@ -176,7 +151,7 @@ def test_apply_rewrites_specs_and_status_idempotently(dsn):
     assert "cache" not in status
     assert status["backup"]["runs"] == {"restore_pre": {"state": "succeeded"}}
     assert status["backup"]["transcripts"] == {"save": {"state": "skipped"}}
-    SessionSpec.model_validate(_spec_of(dsn, "presets", pid))
+    SessionSpec.model_validate(without_legacy_backup(_spec_of(dsn, "presets", pid)))
 
 
 def test_run_migrations_runs_the_step_and_refuses_unmapped(dsn):

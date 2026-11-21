@@ -27,7 +27,6 @@ from pydantic import (
 )
 
 from agents_orchestrator import rendering
-from agents_orchestrator.cache.keys import validate_name
 
 if TYPE_CHECKING:
     from agents_orchestrator.settings import Settings
@@ -324,6 +323,30 @@ def legacy_context(pins: Mapping[str, Any] | None) -> dict[str, Any]:
     return {_LEGACY_ENV: sorted(k for k, v in (pins or {}).items() if isinstance(v, str))}
 
 
+def transcripts_enabled(spec: SessionSpec) -> bool:
+    """True when the session keeps its Claude transcripts in the object store: a read-write
+    `backup_restore` volume is mounted at the workdir or below it (the successor of the old
+    workspace backup entry that enabled the transcripts target; the startup migration mounts a
+    workspace entry exactly there)."""
+    workdir = f"{WORKDIR_ROOT}/{spec.workdir}"
+    return any(
+        a.backup_restore
+        and a.mode == "rw"
+        and a.mount_path is not None
+        and (a.mount_path == workdir or a.mount_path.startswith(workdir + "/"))
+        for a in spec.volumes or []
+    )
+
+
+def without_legacy_backup(raw: dict[str, Any]) -> dict[str, Any]:
+    """A stored spec without the removed `backup` key (S-77: backup entries became volumes).
+
+    Stored rows written before the removal still carry it; the volume migration moves a preset's
+    entries to volumes from the raw JSON, and every other read drops the key so the row loads.
+    """
+    return {k: v for k, v in raw.items() if k != "backup"} if "backup" in raw else raw
+
+
 class Ref(NamedTuple):
     """A vault reference: the entry id and the entry's env name."""
 
@@ -570,15 +593,6 @@ class WrapperSettings(_Strict):
         return v
 
 
-BACKUP_MAX_ENTRIES = 16
-BACKUP_NAME_TEMPLATE_MAX = 256
-Direction = Literal["restore", "backup"]
-
-
-def _path_parts(path: str) -> tuple[str, ...]:
-    return () if path == "." else tuple(path.split("/"))
-
-
 def check_exclude(v: list[str]) -> list[str]:
     """Validate backup exclude entries (count, length, relative with no '..'); ValueError."""
     if len(v) > CACHE_EXCLUDE_MAX:
@@ -589,110 +603,6 @@ def check_exclude(v: list[str]) -> list[str]:
         if entry.startswith("/") or ".." in entry.split("/"):
             raise ValueError(f"exclude {entry!r} must be relative with no '..' segment")
     return v
-
-
-class BackupEntry(_Strict):
-    """One named directory of a session that is restored at start and or saved at discard.
-
-    `root` picks the tree (`workspace` is the session workdir, `claude` the session PVC subPath
-    shared by all pods); `path` is relative to it (`.` is the whole root). `name` is a Jinja
-    template (surface `archive_name`) naming the backup in the object store.
-    """
-
-    root: Literal["workspace", "claude"]
-    path: str
-    mode: Literal["backup", "restore", "both"]
-    name: str
-    exclude: list[str] = []
-    live: bool = False
-    after_init: bool = False
-
-    @field_validator("path")
-    @classmethod
-    def _check_path(cls, v: str) -> str:
-        if not v or len(v) > CACHE_EXCLUDE_ENTRY_MAX:
-            raise ValueError(f"path is 1 to {CACHE_EXCLUDE_ENTRY_MAX} characters")
-        if v.startswith("/") or ".." in v.split("/"):
-            raise ValueError(f"path {v!r} must be relative with no '..' segment")
-        if v != "." and "" in v.split("/"):
-            raise ValueError(f"path {v!r} has an empty segment")
-        return v
-
-    @field_validator("name")
-    @classmethod
-    def _check_name(cls, v: str) -> str:
-        if not v or len(v) > BACKUP_NAME_TEMPLATE_MAX:
-            raise ValueError(f"name is 1 to {BACKUP_NAME_TEMPLATE_MAX} characters")
-        if not any(m in v for m in rendering.MARKERS):
-            # A plain name is checked here; a template renders in validate_spec (spec time), as
-            # the sandbox is a child process and a stored spec is parsed on every read.
-            validate_name(v, allow_prefix=False)
-        return v
-
-    @field_validator("exclude")
-    @classmethod
-    def _check_exclude(cls, v: list[str]) -> list[str]:
-        return check_exclude(v)
-
-    def directions(self) -> tuple[Direction, ...]:
-        return ("restore", "backup") if self.mode == "both" else (self.mode,)
-
-
-def _entries(spec: SessionSpec, direction: Direction) -> list[tuple[int, BackupEntry]]:
-    return [(i, e) for i, e in enumerate(spec.backup or []) if direction in e.directions()]
-
-
-def restores(spec: SessionSpec) -> list[tuple[int, BackupEntry]]:
-    """The (index, entry) pairs restored at start (mode restore or both)."""
-    return _entries(spec, "restore")
-
-
-def backups(spec: SessionSpec) -> list[tuple[int, BackupEntry]]:
-    """The (index, entry) pairs saved at discard (mode backup or both)."""
-    return _entries(spec, "backup")
-
-
-def has_workspace_entry(spec: SessionSpec) -> bool:
-    """True when any entry names the workspace root: the transcripts target rides on it."""
-    return any(e.root == "workspace" for e in spec.backup or [])
-
-
-def _contains(outer: tuple[str, ...], inner: tuple[str, ...]) -> bool:
-    return inner[: len(outer)] == outer
-
-
-def _backup_problems(spec: SessionSpec) -> list[str]:
-    """Rules across entries and the render check of each name (a dummy context)."""
-    entries = spec.backup or []
-    errors: list[str] = []
-    if len(entries) > BACKUP_MAX_ENTRIES:
-        errors.append(f"backup: at most {BACKUP_MAX_ENTRIES} entries")
-    for i, entry in enumerate(entries):
-        if entry.live and "restore" not in entry.directions():
-            errors.append(f"backup[{i}]: live needs mode restore or both")
-        if entry.after_init and "restore" not in entry.directions():
-            errors.append(f"backup[{i}]: after_init needs mode restore or both")
-        error, rendered = rendering.name_problem(entry.name)
-        if error is not None:
-            errors.append(f"backup[{i}].name: {error}")
-        elif rendered is not None:
-            try:
-                validate_name(rendered, allow_prefix=False)
-            except ValueError as exc:
-                errors.append(f"backup[{i}].name: renders to {rendered!r}: {exc}")
-    overlaps: dict[tuple[int, int], Direction] = {}
-    for direction in ("restore", "backup"):
-        picked = _entries(spec, direction)  # type: ignore[arg-type]
-        for x, (i, a) in enumerate(picked):
-            for j, b in picked[x + 1 :]:
-                pa, pb = _path_parts(a.path), _path_parts(b.path)
-                if a.root == b.root and (_contains(pa, pb) or _contains(pb, pa)):
-                    overlaps.setdefault((i, j), direction)  # type: ignore[arg-type]
-    errors.extend(
-        f"backup[{i}] and backup[{j}]: paths overlap in the {d} direction of the same root"
-        for (i, j), d in overlaps.items()
-    )
-    return errors
 
 
 VOLUME_PATH_MAX = 200
@@ -881,9 +791,6 @@ class SessionSpec(BaseModel):
     docker_storage: Quantity | None = None
     docker_cpu: Quantity | None = None
     docker_memory: Quantity | None = None
-    # Named directory backups in S3, restored at start and saved at discard; presence enables
-    # them. Sparse: unset is not stored or dumped. No built-in default entries.
-    backup: list[BackupEntry] | None = None
     # Shared volumes mounted into the pod (S-77); presets only, a session body may not carry them.
     volumes: list[VolumeAttachment] | None = None
     # env names of a stored session's legacy pins (`legacy_context`); never input or output
@@ -1149,7 +1056,7 @@ def validate_spec(spec: SessionSpec, settings: Settings, stored: SessionSpec | N
     """Validate a spec.
 
     `stored` stays for the preset PUT: a model, effort or image that has since left the settings
-    lists, and a backup, kube_cluster_access, kube_namespace_access or docker whose setting has
+    lists, and a kube_cluster_access, kube_namespace_access or docker whose setting has
     since been unset, is accepted only when unchanged from the stored preset spec. Scheduling a
     session passes no `stored` and validates fully.
     """
@@ -1179,13 +1086,6 @@ def validate_spec(spec: SessionSpec, settings: Settings, stored: SessionSpec | N
         and (stored is None or spec.effort != stored.effort)
     ):
         errors.append(f"effort {spec.effort!r} is not one of: {', '.join(settings.efforts)}")
-    if (
-        spec.backup
-        and not settings.cache_available
-        and (stored is None or spec.backup != stored.backup)
-    ):
-        errors.append("backups are not configured (ORCH_CACHE_S3_BUCKET is unset)")
-    errors.extend(_backup_problems(spec))
     errors.extend(_volume_problems(spec, settings.volume_max_per_preset))
     if (
         spec.kube_cluster_access

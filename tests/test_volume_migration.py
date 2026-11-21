@@ -311,3 +311,29 @@ async def test_api_startup_survives_a_failing_migration(pool, dsn, s3, monkeypat
     app = create_app(settings_for(dsn), pool)
     async with app.router.lifespan_context(app):
         pass
+
+
+async def test_legacy_backup_rows_still_migrate_and_load_without_the_entry_model(
+    pool, settings, s3
+):
+    # the entry model is gone: a stored preset with `backup` is migrated from its raw JSON, the
+    # migrated spec loads, and a running session row that still carries the key still loads
+    from agents_orchestrator.db import sessions
+    from agents_orchestrator.spec import SessionSpec
+
+    await add_version(pool, "proj/ws", "sha:1")
+    pid = await add_preset(pool, "Bot", [entry()])
+    async with pool.connection() as conn:
+        created = await sessions.create(conn, "legacy", SessionSpec())
+        await conn.execute(
+            "UPDATE sessions SET spec = spec || %s WHERE id = %s",
+            (Jsonb({"backup": [entry()]}), created.id),
+        )
+    res = await mv.migrate(pool, settings)
+    assert res.volumes == ["bot-proj-ws"]
+    stored = await spec_of(pool, pid)
+    assert "backup" not in stored
+    assert SessionSpec.model_validate(stored).volumes[0].backup_restore is True
+    async with pool.connection() as conn:
+        loaded = await sessions.get(conn, created.id)
+    assert loaded is not None and "backup" not in loaded.spec.model_dump(exclude_unset=True)

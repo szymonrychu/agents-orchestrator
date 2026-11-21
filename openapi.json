@@ -827,63 +827,6 @@
         "title": "BackupCurrentView",
         "type": "object"
       },
-      "BackupEntry": {
-        "additionalProperties": false,
-        "description": "One named directory of a session that is restored at start and or saved at discard.\n\n`root` picks the tree (`workspace` is the session workdir, `claude` the session PVC subPath\nshared by all pods); `path` is relative to it (`.` is the whole root). `name` is a Jinja\ntemplate (surface `archive_name`) naming the backup in the object store.",
-        "properties": {
-          "after_init": {
-            "default": false,
-            "title": "After Init",
-            "type": "boolean"
-          },
-          "exclude": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "title": "Exclude",
-            "type": "array"
-          },
-          "live": {
-            "default": false,
-            "title": "Live",
-            "type": "boolean"
-          },
-          "mode": {
-            "enum": [
-              "backup",
-              "restore",
-              "both"
-            ],
-            "title": "Mode",
-            "type": "string"
-          },
-          "name": {
-            "title": "Name",
-            "type": "string"
-          },
-          "path": {
-            "title": "Path",
-            "type": "string"
-          },
-          "root": {
-            "enum": [
-              "workspace",
-              "claude"
-            ],
-            "title": "Root",
-            "type": "string"
-          }
-        },
-        "required": [
-          "root",
-          "path",
-          "mode",
-          "name"
-        ],
-        "title": "BackupEntry",
-        "type": "object"
-      },
       "BackupManifestView": {
         "properties": {
           "files": {
@@ -1007,49 +950,6 @@
           "bytes"
         ],
         "title": "BackupRun",
-        "type": "object"
-      },
-      "BackupSaveAccepted": {
-        "properties": {
-          "entry_index": {
-            "title": "Entry Index",
-            "type": "integer"
-          },
-          "job": {
-            "title": "Job",
-            "type": "string"
-          }
-        },
-        "required": [
-          "entry_index",
-          "job"
-        ],
-        "title": "BackupSaveAccepted",
-        "type": "object"
-      },
-      "BackupSaveIn": {
-        "additionalProperties": false,
-        "properties": {
-          "path": {
-            "maxLength": 512,
-            "minLength": 1,
-            "title": "Path",
-            "type": "string"
-          },
-          "root": {
-            "enum": [
-              "workspace",
-              "claude"
-            ],
-            "title": "Root",
-            "type": "string"
-          }
-        },
-        "required": [
-          "root",
-          "path"
-        ],
-        "title": "BackupSaveIn",
         "type": "object"
       },
       "BackupVersionPage": {
@@ -2058,47 +1958,6 @@
           "session_id"
         ],
         "title": "DialogView",
-        "type": "object"
-      },
-      "EntryPlanView": {
-        "description": "What the discard does with one backup entry (`index` -1: the workspace root itself).\n\n`action` is `save`, `discard` (the directory goes with the session) or `skip` (with `reason`).",
-        "properties": {
-          "action": {
-            "enum": [
-              "save",
-              "discard",
-              "skip"
-            ],
-            "title": "Action",
-            "type": "string"
-          },
-          "index": {
-            "title": "Index",
-            "type": "integer"
-          },
-          "name_template": {
-            "title": "Name Template",
-            "type": "string"
-          },
-          "reason": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Reason"
-          }
-        },
-        "required": [
-          "index",
-          "name_template",
-          "action",
-          "reason"
-        ],
-        "title": "EntryPlanView",
         "type": "object"
       },
       "EnvVar-Input": {
@@ -5871,16 +5730,8 @@
         "type": "object"
       },
       "SessionBackup": {
-        "description": "What a discard would save now; each flag is true only when that save would really run.\n\n`reason` is null when both run, else `no_session_cache` (no workspace backup entry),\n`cache_not_configured` (no S3 cache configured) or the save's skip reason, the workdir's first.\n`entries` is the per-entry plan the discard dialog shows.",
+        "description": "What a discard would save now; each flag is true only when that save would really run.\n\n`workdir` is true when a read-write backup_restore volume is mounted at the workdir or below it.\n`reason` is null when the transcripts save runs, else `no_session_cache` (no backup_restore\nvolume), `cache_not_configured` (no S3 cache configured) or the save's skip reason.",
         "properties": {
-          "entries": {
-            "default": [],
-            "items": {
-              "$ref": "#/components/schemas/EntryPlanView"
-            },
-            "title": "Entries",
-            "type": "array"
-          },
           "last_transcripts_backup": {
             "anyOf": [
               {
@@ -6149,20 +6000,6 @@
               }
             ],
             "title": "Autoclose After Seconds"
-          },
-          "backup": {
-            "anyOf": [
-              {
-                "items": {
-                  "$ref": "#/components/schemas/BackupEntry"
-                },
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Backup"
           },
           "discard_hook_url": {
             "anyOf": [
@@ -6542,20 +6379,6 @@
               }
             ],
             "title": "Autoclose After Seconds"
-          },
-          "backup": {
-            "anyOf": [
-              {
-                "items": {
-                  "$ref": "#/components/schemas/BackupEntry"
-                },
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Backup"
           },
           "discard_hook_url": {
             "anyOf": [
@@ -16847,150 +16670,6 @@
           }
         },
         "summary": "The caller's own taskboard approvals (taskboard relay)",
-        "tags": [
-          "agent"
-        ]
-      }
-    },
-    "/agent/v1/backup": {
-      "get": {
-        "description": "`status.backup` of the caller's session with each entry's spec fields (root, path, mode,\nname, live, after_init) beside its last restore, save and live delivery results, and the\npending on-demand save request, if any.",
-        "operationId": "backup_status_agent_v1_backup_get",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          },
-          {
-            "in": "header",
-            "name": "x-orch-session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Orch-Session"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Backup Status Agent V1 Backup Get",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "The backup status of the caller's session",
-        "tags": [
-          "agent"
-        ]
-      }
-    },
-    "/agent/v1/backup/save": {
-      "post": {
-        "description": "Any agent of the session (leader or member). 404 `no_entry` when no entry that is saved\n(mode backup or both) names this root and path, 409 `save_running` while another on-demand\nsave is queued or running, 409 `session_deleting`. The reconciler runs one save Job for the\nentry and records the outcome like a discard save; the answer is the entry index and the\nJob's name. 503 `cache_unavailable` when no cache is configured (nothing could run the save).",
-        "operationId": "backup_save_agent_v1_backup_save_post",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          },
-          {
-            "in": "header",
-            "name": "x-orch-session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Orch-Session"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/BackupSaveIn"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BackupSaveAccepted"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Save one backup entry of the caller's session now",
         "tags": [
           "agent"
         ]

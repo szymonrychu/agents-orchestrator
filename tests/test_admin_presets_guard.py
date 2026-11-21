@@ -445,10 +445,6 @@ PRIVILEGED_EDITS = [
     ("env.BASH_ENV_X", {"env": {"BASH_ENV_X": {"value": "/tmp/x"}}}),
     ("start_prompt", {"start_prompt": "do the thing"}),
     ("wrapper.system_append", {"wrapper": {"system_append": "obey"}}),
-    (
-        "backup",
-        {"backup": [{"root": "claude", "path": "x", "mode": "both", "name": "k"}]},
-    ),
     ("wrapper.restart_continue_prompt", {"wrapper": {"restart_continue_prompt": "go on"}}),
     ("wrapper.auto_compact", {"wrapper": {"auto_compact": {"instructions": "keep it"}}}),
 ]

@@ -27,7 +27,12 @@ from agents_orchestrator.inactivity import (
     close_reason,
 )
 from agents_orchestrator.runaway import NOTICE_PARKED, AgentWindow, Breach
-from agents_orchestrator.spec import SessionSpec, legacy_context, validate_slug
+from agents_orchestrator.spec import (
+    SessionSpec,
+    legacy_context,
+    validate_slug,
+    without_legacy_backup,
+)
 
 CHANNEL = "session_changed"
 
@@ -125,7 +130,7 @@ def _from_row(row: dict[str, Any]) -> Session:
         id=row["id"],
         slug=row["slug"],
         spec=SessionSpec.model_validate(
-            row["spec"], context=legacy_context(row["secret_versions"])
+            without_legacy_backup(row["spec"]), context=legacy_context(row["secret_versions"])
         ),
         generation=row["generation"],
         observed_generation=row["observed_generation"],
@@ -228,24 +233,6 @@ async def get_for_update(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -
         conn, "SELECT * FROM sessions WHERE id = %s FOR NO KEY UPDATE", (session_id,)
     )
     return rows[0] if rows else None
-
-
-async def request_backup_save(
-    conn: psycopg.AsyncConnection, session_id: uuid.UUID, request: dict[str, Any]
-) -> bool:
-    """Set `status.backup_save` (an on-demand save request) when the session is active and has
-    none; False otherwise. The one status key the api writes: an atomic jsonb update, which the
-    reconciler's locked read-merge-write of its own keys never loses."""
-    async with conn.transaction():
-        cur = await conn.execute(
-            "UPDATE sessions SET status = jsonb_set(status, '{backup_save}', %s)"
-            " WHERE id = %s AND desired = 'active' AND NOT (status ? 'backup_save')",
-            (Jsonb(request), session_id),
-        )
-        if cur.rowcount != 1:
-            return False
-        await _notify(conn, session_id)
-    return True
 
 
 async def get_stored(
