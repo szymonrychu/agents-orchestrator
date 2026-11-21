@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from types import SimpleNamespace
 from typing import Any
 
@@ -30,15 +30,19 @@ from agents_orchestrator.api.vault_refs import (
 from agents_orchestrator.api.volume_refs import (
     attachments_in,
     audit_volume_attachments,
+    check_volume_refs,
+    other_attaching_specs,
     prepare_volumes,
 )
 from agents_orchestrator.db import presets as repo
 from agents_orchestrator.db import projects
 from agents_orchestrator.db import proposals as proposals_repo
+from agents_orchestrator.db import volumes as volumes_repo
 from agents_orchestrator.preset_policy import (
     changed_paths,
     privileged,
     strip_grants,
+    volume_attach_is_security,
 )
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import Ref, SessionSpec
@@ -181,17 +185,27 @@ async def _save(
     old_refs: dict[str, Ref] | None = None,
     old_volumes: list[dict[str, Any]] | None = None,
     extra_projects: tuple[str, ...] = (),
+    preset_id: uuid.UUID | None = None,
 ) -> repo.Preset:
     """Save the preset row in one transaction, the preset's `project` checked and held first
     (`hold_project`). In the same transaction: the volume attachments are checked against the
     project scope (`project` plus `extra_projects`) and get their default mount path (422
     `volumes_invalid`), the names the new spec defines leave the preset's re-attach list, the
     vault refs attached or detached against `old_refs` and the volume attachments against
-    `old_volumes` are recorded as events by `actor`.
+    `old_volumes` are recorded as events by `actor`. A save by a superleader (`actor` is not
+    `user`) also runs the volume cross-trust rule against `old_volumes` (403
+    `volume_cross_trust`), `preset_id` being the preset saved (None on create).
     """
     async with conn.transaction():
         await hold_project(conn, project)
-        await prepare_volumes(conn, spec, (project, *extra_projects))
+        await prepare_volumes(
+            conn,
+            spec,
+            (project, *extra_projects),
+            superleader=actor != "user",
+            old=old_volumes,
+            preset_id=preset_id,
+        )
         preset = await _after_save(conn, await save(), spec, actor, old_refs or {})
         await audit_volume_attachments(
             conn,
@@ -351,6 +365,7 @@ async def replace(
             refs_in(stored.spec),
             attachments_in(stored.spec),
             stored.extra_projects,
+            preset_id,
         )
     except repo.PresetNotFound:
         raise not_found("preset") from None
@@ -510,6 +525,7 @@ async def _edit_refs(
                 refs_in(stored.spec),
                 attachments_in(stored.spec),
                 stored.extra_projects,
+                preset_id,
             )
         except repo.PresetNotFound:
             raise not_found("preset") from None
@@ -518,6 +534,92 @@ async def _edit_refs(
         note_fields(request, changed_paths(stored.spec, spec))
         return _view(preset)
     raise ApiError(409, "conflict", "the preset changed since it was read; retry")
+
+
+async def edit_volumes(
+    request: Request,
+    conn,
+    settings: Settings,
+    preset_id: uuid.UUID,
+    volume_id: uuid.UUID,
+    attachment: dict[str, Any] | None,
+    *,
+    caller_projects: Iterable[str],
+    file_proposal: Callable[[list[dict[str, Any]]], Awaitable[schemas.ProposalView]],
+) -> schemas.PresetView | schemas.ProposalView:
+    """Superleader attach (`attachment`, replacing the volume's earlier one) or detach (None) of
+    a volume on a manageable preset, saved like a patch (a concurrent edit is re-read and
+    retried). The volume must be live and share a project with the caller (else 404
+    `volume_not_found`, as for an unknown one). A detach applies at once, 404 `not_attached` when
+    there is nothing to remove. An attach that `volume_attach_is_security` judges security
+    changes nothing: `file_proposal(new attachments)` files the preset proposal the user reviews
+    and its view is the answer; any other attach is saved, where `prepare_volumes` checks the
+    rule again under the volume lock. Only `volumes` changes, so the human-only guards, which
+    would refuse any `volumes` edit of a privileged preset, do not run."""
+    caller_scope = set(caller_projects)
+    for _ in range(_PATCH_TRIES):
+        stored = await repo.get(conn, preset_id)
+        if stored is None or not stored.superleader_manageable:
+            raise not_found("preset")
+        vol = await volumes_repo.get(conn, volume_id)
+        if vol is None or not caller_scope & set(vol.projects):
+            raise ApiError(404, "volume_not_found", "unknown volume")
+        old = attachments_in(stored.spec)
+        kept = [a for a in old if str(a.get("volume")) != str(volume_id)]
+        if attachment is None:
+            if len(kept) == len(old):
+                raise ApiError(404, "not_attached", "the volume is not attached to the preset")
+            new_atts = kept
+        else:
+            attachment = {
+                **attachment,
+                "mount_path": attachment.get("mount_path") or f"/volumes/{vol.name}",
+            }
+            new_atts = [*kept, attachment]
+        merged = (
+            {**stored.spec, "volumes": new_atts} if new_atts else _without(stored.spec, "volumes")
+        )
+        body = schemas.PresetIn(name=stored.name, spec=merged, project=stored.project)
+        spec, _ = await _validated(body, settings, stored.spec, preset_id, request=request)
+        if attachment is not None:
+            scope = (stored.project, *stored.extra_projects)
+            problems = await check_volume_refs(conn, SessionSpec.model_validate(spec), scope)
+            if problems:
+                raise ApiError(
+                    422, "volumes_invalid", "; ".join(problems), extra={"problems": problems}
+                )
+            others = await other_attaching_specs(conn, volume_id, preset_id)
+            if volume_attach_is_security(spec, str(attachment["mode"]), others):
+                note_fields(request, ["volumes"])
+                await conn.commit()  # the reads above end here: a proposal write needs an idle conn
+                return await file_proposal(new_atts)
+        recheck = _unchanged_since(stored, labels=True, project=True)
+        try:
+            preset = await _save(
+                request,
+                conn,
+                spec,
+                stored.project,
+                lambda st=stored, sp=spec, rc=recheck: repo.update(
+                    conn, preset_id, st.name, sp, None, None, st.updated_at, st.project, rc
+                ),
+                _actor(request, True),
+                refs_in(stored.spec),
+                old,
+                stored.extra_projects,
+                preset_id,
+            )
+        except repo.PresetNotFound:
+            raise not_found("preset") from None
+        except repo.PresetChanged:
+            continue
+        note_fields(request, ["volumes"])
+        return _view(preset)
+    raise ApiError(409, "conflict", "the preset changed since it was read; retry")
+
+
+def _without(spec: dict[str, Any], key: str) -> dict[str, Any]:
+    return {k: v for k, v in spec.items() if k != key}
 
 
 def _merged_body(stored: repo.Preset, body: schemas.PresetPatch) -> schemas.PresetIn:
@@ -578,6 +680,7 @@ async def patch(
                 refs_in(stored.spec),
                 attachments_in(stored.spec),
                 stored.extra_projects,
+                preset_id,
             )
         except repo.PresetNotFound:
             raise not_found("preset") from None
@@ -699,7 +802,7 @@ async def copy(
                 await hold_project(conn, project)
                 if attachments_in(spec):
                     spec = {**spec, "volumes": [dict(a) for a in attachments_in(spec)]}
-                await prepare_volumes(conn, spec, (project,))
+                await prepare_volumes(conn, spec, (project,), superleader=superleader)
                 created = await repo.create(
                     conn, name, spec, source.superleader_manageable, source.labels, project
                 )

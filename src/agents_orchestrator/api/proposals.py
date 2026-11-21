@@ -60,6 +60,7 @@ from agents_orchestrator.api.volume_refs import (
 from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.db import proposals as repo
 from agents_orchestrator.db import sessions as sessions_repo
+from agents_orchestrator.db import volumes as volumes_repo
 from agents_orchestrator.db.queue import SessionBeingDeleted, enqueue_message
 from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.preset_policy import (
@@ -87,8 +88,15 @@ SCHEDULE_FIELDS = tuple(schemas.ScheduleIn.model_fields)
 PROJECT_KINDS = ("session_projects", "preset_projects")
 # the manageable request (S-66): its target is an unmanageable preset by design
 MANAGEABLE_KIND = "preset_manageable"
+# the volume creation request (S-77 Q10): its target is the volume name, free until it is approved
+VOLUME_KIND = "volume_create"
 # the target a kind names, for texts
-_NOUN = {"session_projects": "session", "preset_projects": "preset", MANAGEABLE_KIND: "preset"}
+_NOUN = {
+    "session_projects": "session",
+    "preset_projects": "preset",
+    MANAGEABLE_KIND: "preset",
+    VOLUME_KIND: "volume name",
+}
 
 
 @dataclass(frozen=True)
@@ -160,6 +168,19 @@ async def live_manageable_fingerprint(conn, target_id: str) -> str | None:
     if preset is None:
         return None
     return fingerprint_manageable(preset.superleader_manageable)
+
+
+def fingerprint_volume_name(taken: bool) -> str:
+    """A volume creation request's target as its revision was based on it: whether a live
+    volume already has the name."""
+    canonical = json.dumps({"name_taken": taken}, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+async def live_volume_fingerprint(conn, target_id: str) -> str:
+    """The live fingerprint of a volume creation request: never None (a free name has no target
+    to lose); a name taken meanwhile makes the request stale."""
+    return fingerprint_volume_name(await volumes_repo.by_name(conn, target_id) is not None)
 
 
 def _not_open() -> ApiError:
@@ -503,6 +524,68 @@ async def create_manageable(
     return await get_view(conn, settings, proposal_id, proposer=caller.id), True
 
 
+def _volume_problem(exc: Exception) -> ApiError:
+    return ApiError(422, "invalid_request", str(exc))
+
+
+async def create_volume(
+    request: Request,
+    conn,
+    settings: Settings,
+    *,
+    body: schemas.VolumeProposalIn,
+    caller: Session,
+) -> tuple[schemas.ProposalView, bool]:
+    """File a request to create a volume as a `volume_create` proposal (S-77 Q10); the bool is
+    False on a `client_key` replay. Nothing is created here. Checked at filing, again at the
+    review: the name grammar, the size within the deploy cap, the projects within the caller's
+    own projects (403 `project_out_of_scope`), the name free (409 `volume_exists`). One item
+    `volume` carries the fields; the user approves, reworks or denies it."""
+    _idle(conn)
+    filed = _Filed(kind=VOLUME_KIND, reason=body.reason, client_key=body.client_key)
+    if body.client_key is not None:
+        async with conn.transaction():
+            first = await repo.by_client_key(conn, caller.id, body.client_key)
+        if first is not None:
+            view = await get_view(conn, settings, first, proposer=caller.id, visible_only=True)
+            return view, False
+    size = body.size or settings.volume_default_size
+    try:
+        projects, labels = volumes_repo.validate_new(
+            body.name, body.projects, size, body.labels, body.exclude, settings.volume_max_size
+        )
+    except (ValueError, volumes_repo.OverCap) as exc:
+        raise _volume_problem(exc) from None
+    if not set(projects) <= set(caller.projects):
+        raise ApiError(
+            403, "project_out_of_scope", "a volume may only name projects of the caller's scope"
+        )
+    note_fields(request, ["volume"])
+    try:
+        async with conn.transaction():
+            if await volumes_repo.by_name(conn, body.name) is not None:
+                raise ApiError(409, "volume_exists", f"volume {body.name!r} already exists")
+            after = {
+                "name": body.name,
+                "projects": projects,
+                "size": size,
+                "description": body.description,
+                "labels": labels,
+                "exclude": body.exclude,
+            }
+            item = repo.Item(path="volume", before=None, after=after, security=True, grant=False)
+            plan = _Plan({}, fingerprint_volume_name(False), [item])
+            proposal_id = await _insert(
+                conn, settings, filed, caller, True, body.name, body.name, plan
+            )
+    except repo.ProposalExists as exc:  # a concurrent replay won the insert
+        view = await get_view(
+            conn, settings, exc.proposal_id, proposer=caller.id, visible_only=True
+        )
+        return view, False
+    return await get_view(conn, settings, proposal_id, proposer=caller.id), True
+
+
 async def revise(
     request: Request,
     conn,
@@ -534,6 +617,12 @@ async def revise(
                 422,
                 "not_revisable",
                 "a manageable request is not revised; withdraw it and file the request again",
+            )
+        if current.kind == VOLUME_KIND:
+            raise ApiError(
+                422,
+                "not_revisable",
+                "a volume request is not revised; withdraw it and file the request again",
             )
         if current.status not in repo.ACTIVE:
             raise _not_open()
@@ -599,6 +688,8 @@ async def _stale(conn, proposal: repo.Proposal) -> bool:
         return live != current.fingerprint
     if proposal.kind == MANAGEABLE_KIND:
         return await live_manageable_fingerprint(conn, proposal.target_id) != current.fingerprint
+    if proposal.kind == VOLUME_KIND:
+        return await live_volume_fingerprint(conn, proposal.target_id) != current.fingerprint
     if proposal.kind == "session":
         found = await live_session(conn, uuid.UUID(proposal.target_id))
         if found is None:
@@ -1075,6 +1166,8 @@ async def _review_locked(
         return await _review_projects(conn, p, decisions)
     if p.kind == MANAGEABLE_KIND:
         return await _review_manageable(conn, p, decisions)
+    if p.kind == VOLUME_KIND:
+        return await _review_volume(conn, settings, p, decisions)
     to = _outcome(decisions)
     preset = await _locked_target(conn, uuid.UUID(p.target_id), hold=to == "applied")
     if preset is None:
@@ -1272,6 +1365,42 @@ async def _review_manageable(conn, p: repo.Proposal, decisions: Decisions) -> _D
         return await _close(conn, p, "stale", _stale_error("preset"))
     if to == "applied":
         await presets_repo.set_manageable(conn, preset.id, True)
+    return await _record(conn, p, decisions, to, _Done())
+
+
+async def _review_volume(conn, settings: Settings, p: repo.Proposal, decisions: Decisions) -> _Done:
+    """Plan 3.5 for a volume creation request (S-77 Q10): a name taken meanwhile is `stale`; an
+    approval creates the volume (actor user, detail the proposal id) from the item's fields,
+    checked again against the deploy cap (422 rolls the review back, the proposal stays open).
+    A deny or rework records only."""
+    current = p.revisions[0]
+    to = _outcome(decisions)
+    if p.status == "open" and await live_volume_fingerprint(conn, p.target_id) != (
+        current.fingerprint
+    ):
+        return await _close(conn, p, "stale", _stale_error("volume name"))
+    if to == "applied":
+        after = current.items[0].after
+        try:
+            await volumes_repo.create(
+                conn,
+                name=after["name"],
+                projects=after["projects"],
+                size=after["size"],
+                description=after["description"],
+                labels=after["labels"],
+                exclude=after["exclude"],
+                storage_class=settings.volume_storage_class,
+                created_by="user",
+                actor_kind="user",
+                actor="user",
+                max_size=settings.volume_max_size,
+                detail={"proposal": p.id},
+            )
+        except volumes_repo.VolumeExists:
+            return await _close(conn, p, "stale", _stale_error("volume name"))
+        except (ValueError, volumes_repo.OverCap) as exc:
+            raise _volume_problem(exc) from None
     return await _record(conn, p, decisions, to, _Done())
 
 

@@ -41,6 +41,7 @@ from agents_orchestrator.api.sessions import (
 )
 from agents_orchestrator.cache import save_rule
 from agents_orchestrator.db import agents as agents_repo
+from agents_orchestrator.db import backups as backups_repo
 from agents_orchestrator.db import events as events_repo
 from agents_orchestrator.db import (
     file_locks,
@@ -53,6 +54,7 @@ from agents_orchestrator.db import (
 from agents_orchestrator.db import projects as projects_repo
 from agents_orchestrator.db import queue as q
 from agents_orchestrator.db import sessions as sessions_repo
+from agents_orchestrator.db import volumes as volumes_repo
 from agents_orchestrator.dispatcher import feed
 from agents_orchestrator.dispatcher import hive as hive_push
 from agents_orchestrator.spec import WORKDIR_ROOT, backups
@@ -477,6 +479,82 @@ async def backup_status(agent: Caller, pool: Pool) -> dict[str, Any]:
         "entries": entries,
         "save_request": session.status.get("backup_save"),
     }
+
+
+async def _volume_view(conn: Any, att: Any, vol: volumes_repo.Volume) -> schemas.AgentVolumeView:
+    current = await backups_repo.current(conn, f"{backups_repo.RESERVED_PREFIX}{vol.name}")
+    return schemas.AgentVolumeView(
+        name=vol.name,
+        id=vol.id,
+        mount_path=att.mount_path if att.mount_path is not None else f"/volumes/{vol.name}",
+        mode=att.mode,
+        backup_restore=att.backup_restore,
+        state=vol.state,
+        current_version=current.id if current else None,
+        last_save_at=current.created_at if current else None,
+    )
+
+
+@router.get(
+    "/volumes",
+    response_model=list[schemas.AgentVolumeView],
+    summary="The volumes the caller's session mounts",
+)
+async def volumes_status(agent: Caller, pool: Pool) -> list[schemas.AgentVolumeView]:
+    """The attachments of the caller's session (its own spec, set from the preset when it was
+    created) joined with each volume's state, current version and last save time. Another
+    session's volumes, and a deleted volume, never appear."""
+    async with pool.connection() as conn:
+        session = await _session(conn, agent)
+        out = []
+        for att in session.spec.volumes or []:
+            vol = await volumes_repo.get(conn, att.volume)
+            if vol is not None:
+                out.append(await _volume_view(conn, att, vol))
+    return out
+
+
+@router.post(
+    "/volumes/{name}/save",
+    status_code=202,
+    response_model=schemas.AgentVolumeView,
+    summary="Save a volume of the caller's session now",
+    responses={
+        403: {"description": "backup_not_enabled: the session's attachment has backup_restore off"},
+        404: {"description": "volume_not_found: the session does not attach a volume of that name"},
+        409: {"description": "volume_busy: the volume is not ready (saving, restoring, resizing)"},
+    },
+)
+async def volume_save(name: str, agent: Caller, pool: Pool) -> schemas.AgentVolumeView:
+    """On-demand save of a volume the session mounts, only when that attachment has
+    `backup_restore` (Q12: any mounter with backup on). The save is recorded under the volume
+    row lock and run by the volume reconciler; a volume that is not `ready` is 409."""
+    async with pool.connection() as conn:
+        session = await _session(conn, agent)
+        found = await volumes_repo.by_name(conn, name)
+        att = next(
+            (a for a in session.spec.volumes or [] if found is not None and a.volume == found.id),
+            None,
+        )
+        if found is None or att is None:
+            raise ApiError(404, "volume_not_found", "this session does not attach that volume")
+        if not att.backup_restore:
+            raise ApiError(
+                403, "backup_not_enabled", "this attachment has backup_restore turned off"
+            )
+        try:
+            saved = await volumes_repo.request_save(
+                conn,
+                found.id,
+                trigger="agent",
+                session_slug=session.slug,
+                actor=session.slug,
+                actor_kind="agent",
+            )
+        except volumes_repo.VolumeBusy as exc:
+            raise ApiError(409, "volume_busy", str(exc)) from None
+        assert saved is not None  # only the release trigger returns None
+        return await _volume_view(conn, att, saved)
 
 
 @router.post(

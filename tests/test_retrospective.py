@@ -127,6 +127,8 @@ def test_reader_routes_are_exactly_the_read_set_and_the_copy():
         ("GET", f"{p}/backups/{{name:path}}/versions/{{version_id}}/manifest"),
         ("GET", f"{p}/handoffs"),
         ("GET", f"{p}/handoffs/{{id}}"),
+        ("GET", f"{p}/volumes"),
+        ("GET", f"{p}/volumes/{{volume_id}}"),
         ("GET", f"{p}/chats/rooms"),
         ("GET", f"{p}/chats/rooms/{{room_id}}"),
         ("GET", f"{p}/chats/rooms/{{room_id}}/messages"),

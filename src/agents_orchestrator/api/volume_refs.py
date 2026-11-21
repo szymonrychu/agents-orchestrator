@@ -10,13 +10,17 @@ from typing import Any
 import psycopg
 
 from agents_orchestrator.api.errors import ApiError
+from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.db import volumes
+from agents_orchestrator.preset_policy import volume_attach_is_security
 from agents_orchestrator.spec import SessionSpec, VolumeAttachment, effective_mount_path
 
 __all__ = [
     "attachments_in",
     "audit_volume_attachments",
     "check_volume_refs",
+    "cross_trust_problems",
+    "other_attaching_specs",
     "effective_mount_path",
     "prepare_volumes",
 ]
@@ -59,17 +63,75 @@ async def check_volume_refs(
     return problems
 
 
+async def other_attaching_specs(
+    conn: psycopg.AsyncConnection, volume_id: uuid.UUID, preset_id: uuid.UUID | None
+) -> list[Any]:
+    """The specs of the presets other than `preset_id` that attach the volume (a vanished preset
+    reads as None, which the policy counts as privileged)."""
+    ids = sorted({a.preset_id for a in await volumes.attaching_presets(conn, volume_id)})
+    out: list[Any] = []
+    for other_id in ids:
+        if other_id != preset_id:
+            other = await presets_repo.get(conn, other_id)
+            out.append(other.spec if other is not None else None)
+    return out
+
+
+async def cross_trust_problems(
+    conn: psycopg.AsyncConnection,
+    spec: dict[str, Any],
+    old: list[dict[str, Any]] | None,
+    preset_id: uuid.UUID | None,
+) -> list[str]:
+    """The attachments of `spec` that a superleader may not save (Q7, `volume_attach_is_security`):
+    only attachments whose (volume, mode) pair is new against `old` (the preset's stored ones)
+    count, so an unrelated edit of a preset the user already shared stays possible. Each volume
+    is locked FOR UPDATE first, so two concurrent attaches of one volume see each other. Fail
+    closed: an unreadable attachment is a problem."""
+    kept = {(str(a.get("volume")), str(a.get("mode"))) for a in old or []}
+    problems: list[str] = []
+    for i, att in enumerate(attachments_in(spec)):
+        if (str(att.get("volume")), str(att.get("mode"))) in kept:
+            continue
+        try:
+            vid = uuid.UUID(str(att["volume"]))
+        except (KeyError, ValueError):
+            problems.append(f"volumes[{i}]: unreadable attachment")
+            continue
+        found = await volumes.get_locked(conn, vid)
+        if found is None:
+            continue  # check_volume_refs reports an unknown volume
+        others = await other_attaching_specs(conn, vid, preset_id)
+        if volume_attach_is_security(spec, str(att.get("mode")), others):
+            problems.append(
+                f"volumes[{i}]: volume {found.name!r} would be shared with a privileged preset"
+                " or attached read-write to one; only the user approves that (proposal)"
+            )
+    return problems
+
+
 async def prepare_volumes(
-    conn: psycopg.AsyncConnection, spec: dict[str, Any], preset_scope: Iterable[str]
+    conn: psycopg.AsyncConnection,
+    spec: dict[str, Any],
+    preset_scope: Iterable[str],
+    *,
+    superleader: bool = False,
+    old: list[dict[str, Any]] | None = None,
+    preset_id: uuid.UUID | None = None,
 ) -> None:
     """Check the stored-shape `spec`'s attachments (422 `volumes_invalid`) and fill the default
-    mount path of each in place."""
+    mount path of each in place. For a superleader (`superleader`) the cross-trust rule runs
+    too (403 `volume_cross_trust`) against `old`, the preset's stored attachments, and
+    `preset_id`, excluded from the other attaching presets. Every save path of a preset goes
+    through here, so no superleader route can skip the rule; a human save does not run it."""
     atts = attachments_in(spec)
     if not atts:
         return
     problems = await check_volume_refs(conn, SessionSpec.model_validate(spec), preset_scope)
     if problems:
         raise ApiError(422, "volumes_invalid", "; ".join(problems), extra={"problems": problems})
+    if superleader and (trust := await cross_trust_problems(conn, spec, old, preset_id)):
+        raise ApiError(403, "volume_cross_trust", "; ".join(trust), extra={"problems": trust})
     for att in atts:
         if att.get("mount_path") is None:
             found = await volumes.get(conn, uuid.UUID(str(att["volume"])))

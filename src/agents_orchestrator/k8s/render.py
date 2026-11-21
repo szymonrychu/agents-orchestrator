@@ -508,6 +508,12 @@ BACKUP_SAVE_PROMPT = (
     "call shares it while the session runs."
 )
 
+VOLUME_SAVE_PROMPT = (
+    "A volume mounted with backup_restore is saved when the last session releases it; to share "
+    "files you changed in it sooner, call orchestrator_volume_save with the volume name "
+    "(orchestrator_volumes_status lists your volumes)."
+)
+
 
 def _ask_prompt(settings: Settings) -> str:
     """Questions go through taskboard decisions when the agent relay and taskboard are reachable."""
@@ -528,6 +534,8 @@ def _system_append(spec: SessionSpec, settings: Settings) -> str:
         parts.append(CHAT_ENVELOPE_PROMPT)
     if backups(spec):
         parts.append(BACKUP_SAVE_PROMPT)
+    if any(a.backup_restore for a in spec.volumes or []):
+        parts.append(VOLUME_SAVE_PROMPT)
     return "\n\n".join(parts)
 
 

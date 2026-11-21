@@ -1053,6 +1053,19 @@ def test_system_append_tells_to_save_backups_after_editing():
     assert render.BACKUP_SAVE_PROMPT not in bare["prompts"]["system_append"]
 
 
+def test_system_append_tells_to_save_a_volume_only_with_backup_on():
+    settings = make_settings(agent_api_url=AGENT_URL)
+    vid = "11111111-1111-4111-8111-111111111111"
+
+    def prompt(backup_restore):
+        spec = {"volumes": [{"volume": vid, "mode": "rw", "backup_restore": backup_restore}]}
+        cfg = config_of(render.render_session(make_session(**spec), settings, TOKENS))
+        return cfg["prompts"]["system_append"]
+
+    assert render.VOLUME_SAVE_PROMPT in prompt(True)
+    assert render.VOLUME_SAVE_PROMPT not in prompt(False)
+
+
 def test_room_prompt_absent_without_agent_api():
     cfg = config_of(render.render_session(make_session(), make_settings(agent_api_url=""), TOKENS))
     text = cfg["prompts"]["system_append"]

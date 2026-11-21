@@ -184,6 +184,25 @@ async def record_event(
     )
 
 
+def validate_new(
+    name: str,
+    projects: list[str],
+    size: str,
+    labels: list[str] | None,
+    exclude: list[str] | None,
+    max_size: str = DEFAULT_MAX_SIZE,
+) -> tuple[list[str], list[str]]:
+    """The checks of `create` without a connection (ValueError, OverCap); returns the cleaned
+    projects and labels."""
+    if not NAME_RE.fullmatch(name):
+        raise ValueError(f"{name!r} is not a valid volume name")
+    cleaned = _clean_projects(projects)
+    normalized = normalize_labels(labels or [])
+    _check_size(size, max_size)
+    check_exclude(exclude or [])
+    return cleaned, normalized
+
+
 async def create(
     conn: psycopg.AsyncConnection,
     *,
@@ -198,14 +217,11 @@ async def create(
     actor_kind: str,
     actor: str,
     max_size: str = DEFAULT_MAX_SIZE,
+    detail: dict[str, Any] | None = None,
 ) -> Volume:
-    """Insert a `provisioning` volume (PVC name `vol-<name>`); VolumeExists on a live name."""
-    if not NAME_RE.fullmatch(name):
-        raise ValueError(f"{name!r} is not a valid volume name")
-    projects = _clean_projects(projects)
-    labels = normalize_labels(labels or [])
-    _check_size(size, max_size)
-    check_exclude(exclude or [])
+    """Insert a `provisioning` volume (PVC name `vol-<name>`); VolumeExists on a live name.
+    `detail` (ids, never content) is added to the `created` event."""
+    projects, labels = validate_new(name, projects, size, labels, exclude, max_size)
     # serialise creators of one name: the partial unique index alone would abort the transaction
     await conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"volume:{name}",))
     if await by_name(conn, name) is not None:
@@ -237,10 +253,19 @@ async def create(
         "created",
         actor_kind=actor_kind,
         actor=actor,
-        detail={"name": name, "size": size, "projects": projects},
+        detail={"name": name, "size": size, "projects": projects, **(detail or {})},
     )
     await notify(conn, CHANGED_CHANNEL, {"id": str(vid)})
     return rows[0]
+
+
+async def get_locked(conn: psycopg.AsyncConnection, id: uuid.UUID) -> Volume | None:
+    """The live volume FOR UPDATE (held to the end of the transaction); None when it is gone.
+    Serialises concurrent attaches of one volume so the cross-trust rule sees each other."""
+    try:
+        return await _lock(conn, id)
+    except VolumeNotFound:
+        return None
 
 
 async def get(conn: psycopg.AsyncConnection, id: uuid.UUID) -> Volume | None:

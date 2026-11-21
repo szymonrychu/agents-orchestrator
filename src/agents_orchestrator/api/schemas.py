@@ -124,6 +124,22 @@ class ManageableRequestIn(BaseModel):
     client_key: str | None = Field(default=None, max_length=200)
 
 
+class VolumeProposalIn(BaseModel):
+    """A superleader's request to create a volume (S-77 Q10): filed as a `volume_create` change
+    proposal; nothing is created until the user approves. `size` defaults to the deploy default."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    projects: list[str] = Field(min_length=1)
+    size: str | None = None
+    description: str = Field(default="", max_length=2000)
+    labels: list[str] = Field(default_factory=list)
+    exclude: list[str] = Field(default_factory=list)
+    reason: str = Field(min_length=1, max_length=4000)
+    client_key: str | None = Field(default=None, max_length=200)
+
+
 class ExtraProjectsIn(BaseModel):
     """The human's direct set of a session's or preset's extra projects (main port, T-120)."""
 
@@ -298,6 +314,7 @@ ProposalKind = Literal[
     "session_projects",
     "preset_projects",
     "preset_manageable",
+    "volume_create",
 ]
 
 
@@ -1214,6 +1231,58 @@ class VolumeDetail(VolumeView):
     presets: list[VolumeAttachmentView]
     claims: list[VolumeClaimView]
     versions: list[VolumeVersionView]
+
+
+class AdminVolumeView(BaseModel):
+    """What a superleader or retrospective session sees of a volume: names, ids, sizes, states
+    and counts, never description, labels, exclusions or backup manifests."""
+
+    id: uuid.UUID
+    name: str
+    projects: list[str]
+    size: str
+    storage_class: str
+    state: str
+    attachments: int
+    mounted: int
+    current_version: uuid.UUID | None
+    content_version: uuid.UUID | None
+    last_save_at: datetime | None
+
+
+class AdminVolumeDetail(AdminVolumeView):
+    presets: list[VolumeAttachmentView]
+
+
+class VolumeAttachIn(BaseModel):
+    """A superleader's attach of a volume to a manageable preset (the preset's volume entry)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["ro", "rw"]
+    mount_path: str | None = Field(default=None, max_length=200)
+    backup_restore: bool = False
+
+
+class VolumeAttachResult(BaseModel):
+    """`preset` when the attach was applied (200); `proposal` when it is a security attach that
+    the user must approve (202), the preset unchanged."""
+
+    preset: PresetView | None = None
+    proposal: ProposalView | None = None
+
+
+class AgentVolumeView(BaseModel):
+    """One volume the calling session mounts, joined with the volume's state."""
+
+    name: str
+    id: uuid.UUID
+    mount_path: str
+    mode: str
+    backup_restore: bool
+    state: str
+    current_version: uuid.UUID | None
+    last_save_at: datetime | None
 
 
 class VolumeEventView(BaseModel):

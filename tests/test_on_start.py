@@ -57,6 +57,7 @@ PLAN_TOOLS = [
     "spec_section", "plan_steps_push", "plan_export", "plan_questions_ask",
 ]  # fmt: skip
 BACKUP_TOOLS = ["backup_save", "backup_status"]
+VOLUME_TOOLS = ["volumes_status", "volume_save"]
 TAIL_TOOLS = [
     *SESSION_TOOLS,
     *INIT_SCRIPTS_TOOLS,
@@ -67,12 +68,20 @@ TAIL_TOOLS = [
     *PLAN_TOOLS,
     *on_start.PROJECT_CHAT_TOOLS,
     *BACKUP_TOOLS,
+    *VOLUME_TOOLS,
 ]
 # Allowed before the pinned plugin ships them; add a name here when the allow-list leads the
 # plugin pin and remove it when the pin offers the tool (project room T-117 O9; project grants
 # T-120). The backups, handoff and room notes admin tools wait for the plugins release of PR #61
 # (S-68 steps 12 to 14); backup_save and backup_status wait for plugins release A (S-68).
 PLUGIN_PENDING: set[str] = {
+    "volumes_status",
+    "volume_save",
+    "volumes_list",
+    "volume_get",
+    "volume_attach",
+    "volume_detach",
+    "volume_create",
     "backup_save",
     "backup_status",
     "backups_list",
@@ -123,6 +132,7 @@ ADMIN_TOOLS = [
     "project_update", "backups_cleanup_set", "spec_delete", "spec_suggestion_dismiss",
     "spec_queue_move", "handoffs_list", "handoff_get", "chat_admin_notes_get",
     "chat_admin_notes_update",
+    "volumes_list", "volume_get", "volume_attach", "volume_detach", "volume_create",
     *PROPOSAL,
 ]  # fmt: skip
 SECRET = "s3cr3t-token-value"
@@ -623,7 +633,7 @@ def test_alone_session_allow_is_the_literal_e2e_list():
         "plan_step_deps", "plan_steps_order", "plan_step_next", "plan_step_update", "plan_gate",
         "spec_section", "plan_steps_push", "plan_export", "plan_questions_ask",
         "project_chat_send", "project_chat_read",
-        "backup_save", "backup_status",
+        "backup_save", "backup_status", "volumes_status", "volume_save",
         "session_get", "session_patch", "proposal_create", "proposal_revise", "proposals_list",
         "proposal_get", "proposal_withdraw", "self_close",
     ]  # fmt: skip
@@ -690,6 +700,41 @@ def test_withdraw_offered_to_hives_and_superleaders():
     assert "leadership_withdraw" not in on_start.orchestrator_allow(SessionSpec())
 
 
+@pytest.mark.parametrize(
+    ("spec", "granted", "refused"),
+    [
+        (
+            SessionSpec(replicas=1),
+            ["volumes_status", "volume_save"],
+            ["volumes_list", "volume_create"],
+        ),
+        (
+            SessionSpec(replicas=1, retrospective=True),
+            ["volumes_list", "volume_get"],
+            ["volume_create", "volume_attach"],
+        ),
+        (
+            SessionSpec(replicas=1, session_messaging=True),
+            [
+                "volumes_status",
+                "volume_save",
+                "volumes_list",
+                "volume_get",
+                "volume_attach",
+                "volume_detach",
+                "volume_create",
+            ],
+            [],
+        ),
+    ],
+    ids=["regular", "retrospective", "superleader"],
+)
+def test_volume_tool_grants_per_role(spec, granted, refused):
+    allow = on_start.orchestrator_allow(spec)
+    assert set(granted) <= set(allow)
+    assert not set(refused) & set(allow)
+
+
 def test_project_create_is_superleader_only():
     assert "project_create" in on_start.ADMIN_TOOLS
     assert "project_create" not in on_start.PROJECT_TOOLS
@@ -748,7 +793,8 @@ RETRO = [
     "session_activity", "session_events", "session_messages", "handoffs_list", "handoff_get",
     "chat_admin_rooms", "chat_admin_room", "chat_admin_history", "chat_admin_notes_get",
     "presets_list", "preset_get", "usage_get", "usage_history", "backups_list",
-    "backup_versions", "backup_manifest", "backups_copy", "chat_admin_notes_update",
+    "backup_versions", "backup_manifest", "volumes_list", "volume_get", "backups_copy",
+    "chat_admin_notes_update",
 ]  # fmt: skip
 # Routes of the tools the pinned plugin does not ship yet (any-mcp-tatara-plugins PR #61).
 PENDING_ROUTES = {
@@ -758,6 +804,9 @@ PENDING_ROUTES = {
     "handoffs_list": ("GET", "/agent/v1/admin/handoffs"),
     "handoff_get": ("GET", "/agent/v1/admin/handoffs/{id}"),
     "chat_admin_notes_get": ("GET", "/agent/v1/admin/chats/rooms/{room_id}/notes"),
+    "volumes_status": ("GET", "/agent/v1/volumes"),
+    "volumes_list": ("GET", "/agent/v1/admin/volumes"),
+    "volume_get": ("GET", "/agent/v1/admin/volumes/{volume_id}"),
 }
 
 

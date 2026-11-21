@@ -31,6 +31,7 @@ BODIES = {
     ("PATCH", "/agent/v1/admin/sessions/{slug}"): {"spec": {}},
     ("POST", "/agent/v1/admin/sessions/{slug}/leadership/withdraw"): {},
     ("PUT", "/agent/v1/admin/presets/{ref}/vault/{entry_id}"): {},
+    ("POST", "/agent/v1/admin/presets/{ref}/volumes/{volume_id}"): {"mode": "ro"},
     ("POST", "/agent/v1/admin/sessions/{slug}/projects"): {"project": "default", "reason": "r"},
     ("POST", "/agent/v1/admin/presets/{ref}/projects"): {"project": "default", "reason": "r"},
     ("PUT", "/agent/v1/admin/sessions/{slug}/labels"): {"labels": ["x"]},
@@ -97,6 +98,7 @@ async def test_every_scoped_admin_route_reads_open_and_refuses_writes_on_unmanag
         .replace("{name}", "API_KEY")
         .replace("{message_id}", "1")
         .replace("{entry_id}", "11111111-1111-4111-8111-111111111111")
+        .replace("{volume_id}", "11111111-1111-4111-8111-111111111111")
     )
     kw = {"json": BODIES[(method, path)]} if (method, path) in BODIES else {}
     async with client_for(app, boss.leader_ip) as http:

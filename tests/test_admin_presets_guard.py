@@ -720,14 +720,15 @@ MOVING_WRITES: tuple[tuple[str, str], ...] = (("PUT", f"{A}/{{ref}}"), ("PATCH",
 
 
 def _admin_preset_writes() -> set[tuple[str, str]]:
-    """The routes that take a spec; the vault attach carries none, so it has no grant to refuse
-    (its rules are in test_admin_vault.py), nor do the project grant and the manageable request,
-    which only file a proposal (test_project_grants.py, test_proposals_manageable.py)."""
+    """The routes that take a spec; the vault and volume attaches carry none, so they have no grant
+    to refuse (their rules are in test_admin_vault.py and test_admin_volumes.py), nor do the
+    project grant and the manageable request, which only file a proposal (test_project_grants.py, test_proposals_manageable.py)."""
     return {
         (method, route.path)
         for route in admin.router.routes
         if route.path.startswith(A)
         and "/vault/" not in route.path
+        and "/volumes/" not in route.path
         and not route.path.endswith("/projects")
         and route.path != MANAGEABLE_ROUTE
         for method in route.methods & {"POST", "PUT", "PATCH"}

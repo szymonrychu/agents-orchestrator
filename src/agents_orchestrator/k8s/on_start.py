@@ -90,6 +90,11 @@ MINDMAP_TOOLS = [
 # Backup tools (S-68): every session saves one of its own backup entries on demand and reads its
 # backup status (`POST /agent/v1/backup/save`, `GET /agent/v1/backup`; any agent of the session).
 BACKUP_TOOLS = ["backup_save", "backup_status"]
+# Volume tools (S-77): every session lists the volumes it mounts and saves one on demand (the
+# route answers 403 backup_not_enabled unless its attachment has backup_restore).
+VOLUME_TOOLS = ["volumes_status", "volume_save"]
+# Volume reads of a superleader and a retrospective session (projects-scoped, names and ids only).
+VOLUME_READ_TOOLS = ["volumes_list", "volume_get"]
 # Superleader admin tools: the plugin's declarative admin rows (any-mcp-tatara-plugins
 # orchestration/orchestrator admin.py), the vault tools included. History is read and search
 # only: there is no history delete tool, deleting a stored session is for the user (web UI).
@@ -123,6 +128,7 @@ ADMIN_TOOLS = [
     "project_update", "backups_cleanup_set", "spec_delete", "spec_suggestion_dismiss",
     "spec_queue_move", "handoffs_list", "handoff_get", "chat_admin_notes_get",
     "chat_admin_notes_update",
+    *VOLUME_READ_TOOLS, "volume_attach", "volume_detach", "volume_create",
     *PROPOSAL_TOOLS,
 ]  # fmt: skip
 # Retrospective sessions (S-68, decisions 769, 770, 775): the read set over histories, handoffs,
@@ -136,7 +142,7 @@ RETRO_READ_TOOLS = [
     "session_activity", "session_events", "session_messages", "handoffs_list", "handoff_get",
     "chat_admin_rooms", "chat_admin_room", "chat_admin_history", "chat_admin_notes_get",
     "presets_list", "preset_get", "usage_get", "usage_history", "backups_list",
-    "backup_versions", "backup_manifest",
+    "backup_versions", "backup_manifest", *VOLUME_READ_TOOLS,
 ]  # fmt: skip
 RETRO_TOOLS = [*RETRO_READ_TOOLS, "backups_copy", "chat_admin_notes_update"]
 # Tools a subagent may call although every orchestrator tool is main-agent only (user decision
@@ -154,7 +160,7 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset(
         "spec_pull", "plan_get", "plan_steps", "plan_step_get", "plan_gate", "plan_export",
         "proposals_list", "proposal_get", "mindmap_map_list", "mindmap_map_get",
         "mindmap_node_get", "mindmap_node_history", "mindmap_search", "mindmap_traverse",
-        "mindmap_task_nodes", "mindmap_direction_list",
+        "mindmap_task_nodes", "mindmap_direction_list", "volumes_status",
     }
 )  # fmt: skip
 
@@ -191,6 +197,7 @@ def orchestrator_allow(spec: SessionSpec, *, mindmap: bool = False) -> list[str]
         *PROJECT_CHAT_TOOLS,
         *(MINDMAP_TOOLS if mindmap else []),
         *BACKUP_TOOLS,
+        *VOLUME_TOOLS,
         *(ADMIN_TOOLS if spec.session_messaging else _regular_tools(spec)),
     ]
     if not spec.hive:
