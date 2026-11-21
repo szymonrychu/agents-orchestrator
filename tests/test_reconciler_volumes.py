@@ -170,6 +170,52 @@ async def test_delete_with_a_claim_keeps_the_pvc_and_records_refusal(pool, kube,
     assert "delete_refused" in [k for k, _, _ in await _kinds(pool, v.id)]
 
 
+def _pod(name, **spec):
+    return {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": name, "namespace": "agents"},
+        "spec": spec,
+        "status": {"phase": "Running"},
+    }
+
+
+async def test_delete_is_held_by_a_pod_mounting_the_pvc_without_a_claim(pool, kube, rec):
+    v = await _ready(pool, kube, rec)
+    kube.seed(_pod("hand-made", volumes=[{"persistentVolumeClaim": {"claimName": "vol-data"}}]))
+    async with pool.connection() as conn, conn.transaction():
+        await volumes.mark_deleting(conn, v.id)
+    await rec.tick()
+    assert kube.has(PVC, "vol-data")
+    assert kube.patches == []
+    assert await _state(pool, v.id) == "deleting"
+
+
+async def test_delete_keeps_the_finalizer_when_the_pod_lookup_errors(pool, kube, rec, monkeypatch):
+    v = await _ready(pool, kube, rec)
+    async with pool.connection() as conn, conn.transaction():
+        await volumes.mark_deleting(conn, v.id)
+
+    async def boom(namespace, selector):
+        raise KubeError("api down")
+
+    monkeypatch.setattr(kube, "list_pods", boom)
+    await rec.tick()
+    assert kube.has(PVC, "vol-data")
+    assert kube.patches == []
+    assert await _state(pool, v.id) == "deleting"
+
+
+async def test_stale_snapshot_does_not_overwrite_a_concurrent_state_change(pool, kube, rec):
+    v = await _ready(pool, kube, rec)
+    stale = await _get(pool, v.id)
+    async with pool.connection() as conn, conn.transaction():
+        await volumes.set_state(conn, v.id, "resizing")
+    del kube.objects[(PVC, "agents", "vol-data")]
+    await rec.reconcile(stale)  # _ready sees the PVC missing, but the row moved on
+    assert await _state(pool, v.id) == "resizing"
+
+
 async def test_external_delete_leaves_pvc_terminating_while_finalizer_held(pool, kube, rec):
     v = await _ready(pool, kube, rec)
     await kube.delete(PVC, "agents", "vol-data")
@@ -216,6 +262,28 @@ async def test_orphan_claim_released_by_system_only_when_no_pod_remains(pool, ku
     async with pool.connection() as conn:
         assert [c.session_id for c in await volumes.unreleased_claims(conn, v.id)] == [alive["id"]]
     assert ("released", "system", "reconciler") in await _kinds(pool, v.id)
+
+
+async def test_one_orphan_session_lookup_error_does_not_block_another(pool, kube, rec, monkeypatch):
+    v1, v2 = await _ready(pool, kube, rec, "one"), await _ready(pool, kube, rec, "two")
+    bad, good = uuid.uuid4(), uuid.uuid4()
+    await _claim(pool, v1.id, bad)
+    await _claim(pool, v2.id, good)
+    real = kube.list_pods
+    calls = 0
+
+    async def flaky(namespace, selector):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise KubeError("api down")
+        return await real(namespace, selector)
+
+    monkeypatch.setattr(kube, "list_pods", flaky)
+    await rec.release_orphans()
+    async with pool.connection() as conn:
+        left = {c.session_id for v in (v1, v2) for c in await volumes.unreleased_claims(conn, v.id)}
+    assert len(left) == 1
 
 
 # ------------------------------------------------------------------ restore and save Jobs

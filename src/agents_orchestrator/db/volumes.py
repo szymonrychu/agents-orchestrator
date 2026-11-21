@@ -335,13 +335,17 @@ async def set_state(
     *,
     reason: str | None = None,
     content_version: uuid.UUID | None = None,
-) -> None:
+    expect: str | None = None,
+) -> bool:
     """Set the state and its failure reason (cleared otherwise); `content_version` is set only
     when given (a save or restore). A `deleting` volume leaves that state only through
-    `finish_delete` (VolumeBusy otherwise)."""
+    `finish_delete` (VolumeBusy otherwise). With `expect` the write is status-guarded: when the
+    row is no longer in that state nothing changes and False is returned."""
     if state not in STATES:
         raise ValueError(f"unknown volume state {state!r}")
     cur = await _lock(conn, id)
+    if expect is not None and cur.state != expect:
+        return False
     if cur.state == "deleting" and state != "deleting":
         raise VolumeBusy("a deleting volume cannot change state")
     await conn.execute(
@@ -350,6 +354,7 @@ async def set_state(
         (state, reason, content_version, id, cur.state),
     )
     await _touch(conn, id)
+    return True
 
 
 async def mark_deleting(conn: psycopg.AsyncConnection, id: uuid.UUID) -> None:

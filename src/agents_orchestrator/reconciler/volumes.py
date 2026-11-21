@@ -125,6 +125,16 @@ class VolumeReconciler:
             if await volumes.unreleased_claims(conn, vol.id):
                 await volumes.refuse_delete(conn, vol.id, reason="claims_present")
                 return
+        try:  # a pod the claims do not know about keeps the finalizer; retried next tick
+            found = await pods_using(
+                self.kube, self.settings.namespace, volume_id=vol.id, pvc_name=vol.pvc_name
+            )
+        except KubeError:
+            log.warning("volume %s: pod lookup failed, delete retried", vol.name, exc_info=True)
+            return
+        if found:
+            log.warning("volume %s: delete held, pods still use it: %s", vol.name, found)
+            return
         pvc = await self._pvc(vol)
         if pvc is None:
             async with self.pool.connection() as conn, conn.transaction():
@@ -394,12 +404,17 @@ class VolumeReconciler:
         for c in orphans:
             by_session[c.session_id].append(c)
         for session_id, claims in by_session.items():
-            if await self._any_pod(claims):
-                continue
-            async with self.pool.connection() as conn, conn.transaction():
-                await volumes.release_claims(
-                    conn, session_id, actor_kind="system", actor="reconciler"
-                )
+            try:
+                if await self._any_pod(claims):
+                    continue
+                async with self.pool.connection() as conn, conn.transaction():
+                    await volumes.release_claims(
+                        conn, session_id, actor_kind="system", actor="reconciler"
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("releasing the orphan claims of session %s failed", session_id)
 
     async def _any_pod(self, claims: list[volumes.Claim]) -> bool:
         for c in claims:
@@ -420,7 +435,9 @@ class VolumeReconciler:
 
     async def _set(self, vol: volumes.Volume, state: str, reason: str | None = None) -> None:
         async with self.pool.connection() as conn, conn.transaction():
-            await volumes.set_state(conn, vol.id, state, reason=reason)
+            changed = await volumes.set_state(conn, vol.id, state, reason=reason, expect=vol.state)
+        if not changed:
+            log.info("volume %s: state changed meanwhile, %s skipped", vol.name, state)
 
     # ------------------------------------------------------------------ loop
 
