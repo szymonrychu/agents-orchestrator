@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS volumes (
     projects text[] NOT NULL CHECK (cardinality(projects) >= 1),
     labels text[] NOT NULL DEFAULT '{}',
     description text NOT NULL DEFAULT '',
+    exclude text[] NOT NULL DEFAULT '{}',
     size text NOT NULL,
     storage_class text NOT NULL,
     pvc_name text NOT NULL,
@@ -43,7 +44,7 @@ CREATE TABLE IF NOT EXISTS volume_events (
     actor_kind text NOT NULL CHECK (actor_kind IN ('user', 'agent', 'system')),
     actor text NOT NULL,
     kind text NOT NULL CHECK (kind IN (
-        'created', 'resized', 'labels_updated', 'projects_updated', 'attached', 'detached',
+        'created', 'resized', 'labels_updated', 'exclude_updated', 'projects_updated', 'attached', 'detached',
         'mounted', 'released', 'restore_started', 'restored', 'restore_skipped_mounted',
         'restore_failed', 'save_started', 'saved', 'save_unchanged', 'save_failed',
         'delete_refused', 'deleted')),

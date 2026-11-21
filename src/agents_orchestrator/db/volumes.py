@@ -21,7 +21,7 @@ from psycopg.types.json import Jsonb
 
 from agents_orchestrator.db.backups import Page
 from agents_orchestrator.db.pool import notify
-from agents_orchestrator.spec import parse_quantity
+from agents_orchestrator.spec import check_exclude, parse_quantity
 
 CHANGED_CHANNEL = "volumes_changed"  # NOTIFY {"id"}: a volume or its claims changed
 NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$")
@@ -29,7 +29,7 @@ DEFAULT_MAX_SIZE = "200Gi"
 MAX_LIMIT = 200
 STATES = ("provisioning", "ready", "resizing", "restoring", "saving", "deleting", "failed")
 _COLUMNS = (
-    "id, name, projects, labels, description, size, storage_class, pvc_name, state,"
+    "id, name, projects, labels, description, exclude, size, storage_class, pvc_name, state,"
     " state_reason, content_version, created_by, created_at, updated_at, deleted_at"
 )
 _CLAIM_COLUMNS = (
@@ -61,6 +61,7 @@ class Volume:
     projects: list[str]
     labels: list[str]
     description: str
+    exclude: list[str]
     size: str
     storage_class: str
     pvc_name: str
@@ -157,6 +158,7 @@ async def create(
     size: str,
     description: str = "",
     labels: list[str] | None = None,
+    exclude: list[str] | None = None,
     storage_class: str,
     created_by: str,
     actor_kind: str,
@@ -169,6 +171,7 @@ async def create(
     if not projects:
         raise ValueError("a volume needs at least one project")
     _check_size(size, max_size)
+    check_exclude(exclude or [])
     # serialise creators of one name: the partial unique index alone would abort the transaction
     await conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"volume:{name}",))
     if await by_name(conn, name) is not None:
@@ -176,8 +179,9 @@ async def create(
     vid = uuid.uuid4()
     rows = await _rows(
         conn,
-        f"INSERT INTO volumes (id, name, projects, labels, description, size, storage_class,"
-        f" pvc_name, state, created_by) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'provisioning',%s)"
+        f"INSERT INTO volumes (id, name, projects, labels, description, exclude, size,"
+        f" storage_class, pvc_name, state, created_by)"
+        f" VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'provisioning',%s)"
         f" RETURNING {_COLUMNS}",
         (
             vid,
@@ -185,6 +189,7 @@ async def create(
             projects,
             labels or [],
             description,
+            exclude or [],
             size,
             storage_class,
             f"vol-{name}",
@@ -238,6 +243,7 @@ async def update(
     description: str | None = None,
     labels: list[str] | None = None,
     projects: list[str] | None = None,
+    exclude: list[str] | None = None,
     actor_kind: str,
     actor: str,
     max_size: str = DEFAULT_MAX_SIZE,
@@ -260,6 +266,9 @@ async def update(
     if labels is not None and labels != cur.labels:
         sets["labels"] = labels
         events.append(("labels_updated", {"labels": labels}))
+    if exclude is not None and exclude != cur.exclude:
+        sets["exclude"] = check_exclude(exclude)
+        events.append(("exclude_updated", {"exclude": exclude}))
     if projects is not None and projects != cur.projects:
         if not projects:
             raise ValueError("a volume needs at least one project")

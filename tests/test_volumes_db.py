@@ -108,3 +108,22 @@ async def test_release_claims_sets_released_at_and_writes_event(pool):
         assert released[0].released_at is not None
         assert await volumes.unreleased_claims(conn, v.id) == []
         assert (await _kinds(conn, v.id))[-1] == "released"
+
+
+async def test_exclude_round_trips_and_update_writes_event(pool):
+    async with pool.connection() as conn:
+        v = await _create(conn, exclude=["tmp", "cache/x"])
+        assert (await volumes.get(conn, v.id)).exclude == ["tmp", "cache/x"]
+        upd = await volumes.update(conn, v.id, exclude=["logs"], actor_kind="user", actor="alice")
+        assert upd.exclude == ["logs"]
+        assert await _kinds(conn, v.id) == ["created", "exclude_updated"]
+
+
+@pytest.mark.parametrize("bad", ["/abs", "a/../b", ""])
+async def test_invalid_exclude_refused(pool, bad):
+    async with pool.connection() as conn:
+        with pytest.raises(ValueError):
+            await _create(conn, exclude=[bad])
+        v = await _create(conn)
+        with pytest.raises(ValueError):
+            await volumes.update(conn, v.id, exclude=[bad], actor_kind="user", actor="alice")

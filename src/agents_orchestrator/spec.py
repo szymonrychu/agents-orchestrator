@@ -578,6 +578,18 @@ def _path_parts(path: str) -> tuple[str, ...]:
     return () if path == "." else tuple(path.split("/"))
 
 
+def check_exclude(v: list[str]) -> list[str]:
+    """Validate backup exclude entries (count, length, relative with no '..'); ValueError."""
+    if len(v) > CACHE_EXCLUDE_MAX:
+        raise ValueError(f"at most {CACHE_EXCLUDE_MAX} exclude entries")
+    for entry in v:
+        if not entry or len(entry) > CACHE_EXCLUDE_ENTRY_MAX:
+            raise ValueError(f"exclude entries are 1 to {CACHE_EXCLUDE_ENTRY_MAX} characters")
+        if entry.startswith("/") or ".." in entry.split("/"):
+            raise ValueError(f"exclude {entry!r} must be relative with no '..' segment")
+    return v
+
+
 class BackupEntry(_Strict):
     """One named directory of a session that is restored at start and or saved at discard.
 
@@ -619,14 +631,7 @@ class BackupEntry(_Strict):
     @field_validator("exclude")
     @classmethod
     def _check_exclude(cls, v: list[str]) -> list[str]:
-        if len(v) > CACHE_EXCLUDE_MAX:
-            raise ValueError(f"at most {CACHE_EXCLUDE_MAX} exclude entries")
-        for entry in v:
-            if not entry or len(entry) > CACHE_EXCLUDE_ENTRY_MAX:
-                raise ValueError(f"exclude entries are 1 to {CACHE_EXCLUDE_ENTRY_MAX} characters")
-            if entry.startswith("/") or ".." in entry.split("/"):
-                raise ValueError(f"exclude {entry!r} must be relative with no '..' segment")
-        return v
+        return check_exclude(v)
 
     def directions(self) -> tuple[Direction, ...]:
         return ("restore", "backup") if self.mode == "both" else (self.mode,)
