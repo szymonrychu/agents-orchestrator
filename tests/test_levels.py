@@ -98,3 +98,26 @@ def test_due_level_l1_pct_threshold_when_start_unknown():
     assert pl.l1_tokens(lv, 1_000_000, pl.strong_tokens(lv, 1_000_000)) == 800_000
     assert _due(lv, 800_000, window=1_000_000, pct=10.0) == "l1"
     assert _due(lv, 799_999, window=1_000_000, pct=99.0) == "none"
+
+
+@pytest.mark.parametrize(
+    ("compact", "window", "used", "room"),
+    [
+        (25, 200_000, 5_000, True),  # L2 too small for the margin: half of L2 caps the margin
+        (25, 200_000, None, True),
+        (95, 1_000_000, 10_000, True),
+        (95, 1_000_000, 970_000, False),
+    ],
+)
+def test_successor_has_room_small_l2(compact, window, used, room):
+    lv = pl.levels(
+        {"auto_compact_pct": compact}, None, Settings(database_url="postgresql://u:p@db/o")
+    )
+    l2 = pl.strong_tokens(lv, window)
+    assert pl.successor_has_room(lv, used, window, None, 30_000) is room
+    if compact == 25:
+        assert pl.successor_has_room(lv, l2 // 2, window, None, 30_000)
+        assert not pl.successor_has_room(lv, l2, window, None, 30_000)
+    else:
+        assert pl.successor_has_room(lv, l2 - 30_000, window, None, 30_000)
+        assert not pl.successor_has_room(lv, l2 - 29_999, window, None, 30_000)
