@@ -814,9 +814,10 @@ class _Pass:
         await self.clear_when_idle(row, ["submitted"], facts)
 
     async def request_move(self, row: handoffs.Handoff, leader: leadership.Leader) -> bool:
-        """A `limit` handover to the submit's `to` (when eligible and with headroom) or the
-        pass's pick among the peers with headroom; False when there is none (the leader is the
-        only live agent, or every peer is too full to take over: the solo order)."""
+        """A `limit` handover to the submit's `to` (when eligible; one without headroom is
+        refused, never swapped for another) or the pass's pick among the peers with headroom;
+        False when there is none (the leader is the only live agent, or every peer is too full
+        to take over: the solo order)."""
         session_id = self.session["id"]
         policy = self._pass_policy()
         to = (row.handoff or {}).get("to")
@@ -825,7 +826,9 @@ class _Pass:
             got = await _one(
                 self.conn, _TARGET, {"session": session_id, "pod": to, "other": row.agent_id}
             )
-            if got is not None and await leadership.has_room(self.conn, got["id"], policy):
+            if got is not None:
+                if not await leadership.has_room(self.conn, got["id"], policy):
+                    return False  # a named peer without headroom is rejected, not swapped
                 target = got["id"]
         if target is None and (
             await leadership.successor(

@@ -164,11 +164,13 @@ def successor_has_room(
     margin_tokens: int,
 ) -> bool:
     """A successor must start with room, so it is not due at once and the handover's own cost
-    does not tip it over: its context at most its L2 point minus `margin_tokens`. Without a
-    token gauge (or window) the percent fallback decides (at most `fallback_pct`); with no
-    reading at all (or a gauge stale since the last clear, passed as None) it has room."""
+    does not tip it over: its context at most its L2 point minus `margin_tokens` (the
+    margin at most half of L2, so a small L2 still admits a fresh peer). Without a token gauge
+    (or window) the percent fallback decides (at most `fallback_pct`); with no reading at all
+    (or a gauge stale since the last clear, passed as None) it has room."""
     if used_tokens is not None and window_tokens is not None and window_tokens > 0:
-        return used_tokens <= strong_tokens(lv, window_tokens) - margin_tokens
+        l2 = strong_tokens(lv, window_tokens)
+        return used_tokens <= l2 - min(margin_tokens, l2 // 2)
     if pct is not None:
         return pct <= lv.fallback_pct
     return True

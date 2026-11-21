@@ -2080,3 +2080,13 @@ async def test_reinject_reminder_once_after_compaction_then_empty(env):
     assert env.policy_of(a)["reinject_text"] == ""  # discarded after one push
     await env.push()
     assert env.policy_of(a)["reinject_text"] == ""
+
+
+async def test_limit_move_to_full_named_peer_is_not_redirected(env):
+    # a `to` naming a peer without headroom is rejected, never swapped for another peer
+    c, (a0, a1, a2) = await env.hive(3)
+    await env.gauge(a1["id"], ROOM + 1)
+    assert await env.step(c["id"]) == [f"pressuring:{a0['id']}"]
+    assert await env.submit(a0, to=a1["pod_name"])
+    assert await env.step(c["id"]) == [f"clearing:{a0['id']}"]
+    assert await env.requests(c["id"]) == []
