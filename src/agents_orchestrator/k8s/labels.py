@@ -6,8 +6,9 @@ import uuid
 from collections.abc import Mapping
 from typing import Any
 
-SESSION_LABEL = "agents.szymonrichert.pl/session"
-SESSION_ID_LABEL = "agents.szymonrichert.pl/session-id"
+DOMAIN = "agents.szymonrichert.pl"
+SESSION_LABEL = f"{DOMAIN}/session"
+SESSION_ID_LABEL = f"{DOMAIN}/session-id"
 MANAGED_BY_LABEL = "app.kubernetes.io/managed-by"
 MANAGED_BY = "agents-orchestrator"
 
@@ -36,6 +37,11 @@ def cluster_binding_name(slug: str, session_id: uuid.UUID) -> str:
 
 def namespace_binding_name(slug: str, session_id: uuid.UUID, tier: str) -> str:
     return f"{kube_service_account(slug, session_id)}-{tier}"
+
+
+def volume_pod_label(volume_id: uuid.UUID) -> str:
+    """The pod template label key marking a pod that mounts a volume (value `ro` or `rw`)."""
+    return f"{DOMAIN}/vol-{volume_id.hex[:8]}"
 
 
 def selector(slug: str) -> dict[str, dict[str, str]]:

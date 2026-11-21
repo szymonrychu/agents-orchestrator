@@ -13,7 +13,7 @@ import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 import psycopg
 from psycopg.rows import dict_row
@@ -60,6 +60,13 @@ class VolumeNotFound(Exception):
 
 class VolumeBusy(Exception):
     """The volume is in a state that does not allow this change."""
+
+
+class VolumeMounted(Exception):
+    """A session holds an unreleased claim on the volume (HARD RULE: no restore)."""
+
+
+Decision = Literal["proceed", "restore", "wait", "refuse"]
 
 
 @dataclass
@@ -359,27 +366,37 @@ async def finish_delete(conn: psycopg.AsyncConnection, id: uuid.UUID) -> None:
     await notify(conn, CHANGED_CHANNEL, {"id": str(id)})
 
 
-async def claim(
+@dataclass
+class ClaimDecision:
+    """What `claim` decided: `proceed` (claimed, mount), `restore` (claimed, volume now
+    `restoring`: run the pod check, then the restore Job), `wait` (restoring or saving, nothing
+    claimed, retry next reconcile) or `refuse` (deleting, nothing claimed). `volume` is the row
+    after the decision; `claim` is None for wait and refuse."""
+
+    decision: Decision
+    volume: Volume
+    claim: Claim | None
+
+
+async def _upsert_claim(
     conn: psycopg.AsyncConnection,
-    id: uuid.UUID,
-    *,
+    volume_id: uuid.UUID,
     session_id: uuid.UUID,
     preset_id: uuid.UUID | None,
     mode: str,
     backup_restore: bool,
-) -> Claim:
-    """Claim the volume for a session. Idempotent while the claim is active (no change, no
-    event); a new claim or one re-opened after its release writes `mounted`."""
-    await _lock(conn, id)
+) -> tuple[Claim, bool]:
+    """Idempotent while the claim is active (no change, no event, False); a new claim or one
+    re-opened after its release writes `mounted` (True). The caller holds the volume row lock."""
     active = await _rows(
         conn,
         f"SELECT {_CLAIM_COLUMNS} FROM volume_mounts WHERE volume_id = %s AND session_id = %s"
         " AND released_at IS NULL",
-        (id, session_id),
+        (volume_id, session_id),
         Claim,
     )
     if active:
-        return active[0]
+        return active[0], False
     rows = await _rows(
         conn,
         f"INSERT INTO volume_mounts (volume_id, session_id, preset_id, mode, backup_restore)"
@@ -387,19 +404,165 @@ async def claim(
         f" SET released_at = NULL, claimed_at = now(), preset_id = EXCLUDED.preset_id,"
         f" mode = EXCLUDED.mode, backup_restore = EXCLUDED.backup_restore"
         f" RETURNING {_CLAIM_COLUMNS}",
-        (id, session_id, preset_id, mode, backup_restore),
+        (volume_id, session_id, preset_id, mode, backup_restore),
         Claim,
     )
     await record_event(
         conn,
-        id,
+        volume_id,
         "mounted",
         actor_kind="system",
         actor="reconciler",
         detail={"session_id": str(session_id), "mode": mode, "backup_restore": backup_restore},
     )
-    await notify(conn, CHANGED_CHANNEL, {"id": str(id)})
-    return rows[0]
+    return rows[0], True
+
+
+def _str(v: uuid.UUID | None) -> str | None:
+    return str(v) if v is not None else None
+
+
+async def claim(
+    conn: psycopg.AsyncConnection,
+    *,
+    volume_id: uuid.UUID,
+    session_id: uuid.UUID,
+    preset_id: uuid.UUID | None,
+    mode: str,
+    backup_restore: bool,
+    session_slug: str,
+    current_version: uuid.UUID | None,
+) -> ClaimDecision:
+    """The HARD RULE guard (spec 8.3): claim the volume for a session and decide whether it is
+    restored first. Under the volume row lock: `deleting` refuses, `restoring`/`saving` waits
+    (no claim); else the claim is inserted, and a wanted restore (`backup_restore`, a
+    `current_version` that differs from `content_version`) starts only when no other session
+    holds an unreleased claim (sessions in deleting count until released); otherwise
+    `restore_skipped_mounted` is recorded and the session proceeds. `current_version` is
+    `backups.current(volume-<name>)`, read by the caller."""
+    async with conn.transaction():
+        vol = await _lock(conn, volume_id)
+        if vol.state == "deleting":
+            return ClaimDecision("refuse", vol, None)
+        if vol.state in ("restoring", "saving"):
+            return ClaimDecision("wait", vol, None)
+        mine, created = await _upsert_claim(
+            conn, volume_id, session_id, preset_id, mode, backup_restore
+        )
+        decision: Decision = "proceed"
+        if (
+            backup_restore
+            and current_version is not None
+            and current_version != vol.content_version
+        ):
+            others = [
+                str(c.session_id)
+                for c in await unreleased_claims(conn, volume_id)
+                if c.session_id != session_id
+            ]
+            if others and created:  # once per claim, not on every reconcile's re-claim
+                await record_event(
+                    conn,
+                    volume_id,
+                    "restore_skipped_mounted",
+                    actor_kind="system",
+                    actor="reconciler",
+                    detail={
+                        "session_id": str(session_id),
+                        "others": others,
+                        "current_version": str(current_version),
+                        "content_version": _str(vol.content_version),
+                    },
+                )
+            elif not others:
+                await conn.execute(
+                    "UPDATE volumes SET state = 'restoring', state_reason = NULL WHERE id = %s",
+                    (volume_id,),
+                )
+                await record_event(
+                    conn,
+                    volume_id,
+                    "restore_started",
+                    actor_kind="system",
+                    actor="reconciler",
+                    detail={
+                        "session_id": str(session_id),
+                        "session_slug": session_slug,
+                        "version": str(current_version),
+                        "content_version": _str(vol.content_version),
+                    },
+                )
+                decision = "restore"
+        if (
+            created or decision == "restore"
+        ):  # an idempotent re-claim must not wake NOTIFY listeners every reconcile
+            await _touch(conn, volume_id)
+        after = await get(conn, volume_id)
+        assert after is not None
+        return ClaimDecision(decision, after, mine)
+
+
+async def abort_restore(
+    conn: psycopg.AsyncConnection,
+    volume_id: uuid.UUID,
+    *,
+    reason: str,
+    actor_kind: str = "system",
+    actor: str = "reconciler",
+) -> None:
+    """Undo a `restoring` that the pod check refused (reason e.g. `pod_found`): back to
+    `ready`, event `restore_skipped_mounted`. VolumeBusy when the volume is not restoring."""
+    async with conn.transaction():
+        vol = await _lock(conn, volume_id)
+        if vol.state != "restoring":
+            raise VolumeBusy(f"cannot abort a restore of a volume that is {vol.state}")
+        await conn.execute(
+            "UPDATE volumes SET state = 'ready', state_reason = NULL WHERE id = %s", (volume_id,)
+        )
+        await record_event(
+            conn,
+            volume_id,
+            "restore_skipped_mounted",
+            actor_kind=actor_kind,
+            actor=actor,
+            detail={"reason": reason},
+        )
+        await _touch(conn, volume_id)
+
+
+async def begin_explicit_restore(
+    conn: psycopg.AsyncConnection,
+    volume_id: uuid.UUID,
+    *,
+    version: uuid.UUID,
+    actor: str,
+    actor_kind: str = "user",
+) -> Volume:
+    """A user-triggered restore of `version` (spec 8.3), same lock as `claim`: VolumeBusy unless
+    the volume is `ready` or `failed`, VolumeMounted while any claim is unreleased (HARD RULE);
+    else `restoring` and `restore_started` (detail carries the version to restore)."""
+    async with conn.transaction():
+        vol = await _lock(conn, volume_id)
+        if vol.state not in ("ready", "failed"):
+            raise VolumeBusy(f"cannot restore a volume that is {vol.state}")
+        if await unreleased_claims(conn, volume_id):
+            raise VolumeMounted(str(volume_id))
+        await conn.execute(
+            "UPDATE volumes SET state = 'restoring', state_reason = NULL WHERE id = %s",
+            (volume_id,),
+        )
+        await record_event(
+            conn,
+            volume_id,
+            "restore_started",
+            actor_kind=actor_kind,
+            actor=actor,
+            detail={"version": str(version), "content_version": _str(vol.content_version)},
+        )
+        await _touch(conn, volume_id)
+        after = await get(conn, volume_id)
+        assert after is not None
+        return after
 
 
 async def unreleased_claims(conn: psycopg.AsyncConnection, volume_id: uuid.UUID) -> list[Claim]:

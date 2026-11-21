@@ -99,7 +99,14 @@ async def test_release_claims_sets_released_at_and_writes_event(pool):
         v = await _create(conn)
         session = uuid.uuid4()
         await volumes.claim(
-            conn, v.id, session_id=session, preset_id=None, mode="rw", backup_restore=True
+            conn,
+            volume_id=v.id,
+            session_id=session,
+            preset_id=None,
+            mode="rw",
+            backup_restore=True,
+            session_slug="s",
+            current_version=None,
         )
         assert len(await volumes.unreleased_claims(conn, v.id)) == 1
         released = await volumes.release_claims(
@@ -176,13 +183,21 @@ async def test_claim_event_only_when_created_or_reopened_and_reclaim_clears_rele
     async with pool.connection() as conn:
         v = await _create(conn)
         s = uuid.uuid4()
-        kw = dict(session_id=s, preset_id=None, mode="rw", backup_restore=False)
-        await volumes.claim(conn, v.id, **kw)
-        await volumes.claim(conn, v.id, **kw)
+        kw = dict(
+            volume_id=v.id,
+            session_id=s,
+            preset_id=None,
+            mode="rw",
+            backup_restore=False,
+            session_slug="s",
+            current_version=None,
+        )
+        await volumes.claim(conn, **kw)
+        await volumes.claim(conn, **kw)
         assert await _kinds(conn, v.id) == ["created", "mounted"]
         await volumes.release_claims(conn, s, actor_kind="system", actor="reconciler")
-        again = await volumes.claim(conn, v.id, **kw)
-        assert again.released_at is None
+        again = await volumes.claim(conn, **kw)
+        assert again.claim.released_at is None
         assert len(await volumes.unreleased_claims(conn, v.id)) == 1
         assert await _kinds(conn, v.id) == ["created", "mounted", "released", "mounted"]
 
