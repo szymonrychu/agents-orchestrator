@@ -119,7 +119,7 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     # room notes: the upstream resolves the room from the caller session's own
     # binding, so a caller reaches only the room its session is bound to
     ("GET", f"{_A}/chat/notes"): "own",
-    ("PUT", f"{_A}/chat/notes"): "own",
+    ("PUT", f"{_A}/chat/notes/sections/{{section}}"): "own",
     ("GET", f"{_A}/chat/history"): "own",
     ("POST", f"{_A}/chat/attachments"): "own",
     ("GET", f"{_A}/chat/attachments/{{request_id}}"): "own",
@@ -210,7 +210,7 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("PUT", f"{_ADMIN}/chats/rooms/{{room_id}}/settings"): "superleader",
     ("POST", f"{_ADMIN}/chats/rooms/{{room_id}}/allow"): "superleader",
     ("GET", f"{_ADMIN}/chats/rooms/{{room_id}}/notes"): "reader",
-    ("PUT", f"{_ADMIN}/chats/rooms/{{room_id}}/notes"): "notes",
+    ("PUT", f"{_ADMIN}/chats/rooms/{{room_id}}/notes/sections/{{section}}"): "notes",
     ("GET", f"{_ADMIN}/handoffs"): "reader",
     ("GET", f"{_ADMIN}/handoffs/{{id}}"): "reader",
     ("GET", f"{_ADMIN}/chats/users"): "superleader",

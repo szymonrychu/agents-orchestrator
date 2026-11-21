@@ -142,7 +142,7 @@ _CHATS = [
     ("PUT", "/rooms/{room_id}/settings", 200),
     ("POST", "/rooms/{room_id}/allow", 200),
     ("GET", "/rooms/{room_id}/notes", 200),
-    ("PUT", "/rooms/{room_id}/notes", 200),
+    ("PUT", "/rooms/{room_id}/notes/sections/{section}", 200),
     ("GET", "/users", 200),
     ("POST", "/room-requests", 201),
     ("GET", "/room-requests/{request_id}", 200),
@@ -182,7 +182,7 @@ READER_ROUTES: frozenset[tuple[str, str, str]] = frozenset(
     }
 )
 # The room notes update: the notes writer gate (decision 775).
-NOTES_ROUTE = ("connector", "PUT", "/rooms/{room_id}/notes")
+NOTES_ROUTE = ("connector", "PUT", "/rooms/{room_id}/notes/sections/{section}")
 
 
 @dataclass(frozen=True)
@@ -235,7 +235,7 @@ GUARDS: dict[tuple[str, str, str], Guard] = {
     ("connector", "PUT", "/rooms/{room_id}/settings"): Guard(),
     ("connector", "POST", "/rooms/{room_id}/allow"): Guard(),
     ("connector", "GET", "/rooms/{room_id}/notes"): Guard(),
-    ("connector", "PUT", "/rooms/{room_id}/notes"): Guard(),
+    ("connector", "PUT", "/rooms/{room_id}/notes/sections/{section}"): Guard(),
     ("connector", "GET", "/users"): Guard(),
     ("connector", "POST", "/room-requests"): Guard(ask_decision=True),
     ("connector", "GET", "/room-requests/{request_id}"): Guard(),

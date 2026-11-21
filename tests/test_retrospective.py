@@ -33,7 +33,7 @@ from agents_orchestrator.api.scope import scope_of
 from agents_orchestrator.preset_policy import GRANTS, HUMAN_ONLY_PATHS, human_only_changes
 from agents_orchestrator.spec import SessionSpec
 
-NOTES = "/rooms/{room_id}/notes"
+NOTES = "/rooms/{room_id}/notes/sections/{section}"
 
 
 async def _exec(pool, query: str, params: tuple = ()) -> None:
@@ -136,7 +136,7 @@ def test_reader_routes_are_exactly_the_read_set_and_the_copy():
         ("GET", f"{p}/history/sessions/{{session_id}}/records"),
     }
     assert [(m, r.path) for r in admin.notes_router.routes for m in r.methods] == [
-        ("PUT", f"{p}/chats/rooms/{{room_id}}/notes")
+        ("PUT", f"{p}/chats/rooms/{{room_id}}/notes/sections/{{section}}")
     ]
 
 
@@ -311,7 +311,7 @@ async def test_retro_notes_update_scoped_to_granted_project(rig):  # noqa: F811
     key = ("PUT", UPSTREAM_PREFIX["connector"] + NOTES)
     body = fu.sample(DOCS["connector"], _body_schema(fake, key))
     reader = await retro(pool, "rn-reader", project="rp", extra=("granted",))
-    url = ADMIN_PREFIX + "/chats" + NOTES
+    url = ADMIN_PREFIX + "/chats" + NOTES.replace("{section}", "preferences")
     for room, status in (("21", 200), ("22", 403), ("23", 200), ("24", 403), ("25", 200)):
         r = await call(rig.app, reader, "PUT", url.replace("{room_id}", room), json=body)
         if status == 403:
@@ -319,7 +319,9 @@ async def test_retro_notes_update_scoped_to_granted_project(rig):  # noqa: F811
         else:
             assert r.status_code == 200, (room, r.text)
     puts = [c.path for c in fake.calls if c.method == "PUT"]
-    assert puts == [f"/chat/v1/admin/rooms/{n}/notes" for n in ("21", "23", "25")]
+    assert puts == [
+        f"/chat/v1/admin/rooms/{n}/notes/sections/preferences" for n in ("21", "23", "25")
+    ]
     plain = await alone(pool, "rn-plain")
     r = await call(rig.app, plain, "PUT", url.replace("{room_id}", "21"), json=body)
     assert_error(r, 403, "not_superleader")

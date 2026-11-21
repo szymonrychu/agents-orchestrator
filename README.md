@@ -1773,17 +1773,17 @@ Forwards to `POST {ORCH_CHAT_URL}/chat/v1/reactions`. Body `{to, key}`: `to` a m
 
 Forwards to `GET {ORCH_CHAT_URL}/chat/v1/messages/{send_id}` (the id percent-encoded as one path segment, dots included): the delivery status of a send of the caller's session, 200 `{id, kind, status, reason, room_id, created_at, sent_at}`; the upstream answers 404 `not_found` for an id that is not one of the caller session's sends.
 
-**Room notes** (the two routes below).
+**Room notes** (the two routes below, notes in five named sections).
 
-Per-room memory kept by the connector (notes survive the session). The room is never a parameter: the connector resolves it from the caller session's active binding, so a session reaches only the room it is bound to (scope `own`). No route stamps `last_update_at`. A caller with no bound room gets the upstream's 409 `room_unbound`. Both routes pass the upstream status and JSON body through unchanged: 401, 403 `not_leader` and 503 `chat_unconfigured` or `chat_unavailable` come from the relay, a body over 256 KiB is 413 `payload_too_large` from the relay (the upstream's own 413 `notes_too_large` passes back as is).
+Per-room memory kept by the connector (notes survive the session). The room is never a parameter: the connector resolves it from the caller session's active binding, so a session reaches only the room it is bound to (scope `own`). No route stamps `last_update_at`. A caller with no bound room gets the upstream's 409 `room_unbound`. Both routes pass the upstream status and JSON body through unchanged: 401, 403 `not_leader` and 503 `chat_unconfigured` or `chat_unavailable` come from the relay, a body over 256 KiB is 413 `payload_too_large` from the relay (the upstream's own 413 `section_too_large` and `notes_too_large` pass back as is).
 
 #### `GET /agent/v1/chat/notes`
 
-Forwards to `GET {ORCH_CHAT_URL}/chat/v1/notes`: 200 `{room_id, body, version, updated_at, chars, max_chars, rule}` (empty body and version 0 when none).
+Forwards to `GET {ORCH_CHAT_URL}/chat/v1/notes` with the query string as is. Optional query `section` (one of `preferences`, `requests`, `work-in-progress`, `provided-information`, `repeatable-workflows`; the upstream validates it): 200 `{room_id, body, chars, max_chars, section_max_chars, sections, rule}`, `sections` being `[{key, title, body, version, chars, inject, updated_at}]` (version 0 when never written) and `body` the non-empty sections rendered `## <Title>` plus text; with `section`, `sections` and `body` hold only that section.
 
-#### `PUT /agent/v1/chat/notes`
+#### `PUT /agent/v1/chat/notes/sections/{section}`
 
-Forwards to `PUT .../notes`. Body `{body, expected_version}` (the version read before; 0 creates; an empty body forgets the notes), forwarded byte for byte. A stale version is the upstream's 409 `version_conflict`.
+Forwards to `PUT .../notes/sections/{section}` (the key percent-encoded as one path segment; the upstream answers 422 `invalid_request` for an unknown key). Body `{body, expected_version}` (the section's version read before; 0 creates; an empty body forgets the section), forwarded byte for byte. 200 is the notes of the whole room (the shape above). A stale version is the upstream's 409 `version_conflict`, an over-long section 413 `section_too_large`, a room over its total 413 `notes_too_large`. The whole-body `PUT /agent/v1/chat/notes` is gone (405).
 
 #### `GET /agent/v1/chat/history`
 
