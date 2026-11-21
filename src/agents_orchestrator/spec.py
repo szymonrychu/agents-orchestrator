@@ -722,7 +722,7 @@ def _mount_path_problem(path: str) -> str | None:
         return "must not be '/'"
     if len(path) > VOLUME_PATH_MAX:
         return f"is longer than {VOLUME_PATH_MAX} characters"
-    if posixpath.normpath(path) != path:
+    if path.startswith("//") or posixpath.normpath(path) != path:
         return "must be normalised (no '//', '.', or trailing '/')"
     return None
 

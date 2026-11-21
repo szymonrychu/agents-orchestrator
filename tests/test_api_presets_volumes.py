@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
 import pytest_asyncio
+from fakes.fake_kube import FakeKube
 from test_api_sessions import assert_error, client_for, make_settings
+from test_proposals_service import NS, _create, _request, _session, vault  # noqa: F401
 
+from agents_orchestrator.api import proposals, schemas
 from agents_orchestrator.api.app import create_app
+from agents_orchestrator.api.errors import ApiError
+from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.db import volumes
 
 P = "/api/v1/presets"
@@ -120,3 +126,29 @@ async def test_attach_and_detach_each_write_one_event(http, pool):
     assert [k for k, _ in got if k in ("attached", "detached")] == ["attached", "detached"]
     assert got[-2][1]["mode"] == "rw" and got[-2][1]["preset_id"] == made["id"]
     assert got[-1][1]["preset_id"] == made["id"]
+
+
+@pytest.mark.parametrize("via", ["copy", "proposal"])
+@pytest.mark.parametrize("case", ["unknown", "out_of_scope"])
+async def test_copy_and_proposal_apply_refuse_bad_volumes(http, pool, dsn, via, case):
+    if case == "unknown":
+        bad = {"volume": str(uuid.uuid4()), "mode": "ro", "mount_path": "/x"}
+    else:
+        bad = {**att(await volume(pool, "elsewhere", ("b",))), "mount_path": "/x"}
+    spec = {"volumes": [bad]} if via == "copy" else {}
+    async with pool.connection() as conn:
+        src = await presets_repo.create(conn, "src", spec, superleader_manageable=True, project="a")
+    if via == "copy":
+        assert_error(await http.post(f"{P}/{src.id}/copy"), 422, "volumes_invalid")
+        return
+    settings = make_settings(dsn)
+    kube = FakeKube(namespace=NS)
+    boss = await _session(pool, "prop-boss")
+    view, _, _ = await _create(pool, kube, settings, boss, target="src", patch={"volumes": [bad]})
+    body = schemas.ReviewIn.model_validate(
+        {"revision": 1, "items": [{"path": "volumes", "decision": "approve", "note": None}]}
+    )
+    async with pool.connection() as conn:
+        with pytest.raises(ApiError) as exc:
+            await proposals.review(_request(kube), conn, settings, view.id, body)
+    assert (exc.value.status, exc.value.code) == (422, "volumes_invalid")

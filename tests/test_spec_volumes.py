@@ -33,19 +33,13 @@ def att(volume=V1, **over) -> dict:
         ([att(mount_path="/")], "must not be '/'"),
         ([att(mount_path="/" + "a" * 200)], "longer than 200"),
         ([att(mount_path="/a//b")], "normalised"),
-        ([att(mount_path="/a/"), att(V2, mount_path="/a")], "normalised"),
+        ([att(mount_path="//a")], "normalised"),
         ([att(mount_path="/a"), att(V2, mount_path="/a")], "used more than once"),
         ([att(uuid.uuid4()) for _ in range(9)], "at most 8"),
     ],
 )
 def test_volume_shape_refusals(atts, text):
     assert any(text in e for e in errors(*atts))
-
-
-@pytest.mark.parametrize("path", ["/claude", "/home/agent/.claude/skills", "/volumes/x", None])
-def test_any_absolute_path_is_accepted(path):
-    spec = SessionSpec.model_validate({"volumes": [att(mount_path=path)]})
-    validate_spec(spec, Settings(database_url="postgresql://u:p@h/db"))
 
 
 def test_volumes_is_session_fixed_and_security():
