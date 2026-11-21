@@ -1,6 +1,6 @@
 """HARD RULE: never restore a volume that a not-fully-discarded session has claimed.
 
-The DB guard (`db.volumes.claim`, `begin_explicit_restore`, `abort_restore`) against the real test
+The DB guard (`db.volumes.claim`, `begin_explicit_restore`) against the real test
 Postgres, and the Kubernetes pod check (`reconciler.volume_guard.pods_using`) against the fake kube.
 """
 
@@ -192,17 +192,6 @@ async def test_restore_skipped_mounted_written_once_per_new_claim(pool):
         for _ in range(3):
             assert (await _claim(conn, v.id, me)).decision == "proceed"
     assert (await _kinds(pool, v.id)).count("restore_skipped_mounted") == 1
-
-
-async def test_abort_restore_returns_to_ready_with_reason(pool):
-    v = await _volume(pool, content_version=None)
-    async with pool.connection() as conn:
-        await _claim(conn, v.id, uuid.uuid4())
-        async with conn.transaction():
-            await volumes.abort_restore(conn, v.id, reason="pod_found")
-        assert (await volumes.get(conn, v.id)).state == "ready"
-        last = (await volumes.events(conn, v.id, limit=1)).items[0]
-    assert (last.kind, last.detail["reason"]) == ("restore_skipped_mounted", "pod_found")
 
 
 async def test_explicit_restore_refused_while_any_claim_is_unreleased(pool):

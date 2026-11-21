@@ -149,6 +149,10 @@ class VolumeReconciler:
     async def _ready(self, vol: volumes.Volume) -> None:
         if await self._pvc(vol) is None:
             await self._set(vol, "failed", PVC_MISSING)
+            return
+        if vol.save_pending:  # a release during a busy state: the final writes still get saved
+            async with self.pool.connection() as conn:
+                await volumes.start_pending_save(conn, vol.id)
 
     # ------------------------------------------------------------------ restore and save Jobs
 
@@ -179,8 +183,8 @@ class VolumeReconciler:
             self.kube, self.settings.namespace, volume_id=vol.id, pvc_name=vol.pvc_name
         )
         if found:
-            async with self.pool.connection() as conn, conn.transaction():
-                await volumes.abort_restore(conn, vol.id, reason="pod_found")
+            async with self.pool.connection() as conn:  # stays restoring, retried each tick
+                await volumes.note_restore_wait(conn, vol.id, started_id=n, reason="pod_found")
             return
         if not self.settings.cache_available:
             await self._end_restore(vol, None, "not_configured")

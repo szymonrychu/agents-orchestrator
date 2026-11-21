@@ -2,7 +2,8 @@
 
 The DB guard (`db.volumes.claim`, `begin_explicit_restore`) decides from claims; this check
 catches a pod the claims do not know about (a crashed release, a hand-made pod). Any pod it
-returns aborts the restore (`db.volumes.abort_restore`, reason `pod_found`).
+returns holds the restore (`db.volumes.note_restore_wait`, reason `pod_found`): the volume
+stays `restoring`, no Job is created and the check repeats each pass.
 """
 
 from __future__ import annotations

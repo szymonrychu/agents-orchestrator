@@ -34,7 +34,7 @@ MAX_LIMIT = 200
 STATES = ("provisioning", "ready", "resizing", "restoring", "saving", "deleting", "failed")
 _COLUMNS = (
     "id, name, projects, labels, description, exclude, size, storage_class, pvc_name, state,"
-    " state_reason, content_version, created_by, created_at, updated_at, deleted_at"
+    " state_reason, content_version, save_pending, created_by, created_at, updated_at, deleted_at"
 )
 _CLAIM_COLUMNS = (
     "id, volume_id, session_id, preset_id, mode, backup_restore, claimed_at, released_at"
@@ -87,6 +87,7 @@ class Volume:
     created_at: datetime
     updated_at: datetime
     deleted_at: datetime | None
+    save_pending: bool = False
 
 
 @dataclass
@@ -350,8 +351,9 @@ async def set_state(
         raise VolumeBusy("a deleting volume cannot change state")
     await conn.execute(
         "UPDATE volumes SET state = %s, state_reason = %s,"
-        " content_version = COALESCE(%s, content_version) WHERE id = %s AND state = %s",
-        (state, reason, content_version, id, cur.state),
+        " content_version = COALESCE(%s, content_version),"
+        " save_pending = save_pending AND %s <> 'deleting' WHERE id = %s AND state = %s",
+        (state, reason, content_version, state, id, cur.state),
     )
     await _touch(conn, id)
     return True
@@ -569,32 +571,34 @@ async def claim_all(
     return [out[i] for i in range(len(claims))]
 
 
-async def abort_restore(
-    conn: psycopg.AsyncConnection,
-    volume_id: uuid.UUID,
-    *,
-    reason: str,
-    actor_kind: str = "system",
-    actor: str = "reconciler",
-) -> None:
-    """Undo a `restoring` that the pod check refused (reason e.g. `pod_found`): back to
-    `ready`, event `restore_skipped_mounted`. VolumeBusy when the volume is not restoring."""
+async def note_restore_wait(
+    conn: psycopg.AsyncConnection, volume_id: uuid.UUID, *, started_id: int, reason: str
+) -> bool:
+    """The pod check refused a restore Job (reason e.g. `pod_found`): the volume stays
+    `restoring` (HARD RULE: no Job while a pod uses it) and the pass retries each tick. Writes
+    one `restore_skipped_mounted` event per restore attempt (`started_id` is the id of its
+    `restore_started` event); True when written. VolumeBusy when the volume is not restoring."""
     async with conn.transaction():
         vol = await _lock(conn, volume_id)
         if vol.state != "restoring":
-            raise VolumeBusy(f"cannot abort a restore of a volume that is {vol.state}")
-        await conn.execute(
-            "UPDATE volumes SET state = 'ready', state_reason = NULL WHERE id = %s", (volume_id,)
+            raise VolumeBusy(f"cannot hold a restore of a volume that is {vol.state}")
+        cur = await conn.execute(
+            "SELECT 1 FROM volume_events WHERE volume_id = %s AND id > %s"
+            " AND kind = 'restore_skipped_mounted'",
+            (volume_id, started_id),
         )
+        if await cur.fetchone():
+            return False
         await record_event(
             conn,
             volume_id,
             "restore_skipped_mounted",
-            actor_kind=actor_kind,
-            actor=actor,
+            actor_kind="system",
+            actor="reconciler",
             detail={"reason": reason},
         )
         await _touch(conn, volume_id)
+        return True
 
 
 async def begin_explicit_restore(
@@ -719,31 +723,72 @@ async def request_save(
     """Start a save under the volume row lock (spec 6.3): `saving` and `save_started`, whose
     detail says whether a claim was unreleased (`live`), who triggered it and the session slug.
 
-    A volume that is not `ready` is busy: VolumeBusy for a user or agent request, a coalesced
-    no-op (None) for the automatic `release` trigger. `deleting` refuses every trigger
-    (VolumeBusy; None for release)."""
+    A volume that is not `ready` is busy: VolumeBusy for a user or agent request. The automatic
+    `release` trigger sets `save_pending` instead (coalesced; a release during a running save
+    too) and returns None, so the last mounter's final writes are saved once the volume is
+    `ready` again (`start_pending_save`). `deleting` refuses every trigger (VolumeBusy; None
+    for release, nothing pending)."""
     async with conn.transaction():
         vol = await _lock(conn, volume_id)
         if vol.state != "ready":
             if trigger == "release":
+                if vol.state != "deleting" and not vol.save_pending:
+                    await conn.execute(
+                        "UPDATE volumes SET save_pending = true WHERE id = %s", (volume_id,)
+                    )
+                    await _touch(conn, volume_id)
                 return None
             raise VolumeBusy(f"cannot save a volume that is {vol.state}")
-        live = bool(await unreleased_claims(conn, volume_id))
-        await conn.execute(
-            "UPDATE volumes SET state = 'saving', state_reason = NULL WHERE id = %s", (volume_id,)
-        )
-        await record_event(
+        return await _begin_save(
             conn,
-            volume_id,
-            "save_started",
-            actor_kind=actor_kind,
+            vol,
+            trigger=trigger,
+            session_slug=session_slug,
             actor=actor,
-            detail={"live": live, "trigger": trigger, "session_slug": session_slug},
+            actor_kind=actor_kind,
         )
-        await _touch(conn, volume_id)
-        after = await get(conn, volume_id)
-        assert after is not None
-        return after
+
+
+async def start_pending_save(conn: psycopg.AsyncConnection, volume_id: uuid.UUID) -> Volume | None:
+    """Start the save a release left pending: only on a `ready` volume with `save_pending`,
+    which is cleared under the row lock as the save starts. None otherwise."""
+    async with conn.transaction():
+        vol = await _lock(conn, volume_id)
+        if vol.state != "ready" or not vol.save_pending:
+            return None
+        return await _begin_save(
+            conn, vol, trigger="release", session_slug=None, actor="reconciler", actor_kind="system"
+        )
+
+
+async def _begin_save(
+    conn: psycopg.AsyncConnection,
+    vol: Volume,
+    *,
+    trigger: SaveTrigger,
+    session_slug: str | None,
+    actor: str,
+    actor_kind: str,
+) -> Volume:
+    volume_id = vol.id
+    live = bool(await unreleased_claims(conn, volume_id))
+    await conn.execute(
+        "UPDATE volumes SET state = 'saving', state_reason = NULL, save_pending = false"
+        " WHERE id = %s",
+        (volume_id,),
+    )
+    await record_event(
+        conn,
+        volume_id,
+        "save_started",
+        actor_kind=actor_kind,
+        actor=actor,
+        detail={"live": live, "trigger": trigger, "session_slug": session_slug},
+    )
+    await _touch(conn, volume_id)
+    after = await get(conn, volume_id)
+    assert after is not None
+    return after
 
 
 async def finish_restore(

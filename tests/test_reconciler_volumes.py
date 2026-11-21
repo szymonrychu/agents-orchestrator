@@ -336,27 +336,29 @@ def _uploaded(digest=DIGEST):
     return _outcome(state="uploaded", size=7, digest=digest, manifest=[{"path": "a"}])
 
 
-async def test_restore_with_a_foreign_pod_aborts_and_creates_no_job(pool, kube, rec):
+async def test_restore_waits_while_a_foreign_pod_uses_the_volume_then_runs(pool, kube, rec):
     v = await _ready(pool, kube, rec)
     ver = await _version(pool, v)
-    kube.seed(
-        {
-            "apiVersion": "v1",
-            "kind": "Pod",
-            "metadata": {"name": "x-0", "labels": {volume_pod_label(v.id): "rw"}},
-            "status": {"phase": "Running"},
-        }
-    )
+    pod = {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": "x-0", "labels": {volume_pod_label(v.id): "rw"}},
+        "status": {"phase": "Running"},
+    }
+    kube.seed(pod)
     await _restore(pool, v, ver.id)
-    await rec.tick()
-    assert _jobs(kube) == []
-    got = await _get(pool, v.id)
-    assert (got.state, got.content_version) == ("ready", None)
+    for _ in range(3):
+        await rec.tick()
+        assert _jobs(kube) == []
+        assert await _state(pool, v.id) == "restoring"
     kinds = [k for k, *_ in await _kinds(pool, v.id)]
     assert kinds[-2:] == ["restore_started", "restore_skipped_mounted"]
     async with pool.connection() as conn:
         last = (await volumes.events(conn, v.id, limit=1)).items[0]
     assert last.detail == {"reason": "pod_found"}
+    await kube.delete("Pod", "agents", "x-0")
+    await rec.tick()
+    assert len(_jobs(kube)) == 1
 
 
 async def test_successful_restore_sets_content_version(pool, kube, rec):
@@ -484,3 +486,41 @@ async def test_save_job_carries_the_volume_excludes_and_restore_ignores_them(poo
     await rec.tick()
     (rjob,) = _jobs(kube)
     assert entry(rjob)["exclude"] == []
+
+
+async def test_release_during_a_resize_saves_once_the_volume_is_ready(pool, kube, rec):
+    v = await _ready(pool, kube, rec)
+    async with pool.connection() as conn, conn.transaction():
+        await volumes.update(conn, v.id, size="20Gi", actor_kind="user", actor="alice")
+    assert await _state(pool, v.id) == "resizing"
+    await _save(pool, v, "release", "writer")
+    await _save(pool, v, "release", "writer")
+    await rec.tick()  # patches the PVC; capacity not grown yet
+    assert await _state(pool, v.id) == "resizing"
+    kube.set_pvc(v.pvc_name, "Bound", "20Gi")
+    await rec.tick()
+    assert await _state(pool, v.id) == "ready"
+    await rec.tick()
+    assert await _state(pool, v.id) == "saving"
+    assert (await _kinds(pool, v.id)).count(("save_started", "system", "reconciler")) == 1
+
+
+async def test_release_during_a_save_leads_to_exactly_one_follow_up_save(pool, kube, rec):
+    v = await _ready(pool, kube, rec)
+    await _save(pool, v, "user")
+    await rec.tick()
+    (job,) = _jobs(kube)
+    await _save(pool, v, "release", "writer")
+    await _save(pool, v, "release", "writer")
+    kube.finish_job(job["metadata"]["name"], log=_uploaded())
+    await rec.tick()
+    assert await _state(pool, v.id) == "ready"
+    await rec.tick()
+    assert await _state(pool, v.id) == "saving"
+    await rec.tick()
+    (job2,) = _jobs(kube)
+    kube.finish_job(job2["metadata"]["name"], log=_uploaded())
+    await rec.tick()
+    await rec.tick()
+    assert await _state(pool, v.id) == "ready"
+    assert [k for k, *_ in await _kinds(pool, v.id)].count("save_started") == 2

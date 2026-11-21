@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS volumes (
         'provisioning', 'ready', 'resizing', 'restoring', 'saving', 'deleting', 'failed')),
     state_reason text,
     content_version uuid,
+    save_pending boolean NOT NULL DEFAULT false,
     created_by text NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
