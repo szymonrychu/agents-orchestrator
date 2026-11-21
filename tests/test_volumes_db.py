@@ -14,7 +14,6 @@ async def _create(conn, name="data", projects=("p",), size="10Gi", **kw):
         projects=list(projects),
         size=size,
         description="",
-        labels=[],
         storage_class="rook-ceph-rwx",
         created_by="alice",
         actor_kind="user",
@@ -57,6 +56,7 @@ async def test_duplicate_live_name_refused_and_reusable_after_delete(pool):
 async def test_grow_sets_resizing_and_writes_event(pool):
     async with pool.connection() as conn:
         v = await _create(conn)
+        await volumes.set_state(conn, v.id, "ready")
         grown = await _grow(conn, v.id, "20Gi")
         assert (grown.size, grown.state) == ("20Gi", "resizing")
         assert await _kinds(conn, v.id) == ["created", "resized"]
@@ -65,6 +65,7 @@ async def test_grow_sets_resizing_and_writes_event(pool):
 async def test_shrink_refused(pool):
     async with pool.connection() as conn:
         v = await _create(conn)
+        await volumes.set_state(conn, v.id, "ready")
         with pytest.raises(volumes.ShrinkRefused):
             await _grow(conn, v.id, "5Gi")
 
@@ -127,3 +128,80 @@ async def test_invalid_exclude_refused(pool, bad):
         v = await _create(conn)
         with pytest.raises(ValueError):
             await volumes.update(conn, v.id, exclude=[bad], actor_kind="user", actor="alice")
+
+
+@pytest.mark.parametrize("state", ["provisioning", "resizing", "restoring", "saving", "deleting"])
+async def test_grow_refused_unless_ready_and_keeps_state(pool, state):
+    async with pool.connection() as conn:
+        v = await _create(conn)
+        await volumes.set_state(conn, v.id, state)
+        with pytest.raises(volumes.VolumeBusy):
+            await _grow(conn, v.id, "20Gi")
+        got = await volumes.get(conn, v.id)
+        assert (got.size, got.state) == ("10Gi", state)
+
+
+async def test_deleting_only_leaves_through_finish_delete(pool):
+    async with pool.connection() as conn:
+        v = await _create(conn)
+        await volumes.mark_deleting(conn, v.id)
+        with pytest.raises(volumes.VolumeBusy):
+            await volumes.set_state(conn, v.id, "ready")
+        await volumes.finish_delete(conn, v.id)
+        assert await volumes.get(conn, v.id) is None
+
+
+@pytest.mark.parametrize("bad", ["data\n", "Data", "-a", ""])
+async def test_invalid_name_refused(pool, bad):
+    async with pool.connection() as conn:
+        with pytest.raises(ValueError):
+            await _create(conn, bad)
+
+
+async def test_equal_size_allowed_even_if_cap_lowered(pool):
+    async with pool.connection() as conn:
+        v = await _create(conn, size="10Gi")
+        after = await _grow(conn, v.id, "10Gi", max_size="5Gi")
+        assert after.size == "10Gi"
+
+
+@pytest.mark.parametrize("bad", ["1e999999999", "1" + "0" * 40, "1e19"])
+async def test_hostile_size_refused(pool, bad):
+    async with pool.connection() as conn:
+        with pytest.raises(ValueError):
+            await _create(conn, size=bad)
+
+
+async def test_claim_event_only_when_created_or_reopened_and_reclaim_clears_release(pool):
+    async with pool.connection() as conn:
+        v = await _create(conn)
+        s = uuid.uuid4()
+        kw = dict(session_id=s, preset_id=None, mode="rw", backup_restore=False)
+        await volumes.claim(conn, v.id, **kw)
+        await volumes.claim(conn, v.id, **kw)
+        assert await _kinds(conn, v.id) == ["created", "mounted"]
+        await volumes.release_claims(conn, s, actor_kind="system", actor="reconciler")
+        again = await volumes.claim(conn, v.id, **kw)
+        assert again.released_at is None
+        assert len(await volumes.unreleased_claims(conn, v.id)) == 1
+        assert await _kinds(conn, v.id) == ["created", "mounted", "released", "mounted"]
+
+
+async def test_projects_trimmed_deduped_and_empty_refused(pool):
+    async with pool.connection() as conn:
+        v = await _create(conn, projects=(" a ", "b", "a"))
+        assert v.projects == ["a", "b"]
+        for bad in ([], [""], ["  "]):
+            with pytest.raises(ValueError):
+                await volumes.update(conn, v.id, projects=bad, actor_kind="user", actor="alice")
+            with pytest.raises(ValueError):
+                await _create(conn, "other", projects=bad)
+
+
+async def test_labels_normalised_and_invalid_refused(pool):
+    async with pool.connection() as conn:
+        v = await _create(conn, labels=[" Foo ", "foo", "bar"])
+        assert v.labels == ["foo", "bar"]
+        for bad in (["has space"], ["project:x"]):
+            with pytest.raises(ValueError):
+                await volumes.update(conn, v.id, labels=bad, actor_kind="user", actor="alice")

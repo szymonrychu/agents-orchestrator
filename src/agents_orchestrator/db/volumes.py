@@ -21,11 +21,15 @@ from psycopg.types.json import Jsonb
 
 from agents_orchestrator.db.backups import Page
 from agents_orchestrator.db.pool import notify
+from agents_orchestrator.labels import normalize_labels
 from agents_orchestrator.spec import check_exclude, parse_quantity
 
 CHANGED_CHANNEL = "volumes_changed"  # NOTIFY {"id"}: a volume or its claims changed
 NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$")
 DEFAULT_MAX_SIZE = "200Gi"
+_QUANTITY_MAX_LEN = 32
+_MAX_EXPONENT = 18
+_EXPONENT_RE = re.compile(r"[eE]([+-]?\d+)$")
 MAX_LIMIT = 200
 STATES = ("provisioning", "ready", "resizing", "restoring", "saving", "deleting", "failed")
 _COLUMNS = (
@@ -52,6 +56,10 @@ class OverCap(Exception):
 
 class VolumeNotFound(Exception):
     pass
+
+
+class VolumeBusy(Exception):
+    """The volume is in a state that does not allow this change."""
 
 
 @dataclass
@@ -99,13 +107,31 @@ class Event:
 
 def quantity_bytes(value: str) -> int:
     """A Kubernetes quantity (binary or decimal suffix) as whole bytes; ValueError when bad."""
+    if not isinstance(value, str) or len(value) > _QUANTITY_MAX_LEN:
+        raise ValueError(f"{value!r} is not a valid size")
+    m = _EXPONENT_RE.search(value)
+    if m and abs(int(m.group(1))) > _MAX_EXPONENT:
+        raise ValueError(f"{value!r} is not a valid size")
     return int(parse_quantity(value))
 
 
-def _check_size(size: str, max_size: str) -> int:
+def _clean_projects(projects: list[str]) -> list[str]:
+    """Trimmed, deduplicated (first-seen order) project labels; at least one, none empty."""
+    cleaned = [*dict.fromkeys(p.strip() for p in projects)]
+    if not cleaned or "" in cleaned:
+        raise ValueError("a volume needs at least one non-empty project")
+    return cleaned
+
+
+def _positive_bytes(size: str) -> int:
     n = quantity_bytes(size)
     if n <= 0:
         raise ValueError(f"{size!r} must be a positive quantity")
+    return n
+
+
+def _check_size(size: str, max_size: str) -> int:
+    n = _positive_bytes(size)
     if n > quantity_bytes(max_size):
         raise OverCap(f"{size} is above the maximum {max_size}")
     return n
@@ -166,10 +192,10 @@ async def create(
     max_size: str = DEFAULT_MAX_SIZE,
 ) -> Volume:
     """Insert a `provisioning` volume (PVC name `vol-<name>`); VolumeExists on a live name."""
-    if not NAME_RE.match(name):
+    if not NAME_RE.fullmatch(name):
         raise ValueError(f"{name!r} is not a valid volume name")
-    if not projects:
-        raise ValueError("a volume needs at least one project")
+    projects = _clean_projects(projects)
+    labels = normalize_labels(labels or [])
     _check_size(size, max_size)
     check_exclude(exclude or [])
     # serialise creators of one name: the partial unique index alone would abort the transaction
@@ -187,7 +213,7 @@ async def create(
             vid,
             name,
             projects,
-            labels or [],
+            labels,
             description,
             exclude or [],
             size,
@@ -249,34 +275,44 @@ async def update(
     max_size: str = DEFAULT_MAX_SIZE,
 ) -> Volume:
     """Change a volume. Size is grow-only (ShrinkRefused) up to `max_size` (OverCap); a size
-    equal to the current one is a no-op, a larger one sets `resizing`."""
+    equal to the current one is a no-op, a larger one sets `resizing` and only from `ready`
+    (VolumeBusy in any other state)."""
     cur = await _lock(conn, id)
     sets: dict[str, Any] = {}
     events: list[tuple[str, dict[str, Any]]] = []
     if size is not None:
-        new = _check_size(size, max_size)
+        new = _positive_bytes(size)
         old = quantity_bytes(cur.size)
         if new < old:
             raise ShrinkRefused(f"{size} is below the current {cur.size}")
         if new > old:
+            if new > quantity_bytes(max_size):
+                raise OverCap(f"{size} is above the maximum {max_size}")
+            if cur.state != "ready":
+                raise VolumeBusy(f"cannot resize a volume that is {cur.state}")
             sets.update(size=size, state="resizing", state_reason=None)
             events.append(("resized", {"from": cur.size, "to": size}))
     if description is not None and description != cur.description:
         sets["description"] = description
-    if labels is not None and labels != cur.labels:
-        sets["labels"] = labels
-        events.append(("labels_updated", {"labels": labels}))
+    if labels is not None:
+        labels = normalize_labels(labels)
+        if labels != cur.labels:
+            sets["labels"] = labels
+            events.append(("labels_updated", {"labels": labels}))
     if exclude is not None and exclude != cur.exclude:
         sets["exclude"] = check_exclude(exclude)
         events.append(("exclude_updated", {"exclude": exclude}))
-    if projects is not None and projects != cur.projects:
-        if not projects:
-            raise ValueError("a volume needs at least one project")
-        sets["projects"] = projects
-        events.append(("projects_updated", {"from": cur.projects, "to": projects}))
+    if projects is not None:
+        projects = _clean_projects(projects)
+        if projects != cur.projects:
+            sets["projects"] = projects
+            events.append(("projects_updated", {"from": cur.projects, "to": projects}))
     if sets:
         cols = ", ".join(f"{k} = %s" for k in sets)
-        await conn.execute(f"UPDATE volumes SET {cols} WHERE id = %s", (*sets.values(), id))
+        await conn.execute(
+            f"UPDATE volumes SET {cols} WHERE id = %s AND state = %s",
+            (*sets.values(), id, cur.state),
+        )
         for kind, detail in events:
             await record_event(conn, id, kind, actor_kind=actor_kind, actor=actor, detail=detail)
         await _touch(conn, id)
@@ -294,14 +330,17 @@ async def set_state(
     content_version: uuid.UUID | None = None,
 ) -> None:
     """Set the state and its failure reason (cleared otherwise); `content_version` is set only
-    when given (a save or restore)."""
+    when given (a save or restore). A `deleting` volume leaves that state only through
+    `finish_delete` (VolumeBusy otherwise)."""
     if state not in STATES:
         raise ValueError(f"unknown volume state {state!r}")
-    await _lock(conn, id)
+    cur = await _lock(conn, id)
+    if cur.state == "deleting" and state != "deleting":
+        raise VolumeBusy("a deleting volume cannot change state")
     await conn.execute(
         "UPDATE volumes SET state = %s, state_reason = %s,"
-        " content_version = COALESCE(%s, content_version) WHERE id = %s",
-        (state, reason, content_version, id),
+        " content_version = COALESCE(%s, content_version) WHERE id = %s AND state = %s",
+        (state, reason, content_version, id, cur.state),
     )
     await _touch(conn, id)
 
@@ -329,13 +368,25 @@ async def claim(
     mode: str,
     backup_restore: bool,
 ) -> Claim:
-    """Claim the volume for a session (idempotent per volume and session); writes `mounted`."""
+    """Claim the volume for a session. Idempotent while the claim is active (no change, no
+    event); a new claim or one re-opened after its release writes `mounted`."""
     await _lock(conn, id)
+    active = await _rows(
+        conn,
+        f"SELECT {_CLAIM_COLUMNS} FROM volume_mounts WHERE volume_id = %s AND session_id = %s"
+        " AND released_at IS NULL",
+        (id, session_id),
+        Claim,
+    )
+    if active:
+        return active[0]
     rows = await _rows(
         conn,
         f"INSERT INTO volume_mounts (volume_id, session_id, preset_id, mode, backup_restore)"
         f" VALUES (%s,%s,%s,%s,%s) ON CONFLICT (volume_id, session_id) DO UPDATE"
-        f" SET volume_id = EXCLUDED.volume_id RETURNING {_CLAIM_COLUMNS}",
+        f" SET released_at = NULL, claimed_at = now(), preset_id = EXCLUDED.preset_id,"
+        f" mode = EXCLUDED.mode, backup_restore = EXCLUDED.backup_restore"
+        f" RETURNING {_CLAIM_COLUMNS}",
         (id, session_id, preset_id, mode, backup_restore),
         Claim,
     )
@@ -364,7 +415,14 @@ async def unreleased_claims(conn: psycopg.AsyncConnection, volume_id: uuid.UUID)
 async def release_claims(
     conn: psycopg.AsyncConnection, session_id: uuid.UUID, *, actor_kind: str, actor: str
 ) -> list[Claim]:
-    """Release every unreleased claim of a session; one `released` event per volume."""
+    """Release every unreleased claim of a session; one `released` event per volume. Takes the
+    volume row locks first (id order), like `claim`."""
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT id FROM volumes WHERE id IN (SELECT volume_id FROM volume_mounts"
+            " WHERE session_id = %s AND released_at IS NULL) ORDER BY id FOR UPDATE",
+            (session_id,),
+        )
     released = await _rows(
         conn,
         f"UPDATE volume_mounts SET released_at = now() WHERE session_id = %s"
