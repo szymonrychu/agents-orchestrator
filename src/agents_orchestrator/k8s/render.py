@@ -502,6 +502,16 @@ HIVE_ENVELOPE_PROMPT = (
     'reach you as <message-in channel="..."> frames; refusals and failures of your envelopes '
     'arrive as <message-in channel="notice" ...>.'
 )
+HIVE_AGENT_SEND_PROMPT = (
+    "You message the other agents of your hive the same way: "
+    '<agent-send to="pod|leader" notify="idle">text</agent-send> sends to one member by its pod '
+    'name, or to whoever leads the hive at delivery with to="leader"; notify="idle" sends you '
+    "an idle notice when the turn that handled it ends. Pod names are in orchestrator_me and "
+    "the <hive-state> note."
+)
+#: Claude Code's own agent-to-agent tools: the wrapper denies them only while its peers are on,
+#: and hives run without peers (in-hive messages go through the orchestrator, S-71).
+HIVE_DENY = ("SendMessage", "ListAgents")
 
 CHAT_ENVELOPE_PROMPT = (
     "You reach a chat room only with envelopes at the start of a line, outside code fences, in "
@@ -533,6 +543,8 @@ def _system_append(spec: SessionSpec, settings: Settings) -> str:
         return ask
     room = SUPERLEADER_ROOM_PROMPT if spec.session_messaging else PROJECT_ROOM_PROMPT
     parts = [ask, room, HIVE_ENVELOPE_PROMPT]
+    if spec.hive:
+        parts.append(HIVE_AGENT_SEND_PROMPT)
     if settings.chat_available:
         parts.append(CHAT_ENVELOPE_PROMPT)
     if any(a.backup_restore for a in spec.volumes or []):
@@ -557,7 +569,7 @@ def subagent_allowed_tools(spec: SessionSpec, settings: Settings) -> list[str]:
 
 
 def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
-    spec, slug = session.spec, session.slug
+    spec = session.spec
     kube_env = KUBE_PASSTHROUGH_ENV if kube_granted(spec, settings) else ()
     docker_env = ()
     if docker_enabled(spec, settings):
@@ -585,6 +597,9 @@ def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
     if subagent_tools := subagent_allowed_tools(spec, settings):
         claude["subagent_allowed_tools"] = subagent_tools
     claude["permissions"] = {"deny": ["EnterPlanMode", "ExitPlanMode", "AskUserQuestion"]}
+    if spec.hive:
+        claude["permissions"]["deny"].extend(HIVE_DENY)
+        claude["env"]["extra"] = {"CLAUDE_CODE_HARBOR_KITE": "0"}
     claude["mcp_servers"] = {
         "any-mcp": {
             "type": "stdio",
@@ -633,17 +648,6 @@ def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
         cfg["hooks"]["onAgentToolCall"] = [_lock_check_hook()]
     if settings.agent_api_url:
         cfg["hooks"]["onStop"] = [_envelope_stop_hook()]
-    if spec.peers and spec.hive:
-        cfg["peers"] = {
-            "enabled": True,
-            "name": "${POD_NAME}",
-            "advertise_url": "${CCW_PEER_URL}",
-            "token": "${CCW_PEER_TOKEN}",
-            "static": [
-                pod_url(slug, f"{prefix(slug)}-{i}", settings)
-                for i in range(spec.max_replicas or spec.replicas)
-            ],
-        }
     lim = runaway.effective(spec, settings)
     if lim.max_concurrent_subagents:
         claude["env"]["claude_code_max_concurrent_subagents"] = lim.max_concurrent_subagents
@@ -833,13 +837,11 @@ def _container(
     names: dict[str, str],
     volume_mounts: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    spec, slug = session.spec, session.slug
+    spec = session.spec
     port = settings.wrapper_port
     env: list[dict[str, Any]] = [
         {"name": "POD_NAME", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
-        {"name": "CCW_PEER_URL", "value": pod_url(slug, "$(POD_NAME)", settings)},
         {"name": "CCW_AUTH_TOKEN", **_secret_ref(names["secret"], "CCW_AUTH_TOKEN")},
-        {"name": "CCW_PEER_TOKEN", **_secret_ref(names["secret"], "CCW_PEER_TOKEN")},
         {
             "name": "CLAUDE_CODE_OAUTH_TOKEN",
             **_secret_ref(settings.claude_secret_name, "CLAUDE_CODE_OAUTH_TOKEN"),
@@ -958,7 +960,6 @@ def render_session(
         "type": "Opaque",
         "stringData": {
             "CCW_AUTH_TOKEN": tokens.auth,
-            "CCW_PEER_TOKEN": tokens.peer,
             "ORCH_AGENT_TOKEN": tokens.agent,
         },
     }

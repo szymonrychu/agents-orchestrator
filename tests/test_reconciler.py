@@ -840,7 +840,6 @@ async def test_secrets_only_created_patched_deleted(env):
     secret = env.kube.applied("Secret")[-1].obj
     assert set(secret["stringData"]) == {
         "CCW_AUTH_TOKEN",
-        "CCW_PEER_TOKEN",
         "ORCH_AGENT_TOKEN",
     }
     got = await env.get(c.id)

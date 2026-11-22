@@ -216,7 +216,7 @@ def rendered_allow(created_by_service: str | None, **spec_fields) -> list[str]:
         created_at=datetime(2026, 10, 28, tzinfo=UTC),
         created_by_service=created_by_service,
     )
-    tokens = SessionTokens(auth="a" * 32, peer="p" * 32, agent="g" * 32)
+    tokens = SessionTokens(auth="a" * 32, agent="g" * 32)
     objs = render_session(session, make_settings(), tokens)
     script = next(o for o in objs if o["kind"] == "ConfigMap")["data"]["on-start.sh"]
     plugins = written_config(script)["plugins"]

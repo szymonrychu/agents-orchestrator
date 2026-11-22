@@ -1731,7 +1731,7 @@ async def test_mixed_chat_and_hive_rows_have_unique_indices_and_replay_once(harn
     assert await outbox_rows(pool, h.agent_id) == before
 
 
-async def test_non_leader_gets_not_leader_rows(harness, pool) -> None:
+async def test_non_leader_gets_not_leader_rows_and_queues_agent_send(harness, pool) -> None:
     h = await harness()
     async with pool.connection() as conn:
         await conn.execute(
@@ -1758,7 +1758,37 @@ async def test_non_leader_gets_not_leader_rows(harness, pool) -> None:
     assert [(r["kind"], r["status"], r["error_code"]) for r in rows] == [
         ("session", "invalid", "not_leader"),
         ("send", "invalid", "not_leader"),
-        ("agent", "invalid", "not_supported"),
+        ("agent", "queued", None),
+    ]
+    assert (rows[2]["target"], rows[2]["body"]) == ("leader", "c")
+
+
+async def test_turn_end_sends_one_idle_notice_for_notify_idle_agent_rows(harness, pool) -> None:
+    h = await harness()
+    sender = await insert_agent(pool, h.session_id, ordinal=1, pod_name="hive-1", ready=True)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO messages (session_id, text, status, agent_id, turn_id, channel,"
+            " sender_agent_id, sender_slug, notify, envelope_ref)"
+            " VALUES (%s, 'x', 'sent', %s, 'turn-n', 'agent', %s, 'hive-1', 'idle', 'a4')",
+            (h.session_id, h.agent_id, sender["id"]),
+        )
+    await h.start()
+    record = {"turn_id": "turn-n", "session_id": h.wrapper_session_id, "state": "completed"}
+    h.fake.emit("turn_completed", {"record": record})
+    h.fake.emit("turn_completed", {"record": record})
+    await h.stored_through(h.last_fake_seq())
+    notices = await fetch(
+        pool,
+        "SELECT text, target_agent_id, lane FROM messages WHERE channel = 'session'",
+    )
+    pod = h.agent["pod_name"]
+    assert notices == [
+        {
+            "text": f'<message-in channel="notice" from="{pod}" for="a4" status="idle"/>\n',
+            "target_agent_id": sender["id"],
+            "lane": "idle",
+        }
     ]
 
 

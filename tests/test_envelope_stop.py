@@ -100,6 +100,37 @@ async def test_member_with_a_leader_envelope_is_blocked_as_not_leader(dsn, pool)
     assert again == {"decision": "allow"}
 
 
+async def test_member_agent_send_is_allowed_and_its_refusal_listed(dsn, pool):
+    c, a0, a1 = await hive(pool)
+    sent = '<agent-send to="leader">hi</agent-send>'
+    out = await stop(dsn, pool, c, payload("t1", texts(sent)), ip="10.9.0.11")
+    assert out == {"decision": "allow"}
+    async with pool.connection() as conn:
+        await outbox.insert_rows(
+            conn,
+            [
+                Row(
+                    session_id=c["id"],
+                    agent_id=a1["id"],
+                    wrapper_session_id="w",
+                    event_seq=1,
+                    envelope_index=1,
+                    turn_id="t2",
+                    kind="agent",
+                    target="agent-9",
+                    body="x",
+                    status="refused",
+                    error_code="unknown_agent",
+                )
+            ],
+        )
+    [(rid,)] = await db_rows(pool, "SELECT id FROM envelope_outbox WHERE turn_id = 't2'")
+    bad = '<agent-send to="agent-9">x</agent-send>'
+    out = await stop(dsn, pool, c, payload("t2", texts(bad)), ip="10.9.0.11")
+    assert out["decision"] == "block"
+    assert f"a{rid} envelope 1: refused (unknown_agent)" in out["reason"]
+
+
 async def test_leader_with_a_malformed_session_send_is_blocked_once_then_allowed(dsn, pool):
     c, a0, _ = await hive(pool)
     bad = '<session-send to="other">never closed'

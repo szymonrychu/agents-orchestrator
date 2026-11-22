@@ -18,7 +18,7 @@ from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import SessionSpec
 from agents_orchestrator.tokens import SessionTokens
 
-TOKENS = SessionTokens(auth="a" * 32, peer="p" * 32, agent="g" * 32)
+TOKENS = SessionTokens(auth="a" * 32, agent="g" * 32)
 URL = "https://s3.example/bucket/workspace-cache/k.tar.zst?X-Amz-Signature=abc"
 WHEN = datetime(2026, 10, 26, tzinfo=UTC)
 

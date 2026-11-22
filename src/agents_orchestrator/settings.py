@@ -388,6 +388,9 @@ class Settings(BaseSettings):
     session_message_max_hops: int = Field(default=8, ge=1)
     session_message_pair_max_per_hour: int = Field(default=30, ge=1)
     session_reply_window_seconds: int = Field(default=86400, ge=0)
+    # in-hive <agent-send> (S-71): per sender agent and per target, like the ccw peers defaults
+    agent_message_rate_per_minute: int = Field(default=30, ge=1)
+    agent_message_queued_max: int = Field(default=32, ge=1)
 
     # project chat rooms between hive leaders (T-117)
     project_chat_posts_per_hour: int = Field(default=30, ge=1)

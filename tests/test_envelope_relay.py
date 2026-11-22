@@ -509,3 +509,39 @@ async def test_stale_row_of_an_ended_turn_sends_a_failed_notice(pool, dsn):
         f'<message-in channel="notice" from="{s["slug"]}" for="a{rid}" status="failed"'
         ' reason="unknown_outcome"/>\n'
     ]
+
+
+async def test_agent_envelope_queues_a_hive_member_message(pool, dsn):
+    s = await insert_session(pool, spec={"replicas": 2})
+    a = await insert_agent(pool, s["id"], pod_name="hive-0")
+    b = await insert_agent(pool, s["id"], pod_name="hive-1")
+    await _insert(
+        pool, _row(s, a, 1, kind="agent", target="hive-1", body="hi", lane="idle", notify="idle")
+    )
+    assert await (await _hive_worker(pool, dsn)).drain()
+    rid = (await _ids(pool))[0]
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT id, channel, target_agent_id, sender_session_id, sender_agent_id,"
+            " sender_slug, lane, notify, envelope_ref FROM messages"
+        )
+        [msg] = await cur.fetchall()
+        cur = await conn.execute("SELECT status, message_id FROM envelope_outbox")
+        assert await cur.fetchall() == [("accepted", msg[0])]
+    assert msg[1:] == ("agent", b["id"], None, a["id"], "hive-0", "idle", "idle", f"a{rid}")
+
+
+async def test_late_agent_refusal_sends_a_notice_frame(pool, dsn):
+    s = await insert_session(pool, spec={"replicas": 2})
+    a = await insert_agent(pool, s["id"], pod_name="hive-0")
+    await insert_turn(pool, a["id"], turn_id="t1", status="completed")
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE turns SET completed_at = now() WHERE turn_id = 't1'")
+    await _insert(pool, _row(s, a, 1, kind="agent", target="hive-0", turn_id="t1"))
+    assert await (await _hive_worker(pool, dsn)).drain()
+    rid = (await _ids(pool))[0]
+    assert (await _rows(pool))[0][1:3] == ("refused", "self_send")
+    assert [m[0] for m in await _refused_messages(pool, s["id"])] == [
+        f'<message-in channel="notice" from="{s["slug"]}" for="a{rid}" status="refused"'
+        ' reason="self_send"/>\n'
+    ]

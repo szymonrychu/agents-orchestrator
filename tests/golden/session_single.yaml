@@ -24,7 +24,6 @@
   type: Opaque
   stringData:
     CCW_AUTH_TOKEN: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-    CCW_PEER_TOKEN: pppppppppppppppppppppppppppppppp
     ORCH_AGENT_TOKEN: gggggggggggggggggggggggggggggggg
 - apiVersion: v1
   kind: ConfigMap
@@ -149,18 +148,11 @@
             valueFrom:
               fieldRef:
                 fieldPath: metadata.name
-          - name: CCW_PEER_URL
-            value: http://$(POD_NAME).agent-solo.agents.svc.cluster.local:8080
           - name: CCW_AUTH_TOKEN
             valueFrom:
               secretKeyRef:
                 name: agent-solo-ccw
                 key: CCW_AUTH_TOKEN
-          - name: CCW_PEER_TOKEN
-            valueFrom:
-              secretKeyRef:
-                name: agent-solo-ccw
-                key: CCW_PEER_TOKEN
           - name: CLAUDE_CODE_OAUTH_TOKEN
             valueFrom:
               secretKeyRef:

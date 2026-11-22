@@ -104,18 +104,11 @@
             valueFrom:
               fieldRef:
                 fieldPath: metadata.name
-          - name: CCW_PEER_URL
-            value: http://$(POD_NAME).agent-alpha.agents.svc.cluster.local:8080
           - name: CCW_AUTH_TOKEN
             valueFrom:
               secretKeyRef:
                 name: agent-alpha-ccw
                 key: CCW_AUTH_TOKEN
-          - name: CCW_PEER_TOKEN
-            valueFrom:
-              secretKeyRef:
-                name: agent-alpha-ccw
-                key: CCW_PEER_TOKEN
           - name: CLAUDE_CODE_OAUTH_TOKEN
             valueFrom:
               secretKeyRef:

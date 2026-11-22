@@ -2,8 +2,9 @@
 
 The onStop webhook of the claude-code-wrapper: before the agent's turn ends, its own text blocks
 of the turn are parsed for envelopes (`ingester.envelopes.REGISTRY`, chat and hive tags). A
-malformed envelope, one the caller may not send (`only the leader may send <tag>`, `agent-send`
-in this release), or one the relay refused blocks the Stop once with a numbered reason so the
+malformed envelope, one the caller may not send (`only the leader may send <tag>`; any agent may
+send `<agent-send>`), or one the relay refused (an `<agent-send>` to an unknown agent, itself,
+over its rate or into a full queue included) blocks the Stop once with a numbered reason so the
 agent resends only the corrected ones. Every later Stop of the turn is allowed. When the retry
 did not repair a `<chat-send>` failure of the leader and nothing was delivered to the target
 room, one `notice` row queues the fixed apology the user sees (`chat_protocol_failed`; a member
@@ -86,9 +87,7 @@ def _parse(blocks: list[tuple[str, str]], leads: bool) -> tuple[list[Problem], l
             tag = found.group(1) if found else "chat-send"
             problems.append(Problem(message_id, err.index, tag, err.message, err.snippet))
         for env in parsed.envelopes:
-            if kind_of(env.tag) == "agent":
-                msg = "agent-send is not available yet"
-            elif needs_leader(env.tag) and not leads:
+            if needs_leader(env.tag) and not leads:
                 msg = f"only the leader may send <{env.tag}>"
             else:
                 valid.append(env.tag)

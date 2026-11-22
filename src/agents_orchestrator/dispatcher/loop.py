@@ -29,7 +29,12 @@ from agents_orchestrator.db import (
 from agents_orchestrator.db import sessions as sessions_repo
 from agents_orchestrator.db.pool import listen
 from agents_orchestrator.dispatcher import handoff, hive
-from agents_orchestrator.dispatcher.session_frame import frame, project_post, relay_notice
+from agents_orchestrator.dispatcher.session_frame import (
+    agent_message,
+    frame,
+    project_post,
+    relay_notice,
+)
 from agents_orchestrator.dispatcher.verify import Verifier, session_max_attempts
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.tokens import tokens_for
@@ -348,7 +353,11 @@ class Dispatcher:
                 "orch_message_id": claim.message_id,
                 "orch_attempt": claim.attempts + 1,
             }
-            if claim.sender_slug is not None:
+            if claim.channel == "agent" and claim.sender_slug is not None:
+                # a hive member message: framed by its sender pod, no scope re-check (same hive)
+                text = agent_message(claim.text, claim.sender_slug, claim.message_id)
+                metadata["orch_sender_agent"] = claim.sender_slug
+            elif claim.sender_slug is not None:
                 async with self.pool.connection() as conn:
                     mark = await session_messaging.relay_mark(conn, claim.message_id)
                     room = (

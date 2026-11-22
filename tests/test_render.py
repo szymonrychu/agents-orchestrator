@@ -23,7 +23,7 @@ from agents_orchestrator.spec import SessionSpec
 from agents_orchestrator.tokens import SessionTokens
 
 GOLDEN = Path(__file__).parent / "golden"
-TOKENS = SessionTokens(auth="a" * 32, peer="p" * 32, agent="g" * 32)
+TOKENS = SessionTokens(auth="a" * 32, agent="g" * 32)
 AGENT_ENV = ["ORCH_AGENT_TOKEN", "ORCH_AGENT_URL", "ORCH_SESSION_ID", "POD_NAME"]
 AGENT_URL = "http://orchestrator-agents.agents.svc:8081"
 IMAGE = "harbor.example/containers/claude-code-wrapper:ca2ddf3"
@@ -98,22 +98,20 @@ def test_golden_single_without_peers():
 
 
 def test_rendered_ccw_config_validates(tmp_path, monkeypatch):
-    for peers in (True, False):
+    for replicas in (3, 1):
         objs = render.render_session(
-            make_session(replicas=3, peers=peers, env={"FOO": {"value": "bar"}}),
+            make_session(replicas=replicas, env={"FOO": {"value": "bar"}}),
             make_settings(),
             TOKENS,
         )
         monkeypatch.setenv("CCW_AUTH_TOKEN", TOKENS.auth)
-        monkeypatch.setenv("CCW_PEER_TOKEN", TOKENS.peer)
-        monkeypatch.setenv("CCW_PEER_URL", "http://agent-alpha-0.agent-alpha.agents.svc:8080")
         monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth")
         monkeypatch.setenv("POD_NAME", "agent-alpha-0")
         path = tmp_path / "config.yaml"
         path.write_text(by_kind(objs)["ConfigMap"]["data"]["config.yaml"])
         cfg = load_config(path)
         assert cfg.hooks.onStart
-        assert cfg.peers.enabled is peers
+        assert cfg.peers.enabled is False
         assert cfg.claude.env.claude_autocompact_pct_override == 95
 
 
@@ -144,15 +142,18 @@ def test_sessions_subpathexpr_per_pod():
     assert mounts["/workdir"]["name"] == mounts["/sessions"]["name"]
 
 
-def test_peer_static_urls_cover_every_ordinal():
-    cfg = config_of(render.render_session(make_session(replicas=3), make_settings(), TOKENS))
-    assert cfg["peers"]["enabled"] is True
-    assert cfg["peers"]["name"] == "${POD_NAME}"
-    assert cfg["peers"]["advertise_url"] == "${CCW_PEER_URL}"
-    assert cfg["peers"]["token"] == "${CCW_PEER_TOKEN}"
-    assert cfg["peers"]["static"] == [
-        f"http://agent-alpha-{i}.agent-alpha.agents.svc.cluster.local:8080" for i in range(3)
-    ]
+@pytest.mark.parametrize(("replicas", "hive"), [(3, True), (1, False)])
+def test_peers_off_and_native_agent_messaging_denied_in_hives(replicas, hive):
+    objs = render.render_session(make_session(replicas=replicas), make_settings(), TOKENS)
+    cfg = config_of(objs)
+    assert "peers" not in cfg
+    env = {e["name"] for e in container_of(objs)["env"]}
+    assert not env & {"CCW_PEER_URL", "CCW_PEER_TOKEN"}
+    assert "CCW_PEER_TOKEN" not in by_kind(objs)["Secret"]["stringData"]
+    deny = cfg["claude"]["permissions"]["deny"]
+    assert ({"SendMessage", "ListAgents"} <= set(deny)) is hive
+    extra = cfg["claude"]["env"].get("extra", {})
+    assert (extra.get("CLAUDE_CODE_HARBOR_KITE") == "0") is hive
 
 
 def test_pull_secret_and_oauth_secret_ref():
@@ -170,9 +171,6 @@ def test_pull_secret_and_oauth_secret_ref():
         "key": "CCW_AUTH_TOKEN",
     }
     assert env["POD_NAME"]["valueFrom"]["fieldRef"]["fieldPath"] == "metadata.name"
-    assert env["CCW_PEER_URL"]["value"] == (
-        "http://$(POD_NAME).agent-alpha.agents.svc.cluster.local:8080"
-    )
     empty = sts_of(
         render.render_session(make_session(), make_settings(image_pull_secret=""), TOKENS)
     )
@@ -236,10 +234,6 @@ def test_all_objects_in_namespace():
     )
     for o in objs:
         assert o["metadata"]["namespace"] == "ns1"
-    cfg = config_of(objs)
-    assert all(".agent-alpha.ns1.svc.k.local:8080" in u for u in cfg["peers"]["static"])
-    env = {e["name"]: e for e in container_of(objs)["env"]}
-    assert ".agent-alpha.ns1.svc.k.local:8080" in env["CCW_PEER_URL"]["value"]
     assert sts_of(objs)["spec"]["serviceName"] == "agent-alpha"
 
 
@@ -253,8 +247,6 @@ def test_passthrough_env_lists_spec_env_names(tmp_path, monkeypatch):
     assert env["ZED"] == "1" and env["ALPHA"] == "2"
     for k, v in {
         "CCW_AUTH_TOKEN": "t" * 20,
-        "CCW_PEER_TOKEN": "q" * 20,
-        "CCW_PEER_URL": "http://x:1",
         "CLAUDE_CODE_OAUTH_TOKEN": "o",
         "POD_NAME": "p",
         "ORCH_AGENT_TOKEN": "g" * 20,
@@ -585,15 +577,6 @@ def _render(session, **settings):
     )
 
 
-def test_peer_seeds_from_cap():
-    cfg = config_of(_render(make_session(replicas=1, max_replicas=3)))
-    assert cfg["peers"]["static"] == [
-        f"http://agent-alpha-{i}.agent-alpha.agents.svc.cluster.local:8080" for i in range(3)
-    ]
-    assert cfg["peers"]["name"] == "${POD_NAME}"
-    assert cfg["peers"]["advertise_url"] == "${CCW_PEER_URL}"
-
-
 def test_alone_session_no_hive_config():
     cfg = config_of(_render(make_session(replicas=1, static=True)))
     assert not cfg.get("peers", {}).get("enabled")
@@ -634,7 +617,6 @@ def test_run_marker_pattern_matches_agents_common_marker():
 
 def test_hive_session_config():
     cfg = config_of(_render(make_session(replicas=2)))
-    assert cfg["peers"]["enabled"] is True
     assert cfg["notes"]["enabled"] is True
     assert cfg["hooks"]["onAgentToolCall"] == [
         {
@@ -788,12 +770,13 @@ def test_wrapper_settings_keep_reserved_entries():
         "EnterPlanMode",
         "ExitPlanMode",
         "AskUserQuestion",
+        *render.HIVE_DENY,
         "WebFetch",
     ]
     assert list(cfg["claude"]["mcp_servers"]) == ["any-mcp", "docs", "loc"]
     assert cfg["prompts"]["system_append"] == (
         f"{render.ASK_IN_WRITING_PROMPT}\n\n{render.PROJECT_ROOM_PROMPT}"
-        f"\n\n{render.HIVE_ENVELOPE_PROMPT}\n\nBe terse."
+        f"\n\n{render.HIVE_ENVELOPE_PROMPT}\n\n{render.HIVE_AGENT_SEND_PROMPT}\n\nBe terse."
     )
 
 
@@ -860,8 +843,6 @@ def test_rendered_wrapper_settings_validate(tmp_path, monkeypatch):
     objs = render.render_session(session, make_settings(agent_api_url=AGENT_URL), TOKENS)
     for k, v in {
         "CCW_AUTH_TOKEN": TOKENS.auth,
-        "CCW_PEER_TOKEN": TOKENS.peer,
-        "CCW_PEER_URL": "http://agent-alpha-0.agent-alpha.agents.svc:8080",
         "CLAUDE_CODE_OAUTH_TOKEN": "oauth",
         "POD_NAME": "agent-alpha-0",
         "ORCH_AGENT_TOKEN": "t",
@@ -912,8 +893,6 @@ def test_default_restart_continue_prompt_rendered(tmp_path, monkeypatch):
     assert config_of(objs)["sessions"]["restart_continue_prompt"] == "Resume $${HOME} now."
     for k, v in {
         "CCW_AUTH_TOKEN": TOKENS.auth,
-        "CCW_PEER_TOKEN": TOKENS.peer,
-        "CCW_PEER_URL": "http://agent-alpha-0.agent-alpha.agents.svc:8080",
         "CLAUDE_CODE_OAUTH_TOKEN": "oauth",
         "POD_NAME": "agent-alpha-0",
         "HOME": "/root",
@@ -941,8 +920,6 @@ def test_hive_with_agent_commands_validates(tmp_path, monkeypatch):
     objs = render.render_session(session, make_settings(agent_api_url=AGENT_URL), TOKENS)
     for k, v in {
         "CCW_AUTH_TOKEN": TOKENS.auth,
-        "CCW_PEER_TOKEN": TOKENS.peer,
-        "CCW_PEER_URL": "http://agent-alpha-0.agent-alpha.agents.svc:8080",
         "CLAUDE_CODE_OAUTH_TOKEN": "oauth",
         "POD_NAME": "agent-alpha-0",
         "ORCH_AGENT_TOKEN": "t",
@@ -997,8 +974,6 @@ def test_permission_mode_rendered(mode, tmp_path, monkeypatch):
     objs = render.render_session(session, make_settings(), TOKENS)
     for k, v in {
         "CCW_AUTH_TOKEN": TOKENS.auth,
-        "CCW_PEER_TOKEN": TOKENS.peer,
-        "CCW_PEER_URL": "http://agent-alpha-0.agent-alpha.agents.svc:8080",
         "CLAUDE_CODE_OAUTH_TOKEN": "oauth",
         "POD_NAME": "agent-alpha-0",
     }.items():
@@ -1095,8 +1070,6 @@ def test_shutdown_handoff_block_rendered_and_valid(tmp_path, monkeypatch):
         path = tmp_path / "config.yaml"
         path.write_text(by_kind(objs)["ConfigMap"]["data"]["config.yaml"])
         monkeypatch.setenv("CCW_AUTH_TOKEN", TOKENS.auth)
-        monkeypatch.setenv("CCW_PEER_TOKEN", TOKENS.peer)
-        monkeypatch.setenv("CCW_PEER_URL", "http://agent-alpha-0.agent-alpha.agents.svc:8080")
         monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth")
         monkeypatch.setenv("POD_NAME", "agent-alpha-0")
         cfg = load_config(path)
