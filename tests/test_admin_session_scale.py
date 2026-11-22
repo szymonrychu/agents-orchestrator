@@ -87,8 +87,6 @@ async def test_admin_scale_own_session_422(app, pool):
     boss = await hive(pool, "sc-boss-f", superleader=True)
     r = await scale(app, boss, boss.slug, 1)
     assert_error(r, 422, "own_session")
-    r = await scale(app, boss, boss.slug, 1, ip=boss.member_ip)
-    assert_error(r, 422, "own_session")
     assert await replicas_of(pool, boss.id) == 2
 
 

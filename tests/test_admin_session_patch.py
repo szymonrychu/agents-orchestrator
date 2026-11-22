@@ -140,11 +140,6 @@ async def test_superleader_on_its_own_slug(app, pool, settings):
     await _patched(pool, app, settings, boss, boss)
 
 
-async def test_superleader_non_leader_member_on_its_own_slug(app, pool, settings):
-    boss = await hive(pool, "sp-boss-member", superleader=True)
-    await _patched(pool, app, settings, boss, boss, ip=boss.member_ip)
-
-
 async def test_superleader_on_a_manageable_session(app, pool, settings):
     boss = await alone(pool, "sp-boss-mng", superleader=True)
     target = await alone(pool, "sp-mng-target")

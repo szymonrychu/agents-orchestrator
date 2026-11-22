@@ -6,7 +6,8 @@ request carries the taskboard bearer, `X-Orch-Session`, `X-Orch-Slug` and `X-Orc
 body is capped at 256 KiB (413 `payload_too_large`) and the upstream status and JSON body come back
 unchanged. The allowlist is the spec, its documents, versions and sections, its comments with
 resolve, its plan, steps (order, next) and gate, and the start queue (`/specs/queue`, and
-`/specs/queue/{id}/move` for superleaders by tool policy).
+`/specs/queue/{id}/move` for a superleader only: anyone else, a superleader's member pod
+included, is 403 `superleader_required` without an upstream call, decision 922).
 Accept, dismiss and queue removal are user-only and are not relayed, DELETE does not exist here,
 and a path with `..`, `.` or empty segments is refused: all are 404
 `not_found` without an upstream call. `labels=mine` is not expanded.
@@ -18,10 +19,11 @@ import re
 
 from fastapi import APIRouter, Request, Response
 
-from agents_orchestrator.api.agent import Caller
+from agents_orchestrator.api.agent import Caller, is_superleader
 from agents_orchestrator.api.errors import ApiError
 from agents_orchestrator.api.sessions import Cfg, Pool
 from agents_orchestrator.api.tasks import _RESPONSES, relay, taskboard_target
+from agents_orchestrator.db import sessions as sessions_repo
 
 router = APIRouter(prefix="/agent/v1/specs", tags=["agent"])
 
@@ -32,11 +34,18 @@ _ALLOWED = re.compile(
     rf"|/docs/{_P}/section|/comments|/comments/[0-9]+|/comments/[0-9]+/resolve"
     rf"|/plan|/steps|/steps/order|/steps/next|/gate))"
 )
+_QUEUE_MOVE = re.compile(r"/queue/[0-9]+/move")
 
 
 async def _relay(request: Request, agent: Caller, pool: Pool, settings: Cfg, path: str) -> Response:
     if ".." in path or any(seg in ("", ".") for seg in path.split("/")[1:]):
         raise ApiError(404, "not_found", "no such taskboard path")
+    if _QUEUE_MOVE.fullmatch(path):
+        async with pool.connection() as conn:
+            session = await sessions_repo.get(conn, agent.session_id)
+            assert session is not None
+            if not await is_superleader(conn, agent, session):
+                raise ApiError(403, "superleader_required", "the queue move needs a superleader")
     return await relay(
         request,
         agent,

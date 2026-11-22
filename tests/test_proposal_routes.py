@@ -145,14 +145,6 @@ async def test_non_leader_of_a_regular_hive_403_on_every_agent_route(
     assert await _rows(pool, "SELECT id FROM change_proposals") == []
 
 
-async def test_non_leader_agent_of_a_superleader_passes(app, pool, preset):
-    boss = await hive(pool, "pr-boss-hive", superleader=True)
-    async with client_for(app, boss.member_ip) as http:
-        r = await http.request("POST", P, json=body(), headers=headers(boss.id))
-    assert r.status_code == 201, r.text
-    assert r.json()["proposer_superleader"] is True
-
-
 # ---------------------------------------------------------------- create
 
 

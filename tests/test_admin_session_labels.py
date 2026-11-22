@@ -65,9 +65,7 @@ async def test_labels_of_own_session_allowed(app, pool):
     boss = await hive(pool, "lb-boss-o", superleader=True)
     r = await put(app, boss, boss.slug, {"labels": ["mine"]})
     assert r.status_code == 200, r.text
-    r = await put(app, boss, boss.slug, {"labels": ["member"]}, ip=boss.member_ip)
-    assert r.status_code == 200, r.text
-    assert await stored(pool, boss.id) == ["member"]
+    assert await stored(pool, boss.id) == ["mine"]
 
 
 async def test_labels_unknown_slug_404(app, pool):

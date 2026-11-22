@@ -1,7 +1,8 @@
 """Admin routes of the agent port (`/agent/v1/admin`), for a superleader session (D3, D10).
 
-One gate covers `router`: `require_superleader` (a live agent of a session with
-`session_messaging` set, whoever created the session). `session_router` (GET and PATCH
+One gate covers `router`: `require_superleader` (the leader of a session with
+`session_messaging` set, whoever created the session; its member pods are refused 403
+`not_leader`, decision 919). `session_router` (GET and PATCH
 `/sessions/{slug}`, POST `/sessions/{slug}/leadership/withdraw`) carries
 `require_session_editor` on each route instead, which also admits any other session's leader on
 its own slug (`require_session_reader`).
@@ -73,15 +74,29 @@ def _admit(
     return session
 
 
-async def require_superleader(request: Request, agent: Caller, pool: Pool) -> sessions_repo.Session:
-    """The caller's session; 403 `not_superleader` unless its spec enables `session_messaging`.
-    Who created the session does not matter."""
+def _not_leader() -> ApiError:
+    return ApiError(403, "not_leader", "admin routes need the superleader session's leader")
+
+
+async def _superleader(
+    request: Request, agent: Caller, pool: Pool, message: str
+) -> sessions_repo.Session:
+    """The caller's session; 403 `not_superleader` unless its spec enables `session_messaging`,
+    403 `not_leader` for a member pod of such a session (decision 919). Who created the session
+    does not matter."""
     async with pool.connection() as conn:
         session = await sessions_repo.get(conn, agent.session_id)
-    assert session is not None
-    if not session.spec.session_messaging:
-        raise ApiError(403, "not_superleader", "admin routes need a superleader session")
+        assert session is not None
+        if not session.spec.session_messaging:
+            raise ApiError(403, "not_superleader", message)
+        if not await _leads(conn, agent, session):
+            raise _not_leader()
     return _admit(request, agent, session)
+
+
+async def require_superleader(request: Request, agent: Caller, pool: Pool) -> sessions_repo.Session:
+    """A superleader: the leader of a `session_messaging` session (`_superleader`)."""
+    return await _superleader(request, agent, pool, "admin routes need a superleader session")
 
 
 async def require_session_editor(
@@ -89,34 +104,23 @@ async def require_session_editor(
 ) -> sessions_repo.Session:
     """The caller's session. A superleader session passes for any slug (the route resolves the
     target with _writable_target). Any other session passes only for its own slug (else 403
-    not_superleader, before any lookup, so another slug and an unknown one answer alike) and
-    only for its leader (else 403 not_leader). Sets admin_caller and admin_secrets like
-    require_superleader."""
+    not_superleader, before any lookup, so another slug and an unknown one answer alike). Either
+    passes only for its leader (else 403 not_leader; decision 919 for a superleader's member
+    pod). Sets admin_caller and admin_secrets like require_superleader."""
     async with pool.connection() as conn:
         session = await sessions_repo.get(conn, agent.session_id)
         assert session is not None
-        if not session.spec.session_messaging:
-            if slug != session.slug:
-                raise session_spec.not_superleader()
-            if not await _leads(conn, agent, session):
-                raise session_spec.not_leader()
+        if not session.spec.session_messaging and slug != session.slug:
+            raise session_spec.not_superleader()
+        if not await _leads(conn, agent, session):
+            raise session_spec.not_leader()
     return _admit(request, agent, session)
-
-
-def is_reader(session: sessions_repo.Session) -> bool:
-    """A superleader (steps 6 and 7 of S-83 reshape the reader gate)."""
-    return bool(session.spec.session_messaging)
 
 
 async def require_reader(request: Request, agent: Caller, pool: Pool) -> sessions_repo.Session:
-    """The caller's session; 403 `not_superleader` unless it is a superleader. Sits on the
-    routes of `reader_router`."""
-    async with pool.connection() as conn:
-        session = await sessions_repo.get(conn, agent.session_id)
-    assert session is not None
-    if not is_reader(session):
-        raise ApiError(403, "not_superleader", "this admin route needs a superleader session")
-    return _admit(request, agent, session)
+    """A superleader (`_superleader`; steps 6 and 7 of S-83 reshape the reader gate). Sits on
+    the routes of `reader_router`."""
+    return await _superleader(request, agent, pool, "this admin route needs a superleader session")
 
 
 async def require_session_reader(
@@ -130,14 +134,9 @@ async def require_session_reader(
 async def require_notes_writer(
     request: Request, agent: Caller, pool: Pool, room_id: str
 ) -> sessions_repo.Session:
-    """PUT /chats/rooms/{room_id}/notes/sections/{section}: a superleader on any room; anyone
-    else 403 `not_superleader`."""
-    async with pool.connection() as conn:
-        session = await sessions_repo.get(conn, agent.session_id)
-    assert session is not None
-    if not session.spec.session_messaging:
-        raise ApiError(403, "not_superleader", "room notes need a superleader session")
-    return _admit(request, agent, session)
+    """PUT /chats/rooms/{room_id}/notes/sections/{section}: a superleader (`_superleader`) on
+    any room."""
+    return await _superleader(request, agent, pool, "room notes need a superleader session")
 
 
 Superleader = Depends(require_superleader)

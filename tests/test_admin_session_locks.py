@@ -139,8 +139,6 @@ async def test_own_session_422(app, pool, world):
     body = {"path": "x.py", "to": b1}
     leader = await reassign(app, boss, boss.slug, body)
     assert_error(leader, 422, "own_session")
-    member = await reassign(app, boss, boss.slug, body, ip=boss.member_ip)
-    assert_error(member, 422, "own_session")
 
 
 async def test_regular_leader_403(app, pool, world):

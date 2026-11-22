@@ -6,8 +6,10 @@ import asyncio
 import uuid
 
 import httpx
+import pytest
 from factories import insert_agent, insert_session
-from test_api_agent import AGENT_PORT, IP0, client_for, headers, make_settings, set_ip, token
+from test_api_agent import AGENT_PORT, IP0, IP1, client_for, headers, make_settings, set_ip, token
+from test_api_sessions import assert_error
 
 from agents_orchestrator.api.app import create_app
 from agents_orchestrator.db import presets as presets_repo
@@ -174,3 +176,38 @@ async def test_put_skips_preset_write_when_preset_moved_before_lock(pool, dsn):
     assert r.json()["preset_updated"] is False
     session_scripts, _, preset_scripts = await stored(pool, c["id"], preset.id)
     assert (session_scripts, preset_scripts) == (["echo new"], ["echo old"])
+
+
+@pytest.mark.parametrize(
+    ("method", "pod", "status"),
+    [("GET", "member", 200), ("PUT", "member", 403), ("PUT", "leader", 200)],
+)
+async def test_init_scripts_write_member_refused(pool, dsn, method, pod, status):
+    """Decision 920: the write rewrites the source preset, so only the session's leader may make
+    it (a member pod is 403 not_leader and nothing changes); the read stays open to members."""
+    c, preset = await preset_session(pool)
+    member = await insert_agent(pool, c["id"], ordinal=1, ready=True)
+    await set_ip(pool, member["id"], IP1)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO session_leaders (session_id, agent_id, epoch, since, reason)"
+            " SELECT %s, id, 1, now(), 'start' FROM agents WHERE session_id = %s AND ordinal = 0",
+            (c["id"], c["id"]),
+        )
+        await conn.execute(
+            'UPDATE sessions SET spec = spec || \'{"replicas": 2, "max_replicas": 2}\''
+            " WHERE id = %s",
+            (c["id"],),
+        )
+    kw = {"json": {"scripts": ["echo new"]}} if method == "PUT" else {}
+    async with client_for(
+        create_app(make_settings(dsn), pool), IP1 if pod == "member" else IP0
+    ) as http:
+        r = await http.request(method, URL, headers=headers(c["id"]), **kw)
+    if status == 403:
+        assert_error(r, 403, "not_leader")
+    else:
+        assert r.status_code == 200, r.text
+    expected = ["echo new"] if (method, status) == ("PUT", 200) else ["echo old"]
+    session_scripts, _, preset_scripts = await stored(pool, c["id"], preset.id)
+    assert session_scripts == preset_scripts == expected

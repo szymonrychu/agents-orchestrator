@@ -380,12 +380,14 @@ async def init_scripts_get(agent: Caller, pool: Pool, settings: Cfg) -> schemas.
 @router.put(
     "/init-scripts",
     response_model=schemas.InitScriptsView,
-    summary="Replace the init scripts of the caller's session and its source preset",
+    summary="Replace the init scripts of the caller's session and its source preset (leader only)",
 )
 async def init_scripts_put(
     body: schemas.InitScriptsIn, agent: Caller, pool: Pool, settings: Cfg
 ) -> schemas.InitScriptsView:
     async with pool.connection() as conn:
+        if not await _leads(conn, agent, await _session(conn, agent)):
+            raise ApiError(403, "not_leader", "only the session's leader may edit init scripts")
         return await edit_init_scripts(
             conn, agent.session_id, body.scripts, settings, same_project_preset=True
         )
@@ -822,6 +824,13 @@ async def sessions_list(agent: Caller, pool: Pool) -> SessionPeers:
 async def _leads(conn: Any, agent: agents_repo.Agent, session: sessions_repo.Session) -> bool:
     """The only agent of an alone session leads it; a hive has its leader row."""
     return await leadership.leads(conn, agent.session_id, agent.id, alone=session.spec.alone)
+
+
+async def is_superleader(
+    conn: Any, agent: agents_repo.Agent, session: sessions_repo.Session
+) -> bool:
+    """The leader of a session with `session_messaging`; its member pods are not (decision 919)."""
+    return bool(session.spec.session_messaging) and await _leads(conn, agent, session)
 
 
 @router.post(

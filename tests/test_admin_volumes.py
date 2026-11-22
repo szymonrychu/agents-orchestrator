@@ -9,6 +9,7 @@ import logging
 
 import pytest
 from factories import two_project_fixture
+from test_agent_session_messaging import hive
 from test_api_agent import client_for, headers, make_settings
 from test_api_sessions import assert_error
 from test_api_sessions import client_for as main_client
@@ -366,3 +367,34 @@ def test_volume_route_declares_its_error_statuses(method, path, dsn, pool):
     op = create_app(make_settings(dsn), pool).openapi()["paths"][path][method]
     codes = {int(c) for c in op["responses"]} - {200, 201, 202, 204, 422}
     assert codes == DECLARED[(method, path)]
+
+
+@pytest.mark.parametrize(
+    ("caller", "status", "code"),
+    [
+        ("member", 403, "not_superleader"),
+        ("leader", 403, "not_superleader"),
+        ("superleader_member", 403, "not_leader"),
+        ("superleader", 200, None),
+    ],
+)
+async def test_volume_reads_other_volumes_superleader_only(app, pool, caller, status, code):
+    """Decision 932 (D5): the volume list and detail beyond the caller's own mounts answer only a
+    superleader; any other pod is refused and keeps reading its own mounts."""
+    v = await vol(pool, "shared", ("default",))
+    if caller.startswith("superleader"):
+        s = await hive(pool, "vol-boss", superleader=True)
+    else:
+        s = await hive(pool, "vol-hive")
+    ip = s.member_ip if caller.endswith("member") else s.leader_ip
+    async with client_for(app, ip) as http:
+        listed = await http.get(f"{A}/volumes", headers=headers(s.id))
+        got = await http.get(f"{A}/volumes/{v.id}", headers=headers(s.id))
+        own = await http.get("/agent/v1/volumes", headers=headers(s.id))
+    assert own.status_code == 200, own.text
+    if status == 403:
+        assert_error(listed, 403, code)
+        assert_error(got, 403, code)
+    else:
+        assert [x["name"] for x in listed.json()] == ["shared"]
+        assert got.status_code == 200 and got.json()["name"] == "shared"

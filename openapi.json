@@ -17922,7 +17922,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Replace the init scripts of the caller's session and its source preset",
+        "summary": "Replace the init scripts of the caller's session and its source preset (leader only)",
         "tags": [
           "agent"
         ]
