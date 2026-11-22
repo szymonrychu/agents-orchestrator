@@ -59,7 +59,7 @@ STATES = ("provisioning", "ready", "resizing", "restoring", "saving", "deleting"
 _COLUMNS = (
     "id, name, projects, labels, description, exclude, size, storage_class, pvc_name, state,"
     " state_reason, content_version, save_pending, created_by, created_at, updated_at, deleted_at,"
-    " owner_attempts"
+    " owner_attempts, backup_dirty_at"
 )
 _CLAIM_COLUMNS = (
     "id, volume_id, session_id, preset_id, mode, backup_restore, claimed_at, released_at"
@@ -114,6 +114,13 @@ class Volume:
     deleted_at: datetime | None
     save_pending: bool = False
     owner_attempts: int = 0
+    # when a rw `backup_restore` claim last started or stopped writing, None once a successful
+    # save started after it (decision 858): the last release saves while it is set
+    backup_dirty_at: datetime | None = None
+
+    @property
+    def backup_dirty(self) -> bool:
+        return self.backup_dirty_at is not None
 
     @property
     def owner_exhausted(self) -> bool:
@@ -519,8 +526,10 @@ async def _upsert_claim(
     mode: str,
     backup_restore: bool,
 ) -> tuple[Claim, bool]:
-    """Idempotent while the claim is active (no change, no event, False); a new claim or one
-    re-opened after its release writes `mounted` (True). The caller holds the volume row lock."""
+    """Idempotent while the claim is active (no event, False; a changed `mode` or
+    `backup_restore` updates the row); a new claim or one re-opened after its release writes
+    `mounted` (True). A claim that starts or stops being a rw `backup_restore` writer marks the
+    volume dirty (`backup_dirty_at`). The caller holds the volume row lock."""
     active = await _rows(
         conn,
         f"SELECT {_CLAIM_COLUMNS} FROM volume_mounts WHERE volume_id = %s AND session_id = %s"
@@ -528,8 +537,21 @@ async def _upsert_claim(
         (volume_id, session_id),
         Claim,
     )
+    writer = mode == "rw" and backup_restore
     if active:
-        return active[0], False
+        old = active[0]
+        if (old.mode, old.backup_restore) == (mode, backup_restore):
+            return old, False
+        rows = await _rows(
+            conn,
+            f"UPDATE volume_mounts SET mode = %s, backup_restore = %s WHERE id = %s"
+            f" RETURNING {_CLAIM_COLUMNS}",
+            (mode, backup_restore, old.id),
+            Claim,
+        )
+        if writer or (old.mode == "rw" and old.backup_restore):
+            await _mark_dirty(conn, volume_id)
+        return rows[0], False
     rows = await _rows(
         conn,
         f"INSERT INTO volume_mounts (volume_id, session_id, preset_id, mode, backup_restore)"
@@ -540,6 +562,8 @@ async def _upsert_claim(
         (volume_id, session_id, preset_id, mode, backup_restore),
         Claim,
     )
+    if writer:
+        await _mark_dirty(conn, volume_id)
     await record_event(
         conn,
         volume_id,
@@ -549,6 +573,12 @@ async def _upsert_claim(
         detail={"session_id": str(session_id), "mode": mode, "backup_restore": backup_restore},
     )
     return rows[0], True
+
+
+async def _mark_dirty(conn: psycopg.AsyncConnection, volume_id: uuid.UUID) -> None:
+    await conn.execute(
+        "UPDATE volumes SET backup_dirty_at = clock_timestamp() WHERE id = %s", (volume_id,)
+    )
 
 
 # reads `backups.current(volume-<name>)` id; passed to claim so it runs under the volume lock
@@ -779,7 +809,8 @@ async def orphan_claims(conn: psycopg.AsyncConnection) -> list[Claim]:
 async def release_claims(
     conn: psycopg.AsyncConnection, session_id: uuid.UUID, *, actor_kind: str, actor: str
 ) -> list[Claim]:
-    """Release every unreleased claim of a session; one `released` event per volume. Takes the
+    """Release every unreleased claim of a session; one `released` event per volume, and a
+    released rw `backup_restore` claim marks its volume dirty (its writes end now). Takes the
     volume row locks first (id order), like `claim`."""
     async with conn.cursor() as cur:
         await cur.execute(
@@ -789,8 +820,11 @@ async def release_claims(
         )
     released = await _rows(
         conn,
-        f"UPDATE volume_mounts SET released_at = now() WHERE session_id = %s"
-        f" AND released_at IS NULL RETURNING {_CLAIM_COLUMNS}",
+        f"WITH r AS (UPDATE volume_mounts SET released_at = now() WHERE session_id = %s"
+        f" AND released_at IS NULL RETURNING {_CLAIM_COLUMNS}),"
+        f" d AS (UPDATE volumes SET backup_dirty_at = clock_timestamp() WHERE id IN"
+        f" (SELECT volume_id FROM r WHERE mode = 'rw' AND backup_restore))"
+        f" SELECT {_CLAIM_COLUMNS} FROM r ORDER BY id",
         (session_id,),
         Claim,
     )
@@ -805,6 +839,33 @@ async def release_claims(
         )
         await notify(conn, CHANGED_CHANNEL, {"id": str(c.volume_id)})
     return released
+
+
+async def request_release_saves(
+    conn: psycopg.AsyncConnection, released: list[Claim], *, session_slug: str | None
+) -> None:
+    """After `release_claims` (same transaction, row locks held): for each volume left with no
+    unreleased claim, request the `release` save (spec 8.2, coalesced when busy) when it is
+    dirty (a rw `backup_restore` claim wrote since the last save started, decision 858) or the
+    released claim itself had `backup_restore`."""
+    for c in released:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT 1 FROM volumes v WHERE id = %s AND deleted_at IS NULL"
+                " AND (backup_dirty_at IS NOT NULL OR %s) AND NOT EXISTS (SELECT 1"
+                " FROM volume_mounts m WHERE m.volume_id = v.id AND m.released_at IS NULL)",
+                (c.volume_id, c.backup_restore),
+            )
+            wanted = await cur.fetchone() is not None
+        if wanted:
+            await request_save(
+                conn,
+                c.volume_id,
+                trigger="release",
+                session_slug=session_slug,
+                actor="reconciler",
+                actor_kind="system",
+            )
 
 
 async def events(
@@ -947,7 +1008,10 @@ async def finish_save(
     reason: str | None = None,
 ) -> None:
     """End a save: always back to `ready`. `saved` and `save_unchanged` set `content_version` to
-    `version` (the new or the current one); `save_failed` leaves it and carries `reason`."""
+    `version` (the new or the current one); `save_failed` leaves it and carries `reason`.
+    A successful save clears `backup_dirty_at` when it is not after the save started (its
+    `save_started` event): writes ending later (a release or attachment change during the save,
+    which also leaves a pending save) keep the volume dirty; a failed save keeps it."""
     async with conn.transaction():
         vol = await _lock(conn, volume_id)
         if vol.state != "saving":
@@ -955,6 +1019,13 @@ async def finish_save(
         await set_state(
             conn, volume_id, "ready", content_version=None if kind == "save_failed" else version
         )
+        if kind != "save_failed":
+            await conn.execute(
+                "UPDATE volumes SET backup_dirty_at = NULL WHERE id = %s AND backup_dirty_at <="
+                " (SELECT max(at) FROM volume_events WHERE volume_id = %s"
+                " AND kind = 'save_started')",
+                (volume_id, volume_id),
+            )
         detail: dict[str, Any] = {"reason": fixed_reason(reason)} if kind == "save_failed" else {}
         if version is not None and kind != "save_failed":
             detail["version"] = str(version)

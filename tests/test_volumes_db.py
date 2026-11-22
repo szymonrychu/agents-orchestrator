@@ -249,3 +249,99 @@ async def test_two_on_demand_saves_one_starts_and_one_is_busy(pool):
             )
             is None
         )
+
+
+async def _claim_as(conn, vid, session_id, mode="rw", backup_restore=True):
+    return await volumes.claim(
+        conn,
+        volume_id=vid,
+        session_id=session_id,
+        preset_id=None,
+        mode=mode,
+        backup_restore=backup_restore,
+        session_slug="s",
+        current_version=None,
+    )
+
+
+async def _release(conn, session_id):
+    await volumes.release_claims(conn, session_id, actor_kind="system", actor="t")
+
+
+async def _save(conn, vid, kind="saved"):
+    await volumes.request_save(conn, vid, trigger="user", session_slug=None, actor="alice")
+    await volumes.finish_save(conn, vid, kind=kind)
+
+
+@pytest.mark.parametrize(
+    ("kind", "writer_released", "dirty"),
+    [
+        ("saved", "before", False),
+        ("save_unchanged", "before", False),
+        ("save_failed", "before", True),
+        ("saved", "during", True),
+        ("saved", "after", True),
+    ],
+)
+async def test_a_save_cleans_only_the_backup_writes_made_before_it_started(
+    pool, kind, writer_released, dirty
+):
+    async with pool.connection() as conn:
+        v = await _create(conn)
+        await volumes.set_state(conn, v.id, "ready")
+        writer = uuid.uuid4()
+        await _claim_as(conn, v.id, writer)
+        if writer_released == "before":
+            await _release(conn, writer)
+        await volumes.request_save(conn, v.id, trigger="user", session_slug=None, actor="alice")
+        if writer_released == "during":
+            await _release(conn, writer)
+        await volumes.finish_save(conn, v.id, kind=kind)
+        if writer_released == "after":
+            await _release(conn, writer)
+        assert (await volumes.get(conn, v.id)).backup_dirty is dirty
+
+
+@pytest.mark.parametrize(("pending_kind", "dirty"), [("saved", False), ("save_failed", True)])
+async def test_the_pending_save_after_a_writer_released_mid_save_decides_the_dirty_flag(
+    pool, pending_kind, dirty
+):
+    async with pool.connection() as conn:
+        v = await _create(conn)
+        await volumes.set_state(conn, v.id, "ready")
+        writer = uuid.uuid4()
+        await _claim_as(conn, v.id, writer)
+        await volumes.request_save(conn, v.id, trigger="user", session_slug=None, actor="alice")
+        await _release(conn, writer)
+        await volumes.request_save(
+            conn, v.id, trigger="release", session_slug="s", actor="reconciler"
+        )
+        await volumes.finish_save(conn, v.id, kind="saved")
+        assert (await volumes.get(conn, v.id)).backup_dirty
+        assert await volumes.start_pending_save(conn, v.id) is not None
+        await volumes.finish_save(conn, v.id, kind=pending_kind)
+        assert (await volumes.get(conn, v.id)).backup_dirty is dirty
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "dirty"),
+    [
+        (("ro", False), ("rw", True), True),
+        (("rw", True), ("ro", False), True),
+        (("ro", False), ("rw", False), False),
+    ],
+)
+async def test_a_changed_attachment_updates_the_active_claim_and_its_backup_writes_count(
+    pool, before, after, dirty
+):
+    async with pool.connection() as conn:
+        v = await _create(conn)
+        await volumes.set_state(conn, v.id, "ready")
+        s = uuid.uuid4()
+        await _claim_as(conn, v.id, s, *before)
+        await _save(conn, v.id)
+        await _claim_as(conn, v.id, s, *after)
+        (c,) = await volumes.unreleased_claims(conn, v.id)
+        assert (c.mode, c.backup_restore) == after
+        await _release(conn, s)
+        assert (await volumes.get(conn, v.id)).backup_dirty is dirty
