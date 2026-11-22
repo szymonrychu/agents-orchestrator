@@ -10,6 +10,7 @@ caller controls the commit.
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from datetime import datetime
 from typing import Any
 
 import psycopg
+from agents_common import frames
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -58,6 +60,8 @@ class Claim:
     previous_dispatched_at: datetime | None
     sender_slug: str | None
     lane: str = "regular"
+    channel: str = "session"
+    sender_agent_id: uuid.UUID | None = None
     attachments: tuple[StoredAttachment, ...] = ()  # filled by the dispatcher after the claim
 
 
@@ -147,6 +151,16 @@ async def _transition(
                     (params["id"],),
                 )
             await _status(conn, row["session_id"])
+        return row
+
+
+async def _fail(conn: psycopg.AsyncConnection, query: str, params: dict[str, Any]) -> dict | None:
+    """`_transition` for an update that may fail a message: a failed hive member message tells
+    its sender in the same transaction."""
+    async with conn.transaction():
+        row = await _transition(conn, query, params)
+        if row is not None and row.get("status", "failed") == "failed":
+            await _tell_agent_failed(conn, params["id"])
         return row
 
 
@@ -272,17 +286,17 @@ async def _hop_of_turn(
 ) -> int | None:
     row = await _one(
         conn,
-        "SELECT m.hop FROM agents a JOIN messages m ON m.session_id = a.session_id"
-        " WHERE a.id = %s AND m.turn_id = %s AND m.sender_session_id IS NOT NULL"
-        " AND m.channel = 'session' ORDER BY m.id DESC LIMIT 1",
+        "SELECT max(m.hop) AS hop FROM agents a JOIN messages m ON m.session_id = a.session_id"
+        " WHERE a.id = %s AND m.turn_id = %s"
+        " AND (m.channel = 'agent' OR m.sender_session_id IS NOT NULL)",
         (agent_id, turn_id),
     )
     return row["hop"] if row is not None else None
 
 
 async def turn_hop_for(conn: psycopg.AsyncConnection, agent_id: uuid.UUID, turn_id: str) -> int:
-    """Hop of the session message that started or was typed into the given turn of the agent;
-    0 when that turn delivered no session message with a sender."""
+    """Hop of the session or hive member message that started or was typed into the given turn
+    of the agent; 0 when that turn delivered no message with a sender."""
     return await _hop_of_turn(conn, agent_id, turn_id) or 0
 
 
@@ -336,6 +350,81 @@ async def count_queued_session_messages(
         " AND sender_session_id IS NOT NULL AND channel = 'session'",
         (session_id,),
     )
+
+
+async def count_agent_sent_by(
+    conn: psycopg.AsyncConnection, sender_agent_id: uuid.UUID, seconds: float
+) -> int:
+    """Hive member messages of any status the sender agent sent in the last `seconds`."""
+    return await _count(
+        conn,
+        "SELECT count(*) AS n FROM messages WHERE sender_agent_id = %s AND channel = 'agent'"
+        " AND created_at > now() - make_interval(secs => %s::float8)",
+        (sender_agent_id, seconds),
+    )
+
+
+async def count_queued_agent_messages(
+    conn: psycopg.AsyncConnection, session_id: uuid.UUID, target_agent_id: uuid.UUID | None
+) -> int:
+    """Queued hive member messages waiting for `target_agent_id` (None: for the leader)."""
+    return await _count(
+        conn,
+        "SELECT count(*) AS n FROM messages WHERE session_id = %s AND status = 'queued'"
+        " AND channel = 'agent' AND target_agent_id IS NOT DISTINCT FROM %s",
+        (session_id, target_agent_id),
+    )
+
+
+async def _tell_agent_failed(conn: psycopg.AsyncConnection, message_id: int) -> None:
+    """A failed hive member message (`channel = 'agent'`) queues a failed notice to its sending
+    agent, in the transaction of the failure. Notices are not agent rows, so they never notify;
+    a gone sender or a closing session is told nothing."""
+    row = await _one(
+        conn,
+        "SELECT m.id, m.session_id, m.error, m.envelope_ref, m.sender_agent_id,"
+        " coalesce(t.pod_name, d.pod_name, c.slug) AS sender"
+        " FROM messages m JOIN sessions c ON c.id = m.session_id"
+        " JOIN agents s ON s.id = m.sender_agent_id AND s.gone_at IS NULL"
+        " LEFT JOIN agents t ON t.id = m.target_agent_id"
+        " LEFT JOIN agents d ON d.id = m.agent_id"
+        " WHERE m.id = %s AND m.channel = 'agent' AND m.status = 'failed'",
+        (message_id,),
+    )
+    if row is None:
+        return
+    text = frames.notice(
+        row["sender"], row["envelope_ref"] or f"m{row['id']}", "failed", row["error"] or "failed"
+    )
+    with contextlib.suppress(SessionBeingDeleted):
+        await enqueue_message(conn, row["session_id"], text, row["sender_agent_id"])
+
+
+async def notify_idle(conn: psycopg.AsyncConnection, agent_id: uuid.UUID, turn_id: str) -> int:
+    """At the end of the agent's turn `turn_id`: an idle notice, on the idle lane, to the sender
+    of every hive member message with `notify = 'idle'` the turn handled, once per message
+    (`notified_at` guard). Returns the number of notices queued."""
+    async with conn.transaction():
+        rows = await _all(
+            conn,
+            "UPDATE messages m SET notified_at = now() FROM agents a"
+            " WHERE a.id = m.agent_id AND m.agent_id = %s AND m.turn_id = %s"
+            " AND m.channel = 'agent' AND m.notify = 'idle' AND m.status = 'sent'"
+            " AND m.notified_at IS NULL AND m.sender_agent_id IS NOT NULL"
+            " RETURNING m.id, m.session_id, m.sender_agent_id, m.envelope_ref, a.pod_name",
+            (agent_id, turn_id),
+        )
+        told = 0
+        for r in rows:
+            text = frames.notice(r["pod_name"], r["envelope_ref"] or f"m{r['id']}", "idle")
+            try:
+                await enqueue_message(
+                    conn, r["session_id"], text, r["sender_agent_id"], lane="idle"
+                )
+            except SessionBeingDeleted:
+                continue
+            told += 1
+        return told
 
 
 async def cancel_message(
@@ -648,7 +737,7 @@ async def _claim_in_session(conn: psycopg.AsyncConnection, session_id: uuid.UUID
                 if row["waiting"]:
                     continue
                 if await _target_gone(conn, session_id, target):
-                    await _transition(
+                    await _fail(
                         conn,
                         "UPDATE messages SET status = 'failed', error = 'target_gone'"
                         " WHERE id = %(id)s AND status = 'queued' RETURNING session_id",
@@ -698,7 +787,7 @@ async def _dispatch(conn: psycopg.AsyncConnection, message_id: int, pick: Pick) 
         "UPDATE messages SET status = 'dispatching', agent_id = %s, dispatched_at = now(),"
         " heartbeat_at = now() WHERE id = %s AND status = 'queued'"
         " RETURNING id, session_id, text, attempts, target_agent_id, dispatched_at, sender_slug,"
-        " lane",
+        " lane, channel, sender_agent_id",
         (pick.agent_id, message_id),
     )
     assert msg is not None  # the row is locked and was queued
@@ -717,6 +806,8 @@ async def _dispatch(conn: psycopg.AsyncConnection, message_id: int, pick: Pick) 
         previous_dispatched_at=pick.last_dispatched_at,
         sender_slug=msg["sender_slug"],
         lane=msg["lane"],
+        channel=msg["channel"],
+        sender_agent_id=msg["sender_agent_id"],
     )
 
 
@@ -814,7 +905,7 @@ async def requeue(
 
 async def fail_message(conn: psycopg.AsyncConnection, id: int, error: str) -> bool:
     """A permanent non-accept (rejected, config_error): failed at once, no retry (D24)."""
-    row = await _transition(
+    row = await _fail(
         conn,
         "UPDATE messages SET status = 'failed', error = %(error)s"
         " WHERE id = %(id)s AND status = 'dispatching' RETURNING session_id",
@@ -848,7 +939,7 @@ async def _count_failure(
     backoff_max: float,
 ) -> dict | None:
     # In SET, `attempts` is the old value, so 2^attempts is 2^(new attempts - 1).
-    return await _transition(
+    return await _fail(
         conn,
         _COUNT_FAILURE,
         {
@@ -943,7 +1034,7 @@ async def resolve_not_started(
 async def fail_ambiguous(conn: psycopg.AsyncConnection, id: int) -> bool:
     """No definite answer by the deadline: failed as ambiguous; only Retry re-sends it."""
     async with conn.transaction():
-        row = await _transition(
+        row = await _fail(
             conn,
             "UPDATE messages SET status = 'failed', error = 'ambiguous'"
             " WHERE id = %(id)s AND status = 'verifying'"

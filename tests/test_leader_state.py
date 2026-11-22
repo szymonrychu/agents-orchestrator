@@ -54,6 +54,23 @@ async def room_incoming(pool, session_id, sender_id, post_id) -> int:
         return (await cur.fetchone())[0]
 
 
+async def agent_row(pool, session_id, sender_agent_id, target_agent_id, **cols) -> None:
+    """One in-hive agent-channel message row (no sender session)."""
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO messages (session_id, text, status, lane, channel, sender_agent_id,"
+            " target_agent_id, created_at) VALUES (%s, 'report', %s, 'regular', 'agent', %s, %s,"
+            " coalesce(%s, now()))",
+            (
+                session_id,
+                cols.get("status", "sent"),
+                sender_agent_id,
+                target_agent_id,
+                cols.get("created_at"),
+            ),
+        )
+
+
 async def collect(pool, session_id) -> ls.LeaderState:
     async with pool.connection() as conn:
         return await ls.collect(conn, session_id)
@@ -130,20 +147,11 @@ async def test_members_since_background_last_report(pool):
     )
     idle_since = datetime.now(UTC) - timedelta(minutes=3)
     await set_agent_status(pool, a1["id"], state="idle", free_since=idle_since)
-    await insert_event(
-        pool,
-        s["id"],
-        a0["id"],
-        type="peer_message_received",
-        data={"from": f"{a1['pod_name']}/w1", "kind": "message"},
-    )
-    await insert_event(
-        pool,
-        s["id"],
-        a0["id"],
-        type="peer_message_received",
-        data={"from": f"{a1['pod_name']}x/w1"},  # a different pod with the same prefix
-    )
+    sent_at = datetime.now(UTC) - timedelta(minutes=2)
+    await agent_row(pool, s["id"], a1["id"], None, created_at=sent_at - timedelta(minutes=5))
+    await agent_row(pool, s["id"], a1["id"], a0["id"], created_at=sent_at)
+    await agent_row(pool, s["id"], a1["id"], a0["id"], status="cancelled")  # ignored
+    await agent_row(pool, s["id"], a0["id"], a1["id"])  # the leader to the member: not a report
     state = await collect(pool, s["id"])
     lead, member = state.members
     assert (lead.pod_name, lead.leader, lead.state) == (a0["pod_name"], True, "busy")
@@ -152,7 +160,7 @@ async def test_members_since_background_last_report(pool):
     assert lead.background == {"sub1": "2026-11-09T10:00:00+00:00"}
     assert lead.last_report_at is None
     assert (member.leader, member.state, member.since) == (False, "idle", idle_since)
-    assert member.last_report_at is not None
+    assert member.last_report_at == sent_at
 
 
 async def test_gone_member_left_out(pool):

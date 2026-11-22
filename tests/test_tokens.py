@@ -17,9 +17,9 @@ def test_deterministic():
     assert derive_tokens(KEY, CID) == derive_tokens(KEY, CID)
 
 
-def test_auth_and_peer_differ():
+def test_auth_and_agent_differ():
     t = derive_tokens(KEY, CID)
-    assert t.auth != t.peer
+    assert t.auth != t.agent
 
 
 def test_depends_on_session_and_master():
@@ -30,14 +30,13 @@ def test_depends_on_session_and_master():
 
 def test_length_at_least_16():
     t = derive_tokens(KEY, CID)
-    assert len(t.auth) == len(t.peer) == 64
-    assert min(len(t.auth), len(t.peer)) >= 16
+    assert len(t.auth) == len(t.agent) == 64
 
 
 def test_repr_masks():
     t = derive_tokens(KEY, CID)
     for text in (repr(t), str(t), f"{t}"):
-        assert t.auth not in text and t.peer not in text
+        assert t.auth not in text and t.agent not in text
         assert "***" in text
 
 
@@ -61,14 +60,11 @@ def test_known_answer_vectors():
     assert t.auth == "".join(
         ["f623e2ff1b6e6ee8", "981aaf0e5775fa00", "af60213c589bb49d", "6b402fea88d98c22"]
     )
-    assert t.peer == "".join(
-        ["b573a7ba5c992f58", "3b3fb96e62056ec7", "471a47c1c42b4d9b", "91c2fa5bea452fc1"]
-    )
 
 
 def test_agent_token_purpose():
     t = derive_tokens(KEY, CID)
-    assert t.agent not in (t.auth, t.peer)
+    assert t.agent != t.auth
     assert len(t.agent) == 64
     assert t.agent == derive_tokens(KEY, CID).agent
     assert derive_tokens(KEY, OTHER).agent != t.agent

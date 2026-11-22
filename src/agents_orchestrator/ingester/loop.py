@@ -39,7 +39,7 @@ from typing import Any
 
 from psycopg_pool import AsyncConnectionPool
 
-from agents_orchestrator.db import events, leadership, status
+from agents_orchestrator.db import events, leadership, queue, status
 from agents_orchestrator.db.pool import notify
 from agents_orchestrator.envelope_outbox.worker import EnvelopeRelay
 from agents_orchestrator.ingester import envelopes
@@ -364,6 +364,8 @@ class _AgentStream:
                 )
                 await status.clear_current_turn(conn, ref.agent_id, turn_id)
                 await status.notify_status(conn, ref.session_id, ref.agent_id)
+                # hive member messages this turn handled with notify="idle" tell their senders
+                await queue.notify_idle(conn, ref.agent_id, turn_id)
         elif env.type == "assistant_text":
             await envelopes.project_assistant_text(
                 conn,

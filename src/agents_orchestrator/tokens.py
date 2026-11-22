@@ -11,11 +11,10 @@ from agents_orchestrator.settings import Settings
 @dataclass(frozen=True)
 class SessionTokens:
     auth: str = field(repr=False)
-    peer: str = field(repr=False)
     agent: str = field(repr=False)
 
     def __repr__(self) -> str:
-        return "SessionTokens(auth='***', peer='***', agent='***')"
+        return "SessionTokens(auth='***', agent='***')"
 
     __str__ = __repr__
 
@@ -27,7 +26,6 @@ def _mac(master_key: bytes, purpose: str, session_id: UUID) -> str:
 def derive_tokens(master_key: bytes, session_id: UUID) -> SessionTokens:
     return SessionTokens(
         auth=_mac(master_key, "auth", session_id),
-        peer=_mac(master_key, "peer", session_id),
         agent=_mac(master_key, "agent", session_id),
     )
 

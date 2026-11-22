@@ -46,7 +46,7 @@ def entries() -> list[dict[str, Any]]:
     ]
 
 
-TOKENS = SessionTokens(auth="a" * 32, peer="p" * 32, agent="g" * 32)
+TOKENS = SessionTokens(auth="a" * 32, agent="g" * 32)
 
 
 def make_settings(**over: Any) -> Settings:

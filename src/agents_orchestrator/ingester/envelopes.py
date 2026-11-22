@@ -4,9 +4,9 @@ A fresh main-chain `assistant_text` is parsed with `agents_common.envelope` over
 hive tags (`REGISTRY`, one index space); each envelope becomes a `queued` row and each parse
 error an `invalid` row, in the transaction that stores the event. The chat tags, `<session-send>`
 and `<project-post>` need the session's leadership: a caller that does not lead gets `invalid`
-`not_leader` rows for those tags only. `<agent-send>` is not routed yet (`not_supported`). Rows
-are keyed by (agent, wrapper session, event seq, index), so a replay of the event inserts
-nothing.
+`not_leader` rows for those tags only. `<agent-send>` may come from any agent (the relay's core
+refuses it outside a hive). Rows are keyed by (agent, wrapper session, event seq, index), so a
+replay of the event inserts nothing.
 """
 
 from __future__ import annotations
@@ -90,15 +90,6 @@ def _row(env: Envelope, common: dict[str, Any]) -> Row:
             body=env.body,
             **common,
         )
-    if kind == "agent":
-        return Row(
-            kind=kind,
-            envelope_index=env.index,
-            status="invalid",
-            error_code="not_supported",
-            error="agent-send is not available yet",
-            **common,
-        )
     handled = _split(attrs.get("handled"))
     reply_to = attrs.get("reply_to")
     return Row(
@@ -106,6 +97,7 @@ def _row(env: Envelope, common: dict[str, Any]) -> Row:
         envelope_index=env.index,
         target=attrs.get("to"),
         lane=attrs.get("lane"),
+        notify=attrs.get("notify"),
         handled=tuple(int(h) for h in handled) if handled else None,
         project=attrs.get("project"),
         reply_to=reply_to.removeprefix("p") if reply_to else None,

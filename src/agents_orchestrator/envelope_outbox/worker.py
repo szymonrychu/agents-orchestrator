@@ -3,10 +3,11 @@
 Per session, oldest row first and one row at a time (the message order). A row is claimed
 `queued -> sending`, then settled by kind.
 
-Hive kinds (`session`, `project_post`) need no HTTP hop: the request-free core
-(`api/session_core.py`, `api/project_post_core.py`) queues the `messages` rows, and the outbox
-row becomes `accepted` (with `message_id`, or the post id as `send_id` `p<id>`) in the SAME
-transaction; a refusal of the core rolls it back and the row becomes `refused` with the code.
+Hive kinds (`session`, `agent`, `project_post`) need no HTTP hop: the request-free core
+(`api/session_core.py`, `api/agent_core.py`, `api/project_post_core.py`) queues the `messages`
+rows, and the outbox row becomes `accepted` (with `message_id`, or the post id as `send_id`
+`p<id>`) in the SAME transaction; a refusal of the core rolls it back and the row becomes
+`refused` with the code.
 The hop is the one of the turn that wrote the envelope. These kinds settle without a chat
 upstream.
 
@@ -46,6 +47,7 @@ from agents_common import frames
 from psycopg_pool import AsyncConnectionPool
 
 from agents_orchestrator.api import chat_core, forward
+from agents_orchestrator.api.agent_core import agent_send_core
 from agents_orchestrator.api.errors import ApiError
 from agents_orchestrator.api.project_post_core import (
     ProjectPosted,
@@ -110,7 +112,7 @@ def _payload(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     return "/messages", data
 
 
-HIVE_KINDS = frozenset({"session", "project_post"})
+HIVE_KINDS = frozenset({"session", "agent", "project_post"})
 
 
 def envelope_ref(row: dict[str, Any]) -> str:
@@ -270,7 +272,7 @@ class EnvelopeRelay:
             await self._refuse(row, code, message)
 
     async def _settle_hive(self, row: dict[str, Any], own: sessions_repo.Session | None) -> None:
-        """Queue a `session` or `project_post` row through its core and mark it accepted in
+        """Queue a `session`, `agent` or `project_post` row through its core and mark it accepted in
         one transaction; a refusal of the core writes nothing and refuses the row."""
         rid = row["id"]
         posted: ProjectPosted | None = None
@@ -301,6 +303,20 @@ class EnvelopeRelay:
                             allow_priority=False,
                         )
                         fields: dict[str, Any] = {"message_id": sent.message_id}
+                    elif row["kind"] == "agent":
+                        message_id = await agent_send_core(
+                            conn,
+                            own,
+                            agent,
+                            row["target"],
+                            row["body"],
+                            settings=self.settings,
+                            lane=row["lane"] or "regular",
+                            notify=row["notify"],
+                            hop=hop,
+                            envelope_ref=envelope_ref(row),
+                        )
+                        fields = {"message_id": message_id}
                     else:
                         posted = await project_post_core(
                             conn,

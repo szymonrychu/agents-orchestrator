@@ -1341,7 +1341,11 @@ def test_alone_session_has_no_hive_tools(api: httpx.Client, session: dict[str, A
         hive_entry = next(p for p in hive_plugins if p.get("name") == "orchestrator")
         assert "me" in hive_entry["allow"], hive_entry
         assert hive_entry["source"] == orchestrator_source(), hive_entry
-        assert_deployment_texts(yaml.safe_load(hive_map["data"]["config.yaml"]))
+        hive_config = yaml.safe_load(hive_map["data"]["config.yaml"])
+        assert_deployment_texts(hive_config)
+        # hives run without ccw peers: in-hive messages go through the orchestrator (S-71)
+        assert "peers" not in hive_config, hive_config
+        assert {"SendMessage", "ListAgents"} <= set(hive_config["claude"]["permissions"]["deny"])
     finally:
         api.delete(f"/sessions/{alone['id']}")
 
