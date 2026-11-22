@@ -262,15 +262,20 @@ async def test_discard_releases_the_claim_and_saves_only_after_the_last_backup_m
 
 
 @pytest.mark.parametrize(
-    ("first_mode", "first_backup", "saves"),
-    [("rw", True, 1), ("ro", True, 0), ("rw", False, 0)],
+    ("first_mode", "first_backup", "last_backup", "saves"),
+    [
+        ("rw", True, False, 1),
+        ("ro", True, False, 0),
+        ("rw", False, False, 0),
+        ("rw", False, True, 1),
+    ],
 )
-async def test_last_release_saves_when_a_backup_on_writer_mounted_since_the_last_save(
-    pool, kube, rec, vrec, first_mode, first_backup, saves
+async def test_last_release_saves_when_a_backup_on_writer_mounted_or_the_last_claim_has_backup(
+    pool, kube, rec, vrec, first_mode, first_backup, last_backup, saves
 ):
     vol = await _volume(pool, kube, vrec)
     first = await _session(pool, "alpha", vol, mode=first_mode, backup_restore=first_backup)
-    last = await _session(pool, "beta", vol, mode="ro")
+    last = await _session(pool, "beta", vol, mode="ro", backup_restore=last_backup)
     await rec.reconcile_once()
     await _delete(pool, first.id)
     await rec.reconcile_once()

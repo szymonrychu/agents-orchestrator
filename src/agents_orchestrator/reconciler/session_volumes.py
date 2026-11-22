@@ -11,7 +11,6 @@ after every pod of the session is gone, and asks for the last-release save.
 
 from __future__ import annotations
 
-import logging
 import uuid
 from dataclasses import dataclass, field
 
@@ -21,8 +20,6 @@ from psycopg_pool import AsyncConnectionPool
 from agents_orchestrator.db import backups, volumes
 from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.k8s.render import VolumeAttachments
-
-log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -114,27 +111,10 @@ async def claim_step(
 
 
 async def release(conn: psycopg.AsyncConnection, session: Session) -> None:
-    """Release the claims of a session whose pods are gone and, for each volume it was the last
-    mounter of, request the save when a rw `backup_restore` claim was taken since the last save
-    (`backup_dirty`, decision 858: whatever this claim's own setting; coalesced when busy). The
-    caller holds the transaction."""
+    """Release the claims of a session whose pods are gone and request the release save of each
+    volume it was the last mounter of (`volumes.request_release_saves`). The caller holds the
+    transaction."""
     released = await volumes.release_claims(
         conn, session.id, actor_kind="system", actor="reconciler"
     )
-    for c in released:
-        if await volumes.unreleased_claims(conn, c.volume_id):
-            continue
-        vol = await volumes.get(conn, c.volume_id)
-        if vol is not None and not vol.backup_dirty:  # None: request_save logs it gone
-            continue
-        try:
-            await volumes.request_save(
-                conn,
-                c.volume_id,
-                trigger="release",
-                session_slug=session.slug,
-                actor="reconciler",
-                actor_kind="system",
-            )
-        except volumes.VolumeNotFound:
-            log.warning("session %s: released volume %s is gone", session.slug, c.volume_id)
+    await volumes.request_release_saves(conn, released, session_slug=session.slug)
