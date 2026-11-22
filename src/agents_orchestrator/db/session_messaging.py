@@ -94,7 +94,8 @@ async def mark_handled(
     async with conn.cursor() as cur:
         await cur.execute(
             "UPDATE messages SET handled_at = now() WHERE session_id = %s AND id = ANY(%s)"
-            " AND sender_session_id IS NOT NULL AND notice IS NULL AND handled_at IS NULL"
+            " AND sender_session_id IS NOT NULL AND channel = 'session' AND notice IS NULL"
+            " AND handled_at IS NULL"
             " RETURNING id",
             (session_id, list(ids)),
         )

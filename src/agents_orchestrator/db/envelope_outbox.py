@@ -22,9 +22,9 @@ STALE_SENDING_SECONDS = 60
 _COLUMNS = (
     "id, session_id, agent_id, wrapper_session_id, event_seq, envelope_index, turn_id, kind,"
     " room, reply_to, files, body, react_key, status, error_code, error, send_id, attempts,"
-    " created_at, updated_at"
+    " target, lane, notify, handled, project, message_id, created_at, updated_at"
 )
-_FIELDS = frozenset({"error_code", "error", "send_id", "attempts"})
+_FIELDS = frozenset({"error_code", "error", "send_id", "attempts", "message_id"})
 
 
 @dataclass(frozen=True)
@@ -44,6 +44,11 @@ class Row:
     status: str = "queued"
     error_code: str | None = None
     error: str | None = None
+    target: str | None = None
+    lane: str | None = None
+    notify: str | None = None
+    handled: tuple[int, ...] | None = None
+    project: str | None = None
 
 
 async def insert_rows(conn: psycopg.AsyncConnection, rows: Sequence[Row]) -> int:
@@ -56,7 +61,8 @@ async def insert_rows(conn: psycopg.AsyncConnection, rows: Sequence[Row]) -> int
         cur = await conn.execute(
             "INSERT INTO envelope_outbox (session_id, agent_id, wrapper_session_id, event_seq,"
             " envelope_index, turn_id, kind, room, reply_to, files, body, react_key, status,"
-            " error_code, error) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+            " error_code, error, target, lane, notify, handled, project)"
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
             " ON CONFLICT (agent_id, wrapper_session_id, event_seq, envelope_index)"
             " WHERE event_seq IS NOT NULL DO NOTHING RETURNING id",
             (
@@ -75,6 +81,11 @@ async def insert_rows(conn: psycopg.AsyncConnection, rows: Sequence[Row]) -> int
                 r.status,
                 r.error_code,
                 r.error,
+                r.target,
+                r.lane,
+                r.notify,
+                list(r.handled) if r.handled is not None else None,
+                r.project,
             ),
         )
         if await cur.fetchone() is not None:

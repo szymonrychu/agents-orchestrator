@@ -27,7 +27,7 @@ from agents_orchestrator.db.eligibility import (
     NOT_STOPPING,
     NOTICE_PENDING,
 )
-from agents_orchestrator.db.pool import notify
+from agents_orchestrator.db.pool import notify as pg_notify
 
 COMMAND_KINDS = frozenset({"interrupt", "compact", "restart", "rebootstrap", "clear"})
 COMMAND_FINAL = frozenset({"done", "failed", "cancelled"})
@@ -123,7 +123,7 @@ async def _all(conn: psycopg.AsyncConnection, query: str, params: Any = ()) -> l
 
 
 async def _status(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> None:
-    await notify(conn, "status", {"session_id": str(session_id)})
+    await pg_notify(conn, "status", {"session_id": str(session_id)})
 
 
 async def _transition(
@@ -193,6 +193,10 @@ async def enqueue_message(
     attachments: Sequence[StoredAttachment] = (),
     project_post_id: int | None = None,
     origin_service: str | None = None,
+    channel: str = "session",
+    sender_agent_id: uuid.UUID | None = None,
+    notify: str | None = None,
+    envelope_ref: str | None = None,
 ) -> int:
     """Queue a message; a session message carries its sender and hop (D8), an orchestrator
     notice its kind (`notice`, e.g. `inactivity_reminder`), a project room fan-out row its post
@@ -222,9 +226,10 @@ async def enqueue_message(
             conn,
             "INSERT INTO messages (session_id, text, target_agent_id, sender_session_id,"
             " sender_slug, hop, lane, carries_start_prompt, not_before, notice, project_post_id,"
-            " origin_service)"
+            " origin_service, channel, sender_agent_id, notify, envelope_ref)"
             " VALUES (%s, %s, %s, %s, %s, %s, %s, %s,"
-            " CASE WHEN %s THEN now() + interval '1 day' END, %s, %s, %s) RETURNING id",
+            " CASE WHEN %s THEN now() + interval '1 day' END, %s, %s, %s, %s, %s, %s, %s)"
+            " RETURNING id",
             (
                 session_id,
                 text,
@@ -238,6 +243,10 @@ async def enqueue_message(
                 notice,
                 project_post_id,
                 origin_service,
+                channel,
+                sender_agent_id,
+                notify,
+                envelope_ref,
             ),
         )
         assert row is not None
@@ -247,7 +256,7 @@ async def enqueue_message(
                 " VALUES (%s, %s, %s, %s, %s, %s)",
                 (row["id"], position, att.name, att.mime, len(att.data), att.data),
             )
-        await notify(conn, "message_queued", {"session_id": str(session_id)})
+        await pg_notify(conn, "message_queued", {"session_id": str(session_id)})
         await _status(conn, session_id)
         return row["id"]
 
@@ -258,18 +267,34 @@ async def _count(conn: psycopg.AsyncConnection, query: str, params: Any) -> int:
     return row["n"]
 
 
+async def _hop_of_turn(
+    conn: psycopg.AsyncConnection, agent_id: uuid.UUID, turn_id: str | None
+) -> int | None:
+    row = await _one(
+        conn,
+        "SELECT m.hop FROM agents a JOIN messages m ON m.session_id = a.session_id"
+        " WHERE a.id = %s AND m.turn_id = %s AND m.sender_session_id IS NOT NULL"
+        " AND m.channel = 'session' ORDER BY m.id DESC LIMIT 1",
+        (agent_id, turn_id),
+    )
+    return row["hop"] if row is not None else None
+
+
+async def turn_hop_for(conn: psycopg.AsyncConnection, agent_id: uuid.UUID, turn_id: str) -> int:
+    """Hop of the session message that started or was typed into the given turn of the agent;
+    0 when that turn delivered no session message with a sender."""
+    return await _hop_of_turn(conn, agent_id, turn_id) or 0
+
+
 async def turn_hop(conn: psycopg.AsyncConnection, agent_id: uuid.UUID) -> int | None:
     """Hop of the session message the agent's current turn delivered, or None when the current
     turn (`agent_status.current_turn_id`) delivered no message with a sender (D10)."""
     row = await _one(
-        conn,
-        "SELECT m.hop FROM agent_status s JOIN agents a ON a.id = s.agent_id"
-        " JOIN messages m ON m.session_id = a.session_id AND m.turn_id = s.current_turn_id"
-        " WHERE s.agent_id = %s AND m.sender_session_id IS NOT NULL"
-        " ORDER BY m.id DESC LIMIT 1",
-        (agent_id,),
+        conn, "SELECT current_turn_id FROM agent_status WHERE agent_id = %s", (agent_id,)
     )
-    return row["hop"] if row is not None else None
+    if row is None:
+        return None
+    return await _hop_of_turn(conn, agent_id, row["current_turn_id"])
 
 
 async def count_sent_by(
@@ -280,7 +305,8 @@ async def count_sent_by(
     return await _count(
         conn,
         "SELECT count(*) AS n FROM messages WHERE sender_session_id = %s"
-        " AND project_post_id IS NULL AND created_at > now() - make_interval(secs => %s::float8)",
+        " AND channel = 'session' AND project_post_id IS NULL"
+        " AND created_at > now() - make_interval(secs => %s::float8)",
         (sender_session_id, seconds),
     )
 
@@ -292,7 +318,7 @@ async def count_between(
     `seconds`, room fan-out rows excluded."""
     return await _count(
         conn,
-        "SELECT count(*) AS n FROM messages WHERE project_post_id IS NULL"
+        "SELECT count(*) AS n FROM messages WHERE project_post_id IS NULL AND channel = 'session'"
         " AND ((sender_session_id = %(a)s AND session_id = %(b)s)"
         " OR (sender_session_id = %(b)s AND session_id = %(a)s))"
         " AND created_at > now() - make_interval(secs => %(secs)s::float8)",
@@ -307,7 +333,7 @@ async def count_queued_session_messages(
     return await _count(
         conn,
         "SELECT count(*) AS n FROM messages WHERE session_id = %s AND status = 'queued'"
-        " AND sender_session_id IS NOT NULL",
+        " AND sender_session_id IS NOT NULL AND channel = 'session'",
         (session_id,),
     )
 
@@ -351,7 +377,7 @@ async def retry_message(conn: psycopg.AsyncConnection, id: int) -> bool:
         if row is None:
             return False
         await _release_reservation(conn, row)
-        await notify(conn, "message_queued", {"session_id": str(row["session_id"])})
+        await pg_notify(conn, "message_queued", {"session_id": str(row["session_id"])})
         return True
 
 
@@ -1064,7 +1090,7 @@ async def release_ready_notes(conn: psycopg.AsyncConnection) -> None:
     )
     for row in rows:
         await _status(conn, row["session_id"])
-        await notify(conn, "message_queued", {"session_id": str(row["session_id"])})
+        await pg_notify(conn, "message_queued", {"session_id": str(row["session_id"])})
 
 
 # ---------------------------------------------------------------- checks
