@@ -62,7 +62,7 @@ JOB_UID_LABEL = "batch.kubernetes.io/controller-uid"
 
 # transient failures: back to the state that failed, after RETRY_BASE_SECONDS * 2**attempt, at
 # most RETRY_MAX times per process (the count resets when the volume turns ready); an owner
-# failure also stops at `volumes.OWNER_ATTEMPTS_MAX` owner Jobs, counted on the row
+# failure instead retries until `volumes.OWNER_ATTEMPTS_MAX` owner Jobs, counted on the row only
 RETRY_STATE = {
     PVC_APPLY_FAILED: "provisioning",
     PVC_RESIZE_FAILED: "resizing",
@@ -137,18 +137,18 @@ class VolumeReconciler:
         """The owner Job hands the bound PVC's root to the agent user, then the volume turns
         ready; nothing mounts a provisioning volume (claims wait), so it runs before any pod.
         Its name comes from the row alone (`volume_owner_job_name`), so a pass after a crash
-        finds its own Job; a failure counts one owner attempt and the retry gets a new name."""
+        finds its own Job; a Job that ended Failed counts one owner attempt and the retry gets a
+        new name."""
         if not self.settings.cache_image:
             log.warning("volume %s: no cache image, the root stays owned by uid 0", vol.name)
             await self._set(vol, "ready")
             return
         job = await self.kube.get_job(self.settings.namespace, volume_owner_job_name(vol))
         if job is None:
-            try:
+            try:  # an API error is no owner attempt: retried next pass
                 await self.kube.create_job(render_volume_owner_job(vol, self.settings))
             except KubeError:
                 log.warning("volume %s: creating the owner Job failed", vol.name, exc_info=True)
-                await self._fail_owner(vol)
             return
         end = job_end(job)
         if end is None:
@@ -206,7 +206,6 @@ class VolumeReconciler:
             if await volumes.unreleased_claims(conn, vol.id):
                 await volumes.refuse_delete(conn, vol.id, reason="claims_present")
                 return
-        await self._drop_owner_jobs(vol)  # deleted while provisioning: its pod holds the PVC
         try:  # a pod the claims do not know about keeps the finalizer; retried next tick
             found = await pods_using(
                 self.kube, self.settings.namespace, volume_id=vol.id, pvc_name=vol.pvc_name
@@ -223,6 +222,7 @@ class VolumeReconciler:
                 await volumes.finish_delete(conn, vol.id)
             return
         if pvc["metadata"].get("finalizers"):
+            await self._drop_owner_jobs(vol)  # once: a volume deleted while provisioning
             await self.kube.merge_patch(
                 PVC, self.settings.namespace, vol.pvc_name, {"metadata": {"finalizers": None}}
             )
@@ -234,9 +234,10 @@ class VolumeReconciler:
             return
         attempts, not_before = self._retries.get(vol.id, (0, self._clock() + RETRY_BASE_SECONDS))
         self._retries[vol.id] = (attempts, not_before)
-        if attempts >= RETRY_MAX or self._clock() < not_before:
+        owner = vol.state_reason == volumes.OWNER_FAILED  # bounded by owner_attempts alone
+        if (not owner and attempts >= RETRY_MAX) or self._clock() < not_before:
             return
-        backoff = RETRY_BASE_SECONDS * 2 ** (attempts + 1)
+        backoff = RETRY_BASE_SECONDS * 2 ** (vol.owner_attempts if owner else attempts + 1)
         self._retries[vol.id] = (attempts + 1, self._clock() + backoff)
         log.info(
             "volume %s: retrying after %s (attempt %d)", vol.name, vol.state_reason, attempts + 1

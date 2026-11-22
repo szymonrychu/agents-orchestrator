@@ -198,21 +198,8 @@ class CheckRunner:
 
 
 def container_exit_code(pod: Obj) -> int | None:
-    """The exit code of the main container when it ran; else of a failed regular init container
-    (the main container then never ran; restartable sidecars, restartPolicy Always, are not
-    steps and are skipped); None when nothing terminated."""
-    status = pod.get("status") or {}
-    for cs in status.get("containerStatuses") or []:
+    for cs in (pod.get("status") or {}).get("containerStatuses") or []:
         terminated = (cs.get("state") or {}).get("terminated")
         if terminated is not None and "exitCode" in terminated:
             return int(terminated["exitCode"])
-    sidecars = {
-        c.get("name")
-        for c in (pod.get("spec") or {}).get("initContainers") or []
-        if c.get("restartPolicy") == "Always"
-    }
-    for cs in status.get("initContainerStatuses") or []:
-        code = ((cs.get("state") or {}).get("terminated") or {}).get("exitCode")
-        if code and cs.get("name") not in sidecars:
-            return int(code)
     return None

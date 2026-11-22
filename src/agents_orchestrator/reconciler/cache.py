@@ -39,7 +39,13 @@ from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.db.volumes import Volume
 from agents_orchestrator.k8s.kube import KubeApi, KubeError, Obj, is_owned
 from agents_orchestrator.k8s.labels import prefix, session_labels, volume_labels, workspace_pvc
-from agents_orchestrator.k8s.render import SESSIONS_ROOT, WORKSPACE_VOLUME, agent_identity
+from agents_orchestrator.k8s.render import (
+    AGENT_GID,
+    AGENT_UID,
+    SESSIONS_ROOT,
+    WORKSPACE_VOLUME,
+    agent_identity,
+)
 from agents_orchestrator.reconciler.checks import (
     DEADLINE_GRACE_SECONDS,
     TAIL_LINES,
@@ -141,9 +147,9 @@ def _hardened(settings: Settings, container: dict[str, Any], volumes: list[Obj])
         "restartPolicy": "Never",
         **agent_identity(settings),
         "securityContext": {
-            "runAsUser": 1000,
+            "runAsUser": AGENT_UID,
             "runAsNonRoot": True,
-            "fsGroup": 1000,
+            "fsGroup": AGENT_GID,
             "fsGroupChangePolicy": "OnRootMismatch",
             "seccompProfile": {"type": "RuntimeDefault"},
         },
@@ -223,12 +229,11 @@ OWNER_RESOURCES = {
 }
 
 
-def _owner_container(settings: Settings, mounts: list[dict[str, Any]]) -> dict[str, Any]:
-    root = [m for m in mounts if m["mountPath"] == VOLUME_ROOT]
+def _owner_container(settings: Settings) -> dict[str, Any]:
     return {
         "name": OWNER_CONTAINER,
         "image": settings.cache_image,
-        "command": ["chown", "1000:1000", VOLUME_ROOT],
+        "command": ["chown", f"{AGENT_UID}:{AGENT_GID}", VOLUME_ROOT],
         "resources": OWNER_RESOURCES,
         "securityContext": {
             "runAsUser": 0,
@@ -237,7 +242,7 @@ def _owner_container(settings: Settings, mounts: list[dict[str, Any]]) -> dict[s
             "allowPrivilegeEscalation": False,
             "capabilities": {"drop": ["ALL"], "add": ["CHOWN"]},
         },
-        "volumeMounts": root,
+        "volumeMounts": [{"name": "volume", "mountPath": VOLUME_ROOT}],
     }
 
 
@@ -287,8 +292,7 @@ def volume_owner_job_name(volume: Volume) -> str:
 def render_volume_owner_job(volume: Volume, settings: Settings) -> Obj:
     """The owner Job of a new volume: the PVC at `/volume`, read-write, and only the owner step,
     run once before the volume turns ready (no pod mounts it before)."""
-    mounts = [{"name": "volume", "mountPath": VOLUME_ROOT}]
-    pod_spec = _hardened(settings, _owner_container(settings, mounts), [_volume_pvc(volume)])
+    pod_spec = _hardened(settings, _owner_container(settings), [_volume_pvc(volume)])
     job = _volume_job(volume, settings, "owner", volume_owner_job_name(volume), pod_spec)
     job["spec"]["ttlSecondsAfterFinished"] = OWNER_TTL_SECONDS
     return job
@@ -307,8 +311,8 @@ def render_volume_job(
     """The restore or save Job of a volume (S-77): the PVC `vol-<name>` at `/volume`, read-write
     for a restore and read-only for a save, one presigned URL, the cache Job's hardening and
     deadline. No session label (the session prune never matches it). A save carries the volume's
-    `exclude` globs as the entry's tar excludes; a restore ignores them. A restore runs the owner
-    step first as an init container (the uid 1000 extract cannot take over a uid 0 root)."""
+    `exclude` globs as the entry's tar excludes; a restore ignores them. The volume root is
+    already the agent user's (the owner Job ran before the volume turned ready)."""
     save = action == "save"
     entry: dict[str, Any] = {
         "index": 0,
@@ -333,8 +337,6 @@ def render_volume_job(
         )
     container = _cache_container(settings, action, _cache_env(settings, [entry]), mounts)
     pod_spec = _hardened(settings, container, volumes)
-    if not save:
-        pod_spec["initContainers"] = [_owner_container(settings, mounts)]
     name = volume_job_name(volume.name, action, n)
     return _volume_job(volume, settings, action, name, pod_spec, annotations)
 

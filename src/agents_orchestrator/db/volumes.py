@@ -48,12 +48,13 @@ JOB_REASONS = frozenset(
         "version_missing",
     }
 )
-# a failed volume with one of these reasons has no PVC: nothing may mount or restore into it
-NO_PVC_REASONS = frozenset({"pvc_apply_failed", "pvc_missing", "pvc_lost"})
 # the owner Job of a new volume failed: its root is still uid 0, so nothing mounts it yet; after
 # OWNER_ATTEMPTS_MAX failed owner Jobs (one run plus the reconciler's retries) claims are refused
 OWNER_FAILED = "owner_failed"
 OWNER_ATTEMPTS_MAX = 6
+# a failed volume with one of these reasons has no PVC or a root still owned by uid 0: nothing may
+# mount or restore into it (a restore would end `ready` past the owner step)
+UNMOUNTABLE_REASONS = frozenset({"pvc_apply_failed", "pvc_missing", "pvc_lost", OWNER_FAILED})
 STATES = ("provisioning", "ready", "resizing", "restoring", "saving", "deleting", "failed")
 _COLUMNS = (
     "id, name, projects, labels, description, exclude, size, storage_class, pvc_name, state,"
@@ -587,7 +588,7 @@ async def claim(
         if vol.state == "deleting" or vol.owner_exhausted:
             return ClaimDecision("refuse", vol, None)
         if vol.state not in ("ready", "failed") or (
-            vol.state == "failed" and vol.state_reason in (*NO_PVC_REASONS, OWNER_FAILED)
+            vol.state == "failed" and vol.state_reason in UNMOUNTABLE_REASONS
         ):
             return ClaimDecision("wait", vol, None)
         version = await current_version(conn) if callable(current_version) else current_version
@@ -725,13 +726,14 @@ async def begin_explicit_restore(
     actor_kind: str = "user",
 ) -> Volume:
     """A user-triggered restore of `version` (spec 8.3), same lock as `claim`: VolumeBusy unless
-    the volume is `ready` or `failed`, VolumeMounted while any claim is unreleased (HARD RULE);
-    else `restoring` and `restore_started` (detail carries the version to restore)."""
+    the volume is `ready` or `failed` (not with `UNMOUNTABLE_REASONS`), VolumeMounted while any
+    claim is unreleased (HARD RULE); else `restoring` and `restore_started` (detail carries the
+    version to restore)."""
     async with conn.transaction():
         vol = await _lock(conn, volume_id)
-        if vol.state not in ("ready", "failed") or (
-            vol.state == "failed" and vol.state_reason in NO_PVC_REASONS
-        ):
+        if vol.state == "failed" and vol.state_reason in UNMOUNTABLE_REASONS:
+            raise VolumeBusy(f"cannot restore a volume that failed ({vol.state_reason})")
+        if vol.state not in ("ready", "failed"):
             raise VolumeBusy(f"cannot restore a volume that is {vol.state}")
         if await unreleased_claims(conn, volume_id):
             raise VolumeMounted(str(volume_id))

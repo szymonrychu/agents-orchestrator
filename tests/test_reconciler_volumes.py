@@ -244,21 +244,28 @@ async def test_owner_retry_runs_a_new_job_beside_the_failed_one_of_the_last_atte
     assert await _state(pool, v.id) == "ready"
 
 
-async def test_owner_failure_past_its_attempts_is_terminal_and_refuses_claims(pool, kube, rec):
-    """The attempt count lives on the row: after a restart (a fresh reconciler) the volume is not
-    retried again, and a claim is refused rather than left waiting."""
-    v = await _make(pool)
-    await rec.tick()
-    async with pool.connection() as conn:
-        await conn.execute(
-            "UPDATE volumes SET owner_attempts = %s WHERE id = %s",
-            (volumes.OWNER_ATTEMPTS_MAX - 1, v.id),
-        )
-    kube.set_pvc("vol-data", "Bound", "10Gi")
-    await rec.tick()
-    kube.finish_job(_owner_job(kube), exit_code=1)
-    await rec.tick()
+async def test_owner_failures_retry_until_their_attempts_run_out_then_refuse_claims(
+    pool, kube, rec
+):
+    """Owner retries are bounded only by the attempt count on the row, not by the in-process
+    retry budget (here partly spent on a PVC apply failure): each failure retries until
+    OWNER_ATTEMPTS_MAX, then the volume is terminal, also for a fresh reconciler after a
+    restart, and a claim is refused rather than left waiting."""
     now = [1000.0]
+    rec._clock = lambda: now[0]
+    v = await _make(pool)
+    kube.fail(PVC, "vol-data", KubeError("boom"), verbs=["patch"], times=1)
+    for _ in range(4):  # the apply fails, back to provisioning past the backoff, the PVC
+        now[0] += 10_000
+        await rec.tick()
+    kube.set_pvc("vol-data", "Bound", "10Gi")
+    await rec.tick()  # the first owner Job
+    for _ in range(volumes.OWNER_ATTEMPTS_MAX):
+        kube.finish_job(_owner_job(kube), exit_code=1)
+        for _ in range(4):  # fail, back to provisioning past the backoff, the next Job
+            now[0] += 10_000
+            await rec.tick()
+    assert (await _get(pool, v.id)).owner_attempts == volumes.OWNER_ATTEMPTS_MAX
     fresh = VolumeReconciler(pool, kube, rec.settings)
     fresh._clock = lambda: now[0]
     for _ in range(3):
@@ -279,6 +286,22 @@ async def test_owner_failure_past_its_attempts_is_terminal_and_refuses_claims(po
             current_version=None,
         )
     assert (d.decision, d.claim) == ("refuse", None)
+
+
+async def test_an_api_error_creating_the_owner_job_retries_without_using_an_attempt(
+    pool, kube, rec
+):
+    """Only an owner Job that ran and failed counts: a refused create (API blip, 409, 429) is
+    retried next pass and the volume stays provisioning."""
+    v = await _make(pool)
+    await rec.tick()
+    kube.set_pvc("vol-data", "Bound", "10Gi")
+    kube.fail("Job", f"vol-{v.id}-owner-0", KubeError("429"), verbs=["create"], times=1)
+    await rec.tick()
+    got = await _get(pool, v.id)
+    assert (got.state, got.owner_attempts, kube.names("Job")) == ("provisioning", 0, [])
+    await rec.tick()
+    assert _owner_job(kube) == f"vol-{v.id}-owner-0"
 
 
 @pytest.mark.parametrize("leave", ["deleting", "lost"])
@@ -589,24 +612,6 @@ async def test_failed_restore_keeps_content_version_and_turns_ready(pool, kube, 
     got = await _get(pool, v.id)
     assert (got.state, got.content_version) == ("ready", None)
     assert (await _kinds(pool, v.id))[-1][0] == "restore_failed"
-
-
-async def test_a_failed_owner_step_of_the_restore_is_reported(pool, kube, rec, caplog):
-    """The restore Job's init container (the owner step) failed: the main container never ran
-    and left no outcome; the restore fails with a fixed reason and the init exit code is logged."""
-    v = await _ready(pool, kube, rec)
-    ver = await _version(pool, v)
-    await _restore(pool, v, ver.id)
-    await rec.tick()
-    (job,) = _jobs(kube)
-    kube.finish_job(job["metadata"]["name"], init_exit_code=1)
-    await rec.tick()
-    async with pool.connection() as conn:
-        page = await volumes.events(conn, v.id, limit=50)
-    assert next(e for e in page.items if e.kind == "restore_failed").detail == {
-        "reason": "job_failed"
-    }
-    assert "volume data: the restore Job exited 1" in caplog.text
 
 
 @pytest.mark.parametrize(
