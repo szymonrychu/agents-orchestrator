@@ -16,13 +16,13 @@ from agents_orchestrator.preset_policy import (
 from agents_orchestrator.spec import SessionSpec, WrapperSettings
 
 
-@pytest.mark.parametrize("field", ["kube_cluster_access", "docker", "retrospective"])
+@pytest.mark.parametrize("field", ["kube_cluster_access", "docker"])
 def test_grant_turned_on_is_refused(field):
     assert human_only_changes({}, {field: True}) == [field]
     assert human_only_changes({field: False}, {field: True}) == [field]
 
 
-@pytest.mark.parametrize("field", ["kube_cluster_access", "docker", "retrospective"])
+@pytest.mark.parametrize("field", ["kube_cluster_access", "docker"])
 def test_grant_turned_off_or_removed_is_allowed(field):
     assert human_only_changes({field: True}, {field: False}) == []
     assert human_only_changes({field: True}, {}) == []

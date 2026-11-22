@@ -1,4 +1,4 @@
-"""Superleader and retrospective reads (reader gate, S-68 step 13) of the handoff history (S-68):
+"""Superleader reads (reader gate) of the handoff history (S-68):
 the list of `agent_handoffs` rows and one row in full, with its text. Read only. `kind` is the
 row's trigger (strong, shutdown, voluntary).
 The `session` filter takes a session id or slug."""
@@ -40,7 +40,7 @@ class HandoffPage(BaseModel):
     has_more: bool
 
 
-# step 13: reader gate (superleader or retrospective), was the superleader gate
+# reader gate (superleader until S-83 steps 6, 7)
 @reader_router.get(
     "/handoffs",
     response_model=HandoffPage,
@@ -68,7 +68,7 @@ async def list_handoffs(
     return HandoffPage(handoffs=[HandoffItem(**r) for r in rows], has_more=more)
 
 
-# step 13: reader gate (superleader or retrospective), was the superleader gate
+# reader gate (superleader until S-83 steps 6, 7)
 @reader_router.get(
     "/handoffs/{id}",
     response_model=HandoffDetail,

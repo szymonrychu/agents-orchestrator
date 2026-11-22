@@ -1,7 +1,7 @@
 """Admin routes of the agent port for volumes (S-77 steps 9, spec 9.3, 12). Names, ids, sizes,
 states, modes and counts only: never descriptions, labels, file names, manifests or content.
 
-Reads (`reader_router`: a superleader or a retrospective session) list the volumes whose
+Reads (`reader_router`: a superleader) list the volumes whose
 `projects` intersect the caller's own projects. Writes (superleader):
 
 - attach `POST /presets/{ref}/volumes/{volume_id}` and detach `DELETE` on a manageable preset,

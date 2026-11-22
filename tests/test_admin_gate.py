@@ -32,7 +32,7 @@ GATES = {
     id(admin.router): require_superleader,
     id(admin.session_router): require_session_editor,
     id(proposal_routes.proposal_router): require_proposer,
-    # S-68 step 13: the retrospective reads and the backup copy, and the room notes update
+    # the reader reads and the backup copy, and the room notes update
     id(admin.reader_router): require_reader,
     id(admin.notes_router): require_notes_writer,
 }
@@ -43,7 +43,7 @@ ROUTERS = (
     admin.reader_router,
     admin.notes_router,
 )
-# GET /sessions/{slug} also admits a retrospective session on any slug (S-68 step 13)
+# GET /sessions/{slug} carries the session reader gate
 SESSION_READER_ROUTES = {("GET", f"{ADMIN_PREFIX}/sessions/{{slug}}")}
 EDITOR_ROUTES = {
     ("GET", f"{ADMIN_PREFIX}/sessions/{{slug}}"),
@@ -94,7 +94,7 @@ async def mark_trigger(pool, session_id, service="agents-webhook"):
 async def test_every_admin_route_carries_its_gate(pool, dsn):
     """Each route carries exactly the gate of its router: the session editor gate on the two
     session spec routes and the handover withdraw (the session reader gate on the GET), the
-    proposer gate on the proposal routes, the reader gate on the retrospective reads and the
+    proposer gate on the proposal routes, the reader gate on the reader reads and the
     backup copy, the notes writer gate on the notes update, the superleader gate on every
     other."""
     app = create_app(make_settings(dsn), pool)

@@ -1202,7 +1202,6 @@ def test_subagent_allowed_rendered_for_every_session(tmp_path, monkeypatch):
         "alone": {"replicas": 1},
         "hive": {"replicas": 2},
         "superleader": {"replicas": 1, "session_messaging": True},
-        "retro": {"replicas": 1, "retrospective": True},
     }.items():
         session = make_session(**spec)
         settings = make_settings(agent_api_url=AGENT_URL)
@@ -1215,15 +1214,14 @@ def test_subagent_allowed_rendered_for_every_session(tmp_path, monkeypatch):
         assert cfg["claude"]["main_agent_only_tools"] == [prefix + "*"]
         seen[name] = {t.removeprefix(prefix) for t in tools}
     assert "history_search" not in seen["alone"] | seen["hive"]
-    assert "history_search" in seen["retro"] and "history_search" in seen["superleader"]
-    assert "backups_copy" not in seen["retro"]
+    assert "history_search" in seen["superleader"]
     monkeypatch.setenv("CCW_AUTH_TOKEN", TOKENS.auth)
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth")
     monkeypatch.setenv("POD_NAME", "agent-alpha-0")
     monkeypatch.setenv("ORCH_AGENT_URL", AGENT_URL)
     monkeypatch.setenv("ORCH_AGENT_TOKEN", "agent-token")
     monkeypatch.setenv("ORCH_SESSION_ID", "session-id")
-    objs = _render(make_session(replicas=1, retrospective=True))
+    objs = _render(make_session(replicas=1, session_messaging=True))
     path = tmp_path / "config.yaml"
     path.write_text(by_kind(objs)["ConfigMap"]["data"]["config.yaml"])
     assert prefix + "history_get" in load_config(path).claude.subagent_allowed_tools

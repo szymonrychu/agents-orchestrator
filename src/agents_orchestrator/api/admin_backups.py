@@ -2,8 +2,8 @@
 and preview, each calling the main-port handler of `api/backups.py` so answers and errors (400
 `bad_request`, 404, 503 `unavailable` without the api S3 pair) are identical. The presigned
 download and the deletes are NOT exposed (a download URL carries a credential; a delete is for
-the user). The reads and the copy carry the reader gate (a superleader or a retrospective session,
-S-68 step 13); the cleanup settings and preview stay superleader-only. Writes: the copy (S3
+the user). The reads and the copy carry the reader gate (a superleader; S-83 steps 6, 7 reshape
+it); the cleanup settings and preview stay superleader-only. Writes: the copy (S3
 CopyObject plus a version row) and the cleanup settings PUT (Postgres only)."""
 
 from __future__ import annotations
@@ -21,10 +21,8 @@ from agents_orchestrator.api.admin import (
     reader_router,
     router,
 )
-from agents_orchestrator.api.errors import ApiError
 from agents_orchestrator.api.sessions import Cfg, Pool
 from agents_orchestrator.api.spec_edit import note_fields
-from agents_orchestrator.db import backups as backups_repo
 
 _UNAVAILABLE = {"description": "unavailable: backups are not configured for the api"}
 _BAD_REQUEST = {"description": "bad_request: invalid name or cursor"}
@@ -33,7 +31,7 @@ _Limit = Annotated[int, Query(ge=1, le=backups.LIST_LIMIT_MAX)]
 _Cursor = Annotated[str | None, Query(max_length=1024)]
 
 
-# step 13: reader gate (superleader or retrospective), was the superleader gate
+# reader gate (superleader until S-83 steps 6, 7)
 @reader_router.get(
     "/backups",
     response_model=schemas.BackupNamePage,
@@ -49,7 +47,7 @@ async def list_backups(
     return await backups.list_backups(pool, settings, q, cursor, limit)
 
 
-# step 13: reader gate (superleader or retrospective), was the superleader gate
+# reader gate (superleader until S-83 steps 6, 7)
 @reader_router.post(
     "/backups/copy",
     response_model=schemas.BackupVersionView,
@@ -68,17 +66,7 @@ async def copy_backup(
     """Copy a version to a target name; the copy becomes the target's current version (replace
     only, no merge). The audit row names source and target, never content."""
     _, caller = caller_of(request)
-    role = "superleader" if caller.spec.session_messaging else "retrospective"
-    if role == "retrospective":
-        # a copy makes the target current: only into names that presets and sessions of the
-        # caller's own projects use (S-68 step 16, H2)
-        async with pool.connection() as conn:
-            owners = await backups_repo.projects_using_name(conn, body.target)
-        if not owners <= set(caller.projects):
-            raise ApiError(
-                403, "forbidden", "a retrospective session copies into its projects' names only"
-            )
-    view, _created = await backups.copy_backup(pool, settings, body, f"{role} {caller.slug}")
+    view, _created = await backups.copy_backup(pool, settings, body, f"superleader {caller.slug}")
     note_detail(request, source=body.source, target=body.target)
     return view
 
@@ -122,7 +110,7 @@ async def backups_cleanup_preview(
     return await backups.cleanup_preview(pool, settings, response)
 
 
-# step 13: reader gate (superleader or retrospective), was the superleader gate
+# reader gate (superleader until S-83 steps 6, 7)
 @reader_router.get(
     "/backups/{name:path}/versions/{version_id}/manifest",
     response_model=schemas.BackupManifestView,
@@ -134,7 +122,7 @@ async def backup_manifest(
     return await backups.get_manifest(pool, settings, name, version_id)
 
 
-# step 13: reader gate (superleader or retrospective), was the superleader gate
+# reader gate (superleader until S-83 steps 6, 7)
 @reader_router.get(
     "/backups/{name:path}/versions",
     response_model=schemas.BackupVersionPage,
