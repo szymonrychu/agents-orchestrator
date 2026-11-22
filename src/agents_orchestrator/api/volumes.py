@@ -185,7 +185,7 @@ async def patch_volume(
     actor = _actor(request)
     try:
         async with pool.connection() as conn, conn.transaction():
-            await _require(conn, volume_id)
+            await repo.lock(conn, volume_id)  # the check and the write see one state
             if body.projects is not None:
                 keep = {p.strip() for p in body.projects}
                 for a in await repo.attaching_presets(conn, volume_id):

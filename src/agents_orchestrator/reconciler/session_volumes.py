@@ -12,6 +12,7 @@ of the session is gone, and asks for the last-release save.
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass, field
 
 import psycopg
@@ -53,6 +54,14 @@ async def resolve(
     return pairs, missing
 
 
+def _reader(name: str) -> volumes.VersionReader:
+    async def read(conn: psycopg.AsyncConnection) -> uuid.UUID | None:
+        current = await backups.current(conn, name)
+        return current.id if current else None
+
+    return read
+
+
 async def claim_step(
     pool: AsyncConnectionPool, session: Session, pairs: VolumeAttachments, missing: list[str]
 ) -> VolumeGate:
@@ -62,7 +71,6 @@ async def claim_step(
     async with pool.connection() as conn:
         requests = []
         for att, vol in pairs:
-            current = await backups.current(conn, backup_name(vol))
             requests.append(
                 volumes.ClaimRequest(
                     volume_id=vol.id,
@@ -71,7 +79,7 @@ async def claim_step(
                     mode=att.mode,
                     backup_restore=att.backup_restore,
                     session_slug=session.slug,
-                    current_version=current.id if current else None,
+                    current_version=_reader(backup_name(vol)),
                 )
             )
         async with conn.transaction():

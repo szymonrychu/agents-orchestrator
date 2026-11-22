@@ -126,6 +126,34 @@ async def test_provisioning_failures_set_a_fixed_reason(pool, kube, rec, setup, 
     assert (got.state, got.state_reason) == ("failed", reason)
 
 
+async def test_transient_pvc_apply_failure_is_retried_with_backoff_then_gives_up(pool, kube, rec):
+    now = [1000.0]
+    rec._clock = lambda: now[0]
+    v = await _make(pool)
+    kube.fail(PVC, "vol-data", KubeError("boom"), verbs=["patch"], times=1)
+    await rec.tick()
+    assert await _state(pool, v.id) == "failed"
+    await rec.tick()  # still inside the backoff
+    assert await _state(pool, v.id) == "failed"
+    now[0] += volumes_mod.RETRY_BASE_SECONDS + 1
+    await rec.tick()  # back to provisioning
+    assert await _state(pool, v.id) == "provisioning"
+    await rec.tick()
+    kube.set_pvc("vol-data", "Bound", "10Gi")
+    await rec.tick()
+    assert await _state(pool, v.id) == "ready"
+
+    w = await _make(pool, name="other")
+    kube.fail(PVC, "vol-other", KubeError("boom"), verbs=["patch"])
+    for _ in range(volumes_mod.RETRY_MAX + 3):
+        now[0] += 10_000
+        await rec.tick()
+        await rec.tick()
+    got = await _get(pool, w.id)
+    assert (got.state, got.state_reason) == ("failed", "pvc_apply_failed")
+    assert rec._retries[w.id][0] == volumes_mod.RETRY_MAX
+
+
 async def test_resizing_patches_request_and_turns_ready_at_capacity(pool, kube, rec):
     v = await _ready(pool, kube, rec)
     async with pool.connection() as conn, conn.transaction():
@@ -395,6 +423,28 @@ async def test_failed_restore_keeps_content_version_and_turns_ready(pool, kube, 
     got = await _get(pool, v.id)
     assert (got.state, got.content_version) == ("ready", None)
     assert (await _kinds(pool, v.id))[-1][0] == "restore_failed"
+
+
+@pytest.mark.parametrize(
+    ("msg", "fixed"),
+    [
+        ("OSError: [Errno 13] Permission denied: '/data/secret-dir/f'", "transfer_failed"),
+        ("ClientError: NoSuchKey /data/x", "object_missing"),
+    ],
+)
+async def test_job_failure_text_never_reaches_events(pool, kube, rec, msg, fixed):
+    v = await _ready(pool, kube, rec)
+    ver = await _version(pool, v)
+    await _restore(pool, v, ver.id)
+    await rec.tick()
+    (job,) = _jobs(kube)
+    kube.finish_job(job["metadata"]["name"], log=_outcome(state="unreadable", reason=msg))
+    await rec.tick()
+    async with pool.connection() as conn:
+        page = await volumes.events(conn, v.id, limit=50)
+    last = next(e for e in page.items if e.kind == "restore_failed")
+    assert last.detail == {"reason": fixed}
+    assert "/data" not in str(page.items)
 
 
 async def test_save_with_a_new_digest_moves_current_and_content_version(pool, kube, rec):

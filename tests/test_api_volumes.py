@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 
@@ -181,6 +182,17 @@ async def test_patch_updates_description_labels_projects_and_exclude(http, pool)
         ["x"],
         ["*.o"],
     )
+
+
+async def test_patch_takes_the_volume_lock_before_checking_attaching_presets(http, pool):
+    v = await ready(http, pool, projects=["default", "x"])
+    await attach(http, v)
+    async with pool.connection() as conn, conn.transaction():
+        await conn.execute("SELECT 1 FROM volumes WHERE id = %s FOR UPDATE", (v["id"],))
+        task = asyncio.create_task(http.patch(f"{V}/{v['id']}", json={"projects": ["x"]}))
+        await asyncio.sleep(0.5)
+        assert not task.done()
+    assert_error(await task, 409, "project_in_use")
 
 
 async def test_patch_refuses_removing_a_project_an_attaching_preset_needs(http, pool):

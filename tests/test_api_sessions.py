@@ -861,3 +861,14 @@ async def test_create_from_an_unmigrated_preset_is_409_preset_migration_pending(
     r = await http.post(S, json={"preset_id": "00000000-0000-0000-0000-000000000001"})
     assert_error(r, 409, "preset_migration_pending")
     assert "raw" not in r.json()["error"]["message"] and "extra_forbidden" not in r.text
+
+
+@pytest.mark.parametrize("empty", [[], None])
+async def test_create_from_a_preset_with_an_empty_backup_key_is_not_refused(http, pool, empty):
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE presets SET spec = %s WHERE id = %s",
+            (Jsonb({"backup": empty}), "00000000-0000-0000-0000-000000000001"),
+        )
+    r = await http.post(S, json={"preset_id": "00000000-0000-0000-0000-000000000001"})
+    assert r.status_code == 201, r.text

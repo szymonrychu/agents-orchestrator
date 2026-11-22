@@ -264,3 +264,42 @@ async def test_active_claimant_is_never_restored_under_on_a_re_claim(pool):
         got = await _claim(conn, v.id, me, current=NEWER)
         assert (got.decision, got.volume.state) == ("proceed", "ready")
     assert "restore_started" not in await _kinds(pool, v.id)
+
+
+async def test_claim_reads_the_current_version_under_the_volume_lock(pool):
+    """A save finishing while the claim waits for the lock must not make it restore the older
+    version over the newer content."""
+    older, newer = uuid.uuid4(), uuid.uuid4()
+    v = await _volume(pool, state="ready", content_version=older)
+    seen = {"version": older}
+
+    async def reader(_conn):
+        return seen["version"]
+
+    async with pool.connection() as saver, pool.connection() as claimer:
+        tx = saver.transaction()
+        await tx.__aenter__()
+        try:
+            await saver.execute("SELECT 1 FROM volumes WHERE id = %s FOR UPDATE", (v.id,))
+            pending = asyncio.create_task(_claim(claimer, v.id, uuid.uuid4(), current=reader))
+            await asyncio.sleep(0.5)
+            assert not pending.done()
+            seen["version"] = newer  # the save finished: current moved and content is newer
+            await saver.execute(
+                "UPDATE volumes SET content_version = %s WHERE id = %s", (newer, v.id)
+            )
+        finally:
+            await tx.__aexit__(None, None, None)
+        got = await asyncio.wait_for(pending, 10)
+    assert got.decision == "proceed"
+    assert "restore_started" not in await _kinds(pool, v.id)
+
+
+@pytest.mark.parametrize("reason", ["pvc_apply_failed", "pvc_missing", "pvc_lost"])
+async def test_a_volume_without_a_pvc_cannot_be_claimed(pool, reason):
+    v = await _volume(pool, state="provisioning")
+    async with pool.connection() as conn:
+        await volumes.set_state(conn, v.id, "failed", reason=reason)
+        got = await _claim(conn, v.id, uuid.uuid4(), backup_restore=False)
+        assert got.decision == "wait" and got.claim is None
+        assert await volumes.unreleased_claims(conn, v.id) == []

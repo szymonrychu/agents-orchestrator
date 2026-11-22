@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
@@ -33,6 +33,23 @@ _QUANTITY_MAX_LEN = 32
 _MAX_EXPONENT = 18
 _EXPONENT_RE = re.compile(r"[eE]([+-]?\d+)$")
 MAX_LIMIT = 200
+# the only failure reasons a restore or save ends with (events, responses): raw Job or CLI text
+# can carry paths and never reaches them
+JOB_REASONS = frozenset(
+    {
+        "job_failed",
+        "job_timeout",
+        "transfer_failed",
+        "object_missing",
+        "job_create_failed",
+        "record_failed",
+        "no_request",
+        "not_configured",
+        "version_missing",
+    }
+)
+# a failed volume with one of these reasons has no PVC: nothing may mount or restore into it
+NO_PVC_REASONS = frozenset({"pvc_apply_failed", "pvc_missing", "pvc_lost"})
 STATES = ("provisioning", "ready", "resizing", "restoring", "saving", "deleting", "failed")
 _COLUMNS = (
     "id, name, projects, labels, description, exclude, size, storage_class, pvc_name, state,"
@@ -163,6 +180,12 @@ async def _lock(conn: psycopg.AsyncConnection, id: uuid.UUID) -> Volume:
     if not rows:
         raise VolumeNotFound(str(id))
     return rows[0]
+
+
+async def lock(conn: psycopg.AsyncConnection, id: uuid.UUID) -> Volume:
+    """The live volume row locked FOR UPDATE until the caller's transaction ends
+    (VolumeNotFound when gone)."""
+    return await _lock(conn, id)
 
 
 async def _touch(conn: psycopg.AsyncConnection, id: uuid.UUID) -> None:
@@ -496,6 +519,10 @@ async def _upsert_claim(
     return rows[0], True
 
 
+# reads `backups.current(volume-<name>)` id; passed to claim so it runs under the volume lock
+VersionReader = Callable[[psycopg.AsyncConnection], Awaitable[uuid.UUID | None]]
+
+
 def _str(v: uuid.UUID | None) -> str | None:
     return str(v) if v is not None else None
 
@@ -509,7 +536,7 @@ async def claim(
     mode: str,
     backup_restore: bool,
     session_slug: str,
-    current_version: uuid.UUID | None,
+    current_version: uuid.UUID | VersionReader | None,
 ) -> ClaimDecision:
     """The HARD RULE guard (spec 8.3): claim the volume for a session and decide whether it is
     restored first. Under the volume row lock: `deleting` refuses, any state but `ready` and
@@ -518,7 +545,8 @@ async def claim(
     `current_version` that differs from `content_version`, volume `ready`) starts only when no
     other session holds an unreleased claim (sessions in deleting count until released);
     otherwise `restore_skipped_mounted` is recorded and the session proceeds. `current_version`
-    is `backups.current(volume-<name>)`, read by the caller.
+    is `backups.current(volume-<name>)`: a value, or a reader run under the row lock (a save
+    finishing before the lock cannot make an older version restore over newer content).
 
     Locks one volume row: a caller claiming more than one volume must use `claim_all` (ascending
     id order), or it can deadlock with `release_claims`."""
@@ -526,8 +554,11 @@ async def claim(
         vol = await _lock(conn, volume_id)
         if vol.state == "deleting":
             return ClaimDecision("refuse", vol, None)
-        if vol.state not in ("ready", "failed"):
+        if vol.state not in ("ready", "failed") or (
+            vol.state == "failed" and vol.state_reason in NO_PVC_REASONS
+        ):
             return ClaimDecision("wait", vol, None)
+        version = await current_version(conn) if callable(current_version) else current_version
         mine, created = await _upsert_claim(
             conn, volume_id, session_id, preset_id, mode, backup_restore
         )
@@ -536,8 +567,8 @@ async def claim(
             backup_restore
             and created  # a re-claim is a running claimant: never restore under its pods
             and vol.state == "ready"
-            and current_version is not None
-            and current_version != vol.content_version
+            and version is not None
+            and version != vol.content_version
         ):
             others = [
                 str(c.session_id)
@@ -554,7 +585,7 @@ async def claim(
                     detail={
                         "session_id": str(session_id),
                         "others": others,
-                        "current_version": str(current_version),
+                        "current_version": str(version),
                         "content_version": _str(vol.content_version),
                     },
                 )
@@ -572,7 +603,7 @@ async def claim(
                     detail={
                         "session_id": str(session_id),
                         "session_slug": session_slug,
-                        "version": str(current_version),
+                        "version": str(version),
                         "content_version": _str(vol.content_version),
                     },
                 )
@@ -596,7 +627,7 @@ class ClaimRequest:
     mode: str
     backup_restore: bool
     session_slug: str
-    current_version: uuid.UUID | None
+    current_version: uuid.UUID | VersionReader | None
 
 
 async def claim_all(
@@ -666,7 +697,9 @@ async def begin_explicit_restore(
     else `restoring` and `restore_started` (detail carries the version to restore)."""
     async with conn.transaction():
         vol = await _lock(conn, volume_id)
-        if vol.state not in ("ready", "failed"):
+        if vol.state not in ("ready", "failed") or (
+            vol.state == "failed" and vol.state_reason in NO_PVC_REASONS
+        ):
             raise VolumeBusy(f"cannot restore a volume that is {vol.state}")
         if await unreleased_claims(conn, volume_id):
             raise VolumeMounted(str(volume_id))
@@ -843,6 +876,11 @@ async def _begin_save(
     return after
 
 
+def fixed_reason(reason: str | None) -> str:
+    """`reason` when it is one of `JOB_REASONS`, else `job_failed`."""
+    return reason if reason in JOB_REASONS else "job_failed"
+
+
 async def finish_restore(
     conn: psycopg.AsyncConnection,
     volume_id: uuid.UUID,
@@ -860,7 +898,7 @@ async def finish_restore(
         if version is not None:
             kind, detail = "restored", {"version": str(version)}
         else:
-            kind, detail = "restore_failed", {"reason": reason or "failed"}
+            kind, detail = "restore_failed", {"reason": fixed_reason(reason)}
         await record_event(
             conn, volume_id, kind, actor_kind="system", actor="reconciler", detail=detail
         )
@@ -883,7 +921,7 @@ async def finish_save(
         await set_state(
             conn, volume_id, "ready", content_version=None if kind == "save_failed" else version
         )
-        detail: dict[str, Any] = {"reason": reason or "failed"} if kind == "save_failed" else {}
+        detail: dict[str, Any] = {"reason": fixed_reason(reason)} if kind == "save_failed" else {}
         if version is not None and kind != "save_failed":
             detail["version"] = str(version)
         await record_event(

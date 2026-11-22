@@ -648,7 +648,9 @@ async def _create_from_preset(
     ):
         raise ApiError(409, "conflict", "the preset changed meanwhile; retry")
     raw = dict(preset.spec)
-    if "backup" in raw:
+    if not raw.get("backup"):  # an empty or null key is leftover, never a pending migration
+        raw.pop("backup", None)
+    else:
         raise ApiError(
             409,
             "preset_migration_pending",

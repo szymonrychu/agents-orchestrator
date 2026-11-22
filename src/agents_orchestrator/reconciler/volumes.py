@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 import uuid
 from collections import defaultdict
 from typing import Any
@@ -52,6 +53,12 @@ PVC_LOST = "pvc_lost"
 PVC_MISSING = "pvc_missing"
 PVC_RESIZE_FAILED = "pvc_resize_failed"
 
+# transient failures: back to the state that failed, after RETRY_BASE_SECONDS * 2**attempt, at
+# most RETRY_MAX times per process (the count resets when the volume turns ready)
+RETRY_STATE = {PVC_APPLY_FAILED: "provisioning", PVC_RESIZE_FAILED: "resizing"}
+RETRY_BASE_SECONDS = 30.0
+RETRY_MAX = 5
+
 KEY_ANNOTATION = "agents.szymonrichert.pl/object-key"
 BASE_ANNOTATION = "agents.szymonrichert.pl/base-version"
 
@@ -59,6 +66,8 @@ BASE_ANNOTATION = "agents.szymonrichert.pl/base-version"
 class VolumeReconciler:
     def __init__(self, pool: AsyncConnectionPool, kube: KubeApi, settings: Settings) -> None:
         self.pool, self.kube, self.settings = pool, kube, settings
+        self._clock = time.monotonic
+        self._retries: dict[uuid.UUID, tuple[int, float]] = {}  # volume -> (attempts, not before)
 
     async def tick(self) -> None:
         """One pass over every live volume, then the orphan claims; one failure never stops it."""
@@ -146,7 +155,23 @@ class VolumeReconciler:
             )
         await self.kube.delete(PVC, self.settings.namespace, vol.pvc_name)
 
+    async def _failed(self, vol: volumes.Volume) -> None:
+        target = RETRY_STATE.get(vol.state_reason or "")
+        if target is None:
+            return
+        attempts, not_before = self._retries.get(vol.id, (0, self._clock() + RETRY_BASE_SECONDS))
+        self._retries[vol.id] = (attempts, not_before)
+        if attempts >= RETRY_MAX or self._clock() < not_before:
+            return
+        backoff = RETRY_BASE_SECONDS * 2 ** (attempts + 1)
+        self._retries[vol.id] = (attempts + 1, self._clock() + backoff)
+        log.info(
+            "volume %s: retrying after %s (attempt %d)", vol.name, vol.state_reason, attempts + 1
+        )
+        await self._set(vol, target)
+
     async def _ready(self, vol: volumes.Volume) -> None:
+        self._retries.pop(vol.id, None)
         if await self._pvc(vol) is None:
             await self._set(vol, "failed", PVC_MISSING)
             return
@@ -203,9 +228,9 @@ class VolumeReconciler:
                     vol, self.settings, action="restore", version=version, n=n, url=url
                 )
             )
-        except Exception as exc:  # noqa: BLE001 - a restore never wedges the volume
+        except Exception:  # noqa: BLE001 - a restore never wedges the volume
             log.exception("volume %s: creating the restore Job failed", vol.name)
-            await self._end_restore(vol, None, f"job_create_failed: {type(exc).__name__}")
+            await self._end_restore(vol, None, "job_create_failed")
 
     async def _end_restore(
         self, vol: volumes.Volume, version: uuid.UUID | None, reason: str | None
@@ -267,11 +292,9 @@ class VolumeReconciler:
                     },
                 )
             )
-        except Exception as exc:  # noqa: BLE001 - a save never wedges the volume
+        except Exception:  # noqa: BLE001 - a save never wedges the volume
             log.exception("volume %s: creating the save Job failed", vol.name)
-            await self._end_save(
-                vol, "save_failed", None, f"job_create_failed: {type(exc).__name__}"
-            )
+            await self._end_save(vol, "save_failed", None, "job_create_failed")
 
     async def _record_save(
         self,
@@ -316,9 +339,9 @@ class VolumeReconciler:
                 assert version is not None
                 kind = "save_unchanged" if outcome == "unchanged" else "saved"
                 await volumes.finish_save(conn, vol.id, kind=kind, version=version.id)
-        except Exception as exc:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             log.exception("volume %s: recording the save failed", vol.name)
-            await self._end_save(vol, "save_failed", None, f"record_failed: {type(exc).__name__}")
+            await self._end_save(vol, "save_failed", None, "record_failed")
             return
         if outcome == "unchanged":
             await self._delete_object(key)
@@ -355,11 +378,11 @@ class VolumeReconciler:
         self, vol: volumes.Volume, job: dict[str, Any], action: str, ok_states: set[str]
     ) -> tuple[str, dict[str, Any] | None, str | None]:
         """(state, result, reason): `running`, `ok` (the CLI reported one of `ok_states`) or
-        `failed` with a fixed reason (`timeout`, `failed`, `exit N`, `bad_output` or the CLI's)."""
+        `failed` with a fixed reason (`volumes.JOB_REASONS`; raw CLI text goes to the log only)."""
         status = job.get("status") or {}
         failed = job_condition(job, "Failed")
         if failed is not None and failed.get("reason") == "DeadlineExceeded":
-            return "failed", None, "timeout"
+            return "failed", None, "job_timeout"
         done = job_condition(job, "Complete") is not None or bool(status.get("succeeded"))
         broke = failed is not None or bool(status.get("failed"))
         if not done and not broke:
@@ -380,15 +403,15 @@ class VolumeReconciler:
         results = [r for r in (outcome or {}).get("entries") or [] if isinstance(r, dict)]
         if outcome is None or not results:
             code = container_exit_code(pod) if pod is not None and broke else None
-            return (
-                "failed",
-                None,
-                f"exit {code}" if code is not None else "failed" if broke else "bad_output",
-            )
+            if code is not None:
+                log.warning("volume %s: the %s Job exited %s", vol.name, action, code)
+            return "failed", None, "job_failed" if broke else "transfer_failed"
         result = results[0]
         if broke or result.get("state") not in ok_states:
-            reason = str(result.get("reason") or result.get("state") or "failed")[:REASON_MAX]
-            return "failed", None, reason
+            raw = str(result.get("reason") or result.get("state") or "")[:REASON_MAX]
+            log.warning("volume %s: the %s Job reported: %s", vol.name, action, raw)
+            missing = "NoSuchKey" in raw or "HTTP 404" in raw
+            return "failed", None, "object_missing" if missing else "transfer_failed"
         return "ok", result, None
 
     async def _delete_job(self, job: dict[str, Any]) -> None:

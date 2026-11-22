@@ -255,6 +255,16 @@ async def test_second_run_changes_nothing(pool, settings, s3):
     assert len(s3.copied) == 1
 
 
+@pytest.mark.parametrize("empty", [[], None])
+async def test_empty_or_null_backup_key_is_stripped_once(pool, settings, s3, empty, caplog):
+    pid = await add_preset(pool, "Bot", empty, image="x")
+    with caplog.at_level(logging.INFO):
+        res = await mv.migrate(pool, settings)
+    assert res.stripped == ["Bot"] and "Bot" in caplog.text
+    assert await spec_of(pool, pid) == {"image": "x"}
+    assert (await mv.migrate(pool, settings)).stripped == []
+
+
 async def test_dry_run_writes_nothing_and_logs_names_and_counts(pool, settings, s3, caplog):
     await add_version(pool, "proj/ws", "sha:1")
     pid = await add_preset(pool, "Bot", [entry(path="secret-dir", exclude=["CANARY-x"])])

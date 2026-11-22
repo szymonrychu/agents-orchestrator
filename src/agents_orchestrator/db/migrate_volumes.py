@@ -98,6 +98,7 @@ class Result:
     seeds: int = 0
     skipped: list[str] = field(default_factory=list)  # preset names left untouched
     reserved: list[str] = field(default_factory=list)  # pre-existing volume- backup names
+    stripped: list[str] = field(default_factory=list)  # presets whose empty/null backup key went
 
 
 # ---------------------------------------------------------------------- pure parts
@@ -398,6 +399,48 @@ async def _rows(conn: psycopg.AsyncConnection) -> list[dict[str, Any]]:
         return await cur.fetchall()
 
 
+def _empty_backup(spec: dict[str, Any]) -> bool:
+    return "backup" in spec and not spec["backup"]
+
+
+async def _strip_empty(conn: psycopg.AsyncConnection, dry_run: bool) -> list[str]:
+    """Drop an empty or null `backup` key from stored presets (one audited edit each, logged by
+    name); a preset with entries is left to the migration. Idempotent: a second run finds none."""
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT id FROM presets WHERE spec ? 'backup'"
+            " AND (jsonb_typeof(spec -> 'backup') = 'null' OR spec -> 'backup' = '[]'::jsonb)"
+            " ORDER BY name, id"
+        )
+        ids = [r["id"] for r in await cur.fetchall()]
+    await conn.commit()
+    done: list[str] = []
+    for pid in ids:
+        try:
+            async with conn.transaction():
+                locked = await presets_repo.get_for_update(conn, pid)
+                if locked is None or not _empty_backup(locked.spec):
+                    continue
+                if not dry_run:
+                    spec = {k: v for k, v in locked.spec.items() if k != "backup"}
+                    await presets_repo.update(conn, pid, locked.name, spec)
+                done.append(locked.name)
+                log.info(
+                    "%svolume migration: preset=%s empty backup key stripped",
+                    "dry run: " if dry_run else "audit: ",
+                    locked.name,
+                )
+        except Exception as exc:  # noqa: BLE001 - one preset must not stop the others
+            await conn.rollback()
+            log.warning(
+                "volume migration: preset=%s empty backup key kept: failed (%s)",
+                pid,
+                type(exc).__name__,
+            )
+    await conn.commit()
+    return done
+
+
 async def migrate(
     pool: AsyncConnectionPool, settings: Settings, *, dry_run: bool = False
 ) -> Result | None:
@@ -428,6 +471,7 @@ async def _migrate(conn: psycopg.AsyncConnection, settings: Settings, dry_run: b
             " no volume takes these names, entries naming them seed a fresh volume",
             ",".join(res.reserved),
         )
+    res.stripped = await _strip_empty(conn, dry_run)
     taken: set[str] = set()
     rows = await _rows(conn)
     await conn.commit()  # pool connections are not autocommit: each preset commits on its own
