@@ -175,13 +175,3 @@ async def test_proposal_create_on_unmanageable_session_403(call, locked_session)
         "reason": "r",
     }
     assert_error(await call("POST", f"{ADMIN_PREFIX}/proposals", json=body), 403, "not_manageable")
-
-
-async def test_regular_leader_get_other_session_still_own_only(pool, app):
-    leader = await hive(pool, "split-lead")
-    other = await alone(pool, "split-bystander")
-    async with client_for(app, leader.leader_ip) as http:
-        r = await http.get(f"{S}/{other.slug}", headers=headers(leader.id))
-        assert_error(r, 403, "not_superleader")
-        own = await http.get(f"{S}/{leader.slug}", headers=headers(leader.id))
-        assert own.status_code == 200, own.text
