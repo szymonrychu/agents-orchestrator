@@ -261,6 +261,26 @@ async def test_discard_releases_the_claim_and_saves_only_after_the_last_backup_m
     assert (await _kinds(pool, vol.id)).count("save_started") == saves
 
 
+@pytest.mark.parametrize(
+    ("first_mode", "first_backup", "saves"),
+    [("rw", True, 1), ("ro", True, 0), ("rw", False, 0)],
+)
+async def test_last_release_saves_when_a_backup_on_writer_mounted_since_the_last_save(
+    pool, kube, rec, vrec, first_mode, first_backup, saves
+):
+    vol = await _volume(pool, kube, vrec)
+    first = await _session(pool, "alpha", vol, mode=first_mode, backup_restore=first_backup)
+    last = await _session(pool, "beta", vol, mode="ro")
+    await rec.reconcile_once()
+    await _delete(pool, first.id)
+    await rec.reconcile_once()
+    assert (await _kinds(pool, vol.id)).count("save_started") == 0
+    await _delete(pool, last.id)
+    await rec.reconcile_once()
+    assert await _claimants(pool, vol.id) == set()
+    assert (await _kinds(pool, vol.id)).count("save_started") == saves
+
+
 async def test_discard_leaves_the_volume_pvc_untouched(pool, kube, rec, vrec):
     vol = await _volume(pool, kube, vrec)
     s = await _session(pool, "alpha", vol, backup_restore=True)

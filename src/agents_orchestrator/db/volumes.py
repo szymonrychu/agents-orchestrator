@@ -59,7 +59,7 @@ STATES = ("provisioning", "ready", "resizing", "restoring", "saving", "deleting"
 _COLUMNS = (
     "id, name, projects, labels, description, exclude, size, storage_class, pvc_name, state,"
     " state_reason, content_version, save_pending, created_by, created_at, updated_at, deleted_at,"
-    " owner_attempts"
+    " owner_attempts, backup_dirty"
 )
 _CLAIM_COLUMNS = (
     "id, volume_id, session_id, preset_id, mode, backup_restore, claimed_at, released_at"
@@ -114,6 +114,8 @@ class Volume:
     deleted_at: datetime | None
     save_pending: bool = False
     owner_attempts: int = 0
+    # a rw `backup_restore` claim was taken since the last successful save: the last release saves
+    backup_dirty: bool = False
 
     @property
     def owner_exhausted(self) -> bool:
@@ -540,6 +542,8 @@ async def _upsert_claim(
         (volume_id, session_id, preset_id, mode, backup_restore),
         Claim,
     )
+    if mode == "rw" and backup_restore:
+        await conn.execute("UPDATE volumes SET backup_dirty = true WHERE id = %s", (volume_id,))
     await record_event(
         conn,
         volume_id,
@@ -947,7 +951,9 @@ async def finish_save(
     reason: str | None = None,
 ) -> None:
     """End a save: always back to `ready`. `saved` and `save_unchanged` set `content_version` to
-    `version` (the new or the current one); `save_failed` leaves it and carries `reason`."""
+    `version` (the new or the current one); `save_failed` leaves it and carries `reason`.
+    A successful save clears `backup_dirty` unless a rw `backup_restore` claim is still
+    unreleased (it may write after the snapshot); a failed one keeps it."""
     async with conn.transaction():
         vol = await _lock(conn, volume_id)
         if vol.state != "saving":
@@ -955,6 +961,13 @@ async def finish_save(
         await set_state(
             conn, volume_id, "ready", content_version=None if kind == "save_failed" else version
         )
+        if kind != "save_failed":
+            await conn.execute(
+                "UPDATE volumes SET backup_dirty = EXISTS (SELECT 1 FROM volume_mounts"
+                " WHERE volume_id = %s AND released_at IS NULL AND mode = 'rw'"
+                " AND backup_restore) WHERE id = %s",
+                (volume_id, volume_id),
+            )
         detail: dict[str, Any] = {"reason": fixed_reason(reason)} if kind == "save_failed" else {}
         if version is not None and kind != "save_failed":
             detail["version"] = str(version)

@@ -114,14 +114,18 @@ async def claim_step(
 
 
 async def release(conn: psycopg.AsyncConnection, session: Session) -> None:
-    """Release the claims of a session whose pods are gone and request the save of each volume
-    it was the last `backup_restore` mounter of (spec 8.2; coalesced when busy). The caller
-    holds the transaction."""
+    """Release the claims of a session whose pods are gone and, for each volume it was the last
+    mounter of, request the save when a rw `backup_restore` claim was taken since the last save
+    (`backup_dirty`, decision 858: whatever this claim's own setting; coalesced when busy). The
+    caller holds the transaction."""
     released = await volumes.release_claims(
         conn, session.id, actor_kind="system", actor="reconciler"
     )
     for c in released:
-        if not c.backup_restore or await volumes.unreleased_claims(conn, c.volume_id):
+        if await volumes.unreleased_claims(conn, c.volume_id):
+            continue
+        vol = await volumes.get(conn, c.volume_id)
+        if vol is not None and not vol.backup_dirty:  # None: request_save logs it gone
             continue
         try:
             await volumes.request_save(

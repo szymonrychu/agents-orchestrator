@@ -249,3 +249,37 @@ async def test_two_on_demand_saves_one_starts_and_one_is_busy(pool):
             )
             is None
         )
+
+
+@pytest.mark.parametrize(
+    ("kind", "writer_mounted", "dirty"),
+    [
+        ("saved", False, False),
+        ("save_unchanged", False, False),
+        ("save_failed", False, True),
+        ("saved", True, True),
+    ],
+)
+async def test_save_end_clears_the_backup_dirty_flag_only_on_success_with_no_writer_left(
+    pool, kind, writer_mounted, dirty
+):
+    async with pool.connection() as conn:
+        v = await _create(conn)
+        await volumes.set_state(conn, v.id, "ready")
+        writer = uuid.uuid4()
+        await volumes.claim(
+            conn,
+            volume_id=v.id,
+            session_id=writer,
+            preset_id=None,
+            mode="rw",
+            backup_restore=True,
+            session_slug="writer",
+            current_version=None,
+        )
+        assert (await volumes.get(conn, v.id)).backup_dirty
+        if not writer_mounted:
+            await volumes.release_claims(conn, writer, actor_kind="system", actor="t")
+        await volumes.request_save(conn, v.id, trigger="user", session_slug=None, actor="alice")
+        await volumes.finish_save(conn, v.id, kind=kind)
+        assert (await volumes.get(conn, v.id)).backup_dirty is dirty
