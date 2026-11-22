@@ -391,6 +391,8 @@ ALONE_SESSION_TOOLS = [
     "plan_questions_ask",
     "project_chat_send",
     "project_chat_read",
+    "volumes_status",
+    "volume_save",
     "session_get",
     "session_patch",
     "proposal_create",
