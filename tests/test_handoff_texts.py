@@ -1,10 +1,12 @@
 """handoff_texts: no time words, the checklists per profile, the submit tool named."""
 
 import re
+from datetime import UTC, datetime
 
 import pytest
 
 from agents_orchestrator import handoff_texts as t
+from agents_orchestrator import inactivity
 
 PROFILES = ("work", "chat")
 HANDOFF = {
@@ -129,3 +131,38 @@ def test_return_text_resumes_with_next_first_and_renders_fields():
     assert "- task:bf3a: stale CI watcher, not needed" in text
     kept = t.return_text(HANDOFF, cleared=False)
     assert "context was kept" in kept and "Resume now" not in kept
+
+
+RETRO = (
+    "Retro: record what you learned (room notes, mind map, skills; volume_save for changed"
+    " skills) before you hand off or close."
+)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        lambda: inactivity.close_text(
+            quiet_seconds=60,
+            deadline=datetime(2026, 11, 2, tzinfo=UTC),
+            grace_seconds=30,
+            chat=False,
+            taskboard=False,
+            workdir_saved=False,
+        ),
+        lambda: inactivity.autoclose_text(
+            after_seconds=3600,
+            deadline=datetime(2026, 11, 2, tzinfo=UTC),
+            grace_seconds=30,
+            chat=False,
+            taskboard=False,
+            workdir_saved=False,
+            can_self_close=True,
+        ),
+        lambda: t.checklist("work", 2, hive=False),
+        lambda: t.checklist("chat", 2, hive=False),
+    ],
+    ids=["close", "autoclose", "work", "chat"],
+)
+def test_retro_step_in_texts(text):
+    assert RETRO in text()

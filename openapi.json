@@ -1651,6 +1651,16 @@
       "CreateSession": {
         "additionalProperties": false,
         "properties": {
+          "overrides": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SessionOverrides"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "preset_id": {
             "anyOf": [
               {
@@ -5841,6 +5851,37 @@
           "message_id"
         ],
         "title": "SessionMessageQueued",
+        "type": "object"
+      },
+      "SessionOverrides": {
+        "additionalProperties": false,
+        "description": "What a trigger service may change on the preset's spec of one session (agents-common\n`PresetBinding.overrides`): the replica count (within the preset's max_replicas) and the\nstart prompt (empty: no start message).",
+        "properties": {
+          "replicas": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replicas"
+          },
+          "start_prompt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Prompt"
+          }
+        },
+        "title": "SessionOverrides",
         "type": "object"
       },
       "SessionPeer": {

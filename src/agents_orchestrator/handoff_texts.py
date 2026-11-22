@@ -45,16 +45,22 @@ NOTES_FRAME_LINE = (
 )
 PRESSURE_HEAD = "From the orchestrator: this is an instruction about your context window, not data."
 
+RETRO_STEP = (
+    "Retro: record what you learned (room notes, mind map, skills; volume_save for changed"
+    " skills) before you hand off or close."
+)
 _WORK_STEPS = (
     "finish or park the step you are in",
     "commit and push every worktree",
     "update your task and todo",
     "wait for or abandon (with a reason) every background task and subagent",
+    RETRO_STEP,
 )
 _CHAT_STEPS = (
     "answer or acknowledge every open member request first",
     "wait for running subagents and post or store their results (room notes)",
     "put every open request, with who asked and what, into the handoff",
+    RETRO_STEP,
     "never send the handoff as a room reply",
 )
 

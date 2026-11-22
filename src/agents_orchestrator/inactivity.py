@@ -4,6 +4,7 @@ the sweeper sends (hive-inactivity-limits, spec 3.3 and 3.4). Pure: no database,
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from agents_orchestrator.handoff_texts import RETRO_STEP
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import SessionSpec
 
@@ -142,6 +143,7 @@ def close_text(
         )
     else:
         parts.append("If your work is finished, call orchestrator_self_close.")
+    parts.append(RETRO_STEP)
     parts.append(
         "If you are still working, post a progress update now to keep the session. It is never"
         f" closed while you work; if it is idle after {clock(deadline)} without a self-close or"
@@ -187,6 +189,7 @@ def autoclose_text(
             )
         else:
             parts.append("Finish or checkpoint your work, then call orchestrator_self_close.")
+        parts.append(RETRO_STEP)
     parts.append(
         f"The session is never closed while you work; if it is idle after {clock(deadline)}"
         f" without a self-close, it is discarded {humanize(grace_seconds)} later. Only the user"

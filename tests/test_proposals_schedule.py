@@ -190,6 +190,7 @@ async def test_create_records_one_classified_item_per_field_and_the_updated_at(p
         "prompt": "run the nightly checks",
         "enabled": True,
         "then_schedule_ids": [],
+        "session_overrides": {"replicas": None, "start_prompt": None},
     }
     assert rig.sched.puts() == []
 
@@ -202,6 +203,13 @@ async def test_a_preset_id_change_is_security_and_needs_a_visible_preset(pool, r
     with pytest.raises(proposals.ApiError) as exc:
         await _create(pool, rig, patch={"preset_id": rig.hid})
     _error(exc, 404, "not_found")
+
+
+async def test_schedule_proposal_accepts_session_overrides(pool, rig):
+    overrides = {"replicas": 1, "start_prompt": "go"}
+    view = await _create(pool, rig, patch={"session_overrides": overrides})
+    [item] = view.revisions[0].items
+    assert (item.path, item.after, item.security) == ("session_overrides", overrides, True)
 
 
 async def test_a_key_outside_schedule_in_is_422(pool, rig):
@@ -259,6 +267,7 @@ async def test_approve_puts_the_full_object_with_if_match_and_records_applied(po
         "prompt": "run the nightly checks twice",
         "enabled": True,
         "then_schedule_ids": [],
+        "session_overrides": {"replicas": None, "start_prompt": None},
     }
     assert done.status == "applied"
     assert await _state(pool, view.id) == ("applied", {"cron": "approved", "prompt": "approved"})

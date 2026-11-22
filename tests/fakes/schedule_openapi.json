@@ -384,6 +384,16 @@
             "title": "Prompt",
             "type": "string"
           },
+          "session_overrides": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SessionOverrides"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "then_schedule_ids": {
             "items": {
               "format": "uuid",
@@ -465,6 +475,16 @@
             "title": "Prompt",
             "type": "string"
           },
+          "session_overrides": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SessionOverrides"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "then_schedule_ids": {
             "items": {
               "format": "uuid",
@@ -491,6 +511,7 @@
           "preset_id",
           "prompt",
           "enabled",
+          "session_overrides",
           "then_schedule_ids",
           "next_fires",
           "last_run",
@@ -498,6 +519,38 @@
           "updated_at"
         ],
         "title": "ScheduleView",
+        "type": "object"
+      },
+      "SessionOverrides": {
+        "additionalProperties": false,
+        "description": "Per-schedule overrides of the preset's session, passed to the orchestrator create call.",
+        "properties": {
+          "replicas": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replicas"
+          },
+          "start_prompt": {
+            "anyOf": [
+              {
+                "maxLength": 16384,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Prompt"
+          }
+        },
+        "title": "SessionOverrides",
         "type": "object"
       }
     }

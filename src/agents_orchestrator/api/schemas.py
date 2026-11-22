@@ -26,6 +26,17 @@ from agents_orchestrator.settings import (
 from agents_orchestrator.spec import SessionSpec
 
 
+class SessionOverrides(BaseModel):
+    """What a trigger service may change on the preset's spec of one session (agents-common
+    `PresetBinding.overrides`): the replica count (within the preset's max_replicas) and the
+    start prompt (empty: no start message)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    replicas: int | None = Field(default=None, ge=1)
+    start_prompt: str | None = None
+
+
 class CreateSession(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -34,6 +45,8 @@ class CreateSession(BaseModel):
     preset_id: uuid.UUID | None = None
     # None: the preset's project, or the default project for a spec-only session
     project: str | None = None
+    # preset_id only (422 overrides_need_preset with a spec)
+    overrides: SessionOverrides | None = None
 
 
 class PresetIn(BaseModel):
@@ -260,6 +273,7 @@ class ScheduleIn(BaseModel):
     prompt: str = Field(min_length=1, max_length=16384)
     enabled: bool = True
     then_schedule_ids: list[uuid.UUID] = Field(default_factory=list, max_length=10)
+    session_overrides: SessionOverrides | None = None
 
 
 class ProposalRevise(BaseModel):
