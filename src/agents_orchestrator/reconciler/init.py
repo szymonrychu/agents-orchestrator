@@ -35,6 +35,8 @@ from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.k8s.kube import KubeApi, KubeError, Obj, is_owned
 from agents_orchestrator.k8s.labels import prefix, session_labels, workspace_pvc
 from agents_orchestrator.k8s.render import (
+    AGENT_GID,
+    AGENT_UID,
     WORKSPACE_VOLUME,
     VolumeAttachments,
     agent_identity,
@@ -140,8 +142,8 @@ def render_init_job(
         "restartPolicy": "Never",
         **agent_identity(settings),
         "securityContext": {
-            "runAsUser": 1000,
-            "fsGroup": 1000,
+            "runAsUser": AGENT_UID,
+            "fsGroup": AGENT_GID,
             "fsGroupChangePolicy": "OnRootMismatch",
         },
         "containers": [container],

@@ -303,3 +303,17 @@ async def test_a_volume_without_a_pvc_cannot_be_claimed(pool, reason):
         got = await _claim(conn, v.id, uuid.uuid4(), backup_restore=False)
         assert got.decision == "wait" and got.claim is None
         assert await volumes.unreleased_claims(conn, v.id) == []
+
+
+@pytest.mark.parametrize("reason", ["owner_failed", "pvc_lost"])
+async def test_explicit_restore_refused_on_a_volume_whose_root_was_never_owned(pool, reason):
+    """Its root is still uid 0 (the owner step never completed): a restore would end `ready`
+    past the owner gate, so it is refused and the volume stays failed."""
+    v = await _volume(pool, state="provisioning")
+    async with pool.connection() as conn:
+        await volumes.set_state(conn, v.id, "failed", reason=reason)
+        with pytest.raises(volumes.VolumeBusy, match=reason):
+            async with conn.transaction():
+                await volumes.begin_explicit_restore(conn, v.id, version=NEWER, actor="alice")
+        got = await volumes.get(conn, v.id)
+    assert (got.state, got.state_reason) == ("failed", reason)

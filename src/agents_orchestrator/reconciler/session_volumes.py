@@ -3,10 +3,10 @@
 Before any pod of a session starts, `claim_step` claims every attached volume through
 `db.volumes.claim_all` (the HARD RULE guard) and returns a gate. The StatefulSet and the init
 Job wait while the gate holds: a volume not settled for a first mount (provisioning, resizing,
-restoring, saving), a restore this claim started, or a deleting or missing volume (degraded). A
-session that already holds a claim is never held back again except by a restore, so a resize or
-an on-demand save never scales running pods away. `release` runs in the discard, after every pod
-of the session is gone, and asks for the last-release save.
+restoring, saving), a restore this claim started, or a deleting, missing or owner-exhausted volume
+(degraded). A session that already holds a claim is never held back again except by a restore,
+so a resize or an on-demand save never scales running pods away. `release` runs in the discard,
+after every pod of the session is gone, and asks for the last-release save.
 """
 
 from __future__ import annotations
@@ -95,8 +95,13 @@ async def claim_step(
             restored.append(vol.name)
         elif vol.id in mine:
             continue  # running claimant: a resize, a live save or a refused delete
-        elif d.decision == "refuse":
+        elif d.decision == "refuse" and vol.state == "deleting":
             refused.append(f"volume {vol.name} is being deleted")
+        elif d.decision == "refuse":
+            refused.append(
+                f"volume {vol.name} failed: its root could not be handed to the agent user"
+                f" after {vol.owner_attempts} attempts; delete and recreate it"
+            )
         else:
             waiting.append(vol.name)
     message = "; ".join([*(f"waiting for volume {n}" for n in waiting), *refused])

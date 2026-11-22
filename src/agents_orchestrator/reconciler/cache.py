@@ -39,7 +39,13 @@ from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.db.volumes import Volume
 from agents_orchestrator.k8s.kube import KubeApi, KubeError, Obj, is_owned
 from agents_orchestrator.k8s.labels import prefix, session_labels, volume_labels, workspace_pvc
-from agents_orchestrator.k8s.render import SESSIONS_ROOT, WORKSPACE_VOLUME, agent_identity
+from agents_orchestrator.k8s.render import (
+    AGENT_GID,
+    AGENT_UID,
+    SESSIONS_ROOT,
+    WORKSPACE_VOLUME,
+    agent_identity,
+)
 from agents_orchestrator.reconciler.checks import (
     DEADLINE_GRACE_SECONDS,
     TAIL_LINES,
@@ -141,9 +147,9 @@ def _hardened(settings: Settings, container: dict[str, Any], volumes: list[Obj])
         "restartPolicy": "Never",
         **agent_identity(settings),
         "securityContext": {
-            "runAsUser": 1000,
+            "runAsUser": AGENT_UID,
             "runAsNonRoot": True,
-            "fsGroup": 1000,
+            "fsGroup": AGENT_GID,
             "fsGroupChangePolicy": "OnRootMismatch",
             "seccompProfile": {"type": "RuntimeDefault"},
         },
@@ -212,6 +218,86 @@ def volume_job_name(volume_name: str, action: str, n: int) -> str:
     return f"vol-{volume_name}-{action}-{n}"
 
 
+# The volume root is created by the CSI driver as uid 0 and fsGroup changes only its group, so git
+# in the uid 1000 agent refuses a repository there ("dubious ownership"). The owner step hands the
+# root (not recursive) to the agent user: uid 0 with CAP_CHOWN only. The root of `/volume` is the
+# mount point itself, so no DAC traversal capability is needed.
+OWNER_CONTAINER = "volume-owner"
+OWNER_RESOURCES = {
+    "requests": {"cpu": "10m", "memory": "16Mi"},
+    "limits": {"cpu": "100m", "memory": "64Mi"},
+}
+
+
+def _owner_container(settings: Settings) -> dict[str, Any]:
+    return {
+        "name": OWNER_CONTAINER,
+        "image": settings.cache_image,
+        "command": ["chown", f"{AGENT_UID}:{AGENT_GID}", VOLUME_ROOT],
+        "resources": OWNER_RESOURCES,
+        "securityContext": {
+            "runAsUser": 0,
+            "runAsNonRoot": False,
+            "readOnlyRootFilesystem": True,
+            "allowPrivilegeEscalation": False,
+            "capabilities": {"drop": ["ALL"], "add": ["CHOWN"]},
+        },
+        "volumeMounts": [{"name": "volume", "mountPath": VOLUME_ROOT}],
+    }
+
+
+def _volume_pvc(volume: Volume, *, read_only: bool = False) -> Obj:
+    ro = {"readOnly": True} if read_only else {}
+    return {"name": "volume", "persistentVolumeClaim": {"claimName": volume.pvc_name, **ro}}
+
+
+def _volume_job(
+    volume: Volume,
+    settings: Settings,
+    action: str,
+    name: str,
+    pod_spec: Obj,
+    annotations: dict[str, str] | None = None,
+) -> Obj:
+    labels = {**volume_labels(volume.id), CACHE_LABEL: f"volume-{action}"}
+    metadata: dict[str, Any] = {
+        "name": name,
+        "namespace": settings.namespace,
+        "labels": dict(labels),
+    }
+    if annotations:
+        metadata["annotations"] = dict(annotations)
+    return {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": metadata,
+        "spec": {
+            "backoffLimit": BACKOFF_LIMIT,
+            "activeDeadlineSeconds": settings.cache_timeout_seconds,
+            "template": {"metadata": {"labels": dict(labels)}, "spec": pod_spec},
+        },
+    }
+
+
+# a finished owner Job the reconciler did not delete (the volume left provisioning, a crash)
+OWNER_TTL_SECONDS = 3600
+
+
+def volume_owner_job_name(volume: Volume) -> str:
+    """Unique per owner attempt and derived only from the row, so a pass after a crash finds
+    its own Job and never takes a previous attempt's Job for it."""
+    return f"vol-{volume.id}-owner-{volume.owner_attempts}"
+
+
+def render_volume_owner_job(volume: Volume, settings: Settings) -> Obj:
+    """The owner Job of a new volume: the PVC at `/volume`, read-write, and only the owner step,
+    run once before the volume turns ready (no pod mounts it before)."""
+    pod_spec = _hardened(settings, _owner_container(settings), [_volume_pvc(volume)])
+    job = _volume_job(volume, settings, "owner", volume_owner_job_name(volume), pod_spec)
+    job["spec"]["ttlSecondsAfterFinished"] = OWNER_TTL_SECONDS
+    return job
+
+
 def render_volume_job(
     volume: Volume,
     settings: Settings,
@@ -225,7 +311,8 @@ def render_volume_job(
     """The restore or save Job of a volume (S-77): the PVC `vol-<name>` at `/volume`, read-write
     for a restore and read-only for a save, one presigned URL, the cache Job's hardening and
     deadline. No session label (the session prune never matches it). A save carries the volume's
-    `exclude` globs as the entry's tar excludes; a restore ignores them."""
+    `exclude` globs as the entry's tar excludes; a restore ignores them. The volume root is
+    already the agent user's (the owner Job ran before the volume turned ready)."""
     save = action == "save"
     entry: dict[str, Any] = {
         "index": 0,
@@ -242,43 +329,16 @@ def render_volume_job(
         {"name": "volume", "mountPath": VOLUME_ROOT, **({"readOnly": True} if save else {})},
         {"name": "tmp", "mountPath": TMP_DIR},
     ]
-    volumes: list[Obj] = [
-        {
-            "name": "volume",
-            "persistentVolumeClaim": {
-                "claimName": volume.pvc_name,
-                **({"readOnly": True} if save else {}),
-            },
-        },
-        {"name": "tmp", "emptyDir": {}},
-    ]
+    volumes: list[Obj] = [_volume_pvc(volume, read_only=save), {"name": "tmp", "emptyDir": {}}]
     if save:
         mounts.append({"name": "scratch", "mountPath": SCRATCH_DIR})
         volumes.append(
             {"name": "scratch", "emptyDir": {"sizeLimit": str(settings.cache_max_bytes)}}
         )
     container = _cache_container(settings, action, _cache_env(settings, [entry]), mounts)
-    labels = {**volume_labels(volume.id), CACHE_LABEL: f"volume-{action}"}
-    metadata: dict[str, Any] = {
-        "name": volume_job_name(volume.name, action, n),
-        "namespace": settings.namespace,
-        "labels": dict(labels),
-    }
-    if annotations:
-        metadata["annotations"] = dict(annotations)
-    return {
-        "apiVersion": "batch/v1",
-        "kind": "Job",
-        "metadata": metadata,
-        "spec": {
-            "backoffLimit": BACKOFF_LIMIT,
-            "activeDeadlineSeconds": settings.cache_timeout_seconds,
-            "template": {
-                "metadata": {"labels": dict(labels)},
-                "spec": _hardened(settings, container, volumes),
-            },
-        },
-    }
+    pod_spec = _hardened(settings, container, volumes)
+    name = volume_job_name(volume.name, action, n)
+    return _volume_job(volume, settings, action, name, pod_spec, annotations)
 
 
 def render_cache_job(

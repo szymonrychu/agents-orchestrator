@@ -32,8 +32,9 @@
   recording them; `seed_orchestrator_objects` seeds what the chart puts in the same namespace.
 - `fail(kind, name)` injects an error for one object.
 - Creating a Job simulates its controller: one Running pod `<job>-<suffix>` with the pod template
-  labels; `finish_job` ends it (succeeded, failed with an exit code, or deadline exceeded) and
-  gives the pod its log; deleting a Job removes its pods.
+  labels plus the controller's job labels (controller-uid, job-name) and a creationTimestamp;
+  `finish_job` ends it (succeeded, failed with an exit code, or deadline exceeded) and gives the
+  pod its log; deleting a Job removes its pods.
 """
 
 from __future__ import annotations
@@ -398,10 +399,14 @@ class FakeKube:
         stored.setdefault("status", {})
         self.objects[key] = stored
         template = stored["spec"]["template"]
-        pod = _pod(
-            f"{meta['name']}-x7k2p", dict(template["metadata"].get("labels", {})), ready=False
-        )
+        labels = {
+            **template["metadata"].get("labels", {}),
+            "batch.kubernetes.io/controller-uid": stored["metadata"]["uid"],
+            "batch.kubernetes.io/job-name": meta["name"],
+        }
+        pod = _pod(f"{meta['name']}-x7k2p", labels, ready=False)
         pod["metadata"]["namespace"] = meta["namespace"]
+        pod["metadata"]["creationTimestamp"] = f"2026-11-22T00:00:00.{next(_seq):06d}Z"
         pod["metadata"]["annotations"] = {"fake/job": meta["name"]}
         pod["status"]["phase"] = "Running"
         self.objects[("Pod", meta["namespace"], pod["metadata"]["name"])] = pod

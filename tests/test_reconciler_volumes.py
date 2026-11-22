@@ -88,16 +88,30 @@ async def _state(pool, vid):
     return (await _get(pool, vid)).state
 
 
+def _owner_job(kube):
+    (name,) = [n for n in kube.names("Job") if "-owner-" in n]
+    return name
+
+
+async def _bind(kube, rec, v):
+    """The PVC binds, the owner Job runs and succeeds: the volume turns ready."""
+    kube.set_pvc(v.pvc_name, "Bound", "10Gi")
+    await rec.tick()
+    kube.finish_job(_owner_job(kube))
+    await rec.tick()
+
+
 async def _ready(pool, kube, rec, name="data"):
     v = await _make(pool, name=name)
     await rec.tick()
-    kube.set_pvc(v.pvc_name, "Bound", "10Gi")
-    await rec.tick()
+    await _bind(kube, rec, v)
     assert await _state(pool, v.id) == "ready"
     return v
 
 
-async def test_provisioning_applies_pvc_and_turns_ready_when_bound(pool, kube, rec):
+async def test_provisioning_applies_pvc_and_turns_ready_after_the_owner_job(pool, kube, rec):
+    """An unseeded volume gets its root handed to the agent user before it turns ready (claims
+    wait until then, so no pod mounts it first)."""
     v = await _make(pool)
     await rec.tick()
     pvc = kube.get(PVC, "vol-data")
@@ -106,24 +120,200 @@ async def test_provisioning_applies_pvc_and_turns_ready_when_bound(pool, kube, r
     assert await _state(pool, v.id) == "provisioning"
     kube.set_pvc("vol-data", "Bound", "10Gi")
     await rec.tick()
+    owner = kube.get("Job", _owner_job(kube))
+    (step,) = owner["spec"]["template"]["spec"]["containers"]
+    assert step["command"] == ["chown", "1000:1000", "/volume"]
+    assert await _state(pool, v.id) == "provisioning"
+    await rec.tick()  # the Job is still running
+    assert await _state(pool, v.id) == "provisioning"
+    kube.finish_job(owner["metadata"]["name"])
+    await rec.tick()
     assert await _state(pool, v.id) == "ready"
+    assert kube.names("Job") == []
 
 
 @pytest.mark.parametrize(
     ("setup", "reason"),
-    [("apply_error", "pvc_apply_failed"), ("lost", "pvc_lost")],
+    [("apply_error", "pvc_apply_failed"), ("lost", "pvc_lost"), ("owner", "owner_failed")],
 )
 async def test_provisioning_failures_set_a_fixed_reason(pool, kube, rec, setup, reason):
     v = await _make(pool)
     if setup == "apply_error":
         kube.fail(PVC, "vol-data", KubeError("boom"), verbs=["patch"])
         await rec.tick()
-    else:
+    elif setup == "lost":
         await rec.tick()
         kube.set_pvc("vol-data", "Lost")
         await rec.tick()
+    else:
+        await rec.tick()
+        kube.set_pvc("vol-data", "Bound", "10Gi")
+        await rec.tick()
+        kube.finish_job(_owner_job(kube), exit_code=1)
+        await rec.tick()
     got = await _get(pool, v.id)
     assert (got.state, got.state_reason) == ("failed", reason)
+
+
+async def _owner_running(pool, kube, rec):
+    v = await _make(pool)
+    await rec.tick()
+    kube.set_pvc("vol-data", "Bound", "10Gi")
+    await rec.tick()
+    return v, _owner_job(kube)
+
+
+def _failed(reason):
+    return {"type": "Failed", "status": "True", "reason": reason}
+
+
+@pytest.mark.parametrize(
+    ("status", "state", "logged"),
+    [
+        ({"failed": 1, "active": 1}, "provisioning", None),  # a pod failed, the Job retries
+        ({"failed": 3, "conditions": [_failed("BackoffLimitExceeded")]}, "failed", "job_failed"),
+        ({"failed": 1, "conditions": [_failed("DeadlineExceeded")]}, "failed", "job_timeout"),
+    ],
+)
+async def test_owner_job_ends_only_on_its_terminal_conditions(
+    pool, kube, rec, caplog, status, state, logged
+):
+    v, name = await _owner_running(pool, kube, rec)
+    kube.get("Job", name)["status"] = status
+    await rec.tick()
+    assert await _state(pool, v.id) == state
+    assert kube.has("Job", name) is (state == "provisioning")
+    if logged:
+        assert f"volume data: the owner Job failed ({logged}" in caplog.text
+
+
+async def test_owner_failure_logs_the_exit_code_of_the_newest_pod_of_its_job(
+    pool, kube, rec, caplog
+):
+    _v, name = await _owner_running(pool, kube, rec)
+    labels = kube.get("Pod", f"{name}-x7k2p")["metadata"]["labels"]
+
+    def pod(pod_name, pod_labels, created, code):
+        return {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {"name": pod_name, "labels": pod_labels, "creationTimestamp": created},
+            "status": {
+                "phase": "Failed",
+                "containerStatuses": [{"name": "c", "state": {"terminated": {"exitCode": code}}}],
+            },
+        }
+
+    kube.seed(
+        pod("retry", labels, "2099-01-01T00:00:00Z", 3),  # the Job's newest try
+        pod(  # a pod of an earlier owner Job of the volume, newer still
+            "earlier",
+            {**labels, "batch.kubernetes.io/controller-uid": "an-earlier-job"},
+            "2099-01-02T00:00:00Z",
+            9,
+        ),
+    )
+    kube.finish_job(name, exit_code=1)
+    await rec.tick()
+    assert "volume data: the owner Job failed (job_failed, exit 3)" in caplog.text
+
+
+async def test_owner_retry_runs_a_new_job_beside_the_failed_one_of_the_last_attempt(
+    pool, kube, rec
+):
+    """Each owner attempt has its own Job name, from the row alone: a retry never takes the
+    previous attempt's failed Job (still present, its delete failed) for its own."""
+    now = [1000.0]
+    rec._clock = lambda: now[0]
+    v, first = await _owner_running(pool, kube, rec)
+    assert first == f"vol-{v.id}-owner-0"
+    kube.finish_job(first, exit_code=1)
+    kube.fail("Job", first, KubeError("boom"), verbs=["delete"])
+    await rec.tick()
+    got = await _get(pool, v.id)
+    assert (got.state, got.state_reason, got.owner_attempts) == ("failed", "owner_failed", 1)
+    await rec.tick()  # the backoff starts
+    now[0] += volumes_mod.RETRY_BASE_SECONDS + 1
+    await rec.tick()  # back to provisioning
+    await rec.tick()  # the next attempt's Job
+    second = f"vol-{v.id}-owner-1"
+    assert sorted(kube.names("Job")) == sorted([first, second])
+    assert await _state(pool, v.id) == "provisioning"
+    kube.finish_job(second)
+    await rec.tick()
+    assert await _state(pool, v.id) == "ready"
+
+
+async def test_owner_failures_retry_until_their_attempts_run_out_then_refuse_claims(
+    pool, kube, rec
+):
+    """Owner retries are bounded only by the attempt count on the row, not by the in-process
+    retry budget (here partly spent on a PVC apply failure): each failure retries until
+    OWNER_ATTEMPTS_MAX, then the volume is terminal, also for a fresh reconciler after a
+    restart, and a claim is refused rather than left waiting."""
+    now = [1000.0]
+    rec._clock = lambda: now[0]
+    v = await _make(pool)
+    kube.fail(PVC, "vol-data", KubeError("boom"), verbs=["patch"], times=1)
+    for _ in range(4):  # the apply fails, back to provisioning past the backoff, the PVC
+        now[0] += 10_000
+        await rec.tick()
+    kube.set_pvc("vol-data", "Bound", "10Gi")
+    await rec.tick()  # the first owner Job
+    for _ in range(volumes.OWNER_ATTEMPTS_MAX):
+        kube.finish_job(_owner_job(kube), exit_code=1)
+        for _ in range(4):  # fail, back to provisioning past the backoff, the next Job
+            now[0] += 10_000
+            await rec.tick()
+    assert (await _get(pool, v.id)).owner_attempts == volumes.OWNER_ATTEMPTS_MAX
+    fresh = VolumeReconciler(pool, kube, rec.settings)
+    fresh._clock = lambda: now[0]
+    for _ in range(3):
+        now[0] += 10_000
+        await fresh.tick()
+    got = await _get(pool, v.id)
+    assert (got.state, got.state_reason) == ("failed", "owner_failed")
+    assert kube.names("Job") == []
+    async with pool.connection() as conn, conn.transaction():
+        d = await volumes.claim(
+            conn,
+            volume_id=v.id,
+            session_id=uuid.uuid4(),
+            preset_id=None,
+            mode="rw",
+            backup_restore=False,
+            session_slug="s-x",
+            current_version=None,
+        )
+    assert (d.decision, d.claim) == ("refuse", None)
+
+
+async def test_an_api_error_creating_the_owner_job_retries_without_using_an_attempt(
+    pool, kube, rec
+):
+    """Only an owner Job that ran and failed counts: a refused create (API blip, 409, 429) is
+    retried next pass and the volume stays provisioning."""
+    v = await _make(pool)
+    await rec.tick()
+    kube.set_pvc("vol-data", "Bound", "10Gi")
+    kube.fail("Job", f"vol-{v.id}-owner-0", KubeError("429"), verbs=["create"], times=1)
+    await rec.tick()
+    got = await _get(pool, v.id)
+    assert (got.state, got.owner_attempts, kube.names("Job")) == ("provisioning", 0, [])
+    await rec.tick()
+    assert _owner_job(kube) == f"vol-{v.id}-owner-0"
+
+
+@pytest.mark.parametrize("leave", ["deleting", "lost"])
+async def test_owner_job_is_deleted_when_the_volume_leaves_provisioning(pool, kube, rec, leave):
+    v, name = await _owner_running(pool, kube, rec)
+    if leave == "deleting":
+        async with pool.connection() as conn, conn.transaction():
+            await volumes.mark_deleting(conn, v.id)
+    else:
+        kube.set_pvc("vol-data", "Lost")
+    await rec.tick()
+    assert not kube.has("Job", name)
 
 
 async def test_transient_pvc_apply_failure_is_retried_with_backoff_then_gives_up(pool, kube, rec):
@@ -139,8 +329,7 @@ async def test_transient_pvc_apply_failure_is_retried_with_backoff_then_gives_up
     await rec.tick()  # back to provisioning
     assert await _state(pool, v.id) == "provisioning"
     await rec.tick()
-    kube.set_pvc("vol-data", "Bound", "10Gi")
-    await rec.tick()
+    await _bind(kube, rec, v)
     assert await _state(pool, v.id) == "ready"
 
     w = await _make(pool, name="other")
@@ -516,8 +705,7 @@ async def test_save_while_a_claim_exists_marks_the_manifest_live(pool, kube, rec
 async def test_save_job_carries_the_volume_excludes_and_restore_ignores_them(pool, kube, rec):
     v = await _make(pool, exclude=["node_modules", "*.log"])
     await rec.tick()
-    kube.set_pvc(v.pvc_name, "Bound", "10Gi")
-    await rec.tick()
+    await _bind(kube, rec, v)
     ver = await _version(pool, v)
     await _save(pool, v)
     await rec.tick()
