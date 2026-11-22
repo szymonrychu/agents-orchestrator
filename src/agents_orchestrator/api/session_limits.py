@@ -32,12 +32,17 @@ async def may_message(conn: Any, own: Session, target: Session, settings: Settin
     )
 
 
+async def current_hop(conn: Any, agent_id: uuid.UUID) -> int:
+    """Hop of the session message the agent's current turn delivered; 0 when it delivered none."""
+    return await q.turn_hop(conn, agent_id) or 0
+
+
 async def check_limits(
-    conn: Any, agent_id: uuid.UUID, own: Session, target: Session, settings: Settings
+    conn: Any, own: Session, target: Session, settings: Settings, previous_hop: int
 ) -> int:
-    """The hop, rate, pair and target-queue checks; raises ApiError, returns the new hop."""
-    previous = await q.turn_hop(conn, agent_id)
-    hop = previous + 1 if previous is not None else 1
+    """The hop, rate, pair and target-queue checks; raises ApiError, returns the new hop
+    (`previous_hop` is the hop of the caller's current turn, 0 when it delivered no message)."""
+    hop = previous_hop + 1
     if hop > settings.session_message_max_hops:
         raise ApiError(
             409,

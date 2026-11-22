@@ -3,7 +3,7 @@
 The connector answers 409 `room_bound` with the `occupier` (the session bound to a room agents
 may start a chat in) to a session that is not the occupier. `chat._relay` hands that case to
 `relay`: the text is posted as the occupier with the sender's slug as prefix, a relay notice is
-queued to the occupier under the session-message limits, and the sender gets 202 `relayed`.
+queued to the occupier under the session message limits, and the sender gets 202 `relayed`.
 Every other answer goes back without any `occupier` field: agents never see the occupier id.
 A body with `files` is never relayed (the files live in the sender's workdir, not the occupier's):
 it is answered 409 `files_not_relayable`.
@@ -153,7 +153,9 @@ async def relay(
                 f"{CLOSING_RETRY_SECONDS} seconds",
                 retry_after=CLOSING_RETRY_SECONDS,
             )
-        hop = await session_limits.check_limits(conn, agent_id, own, occupier, settings)
+        hop = await session_limits.check_limits(
+            conn, own, occupier, settings, await session_limits.current_hop(conn, agent_id)
+        )
     payload = json.dumps({"text": prefixed, "room": room}).encode()
     status, content = await forward_core.forward_http(
         http, target, "POST", "/messages", payload, str(occupier.id), occupier.slug

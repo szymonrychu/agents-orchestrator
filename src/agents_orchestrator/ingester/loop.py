@@ -42,7 +42,7 @@ from psycopg_pool import AsyncConnectionPool
 from agents_orchestrator.db import events, leadership, status
 from agents_orchestrator.db.pool import notify
 from agents_orchestrator.envelope_outbox.worker import EnvelopeRelay
-from agents_orchestrator.ingester import chat_envelopes
+from agents_orchestrator.ingester import envelopes
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.tokens import tokens_for
 from agents_orchestrator.wrapper import Envelope, WrapperClient, WrapperError, WrapperUnreachable
@@ -365,7 +365,7 @@ class _AgentStream:
                 await status.clear_current_turn(conn, ref.agent_id, turn_id)
                 await status.notify_status(conn, ref.session_id, ref.agent_id)
         elif env.type == "assistant_text":
-            await chat_envelopes.project_assistant_text(
+            await envelopes.project_assistant_text(
                 conn,
                 session_id=ref.session_id,
                 agent_id=ref.agent_id,
@@ -422,9 +422,7 @@ class Ingester:
             delay = min(delay * 2, self.backoff_max)
 
     async def run(self, stop: asyncio.Event) -> None:
-        relay = (
-            asyncio.create_task(self._relay_forever(stop)) if self.settings.chat_available else None
-        )
+        relay = asyncio.create_task(self._relay_forever(stop))
         try:
             while not stop.is_set():
                 try:
@@ -434,10 +432,9 @@ class Ingester:
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(stop.wait(), self.settings.ingest_refresh_seconds)
         finally:
-            if relay is not None:
-                relay.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await relay
+            relay.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await relay
             await self._cancel(list(self._tasks))
 
     async def _wanted(self) -> dict[uuid.UUID, AgentRef]:

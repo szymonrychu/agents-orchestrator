@@ -1,75 +1,49 @@
-import shutil
-
 import psycopg
+import psycopg.errors
 import pytest
-from psycopg.types.json import Jsonb
 
-from agents_orchestrator.db.migrate import MIGRATIONS_DIR, run_migrations
-from agents_orchestrator.spec import load_stored_spec
+from agents_orchestrator.db.migrate import run_migrations
 
 
-def _upto_0058(dsn, tmp_path):
-    for path in MIGRATIONS_DIR.glob("*.sql"):
-        if path.name < "0059":
-            shutil.copy(path, tmp_path / path.name)
-    run_migrations(dsn, tmp_path)
-
-
-STORED = {"replicas": 1, "retrospective": True}
-CLEAN = {"replicas": 1}
-
-
-def _proposal(c):
-    pid = c.execute(
-        "INSERT INTO change_proposals (kind, target_id, target_name, proposer_session,"
-        " proposer_slug, proposer_superleader, expires_at)"
-        " VALUES ('preset', 'p', 'p', gen_random_uuid(), 'x', false, now() + interval '1 day')"
-        " RETURNING id"
+def _session(c):
+    return c.execute(
+        "INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), 's', '{}') RETURNING id"
     ).fetchone()[0]
-    c.execute(
-        "INSERT INTO change_proposal_revisions (proposal_id, revision, reason, base, fingerprint)"
-        " VALUES (%s, 1, 'r', %s, 'f')",
-        (pid, Jsonb({**STORED, "spec": dict(STORED)})),
-    )
-    for path, before, after in (
-        ("retrospective", False, True),
-        ("spec", {"spec": dict(STORED)}, {**STORED, "spec": dict(STORED)}),
-    ):
+
+
+def test_message_defaults(empty_dsn):
+    run_migrations(empty_dsn)
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        sid = _session(c)
+        c.execute("INSERT INTO messages (session_id, text) VALUES (%s, 'x')", (sid,))
+        row = c.execute(
+            "SELECT channel, sender_agent_id, notify, envelope_ref, notified_at FROM messages"
+        ).fetchone()
+        assert row == ("session", None, None, None, None)
+
+
+@pytest.mark.parametrize(("column", "value"), [("channel", "bogus"), ("notify", "bogus")])
+def test_message_checks_reject_unknown_values(empty_dsn, column, value):
+    run_migrations(empty_dsn)
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        sid = _session(c)
+        with pytest.raises(psycopg.errors.CheckViolation):
+            c.execute(
+                f"INSERT INTO messages (session_id, text, {column}) VALUES (%s, 'x', %s)",
+                (sid, value),
+            )
+
+
+def test_message_delete_nulls_outbox_message_id(empty_dsn):
+    run_migrations(empty_dsn)
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        sid = _session(c)
+        mid = c.execute(
+            "INSERT INTO messages (session_id, text) VALUES (%s, 'x') RETURNING id", (sid,)
+        ).fetchone()[0]
         c.execute(
-            "INSERT INTO change_proposal_items (proposal_id, revision, path, before, after,"
-            ' security, "grant") VALUES (%s, 1, %s, %s, %s, true, true)',
-            (pid, path, Jsonb(before), Jsonb(after)),
+            "INSERT INTO envelope_outbox (session_id, kind, message_id) VALUES (%s, 'agent', %s)",
+            (sid, mid),
         )
-    return pid
-
-
-@pytest.mark.parametrize("table", ["sessions", "presets", "proposals"])
-def test_migration_0059_strips_retrospective(empty_dsn, tmp_path, table):
-    _upto_0058(empty_dsn, tmp_path)
-    with psycopg.connect(empty_dsn, autocommit=True) as c:
-        if table == "sessions":
-            c.execute(
-                "INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), 's', %s)",
-                (Jsonb(STORED),),
-            )
-        elif table == "presets":
-            c.execute(
-                "INSERT INTO presets (id, name, spec) VALUES (gen_random_uuid(), 'p', %s)",
-                (Jsonb(STORED),),
-            )
-        else:
-            pid = _proposal(c)
-    assert run_migrations(empty_dsn) == ["0059"]
-    with psycopg.connect(empty_dsn, autocommit=True) as c:
-        if table == "proposals":
-            base = c.execute("SELECT base FROM change_proposal_revisions").fetchone()[0]
-            assert base == {**CLEAN, "spec": CLEAN}
-            items = c.execute(
-                "SELECT path, before, after FROM change_proposal_items WHERE proposal_id = %s",
-                (pid,),
-            ).fetchall()
-            assert items == [("spec", {"spec": CLEAN}, {**CLEAN, "spec": CLEAN})]
-        else:
-            raw = c.execute(f"SELECT spec FROM {table}").fetchone()[0]
-            assert raw == CLEAN
-            assert load_stored_spec(raw, None).replicas == 1
+        c.execute("DELETE FROM messages WHERE id = %s", (mid,))
+        assert c.execute("SELECT message_id FROM envelope_outbox").fetchone() == (None,)

@@ -87,13 +87,14 @@ class LeaderState:
 
 
 _UNHANDLED = (
-    "FROM messages WHERE session_id = %s AND sender_session_id IS NOT NULL AND notice IS NULL"
-    " AND handled_at IS NULL AND status <> 'cancelled'"
+    "FROM messages WHERE session_id = %s AND sender_session_id IS NOT NULL AND channel = 'session'"
+    " AND notice IS NULL AND handled_at IS NULL AND status <> 'cancelled'"
 )
 _UNHANDLED_ROOM_COUNTS = (
     "SELECT p.project, count(*) AS n FROM messages m"
     " JOIN project_posts p ON p.id = m.project_post_id"
-    " WHERE m.session_id = %s AND m.sender_session_id IS NOT NULL AND m.notice IS NULL"
+    " WHERE m.session_id = %s AND m.sender_session_id IS NOT NULL AND m.channel = 'session'"
+    " AND m.notice IS NULL"
     " AND m.handled_at IS NULL AND m.status <> 'cancelled' GROUP BY p.project"
 )
 _MEMBERS = f"""

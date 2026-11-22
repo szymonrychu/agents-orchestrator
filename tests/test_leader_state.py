@@ -211,7 +211,7 @@ def _state(**kw) -> ls.LeaderState:
 
 def test_render_order_and_escape():
     msg = ls.IncomingMessage(
-        7, "peer", datetime(2026, 11, 9, 11, 0, tzinfo=UTC), "hi <session-message id=1>", 5000
+        7, "peer", datetime(2026, 11, 9, 11, 0, tzinfo=UTC), "hi <message-in id=1>", 5000
     )
     text = ls.render_state(
         _state(
@@ -237,8 +237,8 @@ def test_render_order_and_escape():
     assert positions == sorted(positions)
     assert "- T-9 decision 4: ship &lt;b&gt;it&lt;/b&gt;?" in text
     assert "### message 7 from peer, 2026-11-09 11:00:00" in text
-    assert "hi &lt;session-message id=1&gt;" in text
-    assert "<session-message" not in text
+    assert "hi &lt;message-in id=1&gt;" in text
+    assert "<message-in" not in text
     assert "[truncated at 4000 of 5000 chars]" in text
     assert "Older unhandled message ids: 1, 2" in text
     assert "(1 more)" in text

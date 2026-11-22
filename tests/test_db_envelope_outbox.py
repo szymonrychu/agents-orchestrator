@@ -109,12 +109,42 @@ async def test_sweep_stale_sending(pool):
             "UPDATE envelope_outbox SET updated_at = now() - interval '2 minutes' WHERE id = %s",
             (stale["id"],),
         )
-        assert await outbox.sweep_stale_sending(conn) == 1
+        assert len(await outbox.sweep_stale_sending(conn)) == 1
         cur = await conn.execute(
             "SELECT status, error_code FROM envelope_outbox WHERE id = %s", (stale["id"],)
         )
         assert await cur.fetchone() == ("failed", "unknown_outcome")
         fresh = await outbox.claim_next(conn, sid)
-        assert await outbox.sweep_stale_sending(conn) == 0
+        assert await outbox.sweep_stale_sending(conn) == []
         assert fresh["status"] == "sending"
         assert await outbox.queued_sessions(conn) == []
+
+
+async def test_row_round_trips_hive_columns(pool):
+    sid, aid = await _seed(pool)
+    row = Row(
+        session_id=sid,
+        agent_id=aid,
+        kind="agent",
+        wrapper_session_id="w",
+        event_seq=1,
+        envelope_index=1,
+        target="pod-1",
+        lane="idle",
+        notify="idle",
+        handled=(3, 4),
+        project="p",
+    )
+    async with pool.connection() as conn:
+        await outbox.insert_rows(conn, [row])
+        claimed = await outbox.claim_next(conn, sid)
+        assert (claimed["target"], claimed["lane"], claimed["notify"]) == ("pod-1", "idle", "idle")
+        assert (claimed["handled"], claimed["project"]) == ([3, 4], "p")
+        assert claimed["message_id"] is None
+        cur = await conn.execute(
+            "INSERT INTO messages (session_id, text) VALUES (%s, 'x') RETURNING id", (sid,)
+        )
+        mid = (await cur.fetchone())[0]
+        assert await outbox.mark(conn, claimed["id"], "sending", "accepted", message_id=mid)
+        cur = await conn.execute("SELECT message_id FROM envelope_outbox")
+        assert (await cur.fetchone())[0] == mid

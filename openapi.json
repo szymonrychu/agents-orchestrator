@@ -17667,7 +17667,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "onStop webhook: block once on chat envelopes that were not delivered",
+        "summary": "onStop webhook: block once on envelopes that were not delivered",
         "tags": [
           "agent"
         ]
