@@ -18,8 +18,8 @@ from test_api_sessions import assert_error
 from agents_orchestrator.api import admin, admin_backups, admin_specs, proposal_routes  # noqa: F401
 from agents_orchestrator.api.admin import (
     ADMIN_PREFIX,
-    require_discarder,
     require_agent,
+    require_discarder,
     require_notes_writer,
     require_reader,
     require_session_editor,
