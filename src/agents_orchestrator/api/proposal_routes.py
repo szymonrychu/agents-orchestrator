@@ -2,8 +2,9 @@
 
 `proposal_router` (agent port, `/agent/v1/admin/proposals`, audited by `AdminRoute`) lets the
 proposer file, list, read, revise and withdraw proposals. A superleader READS every proposal
-(any proposer, any target, decision 388); a regular leader reads its own only, on a target it may
-still see. Revise and withdraw stay own-only for everyone: another session's proposal, or one
+(any proposer, any target, decision 388); a regular leader reads its own on a target it may
+still see, plus every preset proposal on a preset of its projects (decision 941). Revise and
+withdraw stay own-only for everyone: another session's proposal, or one
 whose target the caller may no longer see, answers 404 exactly like an unknown id.
 
 `main_router` (main port, `/api/v1/proposals`) is the human's: list, read and review every
@@ -35,7 +36,7 @@ async def require_proposer(request: Request, agent: Caller, pool: Pool) -> sessi
     """The caller's session, admitted for the audit like `require_superleader`: the leader of
     any session, a superleader's included (decision 919: its member pods are refused like any
     other member, 403 not_leader). The create and revise handlers keep a regular leader on its
-    own session (plan 3.3)."""
+    own session (plan 3.3) and the presets of its projects (decision 941)."""
     async with pool.connection() as conn:
         session = await sessions_repo.get(conn, agent.session_id)
         assert session is not None
@@ -89,8 +90,8 @@ async def create_proposal(
 async def list_own_proposals(
     request: Request, pool: Pool, settings: Cfg, status: Status = "active", limit: Limit = 50
 ) -> list[schemas.ProposalView]:
-    """A superleader: every proposal. A regular leader: its own, newest first, current revision
-    only."""
+    """A superleader: every proposal. A regular leader: its own plus the preset proposals on
+    presets of its projects. Newest first, current revision only."""
     _, caller = caller_of(request)
     superleader = bool(caller.spec.session_messaging)
     async with pool.connection() as conn:
@@ -101,6 +102,7 @@ async def list_own_proposals(
             status=status,
             limit=limit,
             visible_only=not superleader,
+            projects=None if superleader else caller.projects,
         )
 
 
@@ -108,13 +110,20 @@ async def list_own_proposals(
 async def get_own_proposal(
     proposal_id: int, request: Request, pool: Pool, settings: Cfg
 ) -> schemas.ProposalView:
-    """A superleader reads any proposal (404 only when unknown); a regular leader its own."""
+    """A superleader reads any proposal (404 only when unknown); a regular leader its own, or a
+    preset proposal on a preset of its projects."""
     _, caller = caller_of(request)
     async with pool.connection() as conn:
         if caller.spec.session_messaging:
             return await proposals.get_view(conn, settings, proposal_id, proposer=None)
-        await _own(conn, proposal_id, caller)
-        return await proposals.get_view(conn, settings, proposal_id, proposer=caller.id)
+        return await proposals.get_view(
+            conn,
+            settings,
+            proposal_id,
+            proposer=caller.id,
+            visible_only=True,
+            projects=caller.projects,
+        )
 
 
 @proposal_router.post("/proposals/{proposal_id}/revise", response_model=schemas.ProposalView)

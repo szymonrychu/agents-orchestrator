@@ -264,3 +264,37 @@ async def test_spec_queue_move_relay_superleader_only(pool, dsn, caller, status)
     else:
         assert move.status_code == 200, move.text
         assert [r.method for r in seen] == ["POST", "GET"]
+
+
+@pytest.mark.parametrize(
+    ("path", "upstream", "patch"),
+    [
+        ("/agent/v1/specs/S-1", "/taskboard/api/v1/specs/S-1", {"status": "archived"}),
+        ("/agent/v1/tasks/T-1", "/taskboard/api/v1/tasks/T-1", {"status": "dropped"}),
+    ],
+)
+async def test_leader_archives_spec_of_p(pool, dsn, path, upstream, patch):
+    """Decision 942: a leader archives specs and closes tasks of its projects through the plain
+    relays (no gate change): the write is forwarded with its home and granted projects, and the
+    taskboard filters on them."""
+    seen: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={})
+
+    settings = make_settings(dsn).model_copy(
+        update={"taskboard_url": "http://taskboard.test:9002", "taskboard_token": TB_TOKEN}
+    )
+    app = create_app(settings, pool)
+    app.state.taskboard_http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    s = await hive(pool, "arch-hive")
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE sessions SET extra_projects = '{b}' WHERE id = %s", (s.id,))
+    async with client_for(app, s.leader_ip) as http:
+        r = await http.patch(path, json=patch, headers=headers(s.id))
+    assert r.status_code == 200, r.text
+    (sent,) = seen
+    assert (sent.method, sent.url.path) == ("PATCH", upstream)
+    assert json.loads(sent.content) == patch
+    assert sent.headers["x-orch-projects"] == "default,b"

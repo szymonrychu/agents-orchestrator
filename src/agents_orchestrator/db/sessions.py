@@ -244,9 +244,37 @@ async def get_stored(
     return None if row is None else (_from_row(row), without_legacy_backup(row["spec"]))
 
 
-async def get_by_slug(conn: psycopg.AsyncConnection, slug: str) -> Session | None:
-    rows = await _fetch(conn, "SELECT * FROM sessions WHERE slug = %s", (slug,))
+async def get_by_slug(
+    conn: psycopg.AsyncConnection, slug: str, *, lock: bool = False
+) -> Session | None:
+    """With `lock`, the row FOR UPDATE inside the caller's transaction."""
+    tail = " FOR UPDATE" if lock else ""
+    rows = await _fetch(conn, f"SELECT * FROM sessions WHERE slug = %s{tail}", (slug,))
     return rows[0] if rows else None
+
+
+async def has_work(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> bool:
+    """True while the session runs work: a live agent is busy, in a turn or has a fresh
+    background subagent, a message is queued, dispatching or verifying, or its init runs. An
+    idle session, or a finished one (no live agent left), has none."""
+    async with conn.cursor() as cur:
+        await cur.execute(
+            f"""SELECT EXISTS (
+                    SELECT 1 FROM agents a JOIN agent_status st ON st.agent_id = a.id
+                    WHERE a.session_id = %(id)s AND a.gone_at IS NULL
+                      AND (st.state = 'busy' OR st.current_turn_id IS NOT NULL
+                           OR {background_busy("st")}))
+                OR EXISTS (
+                    SELECT 1 FROM messages m
+                    WHERE m.session_id = %(id)s
+                      AND m.status IN ('queued', 'dispatching', 'verifying'))
+                OR EXISTS (
+                    SELECT 1 FROM sessions s
+                    WHERE s.id = %(id)s AND s.status->'init'->>'state' = 'running')""",
+            {"id": session_id},
+        )
+        row = await cur.fetchone()
+    return bool(row and row[0])
 
 
 @dataclass(frozen=True)

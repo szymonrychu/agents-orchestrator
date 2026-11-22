@@ -120,8 +120,9 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("GET", f"{_ADMIN}/sessions/{{slug}}"): "own",
     ("PATCH", f"{_ADMIN}/sessions/{{slug}}"): "own",
     ("POST", f"{_ADMIN}/sessions/{{slug}}/leadership/withdraw"): "own",
-    # proposals: the proposer's own proposals only (`proposal_routes`); a superleader's GETs read
-    # every proposal (T-120 slice 2), the scope class stays "own" for the write paths
+    # proposals (`proposal_routes`): a superleader's GETs read every proposal (T-120 slice 2); a
+    # leader reads its own plus those on presets of its projects and files on its own session or
+    # those presets (decision 941); the class stays "own": the caller's own session decides
     ("POST", f"{_ADMIN}/proposals"): "own",
     ("GET", f"{_ADMIN}/proposals"): "own",
     ("GET", f"{_ADMIN}/proposals/{{proposal_id}}"): "own",
@@ -155,7 +156,9 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("PUT", f"{_ADMIN}/presets/{{ref}}/vault/{{entry_id}}"): "superleader",
     ("DELETE", f"{_ADMIN}/presets/{{ref}}/vault/{{entry_id}}"): "superleader",
     ("POST", f"{_ADMIN}/sessions"): "superleader",
-    ("DELETE", f"{_ADMIN}/sessions/{{slug}}"): "superleader",
+    # discard: any session a superleader may manage; for any other leader an idle or finished
+    # session of its projects (decision 942, `admin.discard_session`)
+    ("DELETE", f"{_ADMIN}/sessions/{{slug}}"): "project",
     ("POST", f"{_ADMIN}/sessions/{{slug}}/restart"): "superleader",
     ("POST", f"{_ADMIN}/sessions/{{slug}}/agents/{{pod}}/restart"): "superleader",
     ("GET", f"{_ADMIN}/sessions/{{slug}}/activity"): "reader",

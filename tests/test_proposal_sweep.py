@@ -22,6 +22,7 @@ from test_proposals_service import (
     _create,
     _rows,
     _session,
+    move_preset,
     vault,  # noqa: F401  (an autouse fixture)
 )
 
@@ -241,6 +242,24 @@ async def test_unmanageable_preset_gives_target_gone(pool, kube, settings, boss,
     await _sweep(pool)
     assert await _status(pool, pid) == "target_gone"
     assert len(await _notices(pool, boss.id)) == 1
+
+
+async def test_leader_preset_proposal_follows_the_proposer_projects(
+    pool, kube, settings, boss, preset
+):
+    """Decision 941: a regular leader's preset proposal ignores the manageable flag and stays
+    open while the preset is in the live proposer session's projects; once the preset leaves
+    them it is target_gone."""
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE presets SET superleader_manageable = false WHERE id = %s", (preset.id,)
+        )
+    view, _, _ = await _create(pool, kube, settings, boss, superleader=False, patch=MCP_PATCH)
+    await _sweep(pool)
+    assert await _status(pool, view.id) == "open"
+    await move_preset(pool, preset.id)
+    await _sweep(pool)
+    assert await _status(pool, view.id) == "target_gone"
 
 
 async def test_review_holding_the_proposal_lock_is_skipped_and_its_result_stands(

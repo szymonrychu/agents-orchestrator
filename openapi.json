@@ -12508,7 +12508,7 @@
     },
     "/agent/v1/admin/proposals": {
       "get": {
-        "description": "A superleader: every proposal. A regular leader: its own, newest first, current revision\nonly.",
+        "description": "A superleader: every proposal. A regular leader: its own plus the preset proposals on\npresets of its projects. Newest first, current revision only.",
         "operationId": "list_own_proposals_agent_v1_admin_proposals_get",
         "parameters": [
           {
@@ -12676,7 +12676,7 @@
     },
     "/agent/v1/admin/proposals/{proposal_id}": {
       "get": {
-        "description": "A superleader reads any proposal (404 only when unknown); a regular leader its own.",
+        "description": "A superleader reads any proposal (404 only when unknown); a regular leader its own, or a\npreset proposal on a preset of its projects.",
         "operationId": "get_own_proposal_agent_v1_admin_proposals__proposal_id__get",
         "parameters": [
           {
@@ -13708,7 +13708,7 @@
     },
     "/agent/v1/admin/sessions/{slug}": {
       "delete": {
-        "description": "`?force=true` abandons the target's owed pre-discard hooks, also when it is already\ndeleting (a discard stuck on a hook receiver that is down).",
+        "description": "A superleader discards any session it may manage (`_writable_target`); `?force=true`\nabandons the target's owed pre-discard hooks, also when it is already deleting (a discard\nstuck on a hook receiver that is down). Any other leader discards an idle or finished\nsession of its projects (`_leader_discard`), without `force`.",
         "operationId": "discard_session_agent_v1_admin_sessions__slug__delete",
         "parameters": [
           {
