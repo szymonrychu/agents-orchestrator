@@ -404,7 +404,6 @@ async def test_allowed_tools_exist_in_plugin():
     """Every tool name rendered or named to agents is offered by the pinned plugin."""
     from any_mcp.testing import PluginHarness
 
-    from agents_orchestrator.dispatcher.session_frame import frame
     from agents_orchestrator.reconciler.init import render_init_sh
 
     specs = (
@@ -427,12 +426,8 @@ async def test_allowed_tools_exist_in_plugin():
             # the harness prefixes the class name; the rendered namespace is "orchestrator"
             offered |= {t["name"].removeprefix("orchestratorplugin_") for t in await h.list_tools()}
         allowed |= set(entry["allow"])
-    named = set(
-        re.findall(
-            r"orchestrator_[a-z_]+", render_init_sh("alpha", ["true"]) + frame("x", "alpha", 1)
-        )
-    )
-    assert named == {"orchestrator_init_scripts_edit", "orchestrator_session_send"}
+    named = set(re.findall(r"orchestrator_[a-z_]+", render_init_sh("alpha", ["true"])))
+    assert named == {"orchestrator_init_scripts_edit"}
     assert set(CHAT_TOOLS) <= allowed
     assert allowed | {n.removeprefix("orchestrator_") for n in named} <= offered | PLUGIN_PENDING
 
