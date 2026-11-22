@@ -4,9 +4,9 @@ One gate covers `router`: `require_superleader` (a live agent of a session with
 `session_messaging` set, whoever created the session). `session_router` (GET and PATCH
 `/sessions/{slug}`, POST `/sessions/{slug}/leadership/withdraw`) carries
 `require_session_editor` on each route instead, which also admits any other session's leader on
-its own slug (GET also admits a retrospective session on any slug, `require_session_reader`).
-`reader_router` carries `require_reader` (a superleader or a retrospective session, S-68): the
-reads behind the retrospective read tools and the backup copy. `notes_router` holds the room notes
+its own slug (`require_session_reader`).
+`reader_router` carries `require_reader` (a superleader): the
+reads and the backup copy. `notes_router` holds the room notes
 update with `require_notes_writer` (decision 775). Every admitted call is audited without values
 or bodies (D15): one log line and one `events` row the UI feed shows.
 """
@@ -104,66 +104,40 @@ async def require_session_editor(
 
 
 def is_reader(session: sessions_repo.Session) -> bool:
-    """A superleader, or a retrospective session (S-68, decision 769)."""
-    return bool(session.spec.session_messaging or session.spec.retrospective)
+    """A superleader (steps 6 and 7 of S-83 reshape the reader gate)."""
+    return bool(session.spec.session_messaging)
 
 
 async def require_reader(request: Request, agent: Caller, pool: Pool) -> sessions_repo.Session:
-    """The caller's session; 403 `not_superleader` unless it is a superleader or a
-    retrospective session. Sits on the reads behind the retrospective read tools and on the
-    backup copy (`reader_router`); a retrospective caller gets the same redacted views as a
-    superleader and no route behind this gate touches a secret (`admin_secrets` stays empty)."""
+    """The caller's session; 403 `not_superleader` unless it is a superleader. Sits on the
+    routes of `reader_router`."""
     async with pool.connection() as conn:
         session = await sessions_repo.get(conn, agent.session_id)
     assert session is not None
     if not is_reader(session):
-        raise ApiError(
-            403, "not_superleader", "this admin route needs a superleader or retrospective session"
-        )
+        raise ApiError(403, "not_superleader", "this admin route needs a superleader session")
     return _admit(request, agent, session)
 
 
 async def require_session_reader(
     request: Request, agent: Caller, pool: Pool, slug: str
 ) -> sessions_repo.Session:
-    """GET /sessions/{slug}: a retrospective session reads any session; every other caller goes
-    through `require_session_editor` (a superleader any slug, a leader its own)."""
-    async with pool.connection() as conn:
-        session = await sessions_repo.get(conn, agent.session_id)
-    assert session is not None
-    if session.spec.retrospective:
-        return _admit(request, agent, session)
+    """GET /sessions/{slug}: `require_session_editor` (a superleader any slug, a leader its
+    own)."""
     return await require_session_editor(request, agent, pool, slug)
 
 
 async def require_notes_writer(
     request: Request, agent: Caller, pool: Pool, room_id: str
 ) -> sessions_repo.Session:
-    """PUT /chats/rooms/{room_id}/notes/sections/{section}: a superleader on any room; a
-    retrospective session only on a room whose bound (else configured) preset sits in a project
-    the session holds, its home or a granted one (decision 775), else 403 `forbidden`; anyone
+    """PUT /chats/rooms/{room_id}/notes/sections/{section}: a superleader on any room; anyone
     else 403 `not_superleader`."""
     async with pool.connection() as conn:
         session = await sessions_repo.get(conn, agent.session_id)
     assert session is not None
-    if session.spec.session_messaging:
-        return _admit(request, agent, session)
-    if not session.spec.retrospective:
+    if not session.spec.session_messaging:
         raise ApiError(403, "not_superleader", "room notes need a superleader session")
-    _admit(request, agent, session)  # the room lookup below goes upstream as this caller
-    from agents_orchestrator.api import admin_relay  # admin_relay registers on these routers
-
-    preset_id = await admin_relay.room_preset(request, request.app.state.settings, room_id)
-    project = None
-    if preset_id is not None:
-        async with pool.connection() as conn:
-            preset = await presets_repo.get(conn, preset_id)
-        project = None if preset is None else preset.project
-    if project is None or project not in session.projects:
-        raise ApiError(
-            403, "forbidden", "a retrospective session updates notes of its projects' rooms only"
-        )
-    return session
+    return _admit(request, agent, session)
 
 
 Superleader = Depends(require_superleader)
@@ -291,8 +265,8 @@ router = APIRouter(
 # The routes with {slug} carry the editor gate themselves: it reads the path parameter `slug`, so
 # a router-level dependency would make it a required query parameter on any route without one.
 session_router = APIRouter(prefix=ADMIN_PREFIX, tags=["admin"], route_class=AdminRoute)
-# The reads a retrospective session shares with a superleader, and the backup copy (S-68 step
-# 13): the reader gate. Every other admin route stays on `router` (the superleader gate).
+# The reads and the backup copy behind the reader gate (a superleader until S-83 steps 6, 7).
+# Every other admin route stays on `router` (the superleader gate).
 reader_router = APIRouter(
     prefix=ADMIN_PREFIX, tags=["admin"], route_class=AdminRoute, dependencies=[Reader]
 )
@@ -432,14 +406,14 @@ async def get_meta(settings: Cfg) -> schemas.Meta:
     return await sessions_api.meta(settings)
 
 
-# step 13: reader gate (superleader or retrospective), was the superleader gate
+# reader gate (superleader until S-83 steps 6, 7)
 @reader_router.get("/presets", response_model=list[schemas.PresetView])
 async def list_presets(pool: Pool) -> list[schemas.PresetView]:
     async with pool.connection() as conn:
         return await presets_api.list_all(conn)
 
 
-# step 13: reader gate (superleader or retrospective), was the superleader gate
+# reader gate (superleader until S-83 steps 6, 7)
 @reader_router.get(
     "/sessions", response_model=list[schemas.SessionView], responses={403: FORBIDDEN}
 )
@@ -473,7 +447,7 @@ async def create_preset(
         return await presets_api.create(request, conn, settings, body, superleader=True)
 
 
-# step 13: reader gate (superleader or retrospective), was the superleader gate
+# reader gate (superleader until S-83 steps 6, 7)
 @reader_router.get("/presets/{ref}", response_model=schemas.PresetView)
 async def get_preset(ref: str, pool: Pool) -> schemas.PresetView:
     async with pool.connection() as conn:
@@ -590,14 +564,14 @@ async def _writable_target(conn, slug: str, caller: sessions_repo.Session) -> se
     return session
 
 
-# step 13: a retrospective session reads any session here; others keep the editor gate
+# the session reader gate
 @session_router.get(
     "/sessions/{slug}", response_model=schemas.SessionView, dependencies=[SessionReader]
 )
 async def get_session(
     slug: str, request: Request, pool: Pool, settings: Cfg
 ) -> schemas.SessionView:
-    """A superleader or a retrospective session reads any session; any other leader its own."""
+    """A superleader reads any session; any other leader its own."""
     _, caller = caller_of(request)
     async with pool.connection() as conn:
         return await sessions_api.one_view(
@@ -780,7 +754,7 @@ async def get_command(command_id: int, pool: Pool) -> schemas.CommandView:
 # ------------------------------------------------- live work of any session (T-120)
 
 
-# step 13: reader gate (superleader or retrospective), was the superleader gate
+# reader gate (superleader until S-83 steps 6, 7)
 @reader_router.get(
     "/sessions/{slug}/activity",
     response_model=Activity,
@@ -800,7 +774,7 @@ async def session_activity(
         return await activity_lines(conn, target, peer, limit)
 
 
-# step 13: reader gate (superleader or retrospective), was the superleader gate
+# reader gate (superleader until S-83 steps 6, 7)
 @reader_router.get(
     "/sessions/{slug}/events",
     response_model=streams.EventsPage,
@@ -835,7 +809,7 @@ async def session_events(
         )
 
 
-# step 13: reader gate (superleader or retrospective), was the superleader gate
+# reader gate (superleader until S-83 steps 6, 7)
 @reader_router.get(
     "/sessions/{slug}/messages",
     response_model=list[schemas.MessageView],
@@ -1020,7 +994,7 @@ async def cancel_session_message(
 # ---------------------------------------------------------------- usage
 
 
-# step 13: reader gate (superleader or retrospective), was the superleader gate
+# reader gate (superleader until S-83 steps 6, 7)
 @reader_router.get("/usage", response_model=schemas.UsageView)
 async def get_usage(usage: Usage) -> schemas.UsageView:
     """The account's five_hour and seven_day windows, read-only, from the same cached

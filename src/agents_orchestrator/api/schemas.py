@@ -1221,7 +1221,7 @@ class VolumeDetail(VolumeView):
 
 
 class AdminVolumeView(BaseModel):
-    """What a superleader or retrospective session sees of a volume: names, ids, sizes, states
+    """What a superleader sees of a volume: names, ids, sizes, states
     and counts, never description, labels, exclusions or backup manifests."""
 
     id: uuid.UUID

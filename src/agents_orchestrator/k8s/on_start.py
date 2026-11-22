@@ -90,7 +90,7 @@ MINDMAP_TOOLS = [
 # Volume tools (S-77): every session lists the volumes it mounts and saves one on demand (the
 # route answers 403 backup_not_enabled unless its attachment has backup_restore).
 VOLUME_TOOLS = ["volumes_status", "volume_save"]
-# Volume reads of a superleader and a retrospective session (projects-scoped, names and ids only).
+# Volume reads of a superleader (projects-scoped, names and ids only).
 VOLUME_READ_TOOLS = ["volumes_list", "volume_get"]
 # Superleader admin tools: the plugin's declarative admin rows (any-mcp-tatara-plugins
 # orchestration/orchestrator admin.py), the vault tools included. History is read and search
@@ -128,20 +128,6 @@ ADMIN_TOOLS = [
     *VOLUME_READ_TOOLS, "volume_attach", "volume_detach", "volume_create",
     *PROPOSAL_TOOLS,
 ]  # fmt: skip
-# Retrospective sessions (S-68, decisions 769, 770, 775): the read set over histories, handoffs,
-# chats, presets, usage and backups, plus two writes, the backup copy and the room notes update
-# (scoped to rooms bound to a project the session holds). The API gates are `require_reader` and
-# `require_notes_writer` (api/admin.py); mind map, spec and task writes come from the normal
-# groups and the session's own and granted projects. No session patch or discard of others, no
-# preset write.
-RETRO_READ_TOOLS = [
-    "history_search", "history_get", "history_records", "sessions_admin_list", "session_get",
-    "session_activity", "session_events", "session_messages", "handoffs_list", "handoff_get",
-    "chat_admin_rooms", "chat_admin_room", "chat_admin_history", "chat_admin_notes_get",
-    "presets_list", "preset_get", "usage_get", "usage_history", "backups_list",
-    "backup_versions", "backup_manifest", *VOLUME_READ_TOOLS,
-]  # fmt: skip
-RETRO_TOOLS = [*RETRO_READ_TOOLS, "backups_copy", "chat_admin_notes_update"]
 # Tools a subagent may call although every orchestrator tool is main-agent only (user decision
 # m1223): reads of notes, mind maps, tasks, specs, plans, projects, chats, sessions, locks,
 # approvals, proposals, backups and handoffs; every route behind them is a GET. Rendered for every
@@ -149,7 +135,11 @@ RETRO_TOOLS = [*RETRO_READ_TOOLS, "backups_copy", "chat_admin_notes_update"]
 # spec_pull and plan_export write files only in the working copy and call GET routes only.
 READ_ONLY_TOOLS: frozenset[str] = frozenset(
     {
-        *RETRO_READ_TOOLS,
+        "history_search", "history_get", "history_records", "sessions_admin_list", "session_get",
+        "session_activity", "session_events", "session_messages", "handoffs_list", "handoff_get",
+        "chat_admin_rooms", "chat_admin_room", "chat_admin_history", "chat_admin_notes_get",
+        "presets_list", "preset_get", "usage_get", "usage_history", "backups_list",
+        "backup_versions", "backup_manifest", *VOLUME_READ_TOOLS,
         "me", "activity", "lock_list", "sessions_list", "chat_rooms",
         "chat_history", "chat_attachment_status", "chat_notes_get", "task_list", "task_get",
         "approval_list", "project_list", "project_summary", "project_chat_read", "spec_list",
@@ -162,13 +152,6 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset(
 )  # fmt: skip
 
 
-def _regular_tools(spec: SessionSpec) -> list[str]:
-    """The tail of a session without `session_messaging`: the retrospective set when flagged,
-    then its own spec and proposal tools, and `self_close` last."""
-    retro = RETRO_TOOLS if spec.retrospective else []
-    return [*retro, *SESSION_EDIT_TOOLS, CLOSE_TOOL]
-
-
 def orchestrator_allow(spec: SessionSpec, *, mindmap: bool = False) -> list[str]:
     """The orchestrator tools this session's agents may call.
 
@@ -179,9 +162,8 @@ def orchestrator_allow(spec: SessionSpec, *, mindmap: bool = False) -> list[str]
     tools are listed exactly when `session_messaging` is enabled, whoever
     created the session; every other session gets `SESSION_EDIT_TOOLS` (its spec and its
     proposals) and `self_close` last instead (a superleader is never offered `self_close`; it has
-    the edit tools as admin tools). A `retrospective` session that is no superleader also gets
-    `RETRO_TOOLS` right before its edit tools. A tool in two groups (`leadership_withdraw`, a hive
-    and an admin tool; `session_get`, a retrospective and an edit tool) is listed once.
+    the edit tools as admin tools). A tool in two groups (`leadership_withdraw`, a hive
+    and an admin tool; `session_get`, an admin and an edit tool) is listed once.
     """
     shared = [
         *SESSION_TOOLS,
@@ -194,7 +176,7 @@ def orchestrator_allow(spec: SessionSpec, *, mindmap: bool = False) -> list[str]
         *PROJECT_CHAT_TOOLS,
         *(MINDMAP_TOOLS if mindmap else []),
         *VOLUME_TOOLS,
-        *(ADMIN_TOOLS if spec.session_messaging else _regular_tools(spec)),
+        *(ADMIN_TOOLS if spec.session_messaging else [*SESSION_EDIT_TOOLS, CLOSE_TOOL]),
     ]
     if not spec.hive:
         return list(dict.fromkeys(["me", *HANDOFF_TOOLS, *shared]))

@@ -48,7 +48,7 @@ def own_routes() -> list[tuple[str, str]]:
             *admin.router.routes,
             *admin.session_router.routes,
             *proposal_routes.proposal_router.routes,
-            *admin.reader_router.routes,  # S-68 step 13: the retrospective reads and the copy
+            *admin.reader_router.routes,  # the reader reads and the copy
             *admin.notes_router.routes,
         ]
         if not r.path.startswith(prefixes)

@@ -70,6 +70,7 @@ def test_legacy_open_strong_and_voluntary_rows_closed_superseded(empty_dsn, tmp_
         "0056",
         "0057",
         "0058",
+        "0059",
     ]
     with psycopg.connect(empty_dsn) as c:
         for row_id in ids:

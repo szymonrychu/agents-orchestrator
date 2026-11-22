@@ -16,13 +16,9 @@ agent route fails CI until it is classified.
   upstream filters.
 - `superleader`: the superleader gate; unscoped by design. The admin relay (`admin_relay`)
   forwards send `X-Orch-Projects: *` for a superleader.
-- `reader`: the reader gate (`admin.require_reader`): a superleader or a retrospective session
-  (S-68, decision 769); the reads behind the retrospective read tools and the backup copy.
-- `notes`: the room notes writer gate (`admin.require_notes_writer`): a superleader, or a
-  retrospective session on a room bound to a project it holds (decision 775).
-
-A retrospective session's scope is `*` on GET relays only (`scope_of` with the method): it reads
-every project's tasks, specs and mind maps, and writes only in its own and granted projects.
+- `reader`: the reader gate (`admin.require_reader`): a superleader only (S-83; steps 6 and 7
+  reshape it).
+- `notes`: the room notes writer gate (`admin.require_notes_writer`): a superleader only.
 """
 
 from __future__ import annotations
@@ -40,18 +36,17 @@ _A = "/agent/v1"
 _ADMIN = f"{_A}/admin"
 
 
-def scope_of(session: sessions_repo.Session, method: str | None = None) -> str:
-    """`*` for a superleader session, and for a retrospective one on a GET relay (`method`);
-    else its projects comma-separated, home first (the taskboard reads the first as the home
-    project)."""
-    if session.spec.session_messaging or (session.spec.retrospective and method == "GET"):
+def scope_of(session: sessions_repo.Session) -> str:
+    """`*` for a superleader session only; else its projects comma-separated, home first (the
+    taskboard reads the first as the home project)."""
+    if session.spec.session_messaging:
         return ALL_PROJECTS
     return ",".join(session.projects)
 
 
-def projects_header(session: sessions_repo.Session, method: str | None = None) -> dict[str, str]:
-    """The `X-Orch-Projects` header a relay sends for the calling session and request method."""
-    return {PROJECTS_HEADER: scope_of(session, method)}
+def projects_header(session: sessions_repo.Session) -> dict[str, str]:
+    """The `X-Orch-Projects` header a relay sends for the calling session."""
+    return {PROJECTS_HEADER: scope_of(session)}
 
 
 AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {

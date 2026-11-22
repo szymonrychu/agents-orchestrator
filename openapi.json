@@ -207,7 +207,7 @@
         "type": "object"
       },
       "AdminVolumeView": {
-        "description": "What a superleader or retrospective session sees of a volume: names, ids, sizes, states\nand counts, never description, labels, exclusions or backup manifests.",
+        "description": "What a superleader sees of a volume: names, ids, sizes, states\nand counts, never description, labels, exclusions or backup manifests.",
         "properties": {
           "attachments": {
             "title": "Attachments",
@@ -6222,17 +6222,6 @@
               }
             ]
           },
-          "retrospective": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Retrospective"
-          },
           "reuse_running_agent": {
             "anyOf": [
               {
@@ -6600,17 +6589,6 @@
                 "type": "null"
               }
             ]
-          },
-          "retrospective": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Retrospective"
           },
           "reuse_running_agent": {
             "anyOf": [
@@ -13774,7 +13752,7 @@
         ]
       },
       "get": {
-        "description": "A superleader or a retrospective session reads any session; any other leader its own.",
+        "description": "A superleader reads any session; any other leader its own.",
         "operationId": "get_session_agent_v1_admin_sessions__slug__get",
         "parameters": [
           {

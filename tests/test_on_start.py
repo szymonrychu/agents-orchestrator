@@ -752,16 +752,8 @@ def test_entry_allow_follows_mindmap_available():
     assert allow == on_start.orchestrator_allow(spec, mindmap=True)
 
 
-# ---------------------------------------- retrospective sessions and the subagent reads (S-68)
+# ---------------------------------------- the subagent reads (S-68)
 
-RETRO = [
-    "history_search", "history_get", "history_records", "sessions_admin_list", "session_get",
-    "session_activity", "session_events", "session_messages", "handoffs_list", "handoff_get",
-    "chat_admin_rooms", "chat_admin_room", "chat_admin_history", "chat_admin_notes_get",
-    "presets_list", "preset_get", "usage_get", "usage_history", "backups_list",
-    "backup_versions", "backup_manifest", "volumes_list", "volume_get", "backups_copy",
-    "chat_admin_notes_update",
-]  # fmt: skip
 # Routes of the tools the pinned plugin does not ship yet (any-mcp-tatara-plugins PR #61).
 PENDING_ROUTES = {
     "backups_list": ("GET", "/agent/v1/admin/backups"),
@@ -777,31 +769,10 @@ PENDING_ROUTES = {
 
 
 @pytest.mark.parametrize("replicas", [1, 2])
-def test_retro_tool_list(replicas):
-    """Exactly the regular set plus the retrospective set: no admin write beyond the backup copy
-    and the notes update (no preset writes, no session create, discard or restart)."""
-    assert on_start.RETRO_TOOLS == RETRO
-    plain = on_start.orchestrator_allow(SessionSpec(replicas=replicas))
-    allow = on_start.orchestrator_allow(SessionSpec(replicas=replicas, retrospective=True))
-    assert len(allow) == len(set(allow))
-    assert set(allow) == set(plain) | set(RETRO)
-    for write in (
-        "preset_create", "preset_replace", "preset_patch", "preset_delete", "preset_copy",
-        "session_create", "session_discard", "session_restart", "agent_restart", "vault_list",
-        "backups_cleanup_set", "chat_room_settings", "webhook_create", "schedule_create",
-    ):  # fmt: skip
-        assert write not in allow, write
-    # session_patch is the session's own spec edit; the API refuses any other target
-    assert [t for t in allow if t in ("session_patch", "session_discard")] == ["session_patch"]
-    superleader = on_start.orchestrator_allow(
-        SessionSpec(replicas=replicas, retrospective=True, session_messaging=True)
-    )
-    assert set(RETRO) <= set(superleader) and "self_close" not in superleader
-
-
-@pytest.mark.parametrize("replicas", [1, 2])
-def test_retro_session_gets_self_close(replicas):
-    allow = on_start.orchestrator_allow(SessionSpec(replicas=replicas, retrospective=True))
+def test_regular_session_gets_no_history_or_backup_tools_and_self_close_last(replicas):
+    allow = on_start.orchestrator_allow(SessionSpec(replicas=replicas))
+    for tool in ("history_search", "backups_copy", "chat_admin_notes_update", "handoffs_list"):
+        assert tool not in allow, tool
     assert allow[-1] == "self_close"
 
 
@@ -827,7 +798,6 @@ async def test_read_only_tools_map_to_read_routes():
         r"|react|close|withdraw|resolve|comment|put|link|order|deps|add|move)$"
     )
     assert not [t for t in on_start.READ_ONLY_TOOLS if writes.search(t)]
-    assert set(on_start.RETRO_READ_TOOLS) <= on_start.READ_ONLY_TOOLS
     assert not {"backups_copy", "chat_admin_notes_update", "self_close"} & (
         on_start.READ_ONLY_TOOLS
     )

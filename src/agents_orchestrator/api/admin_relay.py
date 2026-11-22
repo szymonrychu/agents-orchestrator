@@ -2,12 +2,12 @@
 
 Each route maps 1:1 to an upstream admin route and is registered on an admin router, so a gate
 and the audit cover it: the superleader gate, except the `READER_ROUTES` (the reader gate: a
-superleader or a retrospective session, S-68) and the room notes PUT (the notes writer gate,
-decision 775). The gate runs first, then the upstream must be configured
+superleader) and the room notes PUT (the notes writer gate).
+The gate runs first, then the upstream must be configured
 (503 `upstream_unconfigured`), then the body is capped at 256 KiB (413 `payload_too_large`). The
 forwarded request carries only the upstream's service bearer and the caller's `X-Orch-Session`,
-`X-Orch-Slug` and `X-Orch-Projects` (see `forward`). `X-Orch-Projects` is `*` for a superleader,
-and for a retrospective session on a GET (`scope.scope_of`, projects plan 3.3). The upstream
+`X-Orch-Slug` and `X-Orch-Projects` (see `forward`). `X-Orch-Projects` is `*` for a superleader
+(`scope.scope_of`, projects plan 3.3). The upstream
 status and JSON body come back unchanged, except for webhook credentials (D9, `credentials`
 below). A failed call or a non-JSON answer is 503 `upstream_unavailable`. The upstream validates
 the bodies.
@@ -167,8 +167,8 @@ SERVICES: dict[str, tuple[str, str, str, list[tuple[str, str, int]]]] = {
     "usage": ("/usage", "/usage/v1", "usage admin relay", _USAGE),
 }
 STATE_ATTR = "admin_http"
-# The relay routes behind the retrospective read tools (S-68 step 13): the reader gate admits a
-# superleader or a retrospective session; every other relay route stays superleader-only.
+# The relay routes on the reader gate (a superleader; S-83 steps 6, 7 reshape it); every other
+# relay route stays superleader-only.
 READER_ROUTES: frozenset[tuple[str, str, str]] = frozenset(
     {
         ("connector", "GET", "/rooms"),
@@ -359,7 +359,7 @@ async def _upstream_json(request: Request, settings: Settings, service: str, pat
         None,
         str(session.id),
         session.slug,
-        extra_headers=projects_header(session, "GET"),
+        extra_headers=projects_header(session),
     )
     if status == 404:
         raise not_found("object")
@@ -547,7 +547,7 @@ def _handler(service: str, method: str, template: str) -> Callable[..., Awaitabl
             str(session.id),
             session.slug,
             empty_ok=True,
-            extra_headers=projects_header(session, method),
+            extra_headers=projects_header(session),
         )
         if guard.ask_decision and status == 201:
             row = await chat_requests.on_created(request, settings, json.loads(content))
@@ -600,8 +600,8 @@ def _relay_responses(service: str, method: str, template: str) -> dict[int | str
 
 def _router_for(key: tuple[str, str, str]):
     """The admin router (and so the gate) of one relay route. The step 12 and 14 relays sat on
-    the superleader router; step 13 moves the retrospective reads to the reader gate and the
-    notes update to the notes writer gate."""
+    the superleader router; the reads on the reader gate and the notes
+    update on the notes writer gate."""
     if key in READER_ROUTES:
         return reader_router
     if key == NOTES_ROUTE:
