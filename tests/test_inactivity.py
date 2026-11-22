@@ -156,10 +156,11 @@ def test_close_text_example():
         "Orchestrator notice (inactivity limit): this session has sent no update and done no tool"
         " work for 4 h, so the orchestrator asks you to close it. If your work is finished: post a"
         " final status (a <chat-send> envelope or a task comment) and since this session saves its"
-        " workspace, write handoff notes into the workdir, then call orchestrator_self_close. If"
-        " you are still working, post a progress update now to keep the session. It is never"
-        " closed while you work; if it is idle after 14:05Z without a self-close or an update, it"
-        " is discarded 30 s later."
+        " workspace, write handoff notes into the workdir, then call orchestrator_self_close."
+        " Retro: record what you learned (room notes, mind map, skills; volume_save for changed"
+        " skills) before you hand off or close. If you are still working, post a progress update"
+        " now to keep the session. It is never closed while you work; if it is idle after 14:05Z"
+        " without a self-close or an update, it is discarded 30 s later."
     )
     assert "workdir" not in _close(workdir_saved=False)
     assert "post a final status (a <chat-send> envelope or a task comment), then call" in (
@@ -186,7 +187,7 @@ def test_close_text_tools():
     assert "post a final status" not in text
     assert "If your work is finished: since this session saves its workspace, write handoff" in text
     text = _close(chat=False, taskboard=False, workdir_saved=False)
-    assert "hand off" not in text and "handoff" not in text
+    assert "handoff" not in text
     assert "If your work is finished, call orchestrator_self_close." in text
 
 
@@ -210,9 +211,10 @@ def test_autoclose_text():
         " its preset, so the orchestrator asks you to wrap up. Finish or checkpoint your work,"
         " post a final status (a <chat-send> envelope or a task comment) and since this session"
         " saves its workspace, write handoff notes into the workdir, then call"
-        " orchestrator_self_close. The session is never closed while you work; if it is idle"
-        " after 14:05Z without a self-close, it is discarded 30 s later. Only the user can keep"
-        " it."
+        " orchestrator_self_close. Retro: record what you learned (room notes, mind map,"
+        " skills; volume_save for changed skills) before you hand off or close. The session is"
+        " never closed while you work; if it is idle after 14:05Z without a self-close, it is"
+        " discarded 30 s later. Only the user can keep it."
     )
     plain = _autoclose(chat=False, taskboard=False, workdir_saved=False)
     assert "Finish or checkpoint your work, then call orchestrator_self_close." in plain

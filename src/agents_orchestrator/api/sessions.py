@@ -421,6 +421,8 @@ async def create(
     credential_gate.check(settings, datetime.now(UTC))
     if (body.spec is None) == (body.preset_id is None):
         raise ApiError(422, "invalid_request", "exactly one of spec or preset_id")
+    if body.overrides is not None and body.preset_id is None:
+        raise ApiError(422, "overrides_need_preset", "overrides apply to a preset only")
     if created_by_session is not None and body.spec is not None:
         raise ApiError(422, "preset_required", "the superleader creates sessions from a preset")
     if body.spec is not None:
@@ -472,6 +474,7 @@ async def create(
                         created_by_session,
                         project=body.project,
                         pinned=pinned,
+                        overrides=body.overrides,
                     )
                 usage_gate.check(
                     windows,
@@ -627,6 +630,21 @@ async def _placed_preset(
     raise ApiError(409, "conflict", "the preset moved to another project meanwhile; retry")
 
 
+def _apply_overrides(raw: dict, overrides: schemas.SessionOverrides) -> None:
+    """Set the given overrides on the raw preset spec (None leaves a field as the preset has it)."""
+    if overrides.replicas is not None:
+        ceiling = raw.get("max_replicas") or raw["replicas"]
+        if overrides.replicas > ceiling:
+            raise ApiError(
+                422,
+                "overrides_replicas_above_max",
+                f"replicas {overrides.replicas} exceeds the preset's max_replicas {ceiling}",
+            )
+        raw["replicas"] = overrides.replicas
+    if overrides.start_prompt is not None:
+        raw["start_prompt"] = overrides.start_prompt or None
+
+
 async def _create_from_preset(
     conn,
     preset_id: uuid.UUID,
@@ -637,10 +655,14 @@ async def _create_from_preset(
     *,
     project: str | None = None,
     pinned: Pinned | None = None,
+    overrides: schemas.SessionOverrides | None = None,
 ) -> repo.Session:
     """Snapshot the preset's spec, filled and validated against the current settings. The
     session goes into `project`, else the preset's project (`_placed_preset`). `pinned` is what
-    the vault pinned for it; a preset whose refs or effective labels moved since is 409."""
+    the vault pinned for it; a preset whose refs or effective labels moved since is 409.
+    `overrides` change the snapshot before it is validated (so before the policy and the usage
+    gate see it): `replicas` may not exceed the preset's max_replicas (422), an empty
+    `start_prompt` queues no start message."""
     preset, project, extras = await _placed_preset(conn, preset_id, project, created_by_session)
     refs = vault_refs.refs_in(preset.spec)
     if refs != (pinned.refs if pinned else {}) or (
@@ -658,6 +680,8 @@ async def _create_from_preset(
             "moved them yet",
         )
     raw.setdefault("replicas", settings.default_replicas)
+    if overrides is not None:
+        _apply_overrides(raw, overrides)
     try:
         spec = await run_in_threadpool(
             check_spec,
