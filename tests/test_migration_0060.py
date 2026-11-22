@@ -1,56 +1,75 @@
 import shutil
-import uuid
 
 import psycopg
+import pytest
+from psycopg.types.json import Jsonb
 
 from agents_orchestrator.db.migrate import MIGRATIONS_DIR, run_migrations
-
-T0 = "2026-11-20 10:00:00+00"
-
-# claim (mode, backup_restore, released minutes after T0 or None), save (started, ended) or None
-CASES = {
-    "open": (("rw", True, None), (10, 20), True),
-    "released_after_save": (("rw", True, 30), (10, 20), True),
-    "released_during_save": (("rw", True, 15), (10, 20), True),
-    "released_before_save": (("rw", True, 5), (10, 20), False),
-    "never_saved": (("rw", True, 5), None, True),
-    "ro_backup": (("ro", True, 30), (10, 20), False),
-    "rw_no_backup": (("rw", False, 30), (10, 20), False),
-}
+from agents_orchestrator.spec import load_stored_spec
 
 
-def _seed(c, name, claim, save):
-    vid = uuid.uuid4()
-    c.execute(
-        "INSERT INTO volumes (id, name, projects, size, storage_class, pvc_name, state,"
-        " created_by) VALUES (%s, %s, '{p}', '1Gi', 'sc', %s, 'ready', 'alice')",
-        (vid, name, f"vol-{name}"),
-    )
-    mode, backup, released = claim
-    c.execute(
-        "INSERT INTO volume_mounts (volume_id, session_id, mode, backup_restore, claimed_at,"
-        " released_at) VALUES (%s, %s, %s, %s, %s::timestamptz,"
-        " %s::timestamptz + make_interval(mins => %s))",
-        (vid, uuid.uuid4(), mode, backup, T0, None if released is None else T0, released or 0),
-    )
-    if save is not None:
-        for kind, minutes in (("save_started", save[0]), ("saved", save[1])):
-            c.execute(
-                "INSERT INTO volume_events (volume_id, at, actor_kind, actor, kind)"
-                " VALUES (%s, %s::timestamptz + make_interval(mins => %s), 'system', 'r', %s)",
-                (vid, T0, minutes, kind),
-            )
-
-
-def test_0060_marks_volumes_with_backup_writes_after_the_last_save_dirty(empty_dsn, tmp_path):
+def _upto_0059(dsn, tmp_path):
     for path in MIGRATIONS_DIR.glob("*.sql"):
         if path.name < "0060":
             shutil.copy(path, tmp_path / path.name)
-    run_migrations(empty_dsn, tmp_path)
-    with psycopg.connect(empty_dsn) as c:
-        for name, (claim, save, _dirty) in CASES.items():
-            _seed(c, name, claim, save)
-    assert run_migrations(empty_dsn) == ["0060"]
-    with psycopg.connect(empty_dsn) as c:
-        got = dict(c.execute("SELECT name, backup_dirty_at IS NOT NULL FROM volumes"))
-    assert got == {name: dirty for name, (_c, _s, dirty) in CASES.items()}
+    run_migrations(dsn, tmp_path)
+
+
+STORED = {"replicas": 1, "retrospective": True}
+CLEAN = {"replicas": 1}
+
+
+def _proposal(c):
+    pid = c.execute(
+        "INSERT INTO change_proposals (kind, target_id, target_name, proposer_session,"
+        " proposer_slug, proposer_superleader, expires_at)"
+        " VALUES ('preset', 'p', 'p', gen_random_uuid(), 'x', false, now() + interval '1 day')"
+        " RETURNING id"
+    ).fetchone()[0]
+    c.execute(
+        "INSERT INTO change_proposal_revisions (proposal_id, revision, reason, base, fingerprint)"
+        " VALUES (%s, 1, 'r', %s, 'f')",
+        (pid, Jsonb({**STORED, "spec": dict(STORED)})),
+    )
+    for path, before, after in (
+        ("retrospective", False, True),
+        ("spec", {"spec": dict(STORED)}, {**STORED, "spec": dict(STORED)}),
+    ):
+        c.execute(
+            "INSERT INTO change_proposal_items (proposal_id, revision, path, before, after,"
+            ' security, "grant") VALUES (%s, 1, %s, %s, %s, true, true)',
+            (pid, path, Jsonb(before), Jsonb(after)),
+        )
+    return pid
+
+
+@pytest.mark.parametrize("table", ["sessions", "presets", "proposals"])
+def test_migration_0060_strips_retrospective(empty_dsn, tmp_path, table):
+    _upto_0059(empty_dsn, tmp_path)
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        if table == "sessions":
+            c.execute(
+                "INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), 's', %s)",
+                (Jsonb(STORED),),
+            )
+        elif table == "presets":
+            c.execute(
+                "INSERT INTO presets (id, name, spec) VALUES (gen_random_uuid(), 'p', %s)",
+                (Jsonb(STORED),),
+            )
+        else:
+            pid = _proposal(c)
+    assert run_migrations(empty_dsn) == ["0060", "0061"]
+    with psycopg.connect(empty_dsn, autocommit=True) as c:
+        if table == "proposals":
+            base = c.execute("SELECT base FROM change_proposal_revisions").fetchone()[0]
+            assert base == {**CLEAN, "spec": CLEAN}
+            items = c.execute(
+                "SELECT path, before, after FROM change_proposal_items WHERE proposal_id = %s",
+                (pid,),
+            ).fetchall()
+            assert items == [("spec", {"spec": CLEAN}, {**CLEAN, "spec": CLEAN})]
+        else:
+            raw = c.execute(f"SELECT spec FROM {table}").fetchone()[0]
+            assert raw == CLEAN
+            assert load_stored_spec(raw, None).replicas == 1

@@ -16,11 +16,13 @@ import pytest
 import pytest_asyncio
 from factories import insert_agent, insert_message, insert_session, set_agent_status
 from psycopg.types.json import Jsonb
+from pydantic import ValidationError
 
 import agents_orchestrator.api as api_pkg
 from agents_orchestrator.api.app import create_app
 from agents_orchestrator.db import sessions as repo
 from agents_orchestrator.settings import Settings
+from agents_orchestrator.spec import SessionSpec
 
 PEER = ("10.1.2.3", 5555)
 
@@ -83,6 +85,19 @@ async def test_create_and_get_session(http):
 )
 async def test_create_rejects_bad_slug_422(http, body):
     assert_error(await http.post("/api/v1/sessions", json=body), 422, "invalid_request")
+
+
+async def test_spec_rejects_retrospective(http):
+    """The removed `retrospective` field is no alias: a create carrying it is 422, and the spec
+    model names it as an extra field."""
+    assert_error(
+        await http.post("/api/v1/sessions", json={"slug": "ok", "spec": {"retrospective": True}}),
+        422,
+        "invalid_request",
+    )
+    with pytest.raises(ValidationError) as exc:
+        SessionSpec.model_validate({"retrospective": True})
+    assert [e["type"] for e in exc.value.errors(include_input=False)] == ["extra_forbidden"]
 
 
 async def test_duplicate_slug_409(http):

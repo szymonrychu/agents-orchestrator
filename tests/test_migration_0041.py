@@ -66,6 +66,7 @@ def test_reattach_lists_protected_names_and_strips_them_from_the_spec(empty_dsn,
         "0058",
         "0059",
         "0060",
+        "0061",
     ]
     assert _preset(empty_dsn, "p1") == (
         {"env": {"A": {"value": "x", "expand": False}, "PLAIN": "text"}},
@@ -103,6 +104,7 @@ def test_non_object_env_does_not_fail_the_migration(empty_dsn, tmp_path):
         "0058",
         "0059",
         "0060",
+        "0061",
     ]
     assert _preset(empty_dsn, "ok")[1] == ["B"]
     for name in ("noenv", "strenv", "arrenv", "nullenv"):
@@ -278,6 +280,7 @@ def test_protected_entries_leave_presets_and_sessions_legacy_pins_stay(empty_dsn
         "0058",
         "0059",
         "0060",
+        "0061",
     ]
     specs = dict(_rows(empty_dsn, "SELECT name, spec FROM presets"))
     assert specs["mixed"] == {"env": {"A": {"value": "x", "expand": False}, "S": "str", "L": [1]}}
@@ -477,6 +480,7 @@ async def test_a_protected_variable_removed_before_the_apply_does_not_come_back(
         "0058",
         "0059",
         "0060",
+        "0061",
     ]
     pins = dict(_rows(empty_dsn, "SELECT slug, secret_versions FROM sessions"))
     assert pins == {

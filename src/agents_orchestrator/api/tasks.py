@@ -150,7 +150,7 @@ async def relay(
         str(own.id),
         own.slug,
         query=query,
-        extra_headers=projects_header(own, request.method),
+        extra_headers=projects_header(own),
         empty_ok=True,
     )
     if not content and status != 204:
