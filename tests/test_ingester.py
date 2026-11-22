@@ -260,8 +260,22 @@ class Harness:
         self.fake.emit(type, data)["ts"] = ts
 
 
+class _IdleRelay:
+    """The envelope relay always runs with the ingester; these tests pin the projection, so
+    queued rows stay queued."""
+
+    def __init__(self, *_a: Any, **_k: Any) -> None:
+        pass
+
+    async def run(self, stop: asyncio.Event) -> None:
+        await stop.wait()
+
+
 @pytest_asyncio.fixture
-async def harness(pool, dsn: str) -> AsyncIterator[Callable[..., Any]]:
+async def harness(pool, dsn: str, monkeypatch) -> AsyncIterator[Callable[..., Any]]:
+    from agents_orchestrator.ingester import loop as loop_mod
+
+    monkeypatch.setattr(loop_mod, "EnvelopeRelay", _IdleRelay)
     made: list[Harness] = []
 
     async def make(peers: dict[str, Any] | None = None) -> Harness:
@@ -1675,12 +1689,40 @@ async def test_old_wrapper_without_turn_id_or_sidechain(harness, pool) -> None:
     assert len(rows) == 1 and rows[0]["turn_id"] is None and rows[0]["status"] == "queued"
 
 
-async def test_replay_does_not_duplicate_rows(harness, pool) -> None:
+MIXED = TEXT + (
+    '<session-send to="platform" handled="41,42" lane="idle">done</session-send>\n'
+    '<project-post to="a,b" reply_to="p12" project="proj">pin bumped</project-post>\n'
+    "<session-foo>x</session-foo>\n"
+)
+
+
+async def test_mixed_chat_and_hive_rows_have_unique_indices_and_replay_once(harness, pool) -> None:
     h = await harness()
     await h.start()
-    h.fake.emit("assistant_text", {"text": TEXT})
+    h.fake.emit("assistant_text", {"text": MIXED})
     await h.stored_through(h.last_fake_seq())
     before = await outbox_rows(pool, h.agent_id)
+    assert [(r["envelope_index"], r["kind"], r["status"]) for r in before] == [
+        (1, "send", "queued"),
+        (2, "react", "queued"),
+        (4, "session", "queued"),
+        (5, "project_post", "queued"),
+        (3, "send", "invalid"),
+        (6, "session", "invalid"),
+    ]
+    session, post = before[2], before[3]
+    assert (session["target"], session["handled"], session["lane"], session["body"]) == (
+        "platform",
+        [41, 42],
+        "idle",
+        "done",
+    )
+    assert (post["target"], post["reply_to"], post["project"], post["body"]) == (
+        "a,b",
+        "12",
+        "proj",
+        "pin bumped",
+    )
     await h.stop()
     h.replay_all = True
     await h.start()
@@ -1704,14 +1746,20 @@ async def test_non_leader_gets_not_leader_rows(harness, pool) -> None:
             (h.session_id, other["id"]),
         )
     await h.start()
-    h.fake.emit("assistant_text", {"text": TEXT})
+    h.fake.emit(
+        "assistant_text",
+        {
+            "text": '<session-send to="other">a</session-send>\n<chat-send>b</chat-send>\n'
+            '<agent-send to="leader">c</agent-send>\n'
+        },
+    )
     await h.stored_through(h.last_fake_seq())
     rows = await outbox_rows(pool, h.agent_id)
-    assert [(r["kind"], r["status"], r["error_code"]) for r in rows[:2]] == [
+    assert [(r["kind"], r["status"], r["error_code"]) for r in rows] == [
+        ("session", "invalid", "not_leader"),
         ("send", "invalid", "not_leader"),
-        ("react", "invalid", "not_leader"),
+        ("agent", "invalid", "not_supported"),
     ]
-    assert all(r["status"] == "invalid" for r in rows)
 
 
 async def test_leader_of_a_hive_queues(harness, pool) -> None:
@@ -1749,7 +1797,7 @@ async def test_parse_error_before_valid_envelope_shares_index_space(harness, poo
 async def test_invalid_envelope_without_turn_id_logs_warning(harness, pool, caplog) -> None:
     h = await harness()
     await h.start()
-    with caplog.at_level("WARNING", logger="agents_orchestrator.ingester.chat_envelopes"):
+    with caplog.at_level("WARNING", logger="agents_orchestrator.ingester.envelopes"):
         h.fake.emit("assistant_text", {"text": "<chat-status>secret body</chat-status>"})
         await h.stored_through(h.last_fake_seq())
     rows = await outbox_rows(pool, h.agent_id)
@@ -1764,7 +1812,7 @@ async def test_invalid_envelope_without_turn_id_logs_warning(harness, pool, capl
 async def test_invalid_envelope_with_turn_id_does_not_warn(harness, pool, caplog) -> None:
     h = await harness()
     await h.start()
-    with caplog.at_level("WARNING", logger="agents_orchestrator.ingester.chat_envelopes"):
+    with caplog.at_level("WARNING", logger="agents_orchestrator.ingester.envelopes"):
         h.fake.emit(
             "assistant_text",
             {"text": "<chat-status>bad</chat-status>", "turn_id": str(uuid.uuid4())},

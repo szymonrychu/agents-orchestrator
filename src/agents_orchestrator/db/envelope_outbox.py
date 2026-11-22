@@ -1,4 +1,4 @@
-"""Repository for `envelope_outbox`: chat envelopes parsed from an agent's own text.
+"""Repository for `envelope_outbox`: envelopes parsed from an agent's own text.
 
 Rows are inserted by the ingester and the onStop endpoint; every status change is a
 status-guarded update. Delivery is at most once: a `sending` row that outlives a restart becomes
@@ -152,16 +152,18 @@ async def rows_for_turn(
 
 async def sweep_stale_sending(
     conn: psycopg.AsyncConnection, older_than_s: int = STALE_SENDING_SECONDS
-) -> int:
+) -> list[dict[str, Any]]:
     """`sending` rows older than `older_than_s` become `failed` `unknown_outcome`: the send may
-    or may not have happened, and a duplicate chat post is worse than a reported loss."""
-    cur = await conn.execute(
-        "UPDATE envelope_outbox SET status = 'failed', error_code = 'unknown_outcome',"
-        " updated_at = now() WHERE status = 'sending'"
-        " AND updated_at < now() - make_interval(secs => %s)",
-        (older_than_s,),
-    )
-    return cur.rowcount
+    or may not have happened, and a duplicate chat post is worse than a reported loss. Returns
+    the swept rows."""
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "UPDATE envelope_outbox SET status = 'failed', error_code = 'unknown_outcome',"
+            " updated_at = now() WHERE status = 'sending'"
+            " AND updated_at < now() - make_interval(secs => %s) RETURNING " + _COLUMNS,
+            (older_than_s,),
+        )
+        return await cur.fetchall()
 
 
 async def queued_sessions(conn: psycopg.AsyncConnection) -> list[uuid.UUID]:

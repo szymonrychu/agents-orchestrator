@@ -29,6 +29,7 @@ async def sent_to_within(
     row = await queue._one(
         conn,
         "SELECT EXISTS (SELECT 1 FROM messages WHERE sender_session_id = %s AND session_id = %s"
+        " AND channel = 'session'"
         " AND created_at > now() - make_interval(secs => %s::float8)) AS sent",
         (sender, receiver, seconds),
     )

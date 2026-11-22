@@ -109,13 +109,13 @@ async def test_sweep_stale_sending(pool):
             "UPDATE envelope_outbox SET updated_at = now() - interval '2 minutes' WHERE id = %s",
             (stale["id"],),
         )
-        assert await outbox.sweep_stale_sending(conn) == 1
+        assert len(await outbox.sweep_stale_sending(conn)) == 1
         cur = await conn.execute(
             "SELECT status, error_code FROM envelope_outbox WHERE id = %s", (stale["id"],)
         )
         assert await cur.fetchone() == ("failed", "unknown_outcome")
         fresh = await outbox.claim_next(conn, sid)
-        assert await outbox.sweep_stale_sending(conn) == 0
+        assert await outbox.sweep_stale_sending(conn) == []
         assert fresh["status"] == "sending"
         assert await outbox.queued_sessions(conn) == []
 
