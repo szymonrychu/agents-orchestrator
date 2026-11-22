@@ -330,8 +330,10 @@ def test_volume_jobs_hand_the_volume_root_to_the_agent_user(kind, want):
     chown `/volume` itself, as uid 0 with CAP_CHOWN only, before anything writes as uid 1000."""
     vol, settings = make_volume(), make_settings()
     if kind == "owner":
-        job = render_volume_owner_job(vol, settings, n=3)
-        assert job["metadata"]["name"] == "vol-data-owner-3"
+        vol.owner_attempts = 3
+        job = render_volume_owner_job(vol, settings)
+        assert job["metadata"]["name"] == f"vol-{vol.id}-owner-3"
+        assert job["spec"]["ttlSecondsAfterFinished"] > 0
     else:
         job = render_volume_job(vol, settings, action=kind, n=1, url=URL, version=None)
     assert _owner_steps(job) == want

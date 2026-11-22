@@ -12,7 +12,12 @@ from agents_orchestrator.db import sessions
 from agents_orchestrator.k8s.labels import SESSION_LABEL, session_labels
 from agents_orchestrator.k8s.render import render_session, workdir_mount, workdir_path
 from agents_orchestrator.reconciler import Reconciler
-from agents_orchestrator.reconciler.checks import CHECK_LABEL, TAIL_BYTES, TAIL_LINES
+from agents_orchestrator.reconciler.checks import (
+    CHECK_LABEL,
+    TAIL_BYTES,
+    TAIL_LINES,
+    container_exit_code,
+)
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import SessionSpec
 from agents_orchestrator.tokens import tokens_for
@@ -237,3 +242,56 @@ async def test_queued_check_cancelled_when_discard_waits(env):
     await hold.reconcile_once()
     assert (await env.check(queued["id"]))["status"] == "cancelled"
     assert env.kube.names("Job") == []
+
+
+def _status(name: str, **state) -> dict:
+    return {"name": name, "state": state}
+
+
+SIDECAR = {"name": "proxy", "restartPolicy": "Always"}
+
+
+@pytest.mark.parametrize(
+    ("inits", "init_statuses", "main", "code"),
+    [
+        # the main container ran: its code
+        (
+            [{"name": "setup"}],
+            [_status("setup", terminated={"exitCode": 0})],
+            _status("main", terminated={"exitCode": 2}),
+            2,
+        ),
+        # a restartable sidecar killed at the pod's end does not hide the main container's code
+        (
+            [SIDECAR],
+            [_status("proxy", terminated={"exitCode": 137})],
+            _status("main", terminated={"exitCode": 0}),
+            0,
+        ),
+        # the main container never ran: the failed regular init container's code
+        (
+            [SIDECAR, {"name": "setup"}],
+            [
+                _status("proxy", terminated={"exitCode": 137}),
+                _status("setup", terminated={"exitCode": 1}),
+            ],
+            _status("main", waiting={"reason": "PodInitializing"}),
+            1,
+        ),
+        # only a sidecar terminated: no exit code
+        (
+            [SIDECAR],
+            [_status("proxy", terminated={"exitCode": 137})],
+            _status("main", waiting={"reason": "PodInitializing"}),
+            None,
+        ),
+    ],
+)
+async def test_container_exit_code_prefers_the_main_container_and_skips_sidecars(
+    inits, init_statuses, main, code
+):
+    pod = {
+        "spec": {"initContainers": inits, "containers": [{"name": "main"}]},
+        "status": {"initContainerStatuses": init_statuses, "containerStatuses": [main]},
+    }
+    assert container_exit_code(pod) == code

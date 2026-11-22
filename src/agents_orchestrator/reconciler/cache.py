@@ -250,13 +250,13 @@ def _volume_job(
     volume: Volume,
     settings: Settings,
     action: str,
-    n: int,
+    name: str,
     pod_spec: Obj,
     annotations: dict[str, str] | None = None,
 ) -> Obj:
     labels = {**volume_labels(volume.id), CACHE_LABEL: f"volume-{action}"}
     metadata: dict[str, Any] = {
-        "name": volume_job_name(volume.name, action, n),
+        "name": name,
         "namespace": settings.namespace,
         "labels": dict(labels),
     }
@@ -274,12 +274,24 @@ def _volume_job(
     }
 
 
-def render_volume_owner_job(volume: Volume, settings: Settings, *, n: int) -> Obj:
+# a finished owner Job the reconciler did not delete (the volume left provisioning, a crash)
+OWNER_TTL_SECONDS = 3600
+
+
+def volume_owner_job_name(volume: Volume) -> str:
+    """Unique per owner attempt and derived only from the row, so a pass after a crash finds
+    its own Job and never takes a previous attempt's Job for it."""
+    return f"vol-{volume.id}-owner-{volume.owner_attempts}"
+
+
+def render_volume_owner_job(volume: Volume, settings: Settings) -> Obj:
     """The owner Job of a new volume: the PVC at `/volume`, read-write, and only the owner step,
     run once before the volume turns ready (no pod mounts it before)."""
     mounts = [{"name": "volume", "mountPath": VOLUME_ROOT}]
     pod_spec = _hardened(settings, _owner_container(settings, mounts), [_volume_pvc(volume)])
-    return _volume_job(volume, settings, "owner", n, pod_spec)
+    job = _volume_job(volume, settings, "owner", volume_owner_job_name(volume), pod_spec)
+    job["spec"]["ttlSecondsAfterFinished"] = OWNER_TTL_SECONDS
+    return job
 
 
 def render_volume_job(
@@ -323,7 +335,8 @@ def render_volume_job(
     pod_spec = _hardened(settings, container, volumes)
     if not save:
         pod_spec["initContainers"] = [_owner_container(settings, mounts)]
-    return _volume_job(volume, settings, action, n, pod_spec, annotations)
+    name = volume_job_name(volume.name, action, n)
+    return _volume_job(volume, settings, action, name, pod_spec, annotations)
 
 
 def render_cache_job(

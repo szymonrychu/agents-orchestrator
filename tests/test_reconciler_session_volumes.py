@@ -169,17 +169,31 @@ async def test_session_waits_at_zero_pods_while_its_volume_restores(pool, kube, 
     assert got.status["volume_restores_waited"] == ["data"]
 
 
-async def test_deleting_volume_holds_a_new_session_degraded(pool, kube, rec, vrec):
+@pytest.mark.parametrize(
+    ("refused", "message"),
+    [
+        ("deleting", "volume data is being deleted"),
+        ("owner_exhausted", "volume data failed: its root could not be handed to the agent user"),
+    ],
+)
+async def test_refused_volume_holds_a_new_session_degraded(pool, kube, rec, vrec, refused, message):
     vol = await _volume(pool, kube, vrec)
     async with pool.connection() as conn, conn.transaction():
-        await volumes.mark_deleting(conn, vol.id)
+        if refused == "deleting":
+            await volumes.mark_deleting(conn, vol.id)
+        else:  # the owner Job failed past its retries
+            await conn.execute(
+                "UPDATE volumes SET state = 'failed', state_reason = 'owner_failed',"
+                " owner_attempts = %s WHERE id = %s",
+                (volumes.OWNER_ATTEMPTS_MAX, vol.id),
+            )
     s = await _session(pool, "alpha", vol)
     await rec.reconcile_once()
     async with pool.connection() as conn:
         got = await sessions.get(conn, s.id)
     assert _pods(kube, "alpha") == []
     assert got.status["phase"] == "degraded"
-    assert "volume data is being deleted" in got.status["message"]
+    assert message in got.status["message"]
 
 
 @pytest.mark.parametrize(
