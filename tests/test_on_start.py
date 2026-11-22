@@ -73,13 +73,6 @@ TAIL_TOOLS = [
 # T-120). The backups, handoff and room notes admin tools wait for the plugins release of PR #61
 # (S-68 steps 12 to 14).
 PLUGIN_PENDING: set[str] = {
-    "volumes_status",
-    "volume_save",
-    "volumes_list",
-    "volume_get",
-    "volume_attach",
-    "volume_detach",
-    "volume_create",
     "backups_list",
     "backup_versions",
     "backup_manifest",
