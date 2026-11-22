@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
+import pytest
 from factories import (
     insert_agent,
     insert_message,
@@ -629,3 +630,38 @@ async def test_moving_a2_to_b_revokes_on_next_request(pool, dsn):
     assert_error(await _seat_send(app, a1, a2.slug), 403, "project_forbidden")
     assert a2.slug not in _slugs(await _seat_list(app, a1))
     assert len(await _rows(pool)) == 1
+
+
+@pytest.mark.parametrize(
+    ("case", "target", "status", "code"),
+    [
+        ("own_project", "A2", 202, None),
+        ("granted_project", "B1", 202, None),
+        ("outside", "B1", 403, "project_forbidden"),
+        ("member", "A2", 403, "not_leader"),
+    ],
+)
+async def test_session_send_scoped(pool, dsn, case, target, status, code):
+    """Decision 945: a leader sends to any session of its projects (home or granted extra); a
+    session outside them is refused, and so is a member pod."""
+    seats = await two_project_fixture(pool)
+    a1 = seats["A1"]
+    if case == "granted_project":
+        async with pool.connection() as conn:
+            await sessions_repo.set_extra_projects(conn, a1.id, ["b"])
+    ip = None
+    if case == "member":
+        async with pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT id FROM agents WHERE session_id = %s AND ordinal = 1", (a1.id,)
+            )
+            (member,) = await cur.fetchone()
+        ip = "10.9.202.1"
+        await set_ip(pool, member, ip)
+    r = await _seat_send(_app(pool, dsn), a1, seats[target].slug, ip=ip)
+    if code is None:
+        assert r.status_code == status, r.text
+        assert [m["session_id"] for m in await _rows(pool)] == [seats[target].id]
+    else:
+        assert_error(r, status, code)
+        assert await _rows(pool) == []

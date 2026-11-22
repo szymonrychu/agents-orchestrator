@@ -20,7 +20,7 @@ from test_api_agent import client_for, headers, make_settings
 from test_api_presets_vault import GONE, OTHER, FakeVault
 from test_api_sessions import assert_error
 from test_api_sessions import client_for as main_client
-from test_proposals_service import MCP_PATCH, TABLES, _rows, vault  # noqa: F401
+from test_proposals_service import MCP_PATCH, TABLES, _rows, move_preset, vault  # noqa: F401
 
 from agents_orchestrator.api import proposal_routes, proposals
 from agents_orchestrator.api.admin import ADMIN_PREFIX
@@ -264,6 +264,8 @@ async def test_preset_proposal_with_a_vault_ref_over_http(pool, settings, kube, 
 
 
 async def test_regular_leader_lists_own_only(app, pool, boss, other_boss, preset):
+    """Proposals on a preset outside the leader's projects stay hidden (decision 941)."""
+    await move_preset(pool, preset.id)
     plain = await hive(pool, "pr-plain-leader")
     own = {"kind": "session", "target": "pr-plain-leader", "patch": MCP_PATCH}
     mine = await filed(app, plain, **own)
@@ -652,16 +654,14 @@ async def test_regular_leader_proposes_a_grant_for_its_own_session(
 
 
 async def test_regular_leader_off_its_own_session_is_403_alike(app, pool, kube, preset, canary):
-    """Another session (hidden or visible), an unknown slug, a preset or a schedule: one 403
-    body, before any lookup, nothing staged or stored (no existence leak)."""
+    """Another session (hidden or visible), an unknown slug or a schedule: one 403 body, before
+    any lookup, nothing staged or stored (no existence leak). Presets: decision 941."""
     lead = await _leader_of(pool, "pr-lead", preset.id)
     other = await _leader_of(pool, "pr-other-lead", preset.id)
     staged = kube.names("Secret")
     bodies = [
         body(kind="session", target=other.slug, patch=PLAIN_ENV),
         body(kind="session", target="no-such-session", patch=PLAIN_ENV),
-        body(kind="preset", target="infra", patch=PLAIN_ENV),
-        body(kind="preset", target="no-such-preset", patch=PLAIN_ENV),
         body(kind="schedule", target=str(uuid.uuid4()), patch={"prompt": "x"}),
     ]
     answers = [await agent(app, lead, "POST", P, json=b) for b in bodies]
@@ -677,6 +677,7 @@ async def test_regular_leader_reads_revises_and_withdraws_only_its_own(
     app, pool, kube, boss, preset, canary
 ):
     lead = await _leader_of(pool, "pr-lead", preset.id)
+    await move_preset(pool, preset.id)
     mine = (await agent(app, lead, "POST", P, json=own(lead))).json()
     theirs = await filed(app, boss)
     assert [v["id"] for v in (await agent(app, lead, "GET", P)).json()] == [mine["id"]]
@@ -705,16 +706,17 @@ async def test_regular_leader_reads_revises_and_withdraws_only_its_own(
 
 
 async def test_demoted_superleader_may_not_revise_its_preset_proposal(app, pool, kube, preset):
-    """Revise follows create: a non-superleader revises only a proposal on its own session; its
-    other proposals stay readable and withdrawable."""
+    """Revise follows create: a non-superleader revises only a proposal on its own session or a
+    preset of its projects; its other proposals stay readable and withdrawable."""
     lead = await alone(pool, "pr-demoted", superleader=True)
     view = await filed(app, lead)
+    await move_preset(pool, preset.id)
     async with pool.connection() as conn:
         await conn.execute(
             "UPDATE sessions SET spec = spec - 'session_messaging' WHERE id = %s", (lead.id,)
         )
     r = await agent(app, lead, "POST", f"{P}/{view['id']}/revise", json={"patch": PLAIN_PATCH})
-    assert_error(r, 403, "not_superleader")
+    assert_error(r, 403, "project_forbidden")
     async with client_for(app, lead.leader_ip) as http:
         other = await http.post(P, json=body(), headers=headers(lead.id))
     assert r.json() == other.json()
@@ -739,3 +741,46 @@ async def test_new_leader_after_a_handover_sees_the_session_proposals(app, pool,
     assert got.status_code == 200 and got.json()["proposer_slug"] == lead.slug
     old = await agent(app, lead, "GET", P)
     assert_error(old, 403, "not_leader")
+
+
+@pytest.mark.parametrize(
+    ("where", "status"), [("home", 201), ("granted", 201), ("outside", 403), ("unknown", 403)]
+)
+async def test_leader_preset_proposal_scoped(app, pool, kube, preset, where, status):
+    """Decision 941: a regular leader files a preset proposal on a preset of its projects (home
+    or granted extra), whatever its manageable flag; a preset outside them and an unknown one
+    answer the same 403 project_forbidden and nothing is stored."""
+    await hide(pool, preset.id)
+    lead = await hive(pool, "pr-scoped")
+    if where != "home":
+        await move_preset(pool, preset.id)
+    if where == "granted":
+        async with pool.connection() as conn:
+            await conn.execute(
+                "UPDATE sessions SET extra_projects = '{elsewhere}' WHERE id = %s", (lead.id,)
+            )
+    target = "no-such-preset" if where == "unknown" else "infra"
+    r = await agent(app, lead, "POST", P, json=body(target=target, patch=PLAIN_PATCH))
+    if status == 201:
+        assert r.status_code == 201, r.text
+        assert (r.json()["target_name"], r.json()["proposer_superleader"]) == ("infra", False)
+    else:
+        assert_error(r, 403, "project_forbidden")
+        assert await _rows(pool, "SELECT id FROM change_proposals") == []
+
+
+async def test_leader_reads_preset_proposals_of_its_projects(app, pool, boss, preset):
+    """Decision 941: a regular leader lists and reads its own proposals plus every preset
+    proposal on a preset of its projects; revise and withdraw stay the proposer's."""
+    lead = await hive(pool, "pr-reader")
+    theirs = await filed(app, boss, patch=PLAIN_PATCH)
+    async with pool.connection() as conn:
+        outside = await presets_repo.create(conn, "far", {}, superleader_manageable=True)
+    await move_preset(pool, outside.id)
+    await filed(app, boss, target="far", patch=PLAIN_PATCH)
+    r = await agent(app, lead, "GET", P)
+    assert [v["id"] for v in r.json()] == [theirs["id"]]
+    r = await agent(app, lead, "GET", f"{P}/{theirs['id']}")
+    assert r.status_code == 200 and r.json()["id"] == theirs["id"]
+    r = await agent(app, lead, "POST", f"{P}/{theirs['id']}/withdraw")
+    assert_error(r, 404, "not_found")

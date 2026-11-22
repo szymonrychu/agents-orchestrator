@@ -50,6 +50,7 @@ def own_routes() -> list[tuple[str, str]]:
             *proposal_routes.proposal_router.routes,
             *admin.reader_router.routes,  # the reader reads and the copy
             *admin.notes_router.routes,
+            *admin.discard_router.routes,
         ]
         if not r.path.startswith(prefixes)
         for m in r.methods - {"HEAD", "OPTIONS"}

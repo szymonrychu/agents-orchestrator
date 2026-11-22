@@ -8,7 +8,9 @@ One gate covers `router`: `require_superleader` (the leader of a session with
 its own slug (`require_session_reader`).
 `reader_router` carries `require_reader` (a superleader): the
 reads and the backup copy. `notes_router` holds the room notes
-update with `require_notes_writer` (decision 775). Every admitted call is audited without values
+update with `require_notes_writer` (decision 775). `discard_router` holds the session discard
+with `require_discarder` (any session's leader; the handler scopes a regular leader, decision
+942). Every admitted call is audited without values
 or bodies (D15): one log line and one `events` row the UI feed shows.
 """
 
@@ -131,6 +133,18 @@ async def require_session_reader(
     return await require_session_editor(request, agent, pool, slug)
 
 
+async def require_discarder(request: Request, agent: Caller, pool: Pool) -> sessions_repo.Session:
+    """DELETE /sessions/{slug}: the leader of any session (else 403 not_leader). A superleader
+    discards any session it may manage; any other leader only an idle or finished session of
+    its projects (decision 942, `discard_session`)."""
+    async with pool.connection() as conn:
+        session = await sessions_repo.get(conn, agent.session_id)
+        assert session is not None
+        if not await _leads(conn, agent, session):
+            raise ApiError(403, "not_leader", "only the session's leader may discard a session")
+    return _admit(request, agent, session)
+
+
 async def require_notes_writer(
     request: Request, agent: Caller, pool: Pool, room_id: str
 ) -> sessions_repo.Session:
@@ -144,6 +158,7 @@ SessionEditor = Depends(require_session_editor)
 SessionReader = Depends(require_session_reader)
 Reader = Depends(require_reader)
 NotesWriter = Depends(require_notes_writer)
+Discarder = Depends(require_discarder)
 
 
 def caller_of(request: Request):
@@ -271,6 +286,10 @@ reader_router = APIRouter(
 )
 # The room notes update carries the notes writer gate on its route (it reads `room_id`).
 notes_router = APIRouter(prefix=ADMIN_PREFIX, tags=["admin"], route_class=AdminRoute)
+# The session discard: a superleader, or a leader within its projects (decision 942).
+discard_router = APIRouter(
+    prefix=ADMIN_PREFIX, tags=["admin"], route_class=AdminRoute, dependencies=[Discarder]
+)
 
 
 def own_session(what: str) -> ApiError:
@@ -649,15 +668,48 @@ async def create_session(
     )
 
 
-@router.delete("/sessions/{slug}", status_code=202, response_model=schemas.SessionView)
+def _discard_forbidden(reason: str, message: str) -> ApiError:
+    return ApiError(403, "discard_forbidden", message, extra={"reason": reason})
+
+
+async def _leader_discard(
+    conn, slug: str, caller: sessions_repo.Session, settings: Settings
+) -> schemas.SessionView:
+    """A regular leader's discard (decision 942), checked and flipped under the target's row
+    lock: the target is in the caller's projects (home or extra, read live; an unknown slug
+    answers alike), not a superleader session, not the caller's own, and runs no work (no turn,
+    no queued message, no running init). Else 403 `discard_forbidden` with a `reason`."""
+    async with conn.transaction():
+        target = await sessions_repo.get_by_slug(conn, slug, lock=True)
+        if target is None or set(target.projects).isdisjoint(caller.projects):
+            raise _discard_forbidden(
+                "outside_scope", f"session {slug} is not in the projects of the caller's session"
+            )
+        if target.spec.session_messaging:
+            raise _discard_forbidden("superleader", "a superleader session is not discarded here")
+        if target.id == caller.id:
+            raise _discard_forbidden("own_session", "a session cannot discard itself")
+        if await sessions_repo.has_work(conn, target.id):
+            raise _discard_forbidden(
+                "busy", f"session {slug} is running a turn or holds queued work"
+            )
+        return await sessions_api.discard(conn, target.id, settings, by=f"session {caller.slug}")
+
+
+@discard_router.delete("/sessions/{slug}", status_code=202, response_model=schemas.SessionView)
 async def discard_session(
     slug: str, request: Request, pool: Pool, settings: Cfg, force: sessions_api.Force = False
 ) -> schemas.SessionView:
-    """`?force=true` abandons the target's owed pre-discard hooks, also when it is already
-    deleting (a discard stuck on a hook receiver that is down)."""
+    """A superleader discards any session it may manage (`_writable_target`); `?force=true`
+    abandons the target's owed pre-discard hooks, also when it is already deleting (a discard
+    stuck on a hook receiver that is down). Any other leader discards an idle or finished
+    session of its projects (`_leader_discard`), without `force`."""
     _, caller = caller_of(request)
-    force = sessions_api.force_flag(request)
+    superleader = bool(caller.spec.session_messaging)
+    force = sessions_api.force_flag(request, allowed=superleader)
     async with pool.connection() as conn:
+        if not superleader:
+            return await _leader_discard(conn, slug, caller, settings)
         target = await _writable_target(conn, slug, caller)
         if target.id == caller.id:
             raise ApiError(422, "own_session", "a session cannot discard itself")

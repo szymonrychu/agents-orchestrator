@@ -12,9 +12,10 @@ own commit:
    fingerprint differs from the current revision's become `stale` (also the ones a review's SKIP
    LOCKED pass left unmarked);
 3. target_gone: active preset (and preset grant) proposals whose preset is deleted or no longer
-   manageable, active manageable requests whose preset is deleted (their preset is unmanageable
-   by design, S-66), and active session (and session grant) proposals whose session is purged or
-   being deleted.
+   manageable (a regular leader's preset proposal: no longer in the live proposer session's
+   projects, decision 941), active manageable requests whose preset is deleted (their preset is
+   unmanageable by design, S-66), and active session (and session grant) proposals whose session
+   is purged or being deleted.
 
 Each proposal is handled under `FOR UPDATE SKIP LOCKED`: a proposal a review (or revise,
 withdraw) holds is left to it and seen again next pass. Every transition is status-guarded and
@@ -84,8 +85,8 @@ async def _expire(pool: AsyncConnectionPool) -> None:
 
 async def _live(conn: AsyncConnection, p: repo.Proposal) -> str | None:
     """The live fingerprint of the preset or session a proposal targets; None when the preset is
-    deleted or no longer superleader-manageable (a manageable request: only deleted), or the
-    session purged or being deleted."""
+    deleted or no longer superleader-manageable (a regular leader's: outside its projects; a
+    manageable request: only deleted), or the session purged or being deleted."""
     if p.kind in proposals.PROJECT_KINDS:
         return await proposals.live_projects_fingerprint(conn, p.kind, p.target_id)
     if p.kind == proposals.MANAGEABLE_KIND:
@@ -100,7 +101,12 @@ async def _live(conn: AsyncConnection, p: repo.Proposal) -> str | None:
             else proposals.fingerprint_session(found[1], found[0].secret_versions)
         )
     preset = await presets_repo.get(conn, uuid.UUID(p.target_id))
-    if preset is None or not preset.superleader_manageable:
+    if preset is None:
+        return None
+    if p.proposer_superleader:
+        if not preset.superleader_manageable:
+            return None
+    elif not await proposals.in_proposer_scope(conn, p.proposer_session, preset):
         return None
     return proposals.fingerprint_preset(preset)
 

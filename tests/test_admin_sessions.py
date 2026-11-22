@@ -6,7 +6,7 @@ import secrets as stdlib_secrets
 import uuid
 
 import pytest
-from factories import attach_preset
+from factories import attach_preset, insert_message, set_agent_status, two_project_fixture
 from fakes.fake_kube import FakeKube
 from psycopg.rows import dict_row
 from test_agent_session_messaging import alone
@@ -311,3 +311,56 @@ async def test_admin_create_with_project(call, main):
     assert r.json()["project"] == "default"
     r = await call("POST", S, json={"preset_id": shown["id"], "slug": "child-r", "project": "nope"})
     assert_error(r, 422, "unknown_project")
+
+
+async def _agent_of(pool, session_id) -> uuid.UUID:
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT id FROM agents WHERE session_id = %s AND ordinal = 0", (session_id,)
+        )
+        (agent_id,) = await cur.fetchone()
+    return agent_id
+
+
+@pytest.mark.parametrize(
+    ("case", "target", "reason"),
+    [
+        ("idle", "A2", None),
+        ("finished", "A2", None),
+        ("granted_idle", "B1", None),
+        ("busy_turn", "A2", "busy"),
+        ("busy_queued", "A2", "busy"),
+        ("superleader", "S", "superleader"),
+        ("own", "A1", "own_session"),
+        ("outside", "B1", "outside_scope"),
+    ],
+)
+async def test_leader_discard(app, pool, case, target, reason):
+    """Decision 942: a leader discards an idle or finished session of its projects (home or
+    granted); a busy session, a superleader session, its own and one outside its projects are
+    refused 403 discard_forbidden with the reason, and nothing changes."""
+    seats = await two_project_fixture(pool)
+    a1, victim = seats["A1"], seats[target]
+    agent_id = await _agent_of(pool, victim.id)
+    if case == "finished":
+        async with pool.connection() as conn:
+            await conn.execute("UPDATE agents SET gone_at = now() WHERE id = %s", (agent_id,))
+    elif case == "granted_idle":
+        async with pool.connection() as conn:
+            await conn.execute("UPDATE sessions SET extra_projects = '{b}' WHERE id = %s", (a1.id,))
+    elif case == "busy_turn":
+        await set_agent_status(pool, agent_id, state="busy", current_turn_id="t-1")
+    elif case == "busy_queued":
+        await insert_message(pool, victim.id)
+    async with client_for(app, a1.ip) as http:
+        r = await http.delete(f"{S}/{victim.slug}", headers=headers(a1.id))
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT desired FROM sessions WHERE id = %s", (victim.id,))
+        (desired,) = await cur.fetchone()
+    if reason is None:
+        assert r.status_code == 202, r.text
+        assert desired == "deleting"
+    else:
+        assert_error(r, 403, "discard_forbidden")
+        assert r.json()["error"]["reason"] == reason
+        assert desired == "active"

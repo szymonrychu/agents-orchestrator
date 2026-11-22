@@ -6,7 +6,10 @@ project grants `kind: "session_projects"` and `kind: "preset_projects"` (T-120: 
 `projects.<slug>` per granted project, filed by `project_grant_routes`, never revised) and the
 manageable request `kind: "preset_manageable"` (S-66: one item `superleader_manageable` false to
 true on a preset the superleader may only read, filed by `project_grant_routes`, never revised); the
-routes and gates live in `proposal_routes`. A proposal never runs the agent guards (human-only,
+routes and gates live in `proposal_routes`. A regular leader files `kind: "session"` on its own
+session and `kind: "preset"` on a preset of its projects (decision 941: the preset's home or
+extra projects overlap the caller session's, read live; else 403 `project_forbidden`), where a
+superleader files on presets it may manage. A proposal never runs the agent guards (human-only,
 privileged): it may carry any path, security, grant or not, for a human to decide; only `review`
 (a human) writes the target.
 
@@ -200,13 +203,52 @@ def _at(spec: Mapping[str, Any], path: str) -> Any:
     return value.get(sub) if isinstance(value, dict) else None
 
 
-async def _locked(conn, preset_id: uuid.UUID, *, hidden_as: str = "preset") -> presets_repo.Preset:
+def in_projects(preset: presets_repo.Preset, projects: Sequence[str]) -> bool:
+    """The preset's home or extra projects overlap `projects`."""
+    return not {preset.project, *preset.extra_projects}.isdisjoint(projects)
+
+
+def _project_forbidden(ref: str) -> ApiError:
+    return ApiError(
+        403, "project_forbidden", f"preset {ref} is not in the projects of the caller's session"
+    )
+
+
+async def in_proposer_scope(conn, proposer: uuid.UUID, preset: presets_repo.Preset) -> bool:
+    """A regular leader's preset proposal stays in scope while the preset is in the proposer
+    session's projects, or once that session is gone (the human still reviews it)."""
+    session = await sessions_repo.get(conn, proposer)
+    return session is None or in_projects(preset, session.projects)
+
+
+async def _scoped_preset(conn, ref: str, projects: Sequence[str]) -> presets_repo.Preset:
+    """A preset by id or name in `projects`; unknown answers like outside (403, no existence
+    leak)."""
+    try:
+        preset = await admin.readable_preset(conn, ref)
+    except ApiError:
+        raise _project_forbidden(ref) from None
+    if not in_projects(preset, projects):
+        raise _project_forbidden(ref)
+    return preset
+
+
+async def _locked(
+    conn,
+    preset_id: uuid.UUID,
+    *,
+    hidden_as: str = "preset",
+    projects: Sequence[str] | None = None,
+) -> presets_repo.Preset:
     """The target preset under a share lock (it cannot change until the commit); one deleted or
     one the superleader may not manage is as missing as an unknown (`hidden_as` names what the
-    404 says is missing)."""
+    404 says is missing). With `projects` (a regular leader), the preset must be in them instead
+    of manageable (403 `project_forbidden`)."""
     preset = await presets_repo.get_for_share(conn, preset_id)
-    if preset is None or not preset.superleader_manageable:
+    if preset is None or (projects is None and not preset.superleader_manageable):
         raise not_found(hidden_as)
+    if projects is not None and not in_projects(preset, projects):
+        raise _project_forbidden(preset.name)
     return preset
 
 
@@ -311,11 +353,14 @@ async def _based(
     caller: Session,
     *,
     hidden_as: str,
+    superleader: bool,
 ) -> tuple[str, _Plan]:
     """A preset (under its row lock) or session (a plain read) target read now and the
-    revision planned against it: the target's display name and the plan."""
+    revision planned against it: the target's display name and the plan. A regular leader's
+    preset must be in its projects, read now."""
     if kind == "preset":
-        preset = await _locked(conn, target_id, hidden_as=hidden_as)
+        projects = None if superleader else caller.projects
+        preset = await _locked(conn, target_id, hidden_as=hidden_as, projects=projects)
         return preset.name, await _plan(request, conn, settings, preset, body.patch)
     session, stored = await _visible_session(conn, target_id, caller, hidden_as=hidden_as)
     return session.slug, await _session_plan(settings, session, stored, body.patch)
@@ -363,12 +408,15 @@ async def _insert(
     )
 
 
-def _own_session_only(superleader: bool, kind: str, own: bool) -> None:
-    """A regular leader proposes for its own session only (plan 3.3): any other target, unknown
-    and hidden ones included, answers this one body before any lookup (no existence leak)."""
-    if not superleader and not (kind == "session" and own):
+def _leader_kinds(superleader: bool, kind: str, own: bool) -> None:
+    """A regular leader proposes for its own session (plan 3.3) or a preset of its projects
+    (decision 941): any other session or kind, unknown and hidden ones included, answers this
+    one body before any lookup (no existence leak)."""
+    if not superleader and kind != "preset" and not (kind == "session" and own):
         raise ApiError(
-            403, "not_superleader", "a regular session's leader proposes for its own session only"
+            403,
+            "not_superleader",
+            "a regular session's leader proposes for its own session or a preset of its projects",
         )
 
 
@@ -383,7 +431,7 @@ async def create(
 ) -> tuple[schemas.ProposalView, bool]:
     """File a proposal; the bool is False on a `client_key` replay."""
     _idle(conn)
-    _own_session_only(superleader, body.kind, body.target == caller.slug)
+    _leader_kinds(superleader, body.kind, body.target == caller.slug)
     if body.client_key is not None:
         async with conn.transaction():
             first = await repo.by_client_key(conn, caller.id, body.client_key)
@@ -396,12 +444,22 @@ async def create(
     async with conn.transaction():
         if body.kind == "session":
             target_id = (await admin._writable_target(conn, body.target, caller)).id
-        else:
+        elif superleader:
             target_id = (await admin.writable_preset(conn, body.target)).id
+        else:
+            target_id = (await _scoped_preset(conn, body.target, caller.projects)).id
     try:
         async with conn.transaction():
             name, plan = await _based(
-                request, conn, settings, body.kind, target_id, body, caller, hidden_as=body.kind
+                request,
+                conn,
+                settings,
+                body.kind,
+                target_id,
+                body,
+                caller,
+                hidden_as=body.kind,
+                superleader=superleader,
             )
             proposal_id = await _insert(
                 conn, settings, body, caller, superleader, str(target_id), name, plan
@@ -601,11 +659,8 @@ async def revise(
         current = await repo.lock(conn, proposal_id)
         if current is None or current.proposer_session != caller.id:
             raise not_found("proposal")
-        _own_session_only(
-            bool(caller.spec.session_messaging),
-            current.kind,
-            current.target_id == str(caller.id),
-        )
+        superleader = bool(caller.spec.session_messaging)
+        _leader_kinds(superleader, current.kind, current.target_id == str(caller.id))
         if current.kind in PROJECT_KINDS:
             raise ApiError(
                 422,
@@ -642,6 +697,7 @@ async def revise(
                 body,
                 caller,
                 hidden_as="proposal",
+                superleader=superleader,
             )
         previous = current.revisions[0]  # `lock` loads the current revision only
         await repo.add_revision(
@@ -727,10 +783,14 @@ async def get_view(
     *,
     proposer: uuid.UUID | None,
     visible_only: bool = False,
+    projects: Sequence[str] | None = None,
 ) -> schemas.ProposalView:
     """One proposal with every revision; with `proposer`, only that session's, and with
-    `visible_only`, only on a target the proposer may still see (else 404)."""
-    found = await repo.get(conn, proposal_id, proposer, visible_only=visible_only)
+    `visible_only`, only on a target the proposer may still see (else 404); with `projects`,
+    also any preset proposal on a preset of those projects."""
+    found = await repo.get(
+        conn, proposal_id, proposer, visible_only=visible_only, projects=projects
+    )
     if found is None:
         raise not_found("proposal")
     return await _view(conn, found)
@@ -744,13 +804,20 @@ async def list_views(
     status: str,
     limit: int,
     visible_only: bool = False,
+    projects: Sequence[str] | None = None,
 ) -> list[schemas.ProposalView]:
-    """Newest first, the current revision only; `status` is active, open, closed or all."""
+    """Newest first, the current revision only; `status` is active, open, closed or all. With
+    `projects`, also every preset proposal on a preset of those projects."""
     statuses = STATUSES.get(status)
     if statuses is None:
         raise ApiError(422, "invalid_request", f"status must be one of: {', '.join(STATUSES)}")
     found = await repo.list_for(
-        conn, proposer_session=proposer, statuses=statuses, limit=limit, visible_only=visible_only
+        conn,
+        proposer_session=proposer,
+        statuses=statuses,
+        limit=limit,
+        visible_only=visible_only,
+        projects=projects,
     )
     return [await _view(conn, p) for p in found]
 

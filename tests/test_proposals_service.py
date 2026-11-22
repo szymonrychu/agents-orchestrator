@@ -286,10 +286,23 @@ async def test_kind_session_on_an_unknown_session_is_404(pool, kube, settings, b
     _error(exc, 404, "not_found")
 
 
-async def test_a_non_superleader_create_is_403(pool, kube, settings, boss, preset):
+async def move_preset(pool, preset_id, project: str = "elsewhere") -> None:
+    """Put the preset in another project, outside a default-project leader's (decision 941)."""
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO projects (slug, name) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+            (project, project),
+        )
+        await conn.execute("UPDATE presets SET project = %s WHERE id = %s", (project, preset_id))
+
+
+async def test_a_non_superleader_create_outside_its_projects_is_403(
+    pool, kube, settings, boss, preset
+):
+    await move_preset(pool, preset.id)
     with pytest.raises(ApiError) as exc:
         await _create(pool, kube, settings, boss, superleader=False, patch={"replicas": 2})
-    _error(exc, 403, "not_superleader")
+    _error(exc, 403, "project_forbidden")
     assert await _rows(pool, "SELECT id FROM change_proposals") == []
 
 

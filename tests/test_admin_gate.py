@@ -2,7 +2,9 @@
 superleader gate, or for the two session spec routes (GET and PATCH /sessions/{slug}) the
 session editor gate, which admits a superleader on any slug and any other session's leader on
 its own slug only; the proposal routes carry the proposer gate, which admits a superleader and
-any other session's leader (the handlers keep a regular leader on its own session)."""
+any other session's leader (the handlers keep a regular leader on its own session); the session
+discard carries the discarder gate, which admits any session's leader (the handler keeps a
+regular leader on idle or finished sessions of its projects, decision 942)."""
 
 from __future__ import annotations
 
@@ -16,6 +18,7 @@ from test_api_sessions import assert_error
 from agents_orchestrator.api import admin, admin_backups, admin_specs, proposal_routes  # noqa: F401
 from agents_orchestrator.api.admin import (
     ADMIN_PREFIX,
+    require_discarder,
     require_notes_writer,
     require_reader,
     require_session_editor,
@@ -35,6 +38,7 @@ GATES = {
     # the reader reads and the backup copy, and the room notes update
     id(admin.reader_router): require_reader,
     id(admin.notes_router): require_notes_writer,
+    id(admin.discard_router): require_discarder,
 }
 ROUTERS = (
     admin.router,
@@ -42,6 +46,7 @@ ROUTERS = (
     proposal_routes.proposal_router,
     admin.reader_router,
     admin.notes_router,
+    admin.discard_router,
 )
 # GET /sessions/{slug} carries the session reader gate
 SESSION_READER_ROUTES = {("GET", f"{ADMIN_PREFIX}/sessions/{{slug}}")}
@@ -161,6 +166,12 @@ async def test_gate_table_over_all_admin_routes(pool, dsn):
                 async with client_for(app, member.member_ip) as http:
                     r = await http.request(method, path, json={}, headers=headers(member.id))
                 assert_error(r, 403, "not_leader")
+            elif router is admin.discard_router:
+                # the gate admits the leader; the handler refuses a slug outside its projects
+                assert_error(non_super, 403, "discard_forbidden")
+                async with client_for(app, member.member_ip) as http:
+                    r = await http.request(method, path, json={}, headers=headers(member.id))
+                assert_error(r, 403, "not_leader")
             else:
                 assert_error(non_super, 403, "not_superleader")
             async with client_for(app, trigger.leader_ip) as http:
@@ -203,7 +214,7 @@ async def test_flag_does_not_bypass_gate(pool, dsn):
 @pytest.mark.parametrize(
     "router",
     ROUTERS,
-    ids=["superleader", "session_editor", "proposer", "reader", "notes_writer"],
+    ids=["superleader", "session_editor", "proposer", "reader", "notes_writer", "discarder"],
 )
 async def test_superleader_member_pod_refused(pool, dsn, router):
     """Decision 919: a member pod of a superleader hive is not a superleader; every admin gate

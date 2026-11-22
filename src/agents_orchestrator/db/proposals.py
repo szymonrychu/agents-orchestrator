@@ -356,15 +356,24 @@ async def lock(
     return found[0] if found else None
 
 
+_PRESET_PROJECTS = "(ARRAY[pr.project] || pr.extra_projects)"
+
 # The one visibility rule: a proposal is hidden from its proposer when its target exists and the
 # proposer may no longer manage it: a preset that is not superleader-manageable, or another
-# session whose preset is not (or that has none), as `admin._target` decides. A project grant
+# session whose preset is not (or that has none), as `admin._target` decides. A preset proposal
+# a regular leader filed (decision 941) is hidden instead while the proposer session lives and
+# the preset is outside its projects (home or extra, read live). A project grant
 # (T-120) follows the rule of its target. A `preset_manageable` proposal (S-66) is never hidden:
 # it targets an unmanageable preset by design. A deleted target
 # stays visible as target_gone; the proposer's own session is never hidden.
 VISIBLE_SQL = (
-    "NOT (kind IN ('preset', 'preset_projects') AND EXISTS (SELECT 1 FROM presets pr"
+    "NOT (kind = 'preset_projects' AND EXISTS (SELECT 1 FROM presets pr"
     " WHERE pr.id::text = change_proposals.target_id AND NOT pr.superleader_manageable))"
+    " AND NOT (kind = 'preset' AND EXISTS (SELECT 1 FROM presets pr"
+    " WHERE pr.id::text = change_proposals.target_id AND CASE WHEN proposer_superleader"
+    " THEN NOT pr.superleader_manageable ELSE EXISTS (SELECT 1 FROM sessions ps"
+    " WHERE ps.id = change_proposals.proposer_session"
+    f" AND NOT ((ARRAY[ps.project] || ps.extra_projects) && {_PRESET_PROJECTS})) END))"
     " AND NOT (kind IN ('session', 'session_projects')"
     " AND change_proposals.target_id <> proposer_session::text"
     " AND EXISTS (SELECT 1 FROM sessions s LEFT JOIN presets pr ON pr.id = s.preset_id"
@@ -373,21 +382,43 @@ VISIBLE_SQL = (
 )
 
 
+# Who sees a proposal: the proposer filter (none: everyone's) with the visibility rule when
+# asked, or (with `projects`, a regular leader's reads, decision 941) any preset proposal on a
+# preset of those projects.
+_SEEN_SQL = (
+    "(((%(proposer)s::uuid IS NULL OR proposer_session = %(proposer)s)"
+    f" AND (NOT %(visible)s OR {VISIBLE_SQL}))"
+    " OR (kind = 'preset' AND EXISTS (SELECT 1 FROM presets pr"
+    " WHERE pr.id::text = change_proposals.target_id"
+    f" AND {_PRESET_PROJECTS} && %(projects)s::text[])))"
+)
+
+
+def _seen(
+    proposer_session: uuid.UUID | None, visible_only: bool, projects: Sequence[str] | None
+) -> dict[str, Any]:
+    return {
+        "proposer": proposer_session,
+        "visible": visible_only,
+        "projects": list(projects) if projects is not None else None,
+    }
+
+
 async def get(
     conn: psycopg.AsyncConnection,
     proposal_id: int,
     proposer_session: uuid.UUID | None = None,
     *,
     visible_only: bool = False,
+    projects: Sequence[str] | None = None,
 ) -> Proposal | None:
     """The proposal with its whole revision history; with proposer_session, only that one's;
-    with visible_only, none when its target is hidden (`VISIBLE_SQL`)."""
+    with visible_only, none when its target is hidden (`VISIBLE_SQL`); with projects, also a
+    preset proposal on a preset of those projects."""
     rows = await _all(
         conn,
-        f"SELECT {_COLS} FROM change_proposals WHERE id = %s"
-        " AND (%s::uuid IS NULL OR proposer_session = %s)"
-        f" AND (NOT %s OR {VISIBLE_SQL})",
-        (proposal_id, proposer_session, proposer_session, visible_only),
+        f"SELECT {_COLS} FROM change_proposals WHERE id = %(id)s AND {_SEEN_SQL}",
+        {"id": proposal_id, **_seen(proposer_session, visible_only, projects)},
     )
     found = await _load(conn, rows, current_only=False)
     return found[0] if found else None
@@ -400,15 +431,20 @@ async def list_for(
     statuses: Sequence[str],
     limit: int,
     visible_only: bool = False,
+    projects: Sequence[str] | None = None,
 ) -> list[Proposal]:
     """Newest first, in `statuses`, of one proposer or (None) of everyone; current revision only.
-    With visible_only, proposals on a hidden target (`VISIBLE_SQL`) are excluded before LIMIT."""
+    With visible_only, proposals on a hidden target (`VISIBLE_SQL`) are excluded before LIMIT;
+    with projects, preset proposals on presets of those projects are added."""
     rows = await _all(
         conn,
-        f"SELECT {_COLS} FROM change_proposals WHERE status = ANY(%s)"
-        " AND (%s::uuid IS NULL OR proposer_session = %s)"
-        f" AND (NOT %s OR {VISIBLE_SQL}) ORDER BY id DESC LIMIT %s",
-        (list(statuses), proposer_session, proposer_session, visible_only, limit),
+        f"SELECT {_COLS} FROM change_proposals WHERE status = ANY(%(statuses)s)"
+        f" AND {_SEEN_SQL} ORDER BY id DESC LIMIT %(limit)s",
+        {
+            "statuses": list(statuses),
+            "limit": limit,
+            **_seen(proposer_session, visible_only, projects),
+        },
     )
     return await _load(conn, rows, current_only=True)
 
