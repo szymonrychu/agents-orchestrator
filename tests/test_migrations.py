@@ -1506,6 +1506,7 @@ def test_session_close_columns_apply_after_a_database_already_at_0027(empty_dsn,
         "0055_",
         "0057_",
         "0059_",
+        "0060_",
     )
     for path in MIGRATIONS_DIR.glob("*.sql"):
         if not path.name.startswith(skipped):
@@ -2130,7 +2131,7 @@ def test_0041_applies_after_a_database_that_already_holds_0042(empty_dsn, tmp_pa
     for f in MIGRATIONS_DIR.glob("*.sql"):
         if not f.name.startswith("0041_"):
             shutil.copy(f, tmp_path / f.name)
-    assert run_migrations(empty_dsn, tmp_path)[-7:] == [
+    assert run_migrations(empty_dsn, tmp_path)[-8:] == [
         "0053", "0054", "0055", "0056", "0057", "0058", "0059", "0060",
     ]  # fmt: skip
     assert run_migrations(empty_dsn) == ["0041"]
