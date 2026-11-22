@@ -131,3 +131,46 @@ async def test_fanout_rows_not_in_count_sent_by_or_between(pool):
         )
         assert await queue.count_sent_by(conn, sender["id"], 60) == 1
         assert await queue.count_between(conn, sender["id"], r1["id"], 3600) == 1
+
+
+async def test_agent_channel_rows_are_not_session_messages(pool):
+    from agents_orchestrator.db import leader_state
+
+    a, b = await insert_session(pool), await insert_session(pool)
+    async with pool.connection() as conn:
+        first = await queue.enqueue_message(
+            conn, b["id"], "s", sender_session_id=a["id"], sender_slug="a"
+        )
+        await queue.enqueue_message(
+            conn,
+            b["id"],
+            "x",
+            sender_session_id=a["id"],
+            sender_slug="a",
+            channel="agent",
+            notify="idle",
+            envelope_ref="e1",
+        )
+        assert await queue.count_queued_session_messages(conn, b["id"]) == 1
+        assert await queue.count_sent_by(conn, a["id"], 60) == 1
+        assert await queue.count_between(conn, a["id"], b["id"], 60) == 1
+        state = await leader_state.collect(conn, b["id"])
+    assert [m.id for m in state.messages] == [first]
+
+
+async def test_turn_hop_for_reads_a_given_past_turn(pool):
+    from factories import insert_agent, set_agent_status
+
+    a, b = await insert_session(pool), await insert_session(pool)
+    agent = await insert_agent(pool, b["id"])
+    async with pool.connection() as conn:
+        for turn, hop in (("t1", 3), ("t2", 5)):
+            mid = await queue.enqueue_message(
+                conn, b["id"], "m", sender_session_id=a["id"], sender_slug="a", hop=hop
+            )
+            await conn.execute("UPDATE messages SET turn_id = %s WHERE id = %s", (turn, mid))
+    await set_agent_status(pool, agent["id"], current_turn_id="t2")
+    async with pool.connection() as conn:
+        assert await queue.turn_hop_for(conn, agent["id"], "t1") == 3
+        assert await queue.turn_hop_for(conn, agent["id"], "nope") == 0
+        assert await queue.turn_hop(conn, agent["id"]) == 5

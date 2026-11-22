@@ -32,7 +32,7 @@ HIVE_TOOLS = [
     "lock_list",
     "lock_reassign",
 ]
-SESSION_TOOLS = ["sessions_list", "session_send"]
+SESSION_TOOLS = ["sessions_list"]
 INIT_SCRIPTS_TOOLS = ["init_scripts_get", "init_scripts_edit"]
 CHAT_TOOLS = [
     "chat_rooms", "chat_history", "chat_attachment_fetch", "chat_attachment_status",
@@ -74,9 +74,9 @@ PLAN_TOOLS = [
     "plan_step_deps", "plan_steps_order", "plan_step_next", "plan_step_update", "plan_gate",
     "spec_section", "plan_steps_push", "plan_export", "plan_questions_ask",
 ]  # fmt: skip
-# Project room tools (T-117): every session can post to and read its project room; the routes
-# themselves answer 403 not_leader to a worker.
-PROJECT_CHAT_TOOLS = ["project_chat_send", "project_chat_read"]
+# Project room tools (T-117): every session can read its project room (it posts with
+# <project-post>); the route answers 403 not_leader to a worker.
+PROJECT_CHAT_TOOLS = ["project_chat_read"]
 # Mindmap tools (research-mindmaps): the plugin's mindmap module registers them statically; they
 # reach a session only when the orchestrator has a mindmap upstream (`settings.mindmap_available`).
 MINDMAP_TOOLS = [

@@ -250,6 +250,12 @@ async def test_relay_refusal_files_not_relayable_is_refused(pool, dsn):
     assert (await _rows(pool))[0][1:3] == ("refused", "files_not_relayable")
 
 
+async def _ids(pool):
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT id FROM envelope_outbox ORDER BY id")
+        return [r[0] for r in await cur.fetchall()]
+
+
 async def _refused_messages(pool, session_id):
     async with pool.connection() as conn:
         cur = await conn.execute(
@@ -267,11 +273,15 @@ async def test_refusal_after_turn_ended_tells_the_agent_session(pool, dsn):
     await _insert(pool, _row(s, a, 3, turn_id="t1"))
     err = {"error": {"code": "room_not_allowed", "message": "no"}}
     await _worker(pool, dsn, Upstream(httpx.Response(403, json=err))).drain()
-    msgs = await _refused_messages(pool, s["id"])
-    assert len(msgs) == 1
-    text, target, sender = msgs[0]
-    assert "envelope 3" in text and "room_not_allowed" in text
-    assert target == a["id"] and sender is None
+    rid = (await _ids(pool))[0]
+    assert await _refused_messages(pool, s["id"]) == [
+        (
+            f'<message-in channel="notice" from="{s["slug"]}" for="a{rid}" status="refused"'
+            ' reason="room_not_allowed"/>\n',
+            a["id"],
+            None,
+        )
+    ]
 
 
 async def test_refusal_during_the_running_turn_is_left_to_the_stop_hook(pool, dsn):
@@ -299,7 +309,8 @@ async def test_refusal_after_allowed_stop_before_turn_completed_tells_the_sessio
     err = {"error": {"code": "room_not_allowed", "message": "no"}}
     await _worker(pool, dsn, Upstream(httpx.Response(403, json=err))).drain()
     msgs = await _refused_messages(pool, s["id"])
-    assert len(msgs) == 1 and "envelope 2" in msgs[0][0]
+    rid = (await _ids(pool))[0]
+    assert len(msgs) == 1 and f'for="a{rid}" status="refused"' in msgs[0][0]
 
 
 async def test_refusal_and_session_message_are_one_transaction(pool, dsn, monkeypatch):
@@ -376,3 +387,125 @@ async def test_drain_sweeps_stale_sending_on_every_pass(pool, dsn):
     assert await w.drain()  # aged past 60 s: swept, the next row goes out
     assert [r[1] for r in await _rows(pool)] == ["failed", "accepted"]
     assert len(up.calls) == 1
+
+
+# ------------------------------------------------------------------ hive kinds (S-71)
+
+
+def _plain_settings(dsn: str, **kw: Any) -> Settings:
+    """No chat upstream: hive kinds settle anyway."""
+    return Settings(database_url=dsn, master_key=MASTER_KEY, **kw)
+
+
+async def _hive_worker(pool, dsn):
+    return EnvelopeRelay(pool, _plain_settings(dsn), httpx.AsyncClient(), clock=Clock())
+
+
+async def _messages(pool, session_id):
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT id, text, sender_session_id, hop, lane, envelope_ref, project_post_id"
+            " FROM messages WHERE session_id = %s ORDER BY id",
+            (session_id,),
+        )
+        return await cur.fetchall()
+
+
+async def test_ingester_relay_settles_session_envelope_without_chat(pool, dsn):
+    from agents_orchestrator.ingester import Ingester
+
+    s, a = await _seed(pool)
+    target = await insert_session(pool)
+    await _insert(
+        pool, _row(s, a, 1, kind="session", target=target["slug"], body="hi", lane="idle")
+    )
+    ing = Ingester(pool, _plain_settings(dsn, ingest_refresh_seconds=0.05))
+    stop = asyncio.Event()
+    task = asyncio.create_task(ing.run(stop))
+    for _ in range(100):
+        if (await _rows(pool))[0][1] == "accepted":
+            break
+        await asyncio.sleep(0.05)
+    stop.set()
+    await asyncio.wait_for(task, 5)
+    rid = (await _ids(pool))[0]
+    [msg] = await _messages(pool, target["id"])
+    assert msg[1:] == ("hi", s["id"], 1, "idle", f"a{rid}", None)
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT status, message_id FROM envelope_outbox")
+        assert await cur.fetchall() == [("accepted", msg[0])]
+
+
+async def test_project_post_becomes_a_room_post(pool, dsn):
+    async with pool.connection() as conn:
+        await conn.execute("INSERT INTO projects (slug, name) VALUES ('a', 'A')")
+    s = await insert_session(pool, project="a")
+    a = await insert_agent(pool, s["id"])
+    peer = await insert_session(pool, project="a")
+    await _insert(pool, _row(s, a, 1, kind="project_post", body="news", target=peer["slug"]))
+    assert await (await _hive_worker(pool, dsn)).drain()
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT id, project, text, sender_session_id FROM project_posts")
+        [(post_id, project, text, sender)] = await cur.fetchall()
+    assert (project, text, sender) == ("a", "news", s["id"])
+    [msg] = await _messages(pool, peer["id"])
+    assert msg[6] == post_id
+    assert (await _rows(pool))[0][:4] == (1, "accepted", None, f"p{post_id}")
+
+
+async def test_refused_core_writes_no_message(pool, dsn):
+    s, a = await _seed(pool)
+    await _insert(pool, _row(s, a, 1, kind="session", target="nobody"))
+    assert await (await _hive_worker(pool, dsn)).drain()
+    assert (await _rows(pool))[0][1:3] == ("refused", "not_found")
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT count(*) FROM messages")
+        assert (await cur.fetchone())[0] == 0
+
+
+async def test_late_hop_limit_refusal_sends_a_notice_frame(pool, dsn):
+    s, a = await _seed(pool)
+    origin = await insert_session(pool)
+    target = await insert_session(pool)
+    await insert_turn(pool, a["id"], turn_id="t1", status="completed")
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE turns SET completed_at = now() WHERE turn_id = 't1'")
+        await conn.execute(
+            "INSERT INTO messages (session_id, text, status, turn_id, sender_session_id, hop)"
+            " VALUES (%s, 'in', 'sent', 't1', %s, %s)",
+            (s["id"], origin["id"], _plain_settings("x").session_message_max_hops),
+        )
+    await _insert(pool, _row(s, a, 1, kind="session", target=target["slug"], turn_id="t1"))
+    assert await (await _hive_worker(pool, dsn)).drain()
+    rid = (await _ids(pool))[0]
+    assert (await _rows(pool))[0][1:3] == ("refused", "hop_limit")
+    assert await _messages(pool, target["id"]) == []
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT text, target_agent_id, lane FROM messages WHERE sender_session_id IS NULL"
+        )
+        assert await cur.fetchall() == [
+            (
+                f'<message-in channel="notice" from="{s["slug"]}" for="a{rid}"'
+                ' status="refused" reason="hop_limit"/>\n',
+                a["id"],
+                "regular",
+            )
+        ]
+
+
+async def test_stale_row_of_an_ended_turn_sends_a_failed_notice(pool, dsn):
+    s, a = await _seed(pool)
+    await insert_turn(pool, a["id"], turn_id="t1", status="completed")
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE turns SET completed_at = now() WHERE turn_id = 't1'")
+    await _insert(pool, _row(s, a, 1, turn_id="t1"))
+    async with pool.connection() as conn:
+        await outbox.claim_next(conn, s["id"])
+        await conn.execute("UPDATE envelope_outbox SET updated_at = now() - interval '5 minutes'")
+    await (await _hive_worker(pool, dsn)).drain()
+    rid = (await _ids(pool))[0]
+    assert [m[0] for m in await _refused_messages(pool, s["id"])] == [
+        f'<message-in channel="notice" from="{s["slug"]}" for="a{rid}" status="failed"'
+        ' reason="unknown_outcome"/>\n'
+    ]

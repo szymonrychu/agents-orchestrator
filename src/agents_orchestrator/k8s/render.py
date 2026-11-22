@@ -361,7 +361,7 @@ def _lock_check_hook() -> dict[str, Any]:
 
 
 def _envelope_stop_hook() -> dict[str, Any]:
-    """Blocks a Stop once when chat envelopes of the turn were malformed or refused (S-70)."""
+    """Blocks a Stop once when envelopes of the turn were malformed or refused (S-70)."""
     return {
         "type": "webhook",
         "url": "${ORCH_AGENT_URL}/agent/v1/envelope/stop",
@@ -479,19 +479,29 @@ def _apply_wrapper(cfg: dict[str, Any], wrapper: WrapperSettings, session: Sessi
 
 
 PROJECT_ROOM_PROMPT = (
-    "Coordinate with the other hives of your project in the project room "
-    "(orchestrator_project_chat_send / orchestrator_project_chat_read): split work, announce "
-    "what you take and what you finished, ask the hive that owns something. Post only what "
-    "other hives need, never an acknowledgement. Ask a superleader only for decisions outside "
-    "the project or ones the user must make. Only the hive leader posts to and reads the "
-    "project room; members ask their leader."
+    "Coordinate with the other hives of your project in the project room (post with "
+    "<project-post>, read with orchestrator_project_chat_read): split work, announce what you "
+    "take and what you finished, ask the hive that owns something. Post only what other hives "
+    "need, never an acknowledgement. Ask a superleader only for decisions outside the project "
+    "or ones the user must make. Only the hive leader posts to and reads the project room; "
+    "members ask their leader."
 )
 SUPERLEADER_ROOM_PROMPT = (
     "Hives coordinate in project rooms without you; read them with "
     "orchestrator_project_chat_read (project required) when you need the state of a project, "
-    "and post there with an explicit project only to step in."
+    'and post there with <project-post project="..."> only to step in.'
 )
 
+HIVE_ENVELOPE_PROMPT = (
+    "You message other sessions and project rooms only with envelopes at the start of a line, "
+    "outside code fences, in your own text, the body being raw text: "
+    '<session-send to="slug" handled="1,2">text</session-send> (leader only) sends to the '
+    "leader of another session, handled marking the ids of <message-in> frames you have "
+    'dealt with; <project-post to="a,b" reply_to="p12" handled="...">text</project-post> '
+    '(leader only; a superleader adds project="...") posts to the project room. Messages '
+    'reach you as <message-in channel="..."> frames; refusals and failures of your envelopes '
+    'arrive as <message-in channel="notice" ...>.'
+)
 
 CHAT_ENVELOPE_PROMPT = (
     "You reach a chat room only with envelopes at the start of a line, outside code fences, in "
@@ -522,7 +532,7 @@ def _system_append(spec: SessionSpec, settings: Settings) -> str:
     if not settings.agent_api_url:
         return ask
     room = SUPERLEADER_ROOM_PROMPT if spec.session_messaging else PROJECT_ROOM_PROMPT
-    parts = [ask, room]
+    parts = [ask, room, HIVE_ENVELOPE_PROMPT]
     if settings.chat_available:
         parts.append(CHAT_ENVELOPE_PROMPT)
     if any(a.backup_restore for a in spec.volumes or []):
@@ -621,7 +631,7 @@ def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
     cfg["notes"] = {"enabled": True}
     if spec.hive and settings.agent_api_url:
         cfg["hooks"]["onAgentToolCall"] = [_lock_check_hook()]
-    if settings.chat_available and settings.agent_api_url:
+    if settings.agent_api_url:
         cfg["hooks"]["onStop"] = [_envelope_stop_hook()]
     if spec.peers and spec.hive:
         cfg["peers"] = {

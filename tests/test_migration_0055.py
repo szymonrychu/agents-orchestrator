@@ -41,7 +41,7 @@ def test_checks_reject_unknown_values(empty_dsn, column, value):
             _row(c, sid, **{column: value})
 
 
-@pytest.mark.parametrize("kind", ["send", "react", "notice"])
+@pytest.mark.parametrize("kind", ["send", "react", "notice", "session", "agent", "project_post"])
 @pytest.mark.parametrize(
     "status", ["queued", "sending", "accepted", "refused", "failed", "invalid"]
 )

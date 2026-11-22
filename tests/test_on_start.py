@@ -33,7 +33,7 @@ HIVE_TOOLS = [
     "lock_list",
     "lock_reassign",
 ]
-SESSION_TOOLS = ["sessions_list", "session_send"]
+SESSION_TOOLS = ["sessions_list"]
 INIT_SCRIPTS_TOOLS = ["init_scripts_get", "init_scripts_edit"]
 CHAT_TOOLS = [
     "chat_rooms",
@@ -404,7 +404,6 @@ async def test_allowed_tools_exist_in_plugin():
     """Every tool name rendered or named to agents is offered by the pinned plugin."""
     from any_mcp.testing import PluginHarness
 
-    from agents_orchestrator.dispatcher.session_frame import frame
     from agents_orchestrator.reconciler.init import render_init_sh
 
     specs = (
@@ -427,12 +426,8 @@ async def test_allowed_tools_exist_in_plugin():
             # the harness prefixes the class name; the rendered namespace is "orchestrator"
             offered |= {t["name"].removeprefix("orchestratorplugin_") for t in await h.list_tools()}
         allowed |= set(entry["allow"])
-    named = set(
-        re.findall(
-            r"orchestrator_[a-z_]+", render_init_sh("alpha", ["true"]) + frame("x", "alpha", 1)
-        )
-    )
-    assert named == {"orchestrator_init_scripts_edit", "orchestrator_session_send"}
+    named = set(re.findall(r"orchestrator_[a-z_]+", render_init_sh("alpha", ["true"])))
+    assert named == {"orchestrator_init_scripts_edit"}
     assert set(CHAT_TOOLS) <= allowed
     assert allowed | {n.removeprefix("orchestrator_") for n in named} <= offered | PLUGIN_PENDING
 
@@ -606,7 +601,7 @@ def test_alone_session_allow_is_the_literal_e2e_list():
     pending ones included (the plugin pin only filters them at load, never from the allow list)."""
     allow = on_start.orchestrator_allow(SessionSpec(replicas=1))
     assert allow == [
-        "me", "handoff_submit", "sessions_list", "session_send", "init_scripts_get",
+        "me", "handoff_submit", "sessions_list", "init_scripts_get",
         "init_scripts_edit",
         "chat_rooms",
         "chat_history", "chat_attachment_fetch", "chat_attachment_status",
@@ -621,7 +616,7 @@ def test_alone_session_allow_is_the_literal_e2e_list():
         "plan_get", "plan_set", "plan_steps", "plan_step_get", "plan_step_add", "plan_step_edit",
         "plan_step_deps", "plan_steps_order", "plan_step_next", "plan_step_update", "plan_gate",
         "spec_section", "plan_steps_push", "plan_export", "plan_questions_ask",
-        "project_chat_send", "project_chat_read",
+        "project_chat_read",
         "volumes_status", "volume_save",
         "session_get", "session_patch", "proposal_create", "proposal_revise", "proposals_list",
         "proposal_get", "proposal_withdraw", "self_close",
@@ -713,8 +708,8 @@ def test_project_create_is_superleader_only():
 )
 def test_project_chat_tools_in_every_session(fields):
     allow = on_start.orchestrator_allow(SessionSpec(**fields))
-    for name in ("project_chat_send", "project_chat_read"):
-        assert allow.count(name) == 1
+    assert allow.count("project_chat_read") == 1
+    assert "project_chat_send" not in allow and "session_send" not in allow
 
 
 # Copied from on_start.MINDMAP_TOOLS on purpose; the plugin's mindmap module
