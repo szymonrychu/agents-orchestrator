@@ -153,7 +153,9 @@ async def relay(
                 f"{CLOSING_RETRY_SECONDS} seconds",
                 retry_after=CLOSING_RETRY_SECONDS,
             )
-        hop = await session_limits.check_limits(conn, agent_id, own, occupier, settings)
+        hop = await session_limits.check_limits(
+            conn, own, occupier, settings, await session_limits.current_hop(conn, agent_id)
+        )
     payload = json.dumps({"text": prefixed, "room": room}).encode()
     status, content = await forward_core.forward_http(
         http, target, "POST", "/messages", payload, str(occupier.id), occupier.slug
