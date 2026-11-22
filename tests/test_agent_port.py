@@ -115,14 +115,20 @@ def test_main_port_unchanged():
     assert allowed.status_code == 200
 
 
-def _free_port(host: str = "127.0.0.1", family: int = socket.AF_INET) -> int:
-    with socket.socket(family) as probe:
-        probe.bind((host, 0))
-        return probe.getsockname()[1]
+def _free_ports(n: int, host: str = "127.0.0.1", family: int = socket.AF_INET) -> list[int]:
+    """n distinct free ports: all probe sockets stay open until every port is chosen."""
+    probes = [socket.socket(family) for _ in range(n)]
+    try:
+        for probe in probes:
+            probe.bind((host, 0))
+        return [probe.getsockname()[1] for probe in probes]
+    finally:
+        for probe in probes:
+            probe.close()
 
 
 def test_three_sockets_bound():
-    a, b, c = _free_port(), _free_port(), _free_port()
+    a, b, c = _free_ports(3)
     settings = Settings(http_host="127.0.0.1", http_port=a, agent_port=b, service_port=c)
     socks = cli.bind_sockets(settings)
     try:
@@ -137,14 +143,10 @@ def test_three_sockets_bound():
 def test_bind_sockets_ipv6_host():
     if not socket.has_ipv6:
         pytest.skip("no ipv6")
-    with socket.socket(socket.AF_INET6) as probe:
-        try:
-            probe.bind(("::1", 0))
-        except OSError:
-            pytest.skip("ipv6 loopback unavailable")
-        a = probe.getsockname()[1]
-    b = _free_port("::1", socket.AF_INET6)
-    c = _free_port("::1", socket.AF_INET6)
+    try:
+        a, b, c = _free_ports(3, "::1", socket.AF_INET6)
+    except OSError:
+        pytest.skip("ipv6 loopback unavailable")
     socks = cli.bind_sockets(Settings(http_host="::1", http_port=a, agent_port=b, service_port=c))
     try:
         assert all(s.family == socket.AF_INET6 for s in socks)
@@ -162,13 +164,13 @@ def test_bind_sockets_closes_first_when_second_bind_fails(monkeypatch):
             super().__init__(*args, **kwargs)
             created.append(self)
 
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        a = probe.getsockname()[1]
     with real() as holder:
         holder.bind(("127.0.0.1", 0))
         holder.listen(1)
         b = holder.getsockname()[1]
+        with real() as probe:  # bound while holder is open, so a != b
+            probe.bind(("127.0.0.1", 0))
+            a = probe.getsockname()[1]
         monkeypatch.setattr(socket, "socket", Spy)
         with pytest.raises(OSError):
             cli.bind_sockets(Settings(http_host="127.0.0.1", http_port=a, agent_port=b))

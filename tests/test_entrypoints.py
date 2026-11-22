@@ -85,15 +85,10 @@ def test_api_uvicorn_config_ignores_proxy_headers(dsn):
 
 
 def test_api_command_serves_healthz(dsn):
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        agent_port = s.getsockname()[1]
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        service_port = s.getsockname()[1]
+    with socket.socket() as s1, socket.socket() as s2, socket.socket() as s3:
+        for s in (s1, s2, s3):
+            s.bind(("127.0.0.1", 0))
+        port, agent_port, service_port = (s.getsockname()[1] for s in (s1, s2, s3))
     proc = _orch(
         "api",
         dsn=dsn,
