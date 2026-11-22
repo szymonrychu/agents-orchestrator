@@ -888,61 +888,46 @@ def memory_target(monkeypatch: pytest.MonkeyPatch) -> Target:
 
 
 async def check_chat_tools_parity(target: Target) -> None:
-    """The chat tools return what the routes return, and a member's calls are refused."""
+    """The chat tools return what the routes return, and a member's calls are refused.
+
+    The plugin offers no send, react or status tool since v0.56.0 (envelopes replace them), so
+    those routes are checked directly.
+    """
     fake = target.fake
     async with target.plugin(target.leader_ip) as h:
         rooms = await h.call("chat_rooms")
-        sent = await h.call("chat_send", {"text": "hello from the plugin", "room": DEFAULT_ROOM})
-        reacted = await h.call("chat_react", {"to": "m3", "key": "\U0001f44d"})
-        status = await h.call("chat_status", {"id": "s1"})
-        missing = await h.call("chat_status", {"id": "s99"})
         notes0 = await h.call("chat_notes_get")
     # the plugin's chat_notes_update still sends the whole-body PUT until the plugins pin moves
     # to the section release (S-79 step 7), so only the read goes through the plugin here
-    for result in (rooms, sent, reacted, status, notes0):
+    for result in (rooms, notes0):
         assert not result.is_error, result.text
     direct_rooms = await target.direct("GET", "/agent/v1/chat/rooms")
     assert rooms.structured == direct_rooms.json() == {"rooms": fake.rooms}
-    assert sent.structured == {"id": "s1", "status": "queued"}
-    assert reacted.structured == {"id": "s2", "status": "queued"}
-    body = {"text": "hello from the plugin", "room": DEFAULT_ROOM}
+    body = {"text": "hello from the relay", "room": DEFAULT_ROOM}
     direct_send = await target.direct("POST", "/agent/v1/chat/messages", json=body)
     assert direct_send.status_code == 202
-    assert direct_send.json() == {"id": "s3", "status": "queued"}
+    assert direct_send.json() == {"id": "s1", "status": "queued"}
     direct_react = await target.direct(
         "POST", "/agent/v1/chat/reactions", json={"to": "m3", "key": "\U0001f44d"}
     )
-    assert direct_react.json() == {"id": "s4", "status": "queued"}
+    assert direct_react.json() == {"id": "s2", "status": "queued"}
     direct_status = await target.direct("GET", "/agent/v1/chat/messages/s1")
-    assert status.structured == direct_status.json()
-    assert status.structured["id"] == "s1" and status.structured["kind"] == "message"
-    # an unknown id is the upstream's 404, passed through by the relay and the plugin
+    assert direct_status.json()["id"] == "s1" and direct_status.json()["kind"] == "message"
+    # an unknown id is the upstream's 404, passed through by the relay
     direct_missing = await target.direct("GET", "/agent/v1/chat/messages/s99")
     assert direct_missing.status_code == 404
-    assert missing.is_error
-    assert missing.structured["error"]["status"] == 404
-    assert missing.structured["error"]["code"] == direct_missing.json()["error"]["code"]
     # the notes read through the plugin equals the direct route answer
     direct_notes = await target.direct("GET", "/agent/v1/chat/notes")
     assert notes0.structured["body"] == "" and len(notes0.structured["sections"]) == 5
     assert {**direct_notes.json(), "sections": []} == {**notes0.structured, "sections": []}
-    # the plugin sent the same bodies as the direct calls and the same identity headers
-    plugin_calls = [c for c in fake.calls if c.method == "POST"][:2]
-    assert plugin_calls[0].json() == {"text": "hello from the plugin", "room": DEFAULT_ROOM}
-    assert plugin_calls[1].json() == {"to": "m3", "key": "\U0001f44d"}
+    # the plugin sent the same identity headers as the direct calls
     for call in fake.calls:
         assert call.headers["x-orch-session"] == str(target.session_id)
         assert call.headers["x-orch-slug"] == target.slug
     # only the leader's calls succeed
     fake.calls.clear()
     async with target.plugin(target.member_ip) as h:
-        for name, args in (
-            ("chat_rooms", {}),
-            ("chat_send", {"text": "x"}),
-            ("chat_react", {"to": "m1", "key": "x"}),
-            ("chat_status", {"id": "s1"}),
-            ("chat_notes_get", {}),
-        ):
+        for name, args in (("chat_rooms", {}), ("chat_notes_get", {})):
             refused = await h.call(name, args)
             assert refused.is_error, name
             assert refused.structured["error"]["code"] == "not_leader", refused.text
@@ -953,21 +938,6 @@ async def test_chat_tools_parity(monkeypatch):
     """The released plugin drives the chat tools against the
     real agent routes and the contract fake of the chat upstream (design D16)."""
     await check_chat_tools_parity(memory_target(monkeypatch))
-
-
-async def test_chat_send_max_text_through_plugin(monkeypatch):
-    """16000 four-byte characters through the released plugin and the real relay reach the
-    upstream byte for byte (interrogate Act 6, design D5)."""
-    target = memory_target(monkeypatch)
-    text = "\U0001f600" * 16000
-    async with target.plugin(target.leader_ip) as h:
-        sent = await h.call("chat_send", {"text": text})
-    assert not sent.is_error, sent.text
-    assert sent.structured == {"id": "s1", "status": "queued"}
-    (call,) = target.fake.calls
-    assert call.path == "/chat/v1/messages"
-    assert call.json()["text"] == text
-    assert len(call.body) > 64000
 
 
 # ------------------------------------------------------------------- DB-backed (CI, Docker)
