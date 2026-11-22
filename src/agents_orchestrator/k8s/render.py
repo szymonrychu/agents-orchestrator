@@ -718,31 +718,6 @@ def volume_pod_parts(
     return volumes, mounts, pod_labels
 
 
-def volume_owner_init(image: str, mounts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The init container that hands the roots of the read-write `mounts` to the agent user, or
-    none. The CSI driver creates a volume root as uid 0 and fsGroup changes only its group, so
-    git in the uid 1000 agent refuses a repository there ("dubious ownership"); the contents are
-    already written by uid 1000. Not recursive: uid 0 with CAP_CHOWN only, no other capability."""
-    rw = [{"name": m["name"], "mountPath": m["mountPath"]} for m in mounts if not m.get("readOnly")]
-    if not rw:
-        return []
-    return [
-        {
-            "name": "volume-owner",
-            "image": image,
-            "command": ["chown", "1000:1000", *(m["mountPath"] for m in rw)],
-            "securityContext": {
-                "runAsUser": 0,
-                "runAsNonRoot": False,
-                "readOnlyRootFilesystem": True,
-                "allowPrivilegeEscalation": False,
-                "capabilities": {"drop": ["ALL"], "add": ["CHOWN"]},
-            },
-            "volumeMounts": rw,
-        }
-    ]
-
-
 def _meta(slug: str, kind_name: str, settings: Settings) -> dict[str, Any]:
     return {
         "name": kind_name,
@@ -1015,12 +990,9 @@ def render_session(
             *att_volumes,
         ],
     }
-    init_containers = volume_owner_init(spec.image or settings.agent_image, att_mounts)
     if docker_enabled(spec, settings):
-        init_containers += _docker_init_containers(spec, settings)
+        pod_spec["initContainers"] = _docker_init_containers(spec, settings)
         pod_spec["volumes"] += _docker_volumes(spec, settings)
-    if init_containers:
-        pod_spec["initContainers"] = init_containers
     if settings.image_pull_secret:
         pod_spec = {"imagePullSecrets": [{"name": settings.image_pull_secret}], **pod_spec}
     statefulset = {

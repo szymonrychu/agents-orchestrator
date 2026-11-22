@@ -88,16 +88,30 @@ async def _state(pool, vid):
     return (await _get(pool, vid)).state
 
 
+def _owner_job(kube):
+    (name,) = [n for n in kube.names("Job") if "-owner-" in n]
+    return name
+
+
+async def _bind(kube, rec, v):
+    """The PVC binds, the owner Job runs and succeeds: the volume turns ready."""
+    kube.set_pvc(v.pvc_name, "Bound", "10Gi")
+    await rec.tick()
+    kube.finish_job(_owner_job(kube))
+    await rec.tick()
+
+
 async def _ready(pool, kube, rec, name="data"):
     v = await _make(pool, name=name)
     await rec.tick()
-    kube.set_pvc(v.pvc_name, "Bound", "10Gi")
-    await rec.tick()
+    await _bind(kube, rec, v)
     assert await _state(pool, v.id) == "ready"
     return v
 
 
-async def test_provisioning_applies_pvc_and_turns_ready_when_bound(pool, kube, rec):
+async def test_provisioning_applies_pvc_and_turns_ready_after_the_owner_job(pool, kube, rec):
+    """An unseeded volume gets its root handed to the agent user before it turns ready (claims
+    wait until then, so no pod mounts it first)."""
     v = await _make(pool)
     await rec.tick()
     pvc = kube.get(PVC, "vol-data")
@@ -106,21 +120,36 @@ async def test_provisioning_applies_pvc_and_turns_ready_when_bound(pool, kube, r
     assert await _state(pool, v.id) == "provisioning"
     kube.set_pvc("vol-data", "Bound", "10Gi")
     await rec.tick()
+    owner = kube.get("Job", _owner_job(kube))
+    (step,) = owner["spec"]["template"]["spec"]["containers"]
+    assert step["command"] == ["chown", "1000:1000", "/volume"]
+    assert await _state(pool, v.id) == "provisioning"
+    await rec.tick()  # the Job is still running
+    assert await _state(pool, v.id) == "provisioning"
+    kube.finish_job(owner["metadata"]["name"])
+    await rec.tick()
     assert await _state(pool, v.id) == "ready"
+    assert kube.names("Job") == []
 
 
 @pytest.mark.parametrize(
     ("setup", "reason"),
-    [("apply_error", "pvc_apply_failed"), ("lost", "pvc_lost")],
+    [("apply_error", "pvc_apply_failed"), ("lost", "pvc_lost"), ("owner", "owner_failed")],
 )
 async def test_provisioning_failures_set_a_fixed_reason(pool, kube, rec, setup, reason):
     v = await _make(pool)
     if setup == "apply_error":
         kube.fail(PVC, "vol-data", KubeError("boom"), verbs=["patch"])
         await rec.tick()
-    else:
+    elif setup == "lost":
         await rec.tick()
         kube.set_pvc("vol-data", "Lost")
+        await rec.tick()
+    else:
+        await rec.tick()
+        kube.set_pvc("vol-data", "Bound", "10Gi")
+        await rec.tick()
+        kube.finish_job(_owner_job(kube), exit_code=1)
         await rec.tick()
     got = await _get(pool, v.id)
     assert (got.state, got.state_reason) == ("failed", reason)
@@ -139,8 +168,7 @@ async def test_transient_pvc_apply_failure_is_retried_with_backoff_then_gives_up
     await rec.tick()  # back to provisioning
     assert await _state(pool, v.id) == "provisioning"
     await rec.tick()
-    kube.set_pvc("vol-data", "Bound", "10Gi")
-    await rec.tick()
+    await _bind(kube, rec, v)
     assert await _state(pool, v.id) == "ready"
 
     w = await _make(pool, name="other")
@@ -425,6 +453,24 @@ async def test_failed_restore_keeps_content_version_and_turns_ready(pool, kube, 
     assert (await _kinds(pool, v.id))[-1][0] == "restore_failed"
 
 
+async def test_a_failed_owner_step_of_the_restore_is_reported(pool, kube, rec, caplog):
+    """The restore Job's init container (the owner step) failed: the main container never ran
+    and left no outcome; the restore fails with a fixed reason and the init exit code is logged."""
+    v = await _ready(pool, kube, rec)
+    ver = await _version(pool, v)
+    await _restore(pool, v, ver.id)
+    await rec.tick()
+    (job,) = _jobs(kube)
+    kube.finish_job(job["metadata"]["name"], init_exit_code=1)
+    await rec.tick()
+    async with pool.connection() as conn:
+        page = await volumes.events(conn, v.id, limit=50)
+    assert next(e for e in page.items if e.kind == "restore_failed").detail == {
+        "reason": "job_failed"
+    }
+    assert "volume data: the restore Job exited 1" in caplog.text
+
+
 @pytest.mark.parametrize(
     ("msg", "fixed"),
     [
@@ -516,8 +562,7 @@ async def test_save_while_a_claim_exists_marks_the_manifest_live(pool, kube, rec
 async def test_save_job_carries_the_volume_excludes_and_restore_ignores_them(pool, kube, rec):
     v = await _make(pool, exclude=["node_modules", "*.log"])
     await rec.tick()
-    kube.set_pvc(v.pvc_name, "Bound", "10Gi")
-    await rec.tick()
+    await _bind(kube, rec, v)
     ver = await _version(pool, v)
     await _save(pool, v)
     await rec.tick()

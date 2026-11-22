@@ -32,7 +32,8 @@
   recording them; `seed_orchestrator_objects` seeds what the chart puts in the same namespace.
 - `fail(kind, name)` injects an error for one object.
 - Creating a Job simulates its controller: one Running pod `<job>-<suffix>` with the pod template
-  labels; `finish_job` ends it (succeeded, failed with an exit code, or deadline exceeded) and
+  labels; `finish_job` ends it (succeeded, failed with an exit code or an init container exit
+  code, or deadline exceeded) and
   gives the pod its log; deleting a Job removes its pods.
 """
 
@@ -191,11 +192,28 @@ class FakeKube:
         exit_code: int = 0,
         log: str = "",
         deadline_exceeded: bool = False,
+        init_exit_code: int | None = None,
     ) -> None:
-        """End a Job like its controller: Complete (exit 0), Failed, or DeadlineExceeded."""
+        """End a Job like its controller: Complete (exit 0), Failed, or DeadlineExceeded. With
+        `init_exit_code` its init container failed and the main container never ran."""
         job = self.objects[("Job", self.namespace, name)]
         pod = next(p for p in self._job_pods(name))
         pod["log"] = log
+        if init_exit_code is not None:
+            pod["status"]["phase"] = "Failed"
+            pod["status"]["initContainerStatuses"] = [
+                {"name": "init", "state": {"terminated": {"exitCode": init_exit_code}}}
+            ]
+            pod["status"]["containerStatuses"] = [
+                {"name": "main", "state": {"waiting": {"reason": "PodInitializing"}}}
+            ]
+            job["status"] = {
+                "failed": 1,
+                "conditions": [
+                    {"type": "Failed", "status": "True", "reason": "BackoffLimitExceeded"}
+                ],
+            }
+            return
         if deadline_exceeded:
             pod["status"]["phase"] = "Failed"
             job["status"] = {

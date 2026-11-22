@@ -50,6 +50,8 @@ JOB_REASONS = frozenset(
 )
 # a failed volume with one of these reasons has no PVC: nothing may mount or restore into it
 NO_PVC_REASONS = frozenset({"pvc_apply_failed", "pvc_missing", "pvc_lost"})
+# the owner Job of a new volume failed: its root is still uid 0, so nothing mounts it yet
+OWNER_FAILED = "owner_failed"
 STATES = ("provisioning", "ready", "resizing", "restoring", "saving", "deleting", "failed")
 _COLUMNS = (
     "id, name, projects, labels, description, exclude, size, storage_class, pvc_name, state,"
@@ -555,7 +557,7 @@ async def claim(
         if vol.state == "deleting":
             return ClaimDecision("refuse", vol, None)
         if vol.state not in ("ready", "failed") or (
-            vol.state == "failed" and vol.state_reason in NO_PVC_REASONS
+            vol.state == "failed" and vol.state_reason in (*NO_PVC_REASONS, OWNER_FAILED)
         ):
             return ClaimDecision("wait", vol, None)
         version = await current_version(conn) if callable(current_version) else current_version

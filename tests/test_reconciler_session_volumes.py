@@ -63,6 +63,9 @@ async def _volume(pool, kube, vrec) -> volumes.Volume:
     await vrec.tick()
     kube.set_pvc(v.pvc_name, "Bound", "10Gi")
     await vrec.tick()
+    (owner,) = kube.names("Job")
+    kube.finish_job(owner)
+    await vrec.tick()
     async with pool.connection() as conn:
         got = await volumes.get(conn, v.id)
     assert got.state == "ready"

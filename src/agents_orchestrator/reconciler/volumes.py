@@ -3,8 +3,10 @@
 Leader-only like the cache sweep: the reconciler singleton constructs it. A pass runs on NOTIFY
 `volumes_changed` and every `reconcile_poll_seconds`. The PVC `vol-<name>` is applied by
 server-side apply, grown by a patch of the storage request and deleted only here, after the
-finalizer is removed. Restoring and saving drive one Job each (`render_volume_job`, named by
-the id of the `restore_started`/`save_started` event, so a pass after a crash finds its own Job):
+finalizer is removed. A bound PVC turns ready only after its owner Job hands the volume root to
+the agent user (`render_volume_owner_job`). Restoring and saving drive one Job each
+(`render_volume_job`, named by the id of the `restore_started`/`save_started` event, so a pass
+after a crash finds its own Job):
 a restore first re-checks the pods (HARD RULE, `pods_using`) right before creating the Job. Orphan
 claims (session row gone, no pod left) are released with actor system.
 """
@@ -35,6 +37,7 @@ from agents_orchestrator.reconciler.cache import (
     outcome_line,
     parse_outcome,
     render_volume_job,
+    render_volume_owner_job,
     volume_job_name,
 )
 from agents_orchestrator.reconciler.checks import TAIL_LINES, container_exit_code, job_condition
@@ -52,10 +55,15 @@ PVC_APPLY_FAILED = "pvc_apply_failed"
 PVC_LOST = "pvc_lost"
 PVC_MISSING = "pvc_missing"
 PVC_RESIZE_FAILED = "pvc_resize_failed"
+OWNER_FAILED = volumes.OWNER_FAILED
 
 # transient failures: back to the state that failed, after RETRY_BASE_SECONDS * 2**attempt, at
 # most RETRY_MAX times per process (the count resets when the volume turns ready)
-RETRY_STATE = {PVC_APPLY_FAILED: "provisioning", PVC_RESIZE_FAILED: "resizing"}
+RETRY_STATE = {
+    PVC_APPLY_FAILED: "provisioning",
+    PVC_RESIZE_FAILED: "resizing",
+    OWNER_FAILED: "provisioning",
+}
 RETRY_BASE_SECONDS = 30.0
 RETRY_MAX = 5
 
@@ -103,9 +111,45 @@ class VolumeReconciler:
             return
         phase = ((await self._pvc(vol)) or {}).get("status", {}).get("phase")
         if phase == "Bound":
-            await self._set(vol, "ready")
+            await self._own(vol)
         elif phase == "Lost":
             await self._set(vol, "failed", PVC_LOST)
+
+    async def _own(self, vol: volumes.Volume) -> None:
+        """The owner Job hands the bound PVC's root to the agent user, then the volume turns
+        ready; nothing mounts a provisioning volume (claims wait), so it runs before any pod.
+        Named by the `created` event id, so a pass after a crash finds its own Job."""
+        if not self.settings.cache_image:
+            log.warning("volume %s: no cache image, the root stays owned by uid 0", vol.name)
+            await self._set(vol, "ready")
+            return
+        created = await self._started(vol, "created")
+        n = created.id if created else 0
+        job = await self.kube.get_job(
+            self.settings.namespace, volume_job_name(vol.name, "owner", n)
+        )
+        if job is None:
+            try:
+                await self.kube.create_job(render_volume_owner_job(vol, self.settings, n=n))
+            except KubeError:
+                log.warning("volume %s: creating the owner Job failed", vol.name, exc_info=True)
+                await self._set(vol, "failed", OWNER_FAILED)
+            return
+        status = job.get("status") or {}
+        failed = job_condition(job, "Failed") is not None or bool(status.get("failed"))
+        done = job_condition(job, "Complete") is not None or bool(status.get("succeeded"))
+        if not done and not failed:
+            return
+        if failed:
+            selector = {**volume_labels(vol.id), CACHE_LABEL: "volume-owner"}
+            pods = await self.kube.list_pods(self.settings.namespace, selector)
+            code = container_exit_code(pods[-1]) if pods else None
+            log.warning("volume %s: the owner Job failed (exit %s)", vol.name, code)
+        await self._delete_job(job)
+        if failed:
+            await self._set(vol, "failed", OWNER_FAILED)
+        else:
+            await self._set(vol, "ready")
 
     async def _resizing(self, vol: volumes.Volume) -> None:
         pvc = await self._pvc(vol)

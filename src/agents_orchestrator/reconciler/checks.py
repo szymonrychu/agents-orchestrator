@@ -198,7 +198,14 @@ class CheckRunner:
 
 
 def container_exit_code(pod: Obj) -> int | None:
-    for cs in (pod.get("status") or {}).get("containerStatuses") or []:
+    """The exit code of a failed init container (the main container then never ran), else of
+    the main container; None when nothing terminated."""
+    status = pod.get("status") or {}
+    for cs in status.get("initContainerStatuses") or []:
+        code = ((cs.get("state") or {}).get("terminated") or {}).get("exitCode")
+        if code:
+            return int(code)
+    for cs in status.get("containerStatuses") or []:
         terminated = (cs.get("state") or {}).get("terminated")
         if terminated is not None and "exitCode" in terminated:
             return int(terminated["exitCode"])

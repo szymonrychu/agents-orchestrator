@@ -19,6 +19,7 @@ from agents_orchestrator.reconciler.cache import (
     job_name,
     render_cache_job,
     render_volume_job,
+    render_volume_owner_job,
 )
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import SessionSpec
@@ -285,22 +286,52 @@ def test_volume_job_mounts_the_pvc_at_volume_and_is_not_a_session_job(action, re
     assert pod["securityContext"]["fsGroupChangePolicy"] == "OnRootMismatch"
 
 
-@pytest.mark.parametrize(("action", "chowned"), [("restore", True), ("save", False)])
-def test_volume_restore_chowns_the_volume_root_to_the_agent_first(action, chowned):
-    """The CSI driver creates the root as uid 0; the uid 1000 extract cannot take it over."""
-    job = render_volume_job(
-        make_volume(), make_settings(), action=action, n=1, url=URL, version=None
-    )
-    owners = [
-        (c["image"], c["command"], c["securityContext"]["runAsUser"], c["volumeMounts"])
-        for c in pod_of(job).get("initContainers", [])
-    ]
-    want = [
+def _owner_steps(job: dict[str, Any]) -> list[tuple]:
+    pod = pod_of(job)
+    steps = [("init", c) for c in pod.get("initContainers", [])]
+    steps += [("main", c) for c in pod["containers"] if c["name"] == "volume-owner"]
+    return [
         (
-            CACHE_IMAGE,
-            ["chown", "1000:1000", "/volume"],
-            0,
-            [{"name": "volume", "mountPath": "/volume"}],
+            where,
+            c["image"],
+            tuple(c["command"]),
+            c["securityContext"]["runAsUser"],
+            tuple(c["securityContext"]["capabilities"]["add"]),
+            tuple(c["securityContext"]["capabilities"]["drop"]),
+            tuple((m["name"], m["mountPath"], m.get("readOnly", False)) for m in c["volumeMounts"]),
+            bool(c["resources"]["requests"] and c["resources"]["limits"]),
         )
+        for where, c in steps
     ]
-    assert owners == (want if chowned else [])
+
+
+# image, command, uid, added and dropped capabilities, mounts, requests and limits set
+OWNER = (
+    CACHE_IMAGE,
+    ("chown", "1000:1000", "/volume"),
+    0,
+    ("CHOWN",),
+    ("ALL",),
+    (("volume", "/volume", False),),
+    True,
+)
+
+
+@pytest.mark.parametrize(
+    ("kind", "want"),
+    [
+        ("owner", [("main", *OWNER)]),
+        ("restore", [("init", *OWNER)]),
+        ("save", []),
+    ],
+)
+def test_volume_jobs_hand_the_volume_root_to_the_agent_user(kind, want):
+    """The CSI driver creates the root as uid 0; the owner Job (new volume) and the restore Job
+    chown `/volume` itself, as uid 0 with CAP_CHOWN only, before anything writes as uid 1000."""
+    vol, settings = make_volume(), make_settings()
+    if kind == "owner":
+        job = render_volume_owner_job(vol, settings, n=3)
+        assert job["metadata"]["name"] == "vol-data-owner-3"
+    else:
+        job = render_volume_job(vol, settings, action=kind, n=1, url=URL, version=None)
+    assert _owner_steps(job) == want
