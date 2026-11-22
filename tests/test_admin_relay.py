@@ -1092,14 +1092,6 @@ async def test_room_history_only_get(rig, method):
     assert rig.fakes["connector"].calls == []
 
 
-async def test_room_history_needs_superleader(rig):
-    plain = await alone(rig.pool, "rh-plain")
-    async with client_for(rig.app, plain.leader_ip) as http:
-        r = await http.get(relay_url("connector", HISTORY_TEMPLATE, 9), headers=headers(plain.id))
-    assert_error(r, 403, "not_superleader")
-    assert rig.fakes["connector"].calls == []
-
-
 async def test_room_history_is_audited(rig):
     url = relay_url("connector", HISTORY_TEMPLATE, 9)
     r = await rig.call("GET", url + "?before=m9")

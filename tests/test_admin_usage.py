@@ -1,11 +1,10 @@
 """GET /agent/v1/admin/usage: the account's usage windows for a superleader (read-only), from the
-same `UsageSource` the usage gate reads. Non-superleaders are refused by the admin gate."""
+same `UsageSource` the usage gate reads. Who may read it: `test_scoped_chat_reads`."""
 
 from __future__ import annotations
 
 from test_agent_session_messaging import alone
 from test_api_agent import client_for, headers, make_settings
-from test_api_sessions import assert_error
 from test_api_usage_gate import RESETS, Upstream, close_usage_sources, gated, windows  # noqa: F401
 
 from agents_orchestrator.api.admin import ADMIN_PREFIX
@@ -67,13 +66,3 @@ async def test_not_configured(pool, dsn):
     assert r.status_code == 200, r.text
     assert r.json()["configured"] is False
     assert r.json()["available"] is False
-
-
-async def test_non_superleader_refused(pool, dsn):
-    plain = await alone(pool, "u-plain")
-    upstream = Upstream(windows(five_hour=1))
-    app = gated(make_settings(dsn), pool, upstream)
-    async with client_for(app, plain.leader_ip) as http:
-        r = await http.get(USAGE, headers=headers(plain.id))
-    assert_error(r, 403, "not_superleader")
-    assert upstream.calls == 0

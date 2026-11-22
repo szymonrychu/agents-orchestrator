@@ -41,13 +41,13 @@ def test_every_agent_route_is_classified():
         "project",
         "superleader",
         "reader",
-        "notes",
+        "leader",
         "agent",
     }
-    # the reader, notes and agent classes are exactly their gate's routes (S-68 step 13, S-83)
+    # the reader, leader and agent classes are exactly their gate's routes (S-68 step 13, S-83)
     for cls, router in (
         ("reader", admin.reader_router),
-        ("notes", admin.notes_router),
+        ("leader", admin.leader_router),
         ("agent", admin.agent_router),
     ):
         routes = {(m, r.path) for r in router.routes for m in r.methods}

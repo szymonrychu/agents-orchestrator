@@ -2,8 +2,9 @@
 
 Each route maps 1:1 to an upstream admin route and is registered on an admin router, so a gate
 and the audit cover it: the superleader gate, except the `READER_ROUTES` (the reader gate: a
-superleader), the `AGENT_ROUTES` (the agent gate: any agent; the history reads, decisions
-859-861) and the room notes PUT (the notes writer gate).
+superleader), the `AGENT_ROUTES` (the agent gate: any agent; the history and room reads,
+decisions 859-861, 871, 872) and the `LEADER_ROUTES` (the leader gate: any session's leader; the
+rooms list and the room notes update, decisions 869, 873).
 The gate runs first, then the upstream must be configured
 (503 `upstream_unconfigured`), then the body is capped at 256 KiB (413 `payload_too_large`). The
 forwarded request carries only the upstream's service bearer and the caller's `X-Orch-Session`,
@@ -50,8 +51,13 @@ checks the task on the taskboard, forwards, then asks and attaches a decision as
 session, and `POST /chats/room-requests/{request_id}/confirm` settles the request from the
 answer (`api/chat_requests.py`).
 
-The room history read (`GET /chats/rooms/{room_id}/messages`) is read only and covers any room;
-there is no attachment fetch for the superleader.
+Chat room reads and the notes update are scoped by room (S-83, `room_projects`): a caller other
+than a superleader reaches a room only when the projects of the preset it routes to overlap the
+caller's. The rooms list leaves the other rooms out (one upstream list per request; the map is
+built from it); the room history and notes reads and the notes update refuse them 403
+`project_forbidden` before anything is forwarded, an unlisted room alike. A room with no preset
+belongs to no project. A relayed room settings change or allow drops the cached room map. There
+is no attachment fetch on the admin relay.
 
 History is read-only: three GET routes and no DELETE (deleting a stored
 session is for the user, through the web UI), so the router answers any other method 405 and
@@ -75,7 +81,6 @@ from __future__ import annotations
 
 import json
 import re
-import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -86,15 +91,20 @@ from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import SecretStr
 
-from agents_orchestrator.api import chat_requests, secret_store, vault_client, vault_refs
+from agents_orchestrator.api import (
+    chat_requests,
+    room_projects,
+    secret_store,
+    vault_client,
+    vault_refs,
+)
 from agents_orchestrator.api import forward as forward_core
 from agents_orchestrator.api.admin import (
     FORBIDDEN,
-    NotesWriter,
     agent_router,
     caller_of,
     caller_projects,
-    notes_router,
+    leader_router,
     reader_router,
     router,
     touched,
@@ -103,7 +113,6 @@ from agents_orchestrator.api.errors import ApiError, not_found, not_manageable
 from agents_orchestrator.api.scope import PROJECTS_HEADER, scope_value
 from agents_orchestrator.api.sessions import Cfg
 from agents_orchestrator.db import presets as presets_repo
-from agents_orchestrator.db import sessions as sessions_repo
 from agents_orchestrator.preset_policy import privileged
 from agents_orchestrator.settings import Settings
 
@@ -171,27 +180,32 @@ SERVICES: dict[str, tuple[str, str, str, list[tuple[str, str, int]]]] = {
     "usage": ("/usage", "/usage/v1", "usage admin relay", _USAGE),
 }
 STATE_ATTR = "admin_http"
-# The relay routes on the reader gate (a superleader; S-83 step 7 reshapes it); every other
-# relay route stays superleader-only, except the agent gate's.
+# The relay routes on the reader gate (a superleader); every other relay route stays
+# superleader-only, except the agent and leader gates'.
 READER_ROUTES: frozenset[tuple[str, str, str]] = frozenset(
     {
-        ("connector", "GET", "/rooms"),
         ("connector", "GET", "/rooms/{room_id}"),
-        ("connector", "GET", "/rooms/{room_id}/messages"),
-        ("connector", "GET", "/rooms/{room_id}/notes"),
         ("usage", "GET", "/history"),
     }
 )
-# The relay routes on the agent gate: any agent, scoped upstream on X-Orch-Projects (859-861).
+# The relay routes on the agent gate: any agent. The history reads are scoped upstream on
+# X-Orch-Projects (859-861), the room reads on the room's projects (871, 872, `room_projects`).
 AGENT_ROUTES: frozenset[tuple[str, str, str]] = frozenset(
     {
         ("history", "GET", "/sessions"),
         ("history", "GET", "/sessions/{session_id}"),
         ("history", "GET", "/sessions/{session_id}/records"),
+        ("connector", "GET", "/rooms/{room_id}/messages"),
+        ("connector", "GET", "/rooms/{room_id}/notes"),
     }
 )
-# The room notes update: the notes writer gate (decision 775).
-NOTES_ROUTE = ("connector", "PUT", "/rooms/{room_id}/notes/sections/{section}")
+# The relay routes on the leader gate: any session's leader, the rooms of its projects (869, 873).
+LEADER_ROUTES: frozenset[tuple[str, str, str]] = frozenset(
+    {
+        ("connector", "GET", "/rooms"),
+        ("connector", "PUT", "/rooms/{room_id}/notes/sections/{section}"),
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -207,6 +221,10 @@ class Guard:
     # every schedule named in `then_schedule_ids` must sit on a manageable preset; a clone also
     # checks the stored endpoint's links (see `_chain_targets_ok`)
     chain_targets: Literal["body", "body_and_stored"] | None = None
+    # a caller other than a superleader reaches only the rooms of its projects: `one` refuses a
+    # room outside them 403 `project_forbidden`, `list` leaves such rooms out (`room_projects`)
+    room: Literal["one", "list"] | None = None
+    rebinds: bool = False  # a write that may move a room to another preset: drops the room map
 
 
 _E, _S = "endpoint", "schedule"
@@ -238,13 +256,13 @@ GUARDS: dict[tuple[str, str, str], Guard] = {
     ("schedule", "DELETE", "/schedules/{schedule_id}"): Guard(stored=_S),
     ("schedule", "POST", "/schedules/{schedule_id}/run"): Guard(stored=_S),
     ("schedule", "GET", "/schedules/{schedule_id}/runs"): Guard(),
-    ("connector", "GET", "/rooms"): Guard(),
+    ("connector", "GET", "/rooms"): Guard(room="list"),
     ("connector", "GET", "/rooms/{room_id}"): Guard(),
-    ("connector", "GET", "/rooms/{room_id}/messages"): Guard(),
-    ("connector", "PUT", "/rooms/{room_id}/settings"): Guard(),
-    ("connector", "POST", "/rooms/{room_id}/allow"): Guard(),
-    ("connector", "GET", "/rooms/{room_id}/notes"): Guard(),
-    ("connector", "PUT", "/rooms/{room_id}/notes/sections/{section}"): Guard(),
+    ("connector", "GET", "/rooms/{room_id}/messages"): Guard(room="one"),
+    ("connector", "PUT", "/rooms/{room_id}/settings"): Guard(rebinds=True),
+    ("connector", "POST", "/rooms/{room_id}/allow"): Guard(rebinds=True),
+    ("connector", "GET", "/rooms/{room_id}/notes"): Guard(room="one"),
+    ("connector", "PUT", "/rooms/{room_id}/notes/sections/{section}"): Guard(room="one"),
     ("connector", "GET", "/users"): Guard(),
     ("connector", "POST", "/room-requests"): Guard(ask_decision=True),
     ("connector", "GET", "/room-requests/{request_id}"): Guard(),
@@ -551,6 +569,8 @@ def _handler(service: str, method: str, template: str) -> Callable[..., Awaitabl
             await _rule_room(request, settings, guard, body)
         if guard.ask_decision:
             await chat_requests.check_task(request, settings, body)
+        if guard.room == "one":
+            await _room_in_scope(request, settings)
         path = upstream_prefix + _fill(template, dict(request.path_params))
         status, content = await forward_core.forward(
             request,
@@ -566,6 +586,10 @@ def _handler(service: str, method: str, template: str) -> Callable[..., Awaitabl
         if guard.ask_decision and status == 201:
             row = await chat_requests.on_created(request, settings, json.loads(content))
             return JSONResponse(row, status)
+        if guard.rebinds:
+            room_map(request).invalidate()
+        if guard.room == "list":
+            content = await _rooms_in_scope(request, status, content)
         headers = _next_cursor(request, guard, status, content)
         if service == "webhook":
             if content:
@@ -613,41 +637,61 @@ def _relay_responses(service: str, method: str, template: str) -> dict[int | str
 
 
 def _router_for(key: tuple[str, str, str]):
-    """The admin router (and so the gate) of one relay route. The step 12 and 14 relays sat on
-    the superleader router; the reads on the reader gate and the notes
-    update on the notes writer gate."""
+    """The admin router (and so the gate) of one relay route: the reader, agent or leader gate
+    for the routes in their sets, else the superleader gate."""
     if key in READER_ROUTES:
         return reader_router
     if key in AGENT_ROUTES:
         return agent_router
-    if key == NOTES_ROUTE:
-        return notes_router
+    if key in LEADER_ROUTES:
+        return leader_router
     return router
 
 
-def _uuid(value: Any) -> uuid.UUID | None:
-    try:
-        return None if value is None else uuid.UUID(str(value))
-    except ValueError:
-        return None
+def room_map(request: Request) -> room_projects.RoomMap:
+    return request.app.state.room_map
 
 
-async def room_preset(request: Request, settings: Settings, room_id: str) -> uuid.UUID | None:
-    """The preset a chat room routes to: the preset of the session bound to it when that
-    session is known and has one, else the room's configured (effective) preset; None when it
-    has neither. An unlisted room is 404."""
-    room = await _upstream_json(
-        _bare(request), settings, "connector", "/rooms/" + _segment(room_id)
+async def _room_in_scope(request: Request, settings: Settings) -> None:
+    """403 `project_forbidden` unless the path's room belongs to one of the caller's projects (a
+    superleader passes without a lookup). A room the upstream does not list is refused alike,
+    so the answer does not tell which rooms exist."""
+    projects = caller_projects(request)
+    if projects is None:
+        return
+    room_id = request.path_params["room_id"]
+    entry = await room_map(request).entry(
+        room_id, lambda: _upstream_json(_bare(request), settings, "connector", "/rooms")
     )
-    room = room if isinstance(room, dict) else {}
-    binding = room.get("binding")
-    bound = _uuid(binding.get("session_id")) if isinstance(binding, dict) else None
-    if bound is not None:
+    if entry is not None:
         async with request.app.state.pool.connection() as conn:
-            session = await sessions_repo.get(conn, bound)
-        if session is not None and session.preset_id is not None:
-            return session.preset_id
-    return _uuid(room.get("effective_preset_id") or room.get("preset_id"))
+            found = await room_projects.projects_of(conn, {room_id: entry})
+        if room_projects.overlaps(found.get(room_id), projects):
+            return
+    raise ApiError(403, "project_forbidden", "the room is outside your projects")
+
+
+async def _rooms_in_scope(request: Request, status: int, content: bytes) -> bytes:
+    """The rooms list answer narrowed to the rooms of the caller's projects (a superleader's is
+    unchanged). The answer also refreshes the room map when it lists every room."""
+    if not (200 <= status < 300 and content):
+        return content
+    rooms = json.loads(content)
+    entries = room_projects.entries_of(rooms)
+    if not request.query_params:
+        room_map(request).replace(entries)
+    projects = caller_projects(request)
+    if projects is None:
+        return content
+    async with request.app.state.pool.connection() as conn:
+        found = await room_projects.projects_of(conn, entries)
+    kept = [
+        room
+        for room in rooms
+        if isinstance(room, dict)
+        and room_projects.overlaps(found.get(str(room.get("room_id"))), projects)
+    ]
+    return json.dumps(kept).encode()
 
 
 def _register() -> None:
@@ -664,7 +708,6 @@ def _register() -> None:
                 operation_id="admin_" + service + "_" + method.lower() + _slug(template),
                 summary=f"{method} {service} {template}",
                 tags=["admin"],
-                dependencies=[NotesWriter] if key == NOTES_ROUTE else None,
             )
 
 

@@ -1,14 +1,12 @@
-"""The reader gate (`require_reader`), the notes writer gate and the project scope: a superleader
-only (S-83 step 4 removed the retrospective flag; steps 6 and 7 reshape the gates)."""
+"""The reader gate (`require_reader`, a superleader only), the leader gate's route set and the
+project scope (S-83 step 4 removed the retrospective flag; steps 6 and 7 reshaped the gates)."""
 
 from __future__ import annotations
 
 import dataclasses
 
 import pytest
-from fakes import fake_upstream as fu
 from test_admin_gate import concrete
-from test_admin_relay import DOCS, UPSTREAM_PREFIX, _body_schema, rig  # noqa: F401
 from test_agent_session_messaging import Sess, alone
 from test_agent_tasks import make_rig
 from test_api_agent import AGENT_PORT, KEY, client_for, headers, make_settings
@@ -20,8 +18,6 @@ from agents_orchestrator.api.admin import ADMIN_PREFIX
 from agents_orchestrator.api.app import create_app
 from agents_orchestrator.api.scope import scope_of
 from agents_orchestrator.spec import SessionSpec
-
-NOTES = "/rooms/{room_id}/notes/sections/{section}"
 
 
 async def call(app, caller: Sess, method: str, path: str, **kw):
@@ -41,10 +37,8 @@ def test_reader_routes_are_exactly_the_read_set_and_the_copy():
     p = ADMIN_PREFIX
     assert set(_reader_routes()) == {
         ("GET", f"{p}/presets"),
-        ("GET", f"{p}/presets/{{ref}}"),
         ("GET", f"{p}/sessions/{{slug}}/activity"),
         ("GET", f"{p}/sessions/{{slug}}/messages"),
-        ("GET", f"{p}/usage"),
         ("GET", f"{p}/usage/history"),
         ("GET", f"{p}/backups"),
         ("POST", f"{p}/backups/copy"),
@@ -52,14 +46,14 @@ def test_reader_routes_are_exactly_the_read_set_and_the_copy():
         ("GET", f"{p}/backups/{{name:path}}/versions/{{version_id}}/manifest"),
         ("GET", f"{p}/volumes"),
         ("GET", f"{p}/volumes/{{volume_id}}"),
-        ("GET", f"{p}/chats/rooms"),
         ("GET", f"{p}/chats/rooms/{{room_id}}"),
-        ("GET", f"{p}/chats/rooms/{{room_id}}/messages"),
-        ("GET", f"{p}/chats/rooms/{{room_id}}/notes"),
     }
-    assert [(m, r.path) for r in admin.notes_router.routes for m in r.methods] == [
-        ("PUT", f"{p}/chats/rooms/{{room_id}}/notes/sections/{{section}}")
-    ]
+    assert {(m, r.path) for r in admin.leader_router.routes for m in r.methods} == {
+        ("GET", f"{p}/chats/rooms"),
+        ("PUT", f"{p}/chats/rooms/{{room_id}}/notes/sections/{{section}}"),
+        ("GET", f"{p}/presets/{{ref}}"),
+        ("GET", f"{p}/usage"),
+    }
 
 
 async def test_plain_session_refused_on_reader_routes(pool, dsn):
@@ -91,40 +85,6 @@ async def test_scope_of_star_only_superleader(monkeypatch, superleader):
         assert r.status_code == 200, r.text
         (sent,) = rig_.upstream.seen
         assert sent.headers["x-orch-projects"] == want, method
-
-
-def _room(n: int, preset, bound_session=None) -> dict:
-    room = fu.sample(DOCS["connector"], {"$ref": "#/components/schemas/RoomDetail"})
-    room.update(room_id=str(n), preset_id=preset, effective_preset_id=preset, binding=None)
-    if bound_session is not None:
-        room["binding"] = {
-            "session_id": str(bound_session),
-            "slug": "bound",
-            "origin": "inbound",
-            "since": "2026-11-16T00:00:00Z",
-        }
-    return room
-
-
-async def test_notes_update_superleader_only(rig):  # noqa: F811
-    """A superleader writes any room's notes; any other session is 403 `not_superleader` and
-    never reaches the connector."""
-    fake = rig.fakes["connector"]
-    fake.answers[("GET", "/chat/v1/admin/rooms/{room_id}")] = lambda c, p: (
-        200,
-        _room(int(p["room_id"]), None),
-    )
-    key = ("PUT", UPSTREAM_PREFIX["connector"] + NOTES)
-    body = fu.sample(DOCS["connector"], _body_schema(fake, key))
-    url = ADMIN_PREFIX + "/chats" + NOTES.replace("{section}", "preferences")
-    plain = await alone(rig.pool, "rn-plain")
-    r = await call(rig.app, plain, "PUT", url.replace("{room_id}", "21"), json=body)
-    assert_error(r, 403, "not_superleader")
-    r = await call(rig.app, rig.boss, "PUT", url.replace("{room_id}", "22"), json=body)
-    assert r.status_code == 200, r.text
-    assert [c.path for c in fake.calls if c.method == "PUT"] == [
-        "/chat/v1/admin/rooms/22/notes/sections/preferences"
-    ]
 
 
 async def test_backups_copy_superleader_only(pool, dsn, monkeypatch):

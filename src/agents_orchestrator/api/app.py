@@ -37,6 +37,7 @@ from agents_orchestrator.api import (
     projects,
     proposal_routes,
     proposal_sweep,
+    room_projects,
     secret_store,
     session_labels,
     sessions,
@@ -164,6 +165,7 @@ def create_app(
     app.state.stream_poll_seconds = stream_poll_seconds
     app.state.vault = vault  # the agents-vault client; None when unconfigured
     app.state.usage = usage  # the usage gate's source; None when the gate is off
+    app.state.room_map = room_projects.RoomMap()  # chat room -> preset, for the scoped reads
     errors.install(app)
     app.include_router(sessions.router)
     app.include_router(agent.router)
@@ -173,7 +175,7 @@ def create_app(
     app.include_router(admin.session_router)
     app.include_router(admin.reader_router)
     app.include_router(admin.agent_router)
-    app.include_router(admin.notes_router)
+    app.include_router(admin.leader_router)
     app.include_router(admin.discard_router)
     app.include_router(proposal_routes.proposal_router)
     app.include_router(chat.router)
