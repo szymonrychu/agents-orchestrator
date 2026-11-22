@@ -1,4 +1,4 @@
-"""POST /agent/v1/envelope/stop: the onStop webhook for chat envelopes (S-70)."""
+"""POST /agent/v1/envelope/stop: the onStop webhook for envelopes (S-70, S-71)."""
 
 from __future__ import annotations
 
@@ -90,10 +90,55 @@ async def test_valid_envelopes_allow_and_record_allowed(dsn, pool):
     assert await notices(pool) == []
 
 
-async def test_non_leader_is_allowed(dsn, pool):
+async def test_member_with_a_leader_envelope_is_blocked_as_not_leader(dsn, pool):
     c, a0, a1 = await hive(pool)
-    out = await stop(dsn, pool, c, payload("t1", texts(BAD)), ip="10.9.0.11")
-    assert out == {"decision": "allow"}
+    sent = '<session-send to="other">hi</session-send>'
+    out = await stop(dsn, pool, c, payload("t1", texts(sent)), ip="10.9.0.11")
+    assert out["decision"] == "block"
+    assert "only the leader may send <session-send>" in out["reason"]
+    again = await stop(dsn, pool, c, payload("t1", texts(sent)), ip="10.9.0.11")
+    assert again == {"decision": "allow"}
+
+
+async def test_leader_with_a_malformed_session_send_is_blocked_once_then_allowed(dsn, pool):
+    c, a0, _ = await hive(pool)
+    bad = '<session-send to="other">never closed'
+    out = await stop(dsn, pool, c, payload("t1", texts(bad)))
+    assert out["decision"] == "block"
+    assert out["reason"].startswith("Some envelopes were not delivered: 1) envelope ")
+    assert await stop(dsn, pool, c, payload("t1", texts(bad, bad, start=1))) == {
+        "decision": "allow"
+    }
+    assert await notices(pool) == []
+
+
+async def test_refused_session_row_is_listed_with_its_outbox_id(dsn, pool):
+    c, a0, _ = await hive(pool)
+    async with pool.connection() as conn:
+        await outbox.insert_rows(
+            conn,
+            [
+                Row(
+                    session_id=c["id"],
+                    agent_id=a0["id"],
+                    wrapper_session_id="w",
+                    event_seq=1,
+                    envelope_index=1,
+                    turn_id="t1",
+                    kind="session",
+                    target="other",
+                    body="x",
+                    status="refused",
+                    error_code="not_found",
+                )
+            ],
+        )
+    rows = await db_rows(pool, "SELECT id FROM envelope_outbox WHERE turn_id = 't1'")
+    out = await stop(
+        dsn, pool, c, payload("t1", texts('<session-send to="other">x</session-send>'))
+    )
+    assert out["decision"] == "block"
+    assert f"a{rows[0][0]} envelope 1: refused (not_found)" in out["reason"]
 
 
 async def test_first_stop_with_errors_blocks_with_numbered_reason(dsn, pool):
@@ -101,7 +146,7 @@ async def test_first_stop_with_errors_blocks_with_numbered_reason(dsn, pool):
     out = await stop(dsn, pool, c, payload("t1", texts(OK, BAD)))
     assert out["decision"] == "block"
     reason = out["reason"]
-    assert reason.startswith("Some chat envelopes were not delivered: 1) envelope ")
+    assert reason.startswith("Some envelopes were not delivered: 1) envelope ")
     assert "of message msg2" in reason
     assert reason.endswith(
         "The others were delivered; do not resend them. Resend only the corrected ones now."
@@ -144,7 +189,7 @@ async def test_first_stop_lists_refused_rows_of_the_turn(dsn, pool):
         )
     out = await stop(dsn, pool, c, payload("t1", texts(OK)))
     assert out["decision"] == "block"
-    assert "1) envelope 3: refused by the chat (room_not_allowed)" in out["reason"]
+    assert "refused (room_not_allowed)" in out["reason"]
     assert "elsewhere" not in out["reason"]
 
 

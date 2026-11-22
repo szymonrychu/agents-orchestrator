@@ -1,12 +1,13 @@
-"""`POST /agent/v1/envelope/stop`, served only on the agent port (S-70).
+"""`POST /agent/v1/envelope/stop`, served only on the agent port (S-70, S-71).
 
 The onStop webhook of the claude-code-wrapper: before the agent's turn ends, its own text blocks
-of the turn are parsed for chat envelopes (`agents_common.envelope`). A malformed envelope, or one
-the chat refused, blocks the Stop once with a numbered reason so the agent resends only the
-corrected ones. Every later Stop of the turn is allowed. When the retry did not repair the
-failure and nothing was delivered to the target room, one `notice` row queues the fixed apology
-the user sees (`chat_protocol_failed`). The endpoint never fails on a body it cannot use: the
-hook answers allow on any error (`on_error: allow`).
+of the turn are parsed for envelopes (`ingester.envelopes.REGISTRY`, chat and hive tags). A
+malformed envelope, one the caller may not send (`only the leader may send <tag>`, `agent-send`
+in this release), or one the relay refused blocks the Stop once with a numbered reason so the
+agent resends only the corrected ones. Every later Stop of the turn is allowed. When the retry
+did not repair a `<chat-send>` failure and nothing was delivered to the target room, one
+`notice` row queues the fixed apology the user sees (`chat_protocol_failed`). The endpoint never
+fails on a body it cannot use: the hook answers allow on any error (`on_error: allow`).
 """
 
 from __future__ import annotations
@@ -14,10 +15,11 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
 import psycopg
-from agents_common.envelope import CHAT_TAGS, EnvelopeError, parse
+from agents_common.envelope import parse
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
@@ -26,6 +28,12 @@ from agents_orchestrator.api.sessions import Pool
 from agents_orchestrator.db import envelope_outbox, leadership
 from agents_orchestrator.db import sessions as sessions_repo
 from agents_orchestrator.db.envelope_outbox import Row
+from agents_orchestrator.ingester.envelopes import (
+    REGISTRY,
+    has_marker,
+    kind_of,
+    needs_leader,
+)
 
 log = logging.getLogger(__name__)
 
@@ -49,46 +57,79 @@ def _blocks(data: dict[str, Any]) -> list[tuple[str, str]]:
     return out
 
 
-def _parse(blocks: list[tuple[str, str]]) -> tuple[list[tuple[str, EnvelopeError]], int]:
-    """(parse errors with their message id, number of valid envelopes) over the blocks."""
-    errors: list[tuple[str, EnvelopeError]] = []
-    valid = 0
+@dataclass(frozen=True)
+class Problem:
+    """One envelope of a block that cannot be delivered, before the outbox row is looked up."""
+
+    message_id: str
+    index: int
+    tag: str
+    message: str
+    snippet: str = ""
+
+
+_TAG = re.compile(r"<([a-z]+-[a-z]+)")
+
+
+def _parse(blocks: list[tuple[str, str]], leads: bool) -> tuple[list[Problem], list[str]]:
+    """(problems, tags of the deliverable envelopes) over the blocks."""
+    problems: list[Problem] = []
+    valid: list[str] = []
     for message_id, text in blocks:
-        if "<chat-" not in text:
+        if not has_marker(text):
             continue
-        parsed = parse(text, CHAT_TAGS)
-        valid += len(parsed.envelopes)
-        errors.extend((message_id, e) for e in parsed.errors)
-    return errors, valid
+        parsed = parse(text, REGISTRY)
+        for err in parsed.errors:
+            found = _TAG.match(err.snippet)
+            tag = found.group(1) if found else "chat-send"
+            problems.append(Problem(message_id, err.index, tag, err.message, err.snippet))
+        for env in parsed.envelopes:
+            if kind_of(env.tag) == "agent":
+                msg = "agent-send is not available yet"
+            elif needs_leader(env.tag) and not leads:
+                msg = f"only the leader may send <{env.tag}>"
+            else:
+                valid.append(env.tag)
+                continue
+            problems.append(Problem(message_id, env.index, env.tag, msg))
+    return problems, valid
 
 
-def _line(n: int, message_id: str, err: EnvelopeError) -> str:
-    where = f" of message {message_id}" if message_id else ""
-    return f"{n}) envelope {err.index}{where}: {err.message}"
+def _ref(rows: list[dict[str, Any]], index: int | None, tag: str | None) -> str:
+    """`a<outbox id> ` of the row of this envelope index (of the tag's kind first), or ''."""
+    same = [r for r in rows if index is not None and r["envelope_index"] == index]
+    kind = kind_of(tag) if tag else None
+    match = next((r for r in same if r["kind"] == kind), same[0] if same else None)
+    return f"a{match['id']} " if match else ""
+
+
+def _line(n: int, rows: list[dict[str, Any]], p: Problem) -> str:
+    where = f" of message {p.message_id}" if p.message_id else ""
+    return f"{n}) {_ref(rows, p.index, p.tag)}envelope {p.index}{where}: {p.message}"
 
 
 def _refused_line(n: int, row: dict[str, Any]) -> str:
     index = row["envelope_index"]
     what = f"envelope {index}" if index is not None else "an envelope"
-    return f"{n}) {what}: refused by the chat ({row['error_code'] or 'refused'})"
+    return f"{n}) a{row['id']} {what}: refused ({row['error_code'] or 'refused'})"
 
 
-def _reason(errors: list[tuple[str, EnvelopeError]], refused: list[dict[str, Any]]) -> str:
-    lines = [_line(i, mid, e) for i, (mid, e) in enumerate(errors, 1)]
+def _reason(
+    problems: list[Problem], refused: list[dict[str, Any]], rows: list[dict[str, Any]]
+) -> str:
+    lines = [_line(i, rows, p) for i, p in enumerate(problems, 1)]
     lines += [_refused_line(len(lines) + i, r) for i, r in enumerate(refused, 1)]
     return (
-        "Some chat envelopes were not delivered: "
+        "Some envelopes were not delivered: "
         + " ".join(lines)
         + " The others were delivered; do not resend them. Resend only the corrected ones now."
     )
 
 
-def _target_room(
-    errors: list[tuple[str, EnvelopeError]], refused: list[dict[str, Any]]
-) -> str | None:
+def _target_room(problems: list[Problem], refused: list[dict[str, Any]]) -> str | None:
     """The room the failed envelopes named; None when none did (the connector's default)."""
-    for _, err in errors:
-        found = _ROOM.search(err.snippet)
+    for p in problems:
+        found = _ROOM.search(p.snippet)
         if found:
             return found.group(1)
     for row in refused:
@@ -149,30 +190,35 @@ async def decide(
     leads = session is not None and await leadership.leads(
         conn, session_id, agent_id, alone=session.spec.alone
     )
-    if not blocks or not leads:
+    if not blocks:
         await _record_allowed(conn, agent_id, turn_id)
         return StopOut()
     check = await _check(conn, agent_id, turn_id)
     rows = await envelope_outbox.rows_for_turn(conn, agent_id, turn_id)
     refused = [r for r in rows if r["status"] == "refused"]
     if check is None or check[0] is None:
-        errors, _ = _parse(blocks)
-        if not errors and not refused:
+        problems, _ = _parse(blocks, leads)
+        if not problems and not refused:
             await _record_allowed(conn, agent_id, turn_id)
             return StopOut()
         await _record_blocked(conn, agent_id, turn_id, len(blocks))
-        return StopOut(decision="block", reason=_reason(errors, refused))
-    # a later Stop of the turn: always allowed; judge the retry
+        return StopOut(decision="block", reason=_reason(problems, refused, rows))
+    # a later Stop of the turn: always allowed; judge the chat retry
     seen = check[1]
-    first_errors, _ = _parse(blocks[:seen])
-    later_errors, later_valid = _parse(blocks[seen:])
-    failed = bool(later_errors) or (bool(first_errors or refused) and later_valid == 0)
+    first, _ = _parse(blocks[:seen], leads)
+    later, later_valid = _parse(blocks[seen:], leads)
+    first_chat = [p for p in first if p.tag == "chat-send"]
+    later_chat = [p for p in later if p.tag == "chat-send"]
+    refused_chat = [r for r in refused if r["kind"] == "send"]
+    later_valid_chat = [t for t in later_valid if t.startswith("chat-")]
+    failed = bool(later_chat) or (bool(first_chat or refused_chat) and not later_valid_chat)
     await _record_allowed(conn, agent_id, turn_id)
     if not failed:
         return StopOut()
-    room = _target_room(later_errors or first_errors, refused)
+    room = _target_room(later_chat or first_chat, refused_chat)
     already_told = any(r["kind"] == "notice" for r in rows)
-    if not already_told and not _delivering(rows, room):
+    notify = not already_told and not _delivering(rows, room)
+    if notify:
         await envelope_outbox.insert_rows(
             conn,
             [
@@ -189,9 +235,9 @@ async def decide(
         "chat_protocol_failed agent=%s turn=%s errors=%d refused=%d notice=%s",
         agent_id,
         turn_id,
-        len(first_errors) + len(later_errors),
-        len(refused),
-        not already_told and not _delivering(rows, room),
+        len(first_chat) + len(later_chat),
+        len(refused_chat),
+        notify,
     )
     return StopOut()
 
@@ -200,7 +246,7 @@ async def decide(
     "/stop",
     response_model=StopOut,
     response_model_exclude_none=True,
-    summary="onStop webhook: block once on chat envelopes that were not delivered",
+    summary="onStop webhook: block once on envelopes that were not delivered",
 )
 async def stop(request: Request, agent: Caller, pool: Pool) -> StopOut:
     """Never fails on a body it cannot use: an unreadable one is an allow."""
