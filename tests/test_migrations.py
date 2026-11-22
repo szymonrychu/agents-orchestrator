@@ -1472,7 +1472,7 @@ def test_cache_sweep_tables_apply_after_a_database_already_at_0027(empty_dsn, tm
 
 def test_session_close_columns_apply_after_a_database_already_at_0027(empty_dsn, tmp_path):
     # 0030 backfills close_kind from close_requested_at, so it waits for 0026 as well; 0035 and
-    # 0038, 0043, 0047 to 0055 need the messages.notice column of 0030,
+    # 0038, 0043, 0047 to 0055 and 0059 need the messages.notice column of 0030,
     # 0041 and 0045 the proposal tables of 0038
     skipped = (
         "0026_",
@@ -1492,6 +1492,7 @@ def test_session_close_columns_apply_after_a_database_already_at_0027(empty_dsn,
         "0054_",
         "0055_",
         "0057_",
+        "0059_",
     )
     for path in MIGRATIONS_DIR.glob("*.sql"):
         if not path.name.startswith(skipped):
@@ -1516,6 +1517,7 @@ def test_session_close_columns_apply_after_a_database_already_at_0027(empty_dsn,
         "0054",
         "0055",
         "0057",
+        "0059",
     ]
     assert {"close_requested_at", "close_reason"} <= _columns(empty_dsn, "sessions")
 
@@ -2106,7 +2108,6 @@ def test_0041_applies_after_a_database_that_already_holds_0042(empty_dsn, tmp_pa
         if not f.name.startswith("0041_"):
             shutil.copy(f, tmp_path / f.name)
     assert run_migrations(empty_dsn, tmp_path)[-5:] == [
-        "0054",
         "0055",
         "0056",
         "0057",
