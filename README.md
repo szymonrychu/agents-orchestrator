@@ -53,6 +53,8 @@ Every process reads `ORCH_*` variables (the contract `agents-orchestrator-settin
 | `ORCH_VOLUME_MAX_SIZE` | `200Gi` | api | cap on a volume size (volumes only grow) |
 | `ORCH_VOLUME_MAX_PER_PRESET` | `8` | api | most volumes one preset may attach |
 | `ORCH_VOLUME_MIGRATION_DRY_RUN` | `false` | api | the one-shot startup migration of preset backup entries to volumes only plans and logs (preset and volume names, counts) |
+| `ORCH_VOLUME_MIGRATION_COPY_TIMEOUT_SECONDS` | `120` | api | time limit of one seed copy of the startup migration |
+| `ORCH_VOLUME_MIGRATION_DEADLINE_SECONDS` | `1800` | api | time limit of the whole startup migration (it runs in the background) |
 | `ORCH_CLAUDE_SECRET_NAME` | `agents-orchestrator-claude` | api, reconciler | Secret holding Claude credentials |
 | `ORCH_IMAGE_PULL_SECRET` | `regcred` | api, reconciler | imagePullSecret name; empty means none |
 | `ORCH_ANY_MCP_CONFIG_FILE` | empty | api, reconciler | path to default any-mcp config; empty means {} |
