@@ -319,12 +319,17 @@ async def list_sessions(
     project: str | None = None,
     slug: str | None = None,
     superleaders: bool = False,
+    projects: tuple[str, ...] | None = None,
 ) -> list[Session]:
     """Every session, narrowed by each filter given (they combine): `labels` keeps live (not
     being deleted) sessions sharing any; `project` keeps that project's sessions, plus every
-    superleader session with `superleaders`; `slug` is an exact match."""
+    superleader session with `superleaders`; `slug` is an exact match; `projects` keeps the
+    sessions that belong (home or extra) to any of them."""
     where: list[str] = []
     params: list[Any] = []
+    if projects is not None:
+        where.append("(project = ANY(%s) OR extra_projects && %s::text[])")
+        params.extend([list(projects), list(projects)])
     if labels:
         where.append("labels && %s::text[] AND desired = 'active'")
         params.append(labels)

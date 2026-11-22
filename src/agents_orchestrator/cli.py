@@ -351,6 +351,33 @@ def _cmd_presets_check(_args: argparse.Namespace) -> int:
     return presets_check.run(settings.database_url, settings, sys.stdout)
 
 
+def _configure_history_backfill(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--url",
+        default=None,
+        help="agents-history projects backfill URL (default: ORCH_DISCARD_HOOK_URL + /projects)",
+    )
+
+
+def _cmd_history_backfill(args: argparse.Namespace) -> int:
+    import asyncio
+
+    from agents_orchestrator import history_backfill
+
+    settings = _settings()
+    url = args.url or (
+        history_backfill.projects_url(settings.discard_hook_url)
+        if settings.discard_hook_url
+        else ""
+    )
+    if not url or not settings.discard_hook_token:
+        print("needs ORCH_DISCARD_HOOK_URL (or --url) and ORCH_DISCARD_HOOK_TOKEN", file=sys.stderr)
+        return 2
+    return asyncio.run(
+        history_backfill.run(settings.database_url, url, settings.discard_hook_token, sys.stdout)
+    )
+
+
 def _configure_handover_stats(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--days", type=int, default=7, help="window in days (default 7)")
     parser.add_argument(
@@ -444,6 +471,12 @@ register(
     _cmd_handover_stats,
     "print handover tenure and intake statistics as JSON (read-only)",
     _configure_handover_stats,
+)
+register(
+    "history-backfill-projects",
+    _cmd_history_backfill,
+    "post every session's project and extra_projects to agents-history (fills NULL only)",
+    _configure_history_backfill,
 )
 register(
     "backup",

@@ -643,7 +643,15 @@ async def on_leader_moved(
     )
 
 
-# ------------------------------------------------------------------ superleader reads (S-68)
+# ------------------------------------------------------------------ scoped reads (S-68, S-83)
+
+# the session (s) is in the caller's projects %(p)s, home or extra; NULL means every project
+_IN_PROJECTS = "(%(p)s::text[] IS NULL OR s.project = ANY(%(p)s) OR s.extra_projects && %(p)s)"
+
+
+def _list(projects: tuple[str, ...] | None) -> list[str] | None:
+    return None if projects is None else list(projects)
+
 
 _READ_COLUMNS = (
     "h.id, h.session_id, s.slug AS session_slug, h.agent_id, h.trigger AS kind, h.created_at,"
@@ -657,28 +665,33 @@ async def list_handoffs(
     session_id: uuid.UUID | None,
     limit: int,
     before_id: int | None,
+    projects: tuple[str, ...] | None,
 ) -> tuple[list[dict[str, Any]], bool]:
     """The handoff rows newest first (id order), optionally of one session and older than
-    `before_id`; `kind` is the row's trigger and `size` the characters of its text. The bool says
-    whether more rows follow the page."""
+    `before_id`, of sessions in `projects` (home or extra; None: every session); `kind` is the
+    row's trigger and `size` the characters of its text. The bool says whether more rows follow
+    the page."""
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             f"SELECT {_READ_COLUMNS} FROM agent_handoffs h JOIN sessions s ON s.id = h.session_id"
             " WHERE (%(sid)s::uuid IS NULL OR h.session_id = %(sid)s)"
             " AND (%(before)s::bigint IS NULL OR h.id < %(before)s)"
-            " ORDER BY h.id DESC LIMIT %(n)s",
-            {"sid": session_id, "before": before_id, "n": limit + 1},
+            f" AND {_IN_PROJECTS} ORDER BY h.id DESC LIMIT %(n)s",
+            {"sid": session_id, "before": before_id, "n": limit + 1, "p": _list(projects)},
         )
         rows = await cur.fetchall()
     return rows[:limit], len(rows) > limit
 
 
-async def get_handoff(conn: psycopg.AsyncConnection, id: int) -> dict[str, Any] | None:
-    """One handoff row in full: the list fields plus `handoff_text`; None when absent."""
+async def get_handoff(
+    conn: psycopg.AsyncConnection, id: int, projects: tuple[str, ...] | None
+) -> dict[str, Any] | None:
+    """One handoff row in full: the list fields plus `handoff_text`; None when absent or its
+    session is in none of `projects` (None: every session)."""
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             f"SELECT {_READ_COLUMNS}, h.handoff_text FROM agent_handoffs h"
-            " JOIN sessions s ON s.id = h.session_id WHERE h.id = %s",
-            (id,),
+            f" JOIN sessions s ON s.id = h.session_id WHERE h.id = %(id)s AND {_IN_PROJECTS}",
+            {"id": id, "p": _list(projects)},
         )
         return await cur.fetchone()

@@ -42,9 +42,14 @@ def test_every_agent_route_is_classified():
         "superleader",
         "reader",
         "notes",
+        "agent",
     }
-    # the reader and notes classes are exactly the reader and notes gate routes (S-68 step 13)
-    for cls, router in (("reader", admin.reader_router), ("notes", admin.notes_router)):
+    # the reader, notes and agent classes are exactly their gate's routes (S-68 step 13, S-83)
+    for cls, router in (
+        ("reader", admin.reader_router),
+        ("notes", admin.notes_router),
+        ("agent", admin.agent_router),
+    ):
         routes = {(m, r.path) for r in router.routes for m in r.methods}
         assert {k for k, v in AGENT_SCOPE.items() if v == cls} == routes, cls
     # session-spec-patch and proposals are on the agent port and classified own

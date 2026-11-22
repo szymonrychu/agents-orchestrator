@@ -356,10 +356,12 @@ async def list_views(
     project: str | None,
     superleaders: bool,
     slug: str | None,
+    scope: tuple[str, ...] | None = None,
 ) -> list[schemas.SessionView]:
     """The session list behind the main port and the admin route: `label` (any match among live
     sessions), `project` (422 `unknown_project`; an archived one still lists), `superleaders`
-    adds every superleader session to a project filter, `slug` is an exact match."""
+    adds every superleader session to a project filter, `slug` is an exact match, `scope` (the
+    admin caller's projects; None: every project) keeps the sessions of those projects."""
     try:
         wanted = normalize_labels(label, allow_reserved=True) if label else None
     except ValueError as exc:
@@ -367,7 +369,12 @@ async def list_views(
     if project is not None and await projects.get_project(conn, project) is None:
         raise project_error(projects.UnknownProject(project))
     found = await repo.list_sessions(
-        conn, labels=wanted, project=project, slug=slug, superleaders=superleaders
+        conn,
+        labels=wanted,
+        project=project,
+        slug=slug,
+        superleaders=superleaders,
+        projects=scope,
     )
     aggs = await views.session_aggregates(conn)
     return [_view(c, aggs.get(c.id), settings) for c in found]

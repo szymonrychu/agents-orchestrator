@@ -16,8 +16,11 @@ agent route fails CI until it is classified.
   upstream filters.
 - `superleader`: the superleader gate; unscoped by design. The admin relay (`admin_relay`)
   forwards send `X-Orch-Projects: *` for a superleader.
-- `reader`: the reader gate (`admin.require_reader`): a superleader only (S-83; steps 6 and 7
-  reshape it).
+- `reader`: the reader gate (`admin.require_reader`): a superleader only (S-83; step 7
+  reshapes it).
+- `agent`: the agent gate (`admin.require_agent`): any agent, reading the caller's projects
+  (`admin.caller_projects`: every project for a superleader, its leader only; decisions
+  859-868). History relays forward that scope as `X-Orch-Projects`.
 - `notes`: the room notes writer gate (`admin.require_notes_writer`): a superleader only.
 """
 
@@ -27,7 +30,7 @@ from typing import Literal
 
 from agents_orchestrator.db import sessions as sessions_repo
 
-ScopeClass = Literal["own", "peers", "project", "superleader", "reader", "notes"]
+ScopeClass = Literal["own", "peers", "project", "superleader", "reader", "notes", "agent"]
 
 PROJECTS_HEADER = "X-Orch-Projects"
 ALL_PROJECTS = "*"
@@ -39,9 +42,13 @@ _ADMIN = f"{_A}/admin"
 def scope_of(session: sessions_repo.Session) -> str:
     """`*` for a superleader session only; else its projects comma-separated, home first (the
     taskboard reads the first as the home project)."""
-    if session.spec.session_messaging:
-        return ALL_PROJECTS
-    return ",".join(session.projects)
+    return scope_value(None if session.spec.session_messaging else session.projects)
+
+
+def scope_value(projects: tuple[str, ...] | None) -> str:
+    """The `X-Orch-Projects` value of a scope: `*` for None (every project), else the projects
+    comma-separated, home first."""
+    return ALL_PROJECTS if projects is None else ",".join(projects)
 
 
 def projects_header(session: sessions_repo.Session) -> dict[str, str]:
@@ -137,7 +144,7 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("DELETE", f"{_ADMIN}/presets/{{ref}}"): "superleader",
     ("POST", f"{_ADMIN}/presets/{{ref}}/copy"): "superleader",
     ("GET", f"{_ADMIN}/vault"): "superleader",
-    ("GET", f"{_ADMIN}/sessions"): "reader",
+    ("GET", f"{_ADMIN}/sessions"): "agent",
     ("GET", f"{_ADMIN}/meta"): "superleader",
     ("GET", f"{_ADMIN}/backups"): "reader",
     ("POST", f"{_ADMIN}/backups/copy"): "reader",
@@ -162,7 +169,7 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("POST", f"{_ADMIN}/sessions/{{slug}}/restart"): "superleader",
     ("POST", f"{_ADMIN}/sessions/{{slug}}/agents/{{pod}}/restart"): "superleader",
     ("GET", f"{_ADMIN}/sessions/{{slug}}/activity"): "reader",
-    ("GET", f"{_ADMIN}/sessions/{{slug}}/events"): "reader",
+    ("GET", f"{_ADMIN}/sessions/{{slug}}/events"): "agent",
     ("GET", f"{_ADMIN}/sessions/{{slug}}/messages"): "reader",
     ("GET", f"{_ADMIN}/sessions/{{slug}}/locks"): "superleader",
     ("GET", f"{_ADMIN}/sessions/{{slug}}/commands"): "superleader",
@@ -214,8 +221,8 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("POST", f"{_ADMIN}/chats/rooms/{{room_id}}/allow"): "superleader",
     ("GET", f"{_ADMIN}/chats/rooms/{{room_id}}/notes"): "reader",
     ("PUT", f"{_ADMIN}/chats/rooms/{{room_id}}/notes/sections/{{section}}"): "notes",
-    ("GET", f"{_ADMIN}/handoffs"): "reader",
-    ("GET", f"{_ADMIN}/handoffs/{{id}}"): "reader",
+    ("GET", f"{_ADMIN}/handoffs"): "agent",
+    ("GET", f"{_ADMIN}/handoffs/{{id}}"): "agent",
     ("GET", f"{_ADMIN}/chats/users"): "superleader",
     ("POST", f"{_ADMIN}/chats/room-requests"): "superleader",
     ("GET", f"{_ADMIN}/chats/room-requests/{{request_id}}"): "superleader",
@@ -223,9 +230,9 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("GET", f"{_ADMIN}/chats/rules"): "superleader",
     ("POST", f"{_ADMIN}/chats/rules"): "superleader",
     ("DELETE", f"{_ADMIN}/chats/rules/{{rule_id}}"): "superleader",
-    ("GET", f"{_ADMIN}/history/sessions"): "reader",
-    ("GET", f"{_ADMIN}/history/sessions/{{session_id}}"): "reader",
-    ("GET", f"{_ADMIN}/history/sessions/{{session_id}}/records"): "reader",
+    ("GET", f"{_ADMIN}/history/sessions"): "agent",
+    ("GET", f"{_ADMIN}/history/sessions/{{session_id}}"): "agent",
+    ("GET", f"{_ADMIN}/history/sessions/{{session_id}}/records"): "agent",
     ("GET", f"{_ADMIN}/usage/history"): "reader",
     ("GET", f"{_ADMIN}/usage/sessions"): "superleader",
 }
