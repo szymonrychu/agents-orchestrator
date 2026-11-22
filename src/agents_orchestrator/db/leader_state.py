@@ -103,11 +103,12 @@ _MEMBERS = f"""
            CASE WHEN st.state = 'idle' THEN st.free_since ELSE t.started_at END AS since,
            st.context_pct, st.context_used_tokens,
            coalesce(st.background_subagents, '{{}}'::jsonb) AS background,
-           (SELECT max(e.ts) FROM events e
-             WHERE e.session_id = a.session_id AND e.agent_id = l.agent_id
-               AND e.type = 'peer_message_received'
-               AND e.ts > now() - make_interval(hours => {REPORT_WINDOW_HOURS})
-               AND starts_with(e.data->>'from', a.pod_name || '/')) AS last_report_at
+           (SELECT max(m.created_at) FROM messages m
+             WHERE m.session_id = a.session_id AND m.channel = 'agent'
+               AND m.sender_agent_id = a.id AND m.status <> 'cancelled'
+               AND (m.target_agent_id IS NULL OR m.target_agent_id = l.agent_id)
+               AND m.created_at > now() - make_interval(hours => {REPORT_WINDOW_HOURS}))
+             AS last_report_at
     FROM agents a
     LEFT JOIN agent_status st ON st.agent_id = a.id
     LEFT JOIN turns t ON t.turn_id = st.current_turn_id AND t.agent_id = a.id

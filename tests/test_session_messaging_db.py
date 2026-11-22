@@ -174,3 +174,19 @@ async def test_turn_hop_for_reads_a_given_past_turn(pool):
         assert await queue.turn_hop_for(conn, agent["id"], "t1") == 3
         assert await queue.turn_hop_for(conn, agent["id"], "nope") == 0
         assert await queue.turn_hop(conn, agent["id"]) == 5
+
+
+async def test_turn_hop_is_the_max_over_the_turn_messages(pool):
+    from factories import insert_agent
+
+    a, b = await insert_session(pool), await insert_session(pool)
+    agent = await insert_agent(pool, b["id"])
+    async with pool.connection() as conn:
+        high = await queue.enqueue_message(
+            conn, b["id"], "m", sender_session_id=a["id"], sender_slug="a", hop=7
+        )
+        low = await queue.enqueue_message(
+            conn, b["id"], "member", sender_agent_id=agent["id"], channel="agent"
+        )
+        await conn.execute("UPDATE messages SET turn_id = 't1' WHERE id = ANY(%s)", ([high, low],))
+        assert await queue.turn_hop_for(conn, agent["id"], "t1") == 7

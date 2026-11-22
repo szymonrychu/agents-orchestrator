@@ -286,10 +286,9 @@ async def _hop_of_turn(
 ) -> int | None:
     row = await _one(
         conn,
-        "SELECT m.hop FROM agents a JOIN messages m ON m.session_id = a.session_id"
+        "SELECT max(m.hop) AS hop FROM agents a JOIN messages m ON m.session_id = a.session_id"
         " WHERE a.id = %s AND m.turn_id = %s"
-        " AND (m.channel = 'agent' OR m.sender_session_id IS NOT NULL)"
-        " ORDER BY m.id DESC LIMIT 1",
+        " AND (m.channel = 'agent' OR m.sender_session_id IS NOT NULL)",
         (agent_id, turn_id),
     )
     return row["hop"] if row is not None else None
