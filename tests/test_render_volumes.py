@@ -116,3 +116,51 @@ def test_init_job_mounts_same_paths_and_modes():
 
     assert vol_parts(job) == vol_parts(pod)
     assert job["securityContext"]["fsGroupChangePolicy"] == "OnRootMismatch"
+
+
+OWNER = {
+    "name": "volume-owner",
+    "command": ["chown", "1000:1000", "/workdir/workdir"],
+    "securityContext": {
+        "runAsUser": 0,
+        "runAsNonRoot": False,
+        "readOnlyRootFilesystem": True,
+        "allowPrivilegeEscalation": False,
+        "capabilities": {"drop": ["ALL"], "add": ["CHOWN"]},
+    },
+}
+
+
+def owner_of(pod_spec: dict) -> dict | None:
+    found = [c for c in pod_spec.get("initContainers", []) if c["name"] == "volume-owner"]
+    if not found:
+        return None
+    c = found[0]
+    assert pod_spec["initContainers"][0] is c  # before the docker sidecar and the agent
+    return {k: c[k] for k in ("name", "command", "securityContext")} | {
+        "mounts": [(m["name"], m["mountPath"]) for m in c["volumeMounts"]]
+    }
+
+
+@pytest.mark.parametrize(
+    ("modes", "docker", "chowned"),
+    [
+        (("ro", "rw"), False, [("vol-1", "/workdir/workdir")]),
+        (("ro", "rw"), True, [("vol-1", "/workdir/workdir")]),
+        (("ro",), False, None),
+    ],
+    ids=["rw", "rw-docker", "ro-only"],
+)
+def test_rw_volume_roots_are_chowned_to_the_agent_before_pod_and_init_job_start(
+    modes, docker, chowned
+):
+    """A volume root is created by the CSI driver as uid 0; git refuses a repo there (S-77)."""
+    paths = ("/claude", "/workdir/workdir")
+    atts = [attach(make_volume(m), m, p) for m, p in zip(modes, paths, strict=False)]
+    session = make_session(docker=docker)
+    settings = make_settings(docker_image="docker:27.3.1-dind")
+    pod = pod_of(render.render_session(session, settings, TOKENS, atts))["spec"]
+    job = render_init_job(session, settings, ["true"], atts)["spec"]["template"]["spec"]
+    want = None if chowned is None else OWNER | {"mounts": chowned}
+    assert owner_of(pod) == want
+    assert owner_of(job) == want

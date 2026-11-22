@@ -39,6 +39,7 @@ from agents_orchestrator.k8s.render import (
     VolumeAttachments,
     agent_identity,
     env_entries,
+    volume_owner_init,
     volume_pod_parts,
     workdir_mount,
     workdir_path,
@@ -153,6 +154,9 @@ def render_init_job(
             *att_volumes,
         ],
     }
+    owner = volume_owner_init(container["image"], att_mounts)
+    if owner:
+        pod_spec["initContainers"] = owner
     if settings.image_pull_secret:
         pod_spec = {"imagePullSecrets": [{"name": settings.image_pull_secret}], **pod_spec}
     return {

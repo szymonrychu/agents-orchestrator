@@ -283,3 +283,24 @@ def test_volume_job_mounts_the_pvc_at_volume_and_is_not_a_session_job(action, re
     mount = next(m for m in container_of(job)["volumeMounts"] if m["mountPath"] == "/volume")
     assert mount.get("readOnly", False) is read_only
     assert pod["securityContext"]["fsGroupChangePolicy"] == "OnRootMismatch"
+
+
+@pytest.mark.parametrize(("action", "chowned"), [("restore", True), ("save", False)])
+def test_volume_restore_chowns_the_volume_root_to_the_agent_first(action, chowned):
+    """The CSI driver creates the root as uid 0; the uid 1000 extract cannot take it over."""
+    job = render_volume_job(
+        make_volume(), make_settings(), action=action, n=1, url=URL, version=None
+    )
+    owners = [
+        (c["image"], c["command"], c["securityContext"]["runAsUser"], c["volumeMounts"])
+        for c in pod_of(job).get("initContainers", [])
+    ]
+    want = [
+        (
+            CACHE_IMAGE,
+            ["chown", "1000:1000", "/volume"],
+            0,
+            [{"name": "volume", "mountPath": "/volume"}],
+        )
+    ]
+    assert owners == (want if chowned else [])

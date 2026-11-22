@@ -39,7 +39,12 @@ from agents_orchestrator.db.sessions import Session
 from agents_orchestrator.db.volumes import Volume
 from agents_orchestrator.k8s.kube import KubeApi, KubeError, Obj, is_owned
 from agents_orchestrator.k8s.labels import prefix, session_labels, volume_labels, workspace_pvc
-from agents_orchestrator.k8s.render import SESSIONS_ROOT, WORKSPACE_VOLUME, agent_identity
+from agents_orchestrator.k8s.render import (
+    SESSIONS_ROOT,
+    WORKSPACE_VOLUME,
+    agent_identity,
+    volume_owner_init,
+)
 from agents_orchestrator.reconciler.checks import (
     DEADLINE_GRACE_SECONDS,
     TAIL_LINES,
@@ -258,6 +263,9 @@ def render_volume_job(
             {"name": "scratch", "emptyDir": {"sizeLimit": str(settings.cache_max_bytes)}}
         )
     container = _cache_container(settings, action, _cache_env(settings, [entry]), mounts)
+    pod_spec = _hardened(settings, container, volumes)
+    if not save:  # the extract runs as uid 1000 and cannot take over a uid 0 root
+        pod_spec["initContainers"] = volume_owner_init(settings.cache_image, mounts[:1])
     labels = {**volume_labels(volume.id), CACHE_LABEL: f"volume-{action}"}
     metadata: dict[str, Any] = {
         "name": volume_job_name(volume.name, action, n),
@@ -275,7 +283,7 @@ def render_volume_job(
             "activeDeadlineSeconds": settings.cache_timeout_seconds,
             "template": {
                 "metadata": {"labels": dict(labels)},
-                "spec": _hardened(settings, container, volumes),
+                "spec": pod_spec,
             },
         },
     }
