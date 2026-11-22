@@ -12,8 +12,8 @@ overrides = [{ name = "any-mcp", git = "https://github.com/szymonrychu/any-mcp?r
 
 [[package]]
 name = "agents-common"
-version = "0.19.0"
-source = { git = "https://github.com/szymonrychu/agents-common?rev=v0.19.0#8ed53451288e9b8057556c4363444a41ea11dfa0" }
+version = "0.20.0"
+source = { git = "https://github.com/szymonrychu/agents-common?rev=v0.20.0#5d89e39df295772559d3c8116f977579cd65e804" }
 dependencies = [
     { name = "httpx" },
     { name = "jinja2" },
@@ -55,7 +55,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agents-common", git = "https://github.com/szymonrychu/agents-common?rev=v0.19.0" },
+    { name = "agents-common", git = "https://github.com/szymonrychu/agents-common?rev=v0.20.0" },
     { name = "any-mcp", git = "https://github.com/szymonrychu/any-mcp?rev=v0.5.0" },
     { name = "botocore", specifier = ">=1.43.118" },
     { name = "fastapi", specifier = "==0.160.0" },

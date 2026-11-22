@@ -32,6 +32,7 @@ from agents_orchestrator.api import schemas, session_limits, workspace
 from agents_orchestrator.api import sessions as sessions_api
 from agents_orchestrator.api.errors import ApiError
 from agents_orchestrator.api.scope import ALL_PROJECTS, scope_of
+from agents_orchestrator.api.session_core import session_send_core
 from agents_orchestrator.api.sessions import (
     Cfg,
     Pool,
@@ -836,41 +837,18 @@ async def session_send(
     counts and the insert are not one atomic step (D10)."""
     async with pool.connection() as conn:
         own = await _session(conn, agent)
-        if not await _leads(conn, agent, own):
-            raise ApiError(403, "not_leader", "only the leader of a session can send to another")
-        target = await sessions_repo.get_by_slug(conn, slug)
-        if target is None:
-            raise ApiError(404, "not_found", f"session {slug} not found")
-        if target.id == own.id:
-            raise ApiError(422, "self_send", "a session cannot send a message to itself")
-        if not await session_limits.may_message(conn, own, target, settings):
-            # may_message allows every same-project pair, so a refusal is always cross-project
-            window = settings.session_reply_window_seconds
-            message = f"session {slug} is in another project and neither session is a superleader"
-            if window > 0:
-                message = (
-                    f"session {slug} is in another project, neither session is a superleader,"
-                    f" and it has not messaged the caller's session in the last"
-                    f" {window // 3600} hours"
-                )
-            raise ApiError(403, "project_forbidden", message)
-        if target.desired == "deleting":
-            raise ApiError(409, "session_deleting", f"session {slug} is being discarded")
-        hop = await session_limits.check_limits(conn, agent.id, own, target, settings)
-        try:
-            message_id = await q.enqueue_message(
-                conn,
-                target.id,
-                body.text,
-                sender_session_id=own.id,
-                sender_slug=own.slug,
-                hop=hop,
-                lane=body.lane,
-            )
-        except q.SessionBeingDeleted as exc:
-            raise ApiError(409, "session_deleting", "target session is being discarded") from exc
-        handled = await session_messaging.mark_handled(conn, own.id, body.handled)
-    return SessionMessageQueued(message_id=message_id, handled=handled)
+        sent = await session_send_core(
+            conn,
+            own,
+            agent,
+            slug,
+            body.text,
+            settings=settings,
+            lane=body.lane,
+            handled=body.handled,
+            hop=await session_limits.current_hop(conn, agent.id),
+        )
+    return SessionMessageQueued(message_id=sent.message_id, handled=sent.handled)
 
 
 def _hook_path(body: Any) -> str | None:

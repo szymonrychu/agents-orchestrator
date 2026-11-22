@@ -109,6 +109,7 @@ async def enqueue_fanout(
     sender_slug: str,
     hop: int,
     post_id: int,
+    envelope_ref: str | None = None,
 ) -> int:
     """Queue the post as an untargeted session message to the recipient, marked with the post
     id. Raises `queue.SessionBeingDeleted` like `queue.enqueue_message`."""
@@ -121,6 +122,7 @@ async def enqueue_fanout(
         hop=hop,
         lane="regular",
         project_post_id=post_id,
+        envelope_ref=envelope_ref,
     )
 
 

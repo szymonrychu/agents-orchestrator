@@ -1,4 +1,4 @@
-"""POST /agent/v1/envelope/stop: the onStop webhook for chat envelopes (S-70)."""
+"""POST /agent/v1/envelope/stop: the onStop webhook for envelopes (S-70, S-71)."""
 
 from __future__ import annotations
 
@@ -90,10 +90,55 @@ async def test_valid_envelopes_allow_and_record_allowed(dsn, pool):
     assert await notices(pool) == []
 
 
-async def test_non_leader_is_allowed(dsn, pool):
+async def test_member_with_a_leader_envelope_is_blocked_as_not_leader(dsn, pool):
     c, a0, a1 = await hive(pool)
-    out = await stop(dsn, pool, c, payload("t1", texts(BAD)), ip="10.9.0.11")
-    assert out == {"decision": "allow"}
+    sent = '<session-send to="other">hi</session-send>'
+    out = await stop(dsn, pool, c, payload("t1", texts(sent)), ip="10.9.0.11")
+    assert out["decision"] == "block"
+    assert "only the leader may send <session-send>" in out["reason"]
+    again = await stop(dsn, pool, c, payload("t1", texts(sent)), ip="10.9.0.11")
+    assert again == {"decision": "allow"}
+
+
+async def test_leader_with_a_malformed_session_send_is_blocked_once_then_allowed(dsn, pool):
+    c, a0, _ = await hive(pool)
+    bad = '<session-send to="other">never closed'
+    out = await stop(dsn, pool, c, payload("t1", texts(bad)))
+    assert out["decision"] == "block"
+    assert out["reason"].startswith("Some envelopes were not delivered: 1) envelope ")
+    assert await stop(dsn, pool, c, payload("t1", texts(bad, bad, start=1))) == {
+        "decision": "allow"
+    }
+    assert await notices(pool) == []
+
+
+async def test_refused_session_row_is_listed_with_its_outbox_id(dsn, pool):
+    c, a0, _ = await hive(pool)
+    async with pool.connection() as conn:
+        await outbox.insert_rows(
+            conn,
+            [
+                Row(
+                    session_id=c["id"],
+                    agent_id=a0["id"],
+                    wrapper_session_id="w",
+                    event_seq=1,
+                    envelope_index=1,
+                    turn_id="t1",
+                    kind="session",
+                    target="other",
+                    body="x",
+                    status="refused",
+                    error_code="not_found",
+                )
+            ],
+        )
+    rows = await db_rows(pool, "SELECT id FROM envelope_outbox WHERE turn_id = 't1'")
+    out = await stop(
+        dsn, pool, c, payload("t1", texts('<session-send to="other">x</session-send>'))
+    )
+    assert out["decision"] == "block"
+    assert f"a{rows[0][0]} envelope 1: refused (not_found)" in out["reason"]
 
 
 async def test_first_stop_with_errors_blocks_with_numbered_reason(dsn, pool):
@@ -101,7 +146,7 @@ async def test_first_stop_with_errors_blocks_with_numbered_reason(dsn, pool):
     out = await stop(dsn, pool, c, payload("t1", texts(OK, BAD)))
     assert out["decision"] == "block"
     reason = out["reason"]
-    assert reason.startswith("Some chat envelopes were not delivered: 1) envelope ")
+    assert reason.startswith("Some envelopes were not delivered: 1) envelope ")
     assert "of message msg2" in reason
     assert reason.endswith(
         "The others were delivered; do not resend them. Resend only the corrected ones now."
@@ -144,7 +189,7 @@ async def test_first_stop_lists_refused_rows_of_the_turn(dsn, pool):
         )
     out = await stop(dsn, pool, c, payload("t1", texts(OK)))
     assert out["decision"] == "block"
-    assert "1) envelope 3: refused by the chat (room_not_allowed)" in out["reason"]
+    assert "refused (room_not_allowed)" in out["reason"]
     assert "elsewhere" not in out["reason"]
 
 
@@ -235,3 +280,92 @@ async def test_block_after_an_allowed_stop_clears_allowed_at(dsn, pool):
     out = await stop(dsn, pool, c, payload("t1", texts(OK, BAD, start=1)))
     assert out["decision"] == "block"
     assert await checks(pool) == [("t1", True, False, 2)]
+
+
+async def test_reference_is_omitted_when_another_kind_shares_the_index(dsn, pool):
+    c, a0, _ = await hive(pool)
+    async with pool.connection() as conn:
+        await outbox.insert_rows(
+            conn,
+            [
+                Row(
+                    session_id=c["id"],
+                    agent_id=a0["id"],
+                    wrapper_session_id="w",
+                    event_seq=1,
+                    envelope_index=1,
+                    turn_id="t1",
+                    kind="send",
+                    body="delivered",
+                    status="accepted",
+                ),
+            ],
+        )
+    chat_id = (await db_rows(pool, "SELECT id FROM envelope_outbox WHERE turn_id = 't1'"))[0][0]
+    bad = '<session-send to="other">never closed'
+    out = await stop(dsn, pool, c, payload("t1", texts(OK, bad)))
+    assert out["decision"] == "block"
+    assert "1) envelope 1 of message msg2:" in out["reason"]
+    assert f"a{chat_id} " not in out["reason"]
+
+
+async def test_member_failed_chat_retry_posts_no_apology(dsn, pool):
+    c, a0, a1 = await hive(pool)
+    member_ip = "10.9.0.11"
+    first = await stop(dsn, pool, c, payload("t1", texts(BAD_ROOM)), ip=member_ip)
+    assert first["decision"] == "block"
+    again = texts(BAD_ROOM) + texts(BAD_ROOM, start=2)
+    assert (await stop(dsn, pool, c, payload("t1", again), ip=member_ip)) == {"decision": "allow"}
+    assert await notices(pool) == []
+
+
+async def test_refusal_between_the_read_and_the_allowed_record_is_still_told(
+    dsn, pool, monkeypatch
+):
+    c, a0, _ = await hive(pool)
+    async with pool.connection() as conn:
+        await outbox.insert_rows(
+            conn,
+            [
+                Row(
+                    session_id=c["id"],
+                    agent_id=a0["id"],
+                    wrapper_session_id="w",
+                    event_seq=1,
+                    envelope_index=1,
+                    turn_id="t1",
+                    kind="session",
+                    target="other",
+                    body="x",
+                )
+            ],
+        )
+    real = outbox.rows_for_turn
+    calls = 0
+
+    async def racing(conn, agent_id, turn_id):
+        nonlocal calls
+        calls += 1
+        rows = await real(conn, agent_id, turn_id)
+        if calls == 1:  # the relay refuses the row right after the Stop read the rows
+            await conn.execute(
+                "UPDATE envelope_outbox SET status = 'refused', error_code = 'not_found'"
+            )
+        return rows
+
+    monkeypatch.setattr(outbox, "rows_for_turn", racing)
+    out = await stop(
+        dsn, pool, c, payload("t1", texts('<session-send to="other">x</session-send>'))
+    )
+    assert out == {"decision": "allow"}
+    rid = (await db_rows(pool, "SELECT id FROM envelope_outbox"))[0][0]
+    told = await db_rows(
+        pool, "SELECT text, target_agent_id FROM messages WHERE session_id = %s", c["id"]
+    )
+    assert told == [
+        (
+            f'<message-in channel="notice" from="{c["slug"]}" for="a{rid}" status="refused"'
+            ' reason="not_found"/>\n',
+            a0["id"],
+        )
+    ]

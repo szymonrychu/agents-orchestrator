@@ -458,7 +458,8 @@ def test_system_append_asks_in_writing_without_taskboard():
 def test_system_append_asks_in_writing_with_only_half_the_gate(over):
     cfg = config_of(render.render_session(make_session(), make_settings(**over), TOKENS))
     room = "agent_api_url" in over
-    expected = render.ASK_IN_WRITING_PROMPT + (f"\n\n{render.PROJECT_ROOM_PROMPT}" if room else "")
+    rooms = f"\n\n{render.PROJECT_ROOM_PROMPT}\n\n{render.HIVE_ENVELOPE_PROMPT}"
+    expected = render.ASK_IN_WRITING_PROMPT + (rooms if room else "")
     assert cfg["prompts"]["system_append"] == expected
 
 
@@ -468,7 +469,10 @@ def test_system_append_asks_via_decisions_with_taskboard():
     )
     cfg = config_of(render.render_session(make_session(), settings, TOKENS))
     text = cfg["prompts"]["system_append"]
-    assert text == f"{render.ASK_VIA_DECISIONS_PROMPT}\n\n{render.PROJECT_ROOM_PROMPT}"
+    assert text == (
+        f"{render.ASK_VIA_DECISIONS_PROMPT}\n\n{render.PROJECT_ROOM_PROMPT}"
+        f"\n\n{render.HIVE_ENVELOPE_PROMPT}"
+    )
     assert "orchestrator_decision_ask" in text
     assert "recommended" in text
     assert "askuserquestion" in text.lower()
@@ -767,7 +771,8 @@ def test_wrapper_system_append_follows_decisions_prompt():
     )
     cfg = config_of(render.render_session(session, settings, TOKENS))
     assert cfg["prompts"]["system_append"] == (
-        f"{render.ASK_VIA_DECISIONS_PROMPT}\n\n{render.PROJECT_ROOM_PROMPT}\n\nBe terse."
+        f"{render.ASK_VIA_DECISIONS_PROMPT}\n\n{render.PROJECT_ROOM_PROMPT}"
+        f"\n\n{render.HIVE_ENVELOPE_PROMPT}\n\nBe terse."
     )
 
 
@@ -787,7 +792,8 @@ def test_wrapper_settings_keep_reserved_entries():
     ]
     assert list(cfg["claude"]["mcp_servers"]) == ["any-mcp", "docs", "loc"]
     assert cfg["prompts"]["system_append"] == (
-        f"{render.ASK_IN_WRITING_PROMPT}\n\n{render.PROJECT_ROOM_PROMPT}\n\nBe terse."
+        f"{render.ASK_IN_WRITING_PROMPT}\n\n{render.PROJECT_ROOM_PROMPT}"
+        f"\n\n{render.HIVE_ENVELOPE_PROMPT}\n\nBe terse."
     )
 
 
@@ -806,13 +812,13 @@ def test_user_strings_escaped_against_interpolation():
         "system_append": lit,
     }
     cfg = wrapper_cfg(wrapper)
-    hooks = cfg["hooks"]["onStop"]
+    hooks = cfg["hooks"]["onStop"][1:]  # the rendered envelope hook comes first
     assert hooks[0]["url"] == "https://h.example/$${CLAUDE_CODE_OAUTH_TOKEN}"
     assert hooks[0]["headers"]["X"] == "$${CLAUDE_CODE_OAUTH_TOKEN}"
     assert hooks[1]["run"] == "echo $${CLAUDE_CODE_OAUTH_TOKEN} $$HOME"
     assert cfg["sessions"]["auto_compact"]["instructions"] == "$${CLAUDE_CODE_OAUTH_TOKEN}"
     env = {"CLAUDE_CODE_OAUTH_TOKEN": "secret"}
-    out = interpolate(cfg["hooks"]["onStop"], env)
+    out = interpolate(cfg["hooks"]["onStop"][1:], env)
     assert out[0]["url"] == f"https://h.example/{lit}"
     assert out[0]["headers"]["X"] == lit
     assert out[1]["run"] == f"echo {lit} $HOME"
@@ -844,7 +850,7 @@ def test_wrapper_settings_mapped():
     assert cfg["plugins"]["install"][0]["plugin"] == "tool@mine"
     assert cfg["plugins"]["marketplaces"][0]["name"] == "mine"
     assert cfg["claude"]["permissions"]["allow"] == ["Bash(ls:*)"]
-    assert cfg["hooks"]["onStop"][0]["run"] == "echo stop $$HOME"
+    assert cfg["hooks"]["onStop"][1]["run"] == "echo stop $$HOME"
     assert cfg["hooks"]["onTick"][0]["interval_seconds"] == 30
     assert "docs" in cfg["claude"]["mcp_servers"]
 
@@ -1214,6 +1220,9 @@ def test_subagent_allowed_rendered_for_every_session(tmp_path, monkeypatch):
     monkeypatch.setenv("CCW_AUTH_TOKEN", TOKENS.auth)
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth")
     monkeypatch.setenv("POD_NAME", "agent-alpha-0")
+    monkeypatch.setenv("ORCH_AGENT_URL", AGENT_URL)
+    monkeypatch.setenv("ORCH_AGENT_TOKEN", "agent-token")
+    monkeypatch.setenv("ORCH_SESSION_ID", "session-id")
     objs = _render(make_session(replicas=1, retrospective=True))
     path = tmp_path / "config.yaml"
     path.write_text(by_kind(objs)["ConfigMap"]["data"]["config.yaml"])
@@ -1297,14 +1306,21 @@ def test_envelope_stop_hook_and_prompt_render_with_chat_and_agent_api():
     )
 
 
-def test_envelope_stop_hook_and_prompt_need_chat_and_agent_api():
+def test_envelope_stop_hook_and_hive_prompt_render_without_chat():
     no_chat = config_of(_render(make_session(replicas=1)))
-    assert "onStop" not in no_chat["hooks"]
+    assert no_chat["hooks"]["onStop"][0]["url"] == "${ORCH_AGENT_URL}/agent/v1/envelope/stop"
+    assert render.HIVE_ENVELOPE_PROMPT in no_chat["prompts"]["system_append"]
     assert render.CHAT_ENVELOPE_PROMPT not in no_chat["prompts"]["system_append"]
+    for text in (render.PROJECT_ROOM_PROMPT, render.SUPERLEADER_ROOM_PROMPT):
+        assert "<project-post" in text and "orchestrator_project_chat_send" not in text
+
+
+def test_envelope_stop_hook_and_prompts_need_agent_api():
     no_api = config_of(
         render.render_session(make_session(replicas=1), make_settings(**CHAT), TOKENS)
     )
     assert "onStop" not in no_api["hooks"]
+    assert render.HIVE_ENVELOPE_PROMPT not in no_api["prompts"]["system_append"]
     assert render.CHAT_ENVELOPE_PROMPT not in no_api["prompts"]["system_append"]
 
 

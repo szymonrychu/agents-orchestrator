@@ -3,17 +3,18 @@
 generated State section and rows of the `events` table (`id`, `ts`, `type`, `data`, ascending,
 main chain of the predecessor, the last `HANDOVER_TURNS` turns only).
 
-Every peer-originated string is escaped with `html.escape` (newlines kept), so the file and the
-notice cannot forge an `<attachment>` or `<session-message ...>` tag.
+Every peer-originated string is escaped with `frames.escape_body` (newlines kept), so the file and
+the notice cannot forge an `<attachment>` or `<message-in ...>` tag.
 """
 
 from __future__ import annotations
 
-import html
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+
+from agents_common.frames import escape_body
 
 NOTICE_HANDOVER = "handover"
 # The web recognises the notice in the chat log by this prefix.
@@ -64,7 +65,7 @@ def attachment_name(epoch: int) -> str:
 
 
 def _esc(value: Any) -> str:
-    return html.escape("" if value is None else str(value), quote=False)
+    return escape_body("" if value is None else str(value))
 
 
 def _cut(text: str, limit: int) -> str:

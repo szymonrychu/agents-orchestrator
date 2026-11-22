@@ -1,7 +1,16 @@
-"""The envelope relay worker (S-70): sends the chat envelopes the ingester queued.
+"""The envelope relay worker (S-70, S-71): settles the envelopes the ingester queued.
 
 Per session, oldest row first and one row at a time (the message order). A row is claimed
-`queued -> sending`, forwarded through the request-free relay core (`api/chat_core.py`, the same
+`queued -> sending`, then settled by kind.
+
+Hive kinds (`session`, `project_post`) need no HTTP hop: the request-free core
+(`api/session_core.py`, `api/project_post_core.py`) queues the `messages` rows, and the outbox
+row becomes `accepted` (with `message_id`, or the post id as `send_id` `p<id>`) in the SAME
+transaction; a refusal of the core rolls it back and the row becomes `refused` with the code.
+The hop is the one of the turn that wrote the envelope. These kinds settle without a chat
+upstream.
+
+A chat row is forwarded through the request-free relay core (`api/chat_core.py`, the same
 target, `X-Orch-Agent` header, occupier relay and activity accounting as the agent routes) and
 settled by the answer:
 
@@ -11,12 +20,14 @@ settled by the answer:
 - any other 4xx or a refusal of the relay (`files_not_relayable`, ...): `refused` with the code.
 
 Delivery is at most once: on start, `sending` rows older than 60 s become `failed`
-`unknown_outcome`, and an unexpected error after the claim does the same. A refusal of a row whose
-turn is already over (its Stop was allowed) is told to the agent's session as a message naming the
-envelope index and the code, since the Stop hook can no longer carry it.
+`unknown_outcome`, and an unexpected error after the claim does the same. A refusal (or a stale
+`unknown_outcome`) of a row whose turn is already over (its Stop was allowed) is told to the
+sending agent as a `<message-in channel="notice">` frame for `a<row id>`, since the Stop hook can
+no longer carry it.
 
-The worker runs inside the ingester process (a singleton, so one claimer per session) when the
-chat upstream is configured. It wakes on NOTIFY `envelope_outbox` and polls as a fallback.
+The worker always runs inside the ingester process (a singleton, so one claimer per session); a
+chat row without a configured chat upstream fails `chat_unconfigured`. It wakes on NOTIFY
+`envelope_outbox` and polls as a fallback.
 """
 
 from __future__ import annotations
@@ -31,10 +42,18 @@ from collections.abc import Callable
 from typing import Any
 
 import httpx
+from agents_common import frames
 from psycopg_pool import AsyncConnectionPool
 
 from agents_orchestrator.api import chat_core, forward
 from agents_orchestrator.api.errors import ApiError
+from agents_orchestrator.api.project_post_core import (
+    ProjectPosted,
+    post_project_effects,
+    project_post_core,
+)
+from agents_orchestrator.api.session_core import session_send_core
+from agents_orchestrator.db import agents as agents_repo
 from agents_orchestrator.db import envelope_outbox as outbox
 from agents_orchestrator.db import leadership, queue
 from agents_orchestrator.db import sessions as sessions_repo
@@ -91,14 +110,12 @@ def _payload(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     return "/messages", data
 
 
-def refusal_text(row: dict[str, Any], code: str) -> str:
-    where = (
-        f"envelope {row['envelope_index']}" if row["envelope_index"] is not None else "an envelope"
-    )
-    return (
-        f"Chat {where} of an earlier message of yours was refused after your turn ended: {code}."
-        " It was not delivered; send a corrected one if it still matters."
-    )
+HIVE_KINDS = frozenset({"session", "project_post"})
+
+
+def envelope_ref(row: dict[str, Any]) -> str:
+    """The sender-side reference of an outbox row (`for` of a notice frame)."""
+    return f"a{row['id']}"
 
 
 class EnvelopeRelay:
@@ -170,7 +187,9 @@ class EnvelopeRelay:
         async with self.pool.connection() as conn:
             swept = await outbox.sweep_stale_sending(conn)
             if swept:
-                log.warning("envelope relay: %d sending rows became unknown_outcome", swept)
+                log.warning("envelope relay: %d sending rows became unknown_outcome", len(swept))
+            for row in swept:
+                await _tell_if_late(conn, row, "failed", "unknown_outcome")
             sessions = await outbox.queued_sessions(conn)
         now = self.clock()
         progressed = False
@@ -208,6 +227,9 @@ class EnvelopeRelay:
             if agent_id is None and own is not None:
                 leader = await leadership.current_leader(conn, own.id)
                 agent_id = leader.agent_id if leader else None
+        if row["kind"] in HIVE_KINDS:
+            await self._settle_hive(row, own)
+            return
         if own is None or agent_id is None or not self.settings.chat_available:
             code = "chat_unconfigured" if not self.settings.chat_available else "session_gone"
             async with self.pool.connection() as conn:
@@ -247,6 +269,62 @@ class EnvelopeRelay:
             code, message = _error_of(content, status)
             await self._refuse(row, code, message)
 
+    async def _settle_hive(self, row: dict[str, Any], own: sessions_repo.Session | None) -> None:
+        """Queue a `session` or `project_post` row through its core and mark it accepted in
+        one transaction; a refusal of the core writes nothing and refuses the row."""
+        rid = row["id"]
+        posted: ProjectPosted | None = None
+        refusal: ApiError | None = None
+        async with self.pool.connection() as conn:
+            agent = await agents_repo.get_agent(conn, row["agent_id"]) if row["agent_id"] else None
+            if own is None or agent is None:
+                await outbox.mark(conn, rid, "sending", "failed", error_code="session_gone")
+                return
+            try:
+                async with conn.transaction():
+                    if row["turn_id"] is not None:
+                        hop = await queue.turn_hop_for(conn, agent.id, row["turn_id"])
+                    else:
+                        hop = await queue.turn_hop(conn, agent.id) or 0
+                    if row["kind"] == "session":
+                        sent = await session_send_core(
+                            conn,
+                            own,
+                            agent,
+                            row["target"],
+                            row["body"],
+                            settings=self.settings,
+                            lane=row["lane"] or "regular",
+                            handled=list(row["handled"] or []),
+                            hop=hop,
+                            envelope_ref=envelope_ref(row),
+                            allow_priority=False,
+                        )
+                        fields: dict[str, Any] = {"message_id": sent.message_id}
+                    else:
+                        posted = await project_post_core(
+                            conn,
+                            own,
+                            agent,
+                            settings=self.settings,
+                            text=row["body"],
+                            to=row["target"].split(",") if row["target"] else [],
+                            reply_to=int(row["reply_to"]) if row["reply_to"] else None,
+                            handled=list(row["handled"] or []),
+                            project=row["project"],
+                            hop=hop,
+                            envelope_ref=envelope_ref(row),
+                        )
+                        fields = {"send_id": f"p{posted.post_id}"}
+                    if not await outbox.mark(conn, rid, "sending", "accepted", **fields):
+                        raise RuntimeError(f"envelope row {rid} left sending while settling")
+            except ApiError as exc:
+                refusal = exc
+        if refusal is not None:
+            await self._refuse(row, refusal.code, refusal.message[:MAX_ERROR_CHARS])
+        elif posted is not None:
+            await post_project_effects(self.pool, own, agent, posted)
+
     async def _retry(self, row: dict[str, Any], code: str, retry_after: float | None) -> None:
         attempts = row["attempts"]
         async with self.pool.connection() as conn:
@@ -268,24 +346,31 @@ class EnvelopeRelay:
     async def _refuse(self, row: dict[str, Any], code: str, message: str | None) -> None:
         async with self.pool.connection() as conn:
             await outbox.mark(conn, row["id"], "sending", "refused", error_code=code, error=message)
-            late = (
-                await outbox.turn_ended(conn, row["agent_id"], row["turn_id"])
-                if row["agent_id"]
-                else False
-            )
-            if late:
-                try:
-                    await queue.enqueue_message(
-                        conn,
-                        row["session_id"],
-                        refusal_text(row, code),
-                        row["agent_id"],
-                        lane="regular",
-                    )
-                except queue.SessionBeingDeleted:
-                    log.info(
-                        "envelope relay: session %s is closing; refusal not told", row["session_id"]
-                    )
+            await _tell_if_late(conn, row, "refused", code)
+
+
+async def _tell_if_late(conn: Any, row: dict[str, Any], status: str, code: str) -> None:
+    """When the row's turn is over, queue a notice frame for the row to the sending agent."""
+    if not row["agent_id"] or not await outbox.turn_ended(conn, row["agent_id"], row["turn_id"]):
+        return
+    await tell_row(conn, row, status, code)
+
+
+async def tell_row(conn: Any, row: dict[str, Any], status: str, code: str) -> None:
+    """Queue a notice frame for the row to the sending agent, whatever the turn state."""
+    own = await sessions_repo.get(conn, row["session_id"])
+    if own is None:
+        return
+    try:
+        await queue.enqueue_message(
+            conn,
+            row["session_id"],
+            frames.notice(own.slug, envelope_ref(row), status, code),
+            row["agent_id"],
+            lane="regular",
+        )
+    except queue.SessionBeingDeleted:
+        log.info("envelope relay: session %s is closing; %s not told", row["session_id"], status)
 
 
 def _seconds(values: list[str]) -> float | None:
