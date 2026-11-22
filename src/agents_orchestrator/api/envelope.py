@@ -5,9 +5,10 @@ of the turn are parsed for envelopes (`ingester.envelopes.REGISTRY`, chat and hi
 malformed envelope, one the caller may not send (`only the leader may send <tag>`, `agent-send`
 in this release), or one the relay refused blocks the Stop once with a numbered reason so the
 agent resends only the corrected ones. Every later Stop of the turn is allowed. When the retry
-did not repair a `<chat-send>` failure and nothing was delivered to the target room, one
-`notice` row queues the fixed apology the user sees (`chat_protocol_failed`). The endpoint never
-fails on a body it cannot use: the hook answers allow on any error (`on_error: allow`).
+did not repair a `<chat-send>` failure of the leader and nothing was delivered to the target
+room, one `notice` row queues the fixed apology the user sees (`chat_protocol_failed`; a member
+posts none). The endpoint never fails on a body it cannot use: the hook answers allow on any
+error (`on_error: allow`).
 """
 
 from __future__ import annotations
@@ -95,17 +96,21 @@ def _parse(blocks: list[tuple[str, str]], leads: bool) -> tuple[list[Problem], l
     return problems, valid
 
 
-def _ref(rows: list[dict[str, Any]], index: int | None, tag: str | None) -> str:
-    """`a<outbox id> ` of the row of this envelope index (of the tag's kind first), or ''."""
-    same = [r for r in rows if index is not None and r["envelope_index"] == index]
-    kind = kind_of(tag) if tag else None
-    match = next((r for r in same if r["kind"] == kind), same[0] if same else None)
-    return f"a{match['id']} " if match else ""
+def _ref(rows: list[dict[str, Any]], p: Problem) -> str:
+    """`a<outbox id> ` of the one row of this envelope (same kind and index, narrowed to its
+    assistant message when rows carry one), or '' when it is not exactly one: never a guess."""
+    if p.index is None:
+        return ""
+    kind = kind_of(p.tag)
+    same = [r for r in rows if r["envelope_index"] == p.index and r["kind"] == kind]
+    if len(same) > 1 and p.message_id:
+        same = [r for r in same if r.get("message_id") == p.message_id]
+    return f"a{same[0]['id']} " if len(same) == 1 else ""
 
 
 def _line(n: int, rows: list[dict[str, Any]], p: Problem) -> str:
     where = f" of message {p.message_id}" if p.message_id else ""
-    return f"{n}) {_ref(rows, p.index, p.tag)}envelope {p.index}{where}: {p.message}"
+    return f"{n}) {_ref(rows, p)}envelope {p.index}{where}: {p.message}"
 
 
 def _refused_line(n: int, row: dict[str, Any]) -> str:
@@ -217,7 +222,7 @@ async def decide(
         return StopOut()
     room = _target_room(later_chat or first_chat, refused_chat)
     already_told = any(r["kind"] == "notice" for r in rows)
-    notify = not already_told and not _delivering(rows, room)
+    notify = leads and not already_told and not _delivering(rows, room)
     if notify:
         await envelope_outbox.insert_rows(
             conn,

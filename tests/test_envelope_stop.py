@@ -280,3 +280,40 @@ async def test_block_after_an_allowed_stop_clears_allowed_at(dsn, pool):
     out = await stop(dsn, pool, c, payload("t1", texts(OK, BAD, start=1)))
     assert out["decision"] == "block"
     assert await checks(pool) == [("t1", True, False, 2)]
+
+
+async def test_reference_is_omitted_when_another_kind_shares_the_index(dsn, pool):
+    c, a0, _ = await hive(pool)
+    async with pool.connection() as conn:
+        await outbox.insert_rows(
+            conn,
+            [
+                Row(
+                    session_id=c["id"],
+                    agent_id=a0["id"],
+                    wrapper_session_id="w",
+                    event_seq=1,
+                    envelope_index=1,
+                    turn_id="t1",
+                    kind="send",
+                    body="delivered",
+                    status="accepted",
+                ),
+            ],
+        )
+    chat_id = (await db_rows(pool, "SELECT id FROM envelope_outbox WHERE turn_id = 't1'"))[0][0]
+    bad = '<session-send to="other">never closed'
+    out = await stop(dsn, pool, c, payload("t1", texts(OK, bad)))
+    assert out["decision"] == "block"
+    assert "1) envelope 1 of message msg2:" in out["reason"]
+    assert f"a{chat_id} " not in out["reason"]
+
+
+async def test_member_failed_chat_retry_posts_no_apology(dsn, pool):
+    c, a0, a1 = await hive(pool)
+    member_ip = "10.9.0.11"
+    first = await stop(dsn, pool, c, payload("t1", texts(BAD_ROOM)), ip=member_ip)
+    assert first["decision"] == "block"
+    again = texts(BAD_ROOM) + texts(BAD_ROOM, start=2)
+    assert (await stop(dsn, pool, c, payload("t1", again), ip=member_ip)) == {"decision": "allow"}
+    assert await notices(pool) == []
