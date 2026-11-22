@@ -70,7 +70,7 @@ async def _kinds(pool, vid):
     return [(e.kind, e.actor_kind, e.actor) for e in reversed(page.items)]
 
 
-async def _claim(pool, vid, session_id):
+async def _claim(pool, vid, session_id, *, backup_restore=False):
     async with pool.connection() as conn, conn.transaction():
         await volumes.claim(
             conn,
@@ -78,7 +78,7 @@ async def _claim(pool, vid, session_id):
             session_id=session_id,
             preset_id=None,
             mode="rw",
-            backup_restore=False,
+            backup_restore=backup_restore,
             session_slug="s-x",
             current_version=None,
         )
@@ -479,6 +479,17 @@ async def test_orphan_claim_released_by_system_only_when_no_pod_remains(pool, ku
     async with pool.connection() as conn:
         assert [c.session_id for c in await volumes.unreleased_claims(conn, v.id)] == [alive["id"]]
     assert ("released", "system", "reconciler") in await _kinds(pool, v.id)
+
+
+@pytest.mark.parametrize(("backup_restore", "saves"), [(True, 1), (False, 0)])
+async def test_the_last_orphan_release_saves_a_volume_with_backup_writes(
+    pool, kube, rec, backup_restore, saves
+):
+    v = await _ready(pool, kube, rec)
+    await _claim(pool, v.id, uuid.uuid4(), backup_restore=backup_restore)
+    await rec.release_orphans()
+    kinds = [k for k, _a, _b in await _kinds(pool, v.id)]
+    assert (kinds.count("released"), kinds.count("save_started")) == (1, saves)
 
 
 async def test_one_orphan_session_lookup_error_does_not_block_another(pool, kube, rec, monkeypatch):

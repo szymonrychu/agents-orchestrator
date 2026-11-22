@@ -503,7 +503,8 @@ class VolumeReconciler:
 
     async def release_orphans(self) -> None:
         """Release the claims of a session row that is gone, once no pod mounts any of its
-        volumes (volume label or claimName): a pod still running keeps the claim."""
+        volumes (volume label or claimName): a pod still running keeps the claim. The last
+        release of a volume requests its save like a session's (`request_release_saves`)."""
         async with self.pool.connection() as conn:
             orphans = await volumes.orphan_claims(conn)
         by_session: dict[Any, list[volumes.Claim]] = defaultdict(list)
@@ -514,9 +515,10 @@ class VolumeReconciler:
                 if await self._any_pod(claims):
                     continue
                 async with self.pool.connection() as conn, conn.transaction():
-                    await volumes.release_claims(
+                    released = await volumes.release_claims(
                         conn, session_id, actor_kind="system", actor="reconciler"
                     )
+                    await volumes.request_release_saves(conn, released, session_slug=None)
             except asyncio.CancelledError:
                 raise
             except Exception:
