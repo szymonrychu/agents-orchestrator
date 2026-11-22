@@ -124,6 +124,22 @@ class ManageableRequestIn(BaseModel):
     client_key: str | None = Field(default=None, max_length=200)
 
 
+class VolumeProposalIn(BaseModel):
+    """A superleader's request to create a volume (S-77 Q10): filed as a `volume_create` change
+    proposal; nothing is created until the user approves. `size` defaults to the deploy default."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    projects: list[str] = Field(min_length=1)
+    size: str | None = None
+    description: str = Field(default="", max_length=2000)
+    labels: list[str] = Field(default_factory=list)
+    exclude: list[str] = Field(default_factory=list)
+    reason: str = Field(min_length=1, max_length=4000)
+    client_key: str | None = Field(default=None, max_length=200)
+
+
 class ExtraProjectsIn(BaseModel):
     """The human's direct set of a session's or preset's extra projects (main port, T-120)."""
 
@@ -298,6 +314,7 @@ ProposalKind = Literal[
     "session_projects",
     "preset_projects",
     "preset_manageable",
+    "volume_create",
 ]
 
 
@@ -364,27 +381,14 @@ class BackupRun(BaseModel):
     bytes: int
 
 
-class EntryPlanView(BaseModel):
-    """What the discard does with one backup entry (`index` -1: the workspace root itself).
-
-    `action` is `save`, `discard` (the directory goes with the session) or `skip` (with `reason`).
-    """
-
-    index: int
-    name_template: str
-    action: Literal["save", "discard", "skip"]
-    reason: str | None
-
-
 class SessionBackup(BaseModel):
     """What a discard would save now; each flag is true only when that save would really run.
 
-    `reason` is null when both run, else `no_session_cache` (no workspace backup entry),
-    `cache_not_configured` (no S3 cache configured) or the save's skip reason, the workdir's first.
-    `entries` is the per-entry plan the discard dialog shows.
+    `workdir` is true when a read-write backup_restore volume is mounted at the workdir or below it.
+    `reason` is null when the transcripts save runs, else `no_session_cache` (no backup_restore
+    volume), `cache_not_configured` (no S3 cache configured) or the save's skip reason.
     """
 
-    entries: list[EntryPlanView] = []
     workdir: bool
     transcripts: bool
     reason: str | None
@@ -615,6 +619,10 @@ class MetaCaps(BaseModel):
     max_replicas: int
     max_pvc_size: str
     max_sessions: int
+    volume_storage_class: str
+    volume_max_size: str
+    volume_default_size: str
+    volume_max_per_preset: int
 
 
 class MetaCache(BaseModel):
@@ -1138,3 +1146,141 @@ class CleanupSettingsView(BaseModel):
     run_requested_at: datetime | None
     run_pending: bool
     last_sweep: dict[str, Any] | None
+
+
+class VolumeCreateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    projects: list[str] = Field(min_length=1)
+    size: str | None = None
+    description: str = ""
+    labels: list[str] = Field(default_factory=list)
+    exclude: list[str] = Field(default_factory=list)
+
+
+class VolumePatchIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    size: str | None = None
+    description: str | None = None
+    labels: list[str] | None = None
+    projects: list[str] | None = Field(default=None, min_length=1)
+    exclude: list[str] | None = None
+
+
+class VolumeRestoreIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: uuid.UUID
+
+
+class VolumeView(BaseModel):
+    id: uuid.UUID
+    name: str
+    projects: list[str]
+    description: str
+    labels: list[str]
+    exclude: list[str]
+    size: str
+    storage_class: str
+    state: str
+    state_reason: str | None
+    attachments: int
+    mounted: int
+    current_version: uuid.UUID | None
+    content_version: uuid.UUID | None
+    last_save_at: datetime | None
+    created_at: datetime
+
+
+class VolumeAttachmentView(BaseModel):
+    preset_id: uuid.UUID
+    preset_name: str
+    mode: str
+    mount_path: str
+    backup_restore: bool
+
+
+class VolumeClaimView(BaseModel):
+    session_slug: str | None
+    mode: str
+
+
+class VolumeVersionView(BaseModel):
+    id: uuid.UUID
+    created_at: datetime
+    origin: str
+    live: bool
+
+
+class VolumeDetail(VolumeView):
+    presets: list[VolumeAttachmentView]
+    claims: list[VolumeClaimView]
+    versions: list[VolumeVersionView]
+
+
+class AdminVolumeView(BaseModel):
+    """What a superleader or retrospective session sees of a volume: names, ids, sizes, states
+    and counts, never description, labels, exclusions or backup manifests."""
+
+    id: uuid.UUID
+    name: str
+    projects: list[str]
+    size: str
+    storage_class: str
+    state: str
+    attachments: int
+    mounted: int
+    current_version: uuid.UUID | None
+    content_version: uuid.UUID | None
+    last_save_at: datetime | None
+
+
+class AdminVolumeDetail(AdminVolumeView):
+    presets: list[VolumeAttachmentView]
+
+
+class VolumeAttachIn(BaseModel):
+    """A superleader's attach of a volume to a manageable preset (the preset's volume entry)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["ro", "rw"]
+    mount_path: str | None = Field(default=None, max_length=200)
+    backup_restore: bool = False
+
+
+class VolumeAttachResult(BaseModel):
+    """`preset` when the attach was applied (200); `proposal` when it is a security attach that
+    the user must approve (202), the preset unchanged."""
+
+    preset: PresetView | None = None
+    proposal: ProposalView | None = None
+
+
+class AgentVolumeView(BaseModel):
+    """One volume the calling session mounts, joined with the volume's state."""
+
+    name: str
+    id: uuid.UUID
+    mount_path: str
+    mode: str
+    backup_restore: bool
+    state: str
+    current_version: uuid.UUID | None
+    last_save_at: datetime | None
+
+
+class VolumeEventView(BaseModel):
+    id: int
+    at: datetime
+    actor_kind: str
+    actor: str
+    kind: str
+    detail: dict[str, Any]
+
+
+class VolumeEventPage(BaseModel):
+    items: list[VolumeEventView]
+    next_cursor: str | None

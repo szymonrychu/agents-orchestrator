@@ -70,8 +70,8 @@ async def copy_backup(
     _, caller = caller_of(request)
     role = "superleader" if caller.spec.session_messaging else "retrospective"
     if role == "retrospective":
-        # a copy makes the target current, and live entries deliver it: only into names that
-        # presets and sessions of the caller's own projects use (S-68 step 16, H2)
+        # a copy makes the target current: only into names that presets and sessions of the
+        # caller's own projects use (S-68 step 16, H2)
         async with pool.connection() as conn:
             owners = await backups_repo.projects_using_name(conn, body.target)
         if not owners <= set(caller.projects):

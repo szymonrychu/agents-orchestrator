@@ -8,10 +8,7 @@ from agents_orchestrator.spec import (
     CACHE_ALWAYS_EXCLUDE,
     CACHE_EXCLUDE_MAX,
     INIT_DIR,
-    BackupEntry,
     SessionSpec,
-    SpecInvalid,
-    validate_spec,
 )
 
 DB = "postgresql://x/y"
@@ -114,77 +111,15 @@ def test_secret_key_not_in_repr():
     assert "TOPSECRETVALUE" not in str(s)
 
 
-def _entry(name="k", **over):
-    return BackupEntry(root="workspace", path=".", mode="both", name=name, **over)
-
-
-def test_backup_entry_validation():
+def test_backup_entries_are_gone_from_the_spec():
+    # entry backups became volumes (S-77): the field no longer exists
     assert CACHE_EXCLUDE_MAX == 50
     assert CACHE_ALWAYS_EXCLUDE == (INIT_DIR,)
-    assert _entry().exclude == []
-    _entry(exclude=["node_modules", "build/*.o"])
-    _entry("a" + "b" * 62)
-    _entry("p/q")
-    _entry("proj/{{ now }}")  # templates render later
-    for bad in ("Bad Key", "-a", ".a", "a//b", "a" * 64, "sessions/x", "a/b/c/d/e", "a" * 257):
-        with pytest.raises(ValidationError):
-            _entry(bad)
-    with pytest.raises(ValidationError):
-        _entry("proj/")  # a name never ends in '/'
-    for bad in ([""], ["/abs"], ["a/../b"], [".."], ["x" * 257], ["x"] * 51):
-        with pytest.raises(ValidationError):
-            _entry(exclude=bad)
-    _entry(exclude=["x" * 256] * 50)
-    with pytest.raises(ValidationError):
-        BackupEntry(root="workspace", path=".", mode="both", name="a", bogus=1)
-    with pytest.raises(ValidationError):
-        SessionSpec.model_validate({"backup": [{"root": "workspace", "path": ".", "mode": "both"}]})
-
-
-def test_backup_sparse_dump():
-    assert "backup" not in SessionSpec().model_dump(mode="json", exclude_none=True)
+    entry = {"root": "workspace", "path": ".", "mode": "both", "name": "k"}
+    with pytest.raises(ValidationError) as e:
+        SessionSpec.model_validate({"backup": [entry]})
+    assert e.value.errors()[0]["type"] == "extra_forbidden"
     assert "backup" not in SessionSpec().model_dump(mode="json", exclude_unset=True)
-    spec = SessionSpec(backup=[_entry()])
-    assert spec.model_dump(mode="json", exclude_none=True)["backup"][0]["name"] == "k"
-
-
-def test_validate_spec_backup_unavailable():
-    off = _settings()
-    on = _settings(cache_s3_bucket="b")
-    spec = SessionSpec(backup=[_entry("k")])
-    validate_spec(SessionSpec(), off)
-    with pytest.raises(SpecInvalid) as e:
-        validate_spec(spec, off)
-    assert "backups are not configured (ORCH_CACHE_S3_BUCKET is unset)" in e.value.errors
-    validate_spec(spec, on)
-    validate_spec(spec, off, stored=SessionSpec(backup=[_entry("k")]))
-    with pytest.raises(SpecInvalid):
-        validate_spec(spec, off, stored=SessionSpec(backup=[_entry("other")]))
-    with pytest.raises(SpecInvalid):
-        validate_spec(spec, off, stored=SessionSpec())
-
-
-@pytest.mark.parametrize(
-    ("name", "valid"),
-    [
-        ("{{ nope }}", False),
-        ("{% if %}", False),
-        ("{{ user }}", True),  # renders to the sample user: fine
-        ("{{ session_slug }}/../x", False),
-        ("{{ date }}", True),  # 2026-01-01 is a valid segment
-        ("UPPER-{{ now }}", False),
-        ("{{ 'sessions' }}/{{ now }}", False),
-        ("{{ preset_name }}/", False),  # a name is not a prefix
-    ],
-)
-def test_validate_spec_renders_name_templates(name, valid):
-    spec = SessionSpec(backup=[_entry(name)])
-    if valid:
-        validate_spec(spec, _settings(cache_s3_bucket="b"))
-        return
-    with pytest.raises(SpecInvalid) as e:
-        validate_spec(spec, _settings(cache_s3_bucket="b"))
-    assert any(m.startswith("backup[0].name") for m in e.value.errors), e.value.errors
 
 
 def test_sweep_settings_defaults():

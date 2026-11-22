@@ -227,6 +227,13 @@ class FakeKube:
         assert pod["metadata"].get("deletionTimestamp"), f"pod {name} is not terminating"
         self._recreate(pod)
 
+    def set_pvc(self, name: str, phase: str, storage: str | None = None) -> None:
+        """The PVC controller: status.phase and, when given, status.capacity.storage."""
+        pvc = self.objects[("PersistentVolumeClaim", self.namespace, name)]
+        pvc["status"] = {"phase": phase}
+        if storage is not None:
+            pvc["status"]["capacity"] = {"storage": canonical_quantity(storage)}
+
     def has(self, kind: str, name: str, namespace: str | None = None) -> bool:
         return (kind, namespace or self.namespace, name) in self.objects
 
@@ -328,6 +335,9 @@ class FakeKube:
         if kind == "StatefulSet":
             _admit_statefulset(stored)
         self.patches.append((kind, name, copy.deepcopy(patch)))
+        if stored["metadata"].get("deletionTimestamp") and not stored["metadata"].get("finalizers"):
+            del self.objects[key]  # the last finalizer went: the deletion completes
+            return copy.deepcopy(stored)
         return self._store(key, stored, previous)
 
     async def get_object(self, kind: str, namespace: str, name: str) -> dict[str, Any] | None:
@@ -343,10 +353,14 @@ class FakeKube:
 
     async def delete(self, kind: str, namespace: str, name: str) -> bool:
         self._check("delete", kind, namespace, name)
-        obj = self.objects.pop((kind, namespace, name), None)
+        obj = self.objects.get((kind, namespace, name))
         if obj is None:
             return False
         self.deletes.append((kind, namespace, name))
+        if obj["metadata"].get("finalizers"):  # stays Terminating until a patch drops them
+            obj["metadata"].setdefault("deletionTimestamp", "2026-10-28T00:00:00Z")
+            return True
+        del self.objects[(kind, namespace, name)]
         if kind == "StatefulSet":
             for pod in self._pods_of(name):
                 self.objects.pop(("Pod", namespace, pod["metadata"]["name"]), None)

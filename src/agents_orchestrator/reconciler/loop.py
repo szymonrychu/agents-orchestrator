@@ -75,13 +75,14 @@ from agents_orchestrator.k8s.labels import (
     workspace_pvc,
 )
 from agents_orchestrator.k8s.render import pod_url, render_session
-from agents_orchestrator.reconciler.cache import CacheGate, CacheRunner
+from agents_orchestrator.reconciler import session_volumes
+from agents_orchestrator.reconciler.cache import CacheRunner
 from agents_orchestrator.reconciler.checks import CheckRunner
 from agents_orchestrator.reconciler.discard_hook import HookResult, resolve_hooks, run_discard_hook
 from agents_orchestrator.reconciler.init import InitGate, InitRunner
-from agents_orchestrator.reconciler.live import Live
 from agents_orchestrator.reconciler.rollout import BUSY, LEADS, Replacer, agent_pods, terminating
 from agents_orchestrator.reconciler.sweeper import CacheSweeper
+from agents_orchestrator.reconciler.volumes import VolumeReconciler
 from agents_orchestrator.reconciler.wrapper_sessions import WrapperSessionBootstrapper
 from agents_orchestrator.settings import DiscardHook, Settings
 from agents_orchestrator.spec import parse_quantity
@@ -90,7 +91,7 @@ from agents_orchestrator.wrapper.models import describe_exception
 
 log = logging.getLogger(__name__)
 
-CHANNELS = ("session_changed", "backups_current")
+CHANNELS = ("session_changed",)
 # The per-session Kubernetes access objects; each carries the session id (`SESSION_ID_LABEL`).
 KUBE_KINDS = frozenset({"ServiceAccount", "RoleBinding", "ClusterRoleBinding"})
 GUARDED_KINDS = (
@@ -234,8 +235,8 @@ class Reconciler:
         self.checks = CheckRunner(pool, kube, settings)
         self.init = InitRunner(pool, kube, settings, write_status=self._write_status)
         self.cache = CacheRunner(pool, kube, settings, write_status=self._write_status)
-        self.live = Live(self.cache, wrapper_factory, self._session_lock)
         self.sweeper = CacheSweeper(pool, settings)
+        self.volumes = VolumeReconciler(pool, kube, settings)
         self.replacer = Replacer(pool, kube, settings)
         self.bootstrapper = (
             WrapperSessionBootstrapper(pool, wrapper_factory)
@@ -269,6 +270,7 @@ class Reconciler:
         listener_task = asyncio.create_task(listener())
         stop_wait = asyncio.create_task(stop.wait())
         sweep_task = asyncio.create_task(self.sweeper.run(stop))
+        volume_task = asyncio.create_task(self.volumes.run(stop))
         command_task = asyncio.create_task(self._command_loop(stop, command_wake))
         try:
             while not stop.is_set():
@@ -296,6 +298,9 @@ class Reconciler:
             sweep_task.cancel()  # a sweep cut short is idempotent: the next one replans
             with contextlib.suppress(asyncio.CancelledError):
                 await sweep_task
+            volume_task.cancel()  # every pass is idempotent: the next one resumes
+            with contextlib.suppress(asyncio.CancelledError):
+                await volume_task
             # a command cut short stays `running` until the next start fails it (run)
             command_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -383,7 +388,6 @@ class Reconciler:
             except Exception as exc:
                 log.exception("reconcile of session %s failed", session.slug)
                 await self._record_error(session, exc)
-        await self.live.deliver()
 
     async def pre_discard(self, session: Session) -> bool:
         """The gate before a discard deletes anything (D15): True lets the deletion proceed.
@@ -579,7 +583,11 @@ class Reconciler:
             if applied == replicas
             else replace(session, spec=session.spec.model_copy(update={"replicas": applied}))
         )
-        objs = render_session(rendered, self.settings, tokens_for(self.settings, session.id))
+        async with self.pool.connection() as conn:
+            attached, missing = await session_volumes.resolve(conn, session)
+        objs = render_session(
+            rendered, self.settings, tokens_for(self.settings, session.id), attached
+        )
 
         foreign, live = await self._foreign(session, objs)
         if foreign:
@@ -590,6 +598,10 @@ class Reconciler:
             )
             return
 
+        # Every attached volume is claimed (the HARD RULE guard) before any pod or init Job of
+        # the session exists; both wait while a volume is unsettled or being restored.
+        volume_gate = await session_volumes.claim_step(self.pool, session, attached, missing)
+
         # The Claude transcripts are restored before any agent pod starts: the StatefulSet stays
         # at zero replicas until that restore has an outcome (D7). It comes first, so a crash
         # after the StatefulSet apply never reads as a session whose pods already existed.
@@ -598,19 +610,18 @@ class Reconciler:
         )
         for obj in objs:
             reason = "scale-down"
-            if sessions_gate.hold and obj["kind"] == "StatefulSet":
+            if (sessions_gate.hold or volume_gate.hold) and obj["kind"] == "StatefulSet":
                 obj = {**obj, "spec": {**obj["spec"], "replicas": 0}}
-                reason = "held for the transcripts restore"
+                reason = (
+                    "held for the transcripts restore"
+                    if sessions_gate.hold
+                    else "held for the attached volumes"
+                )
             await self._apply(obj, live.get(obj_key(obj)), reason)
         desired = {obj_key(o) for o in objs}
         await self._prune(slug, desired, reason="no longer rendered")
-        session, cache_gate = await self.cache.restore_step(session, "pre")
-        # init waits for the restore, so a script never runs on a workspace about to be replaced
-        gate = await self.init.step(session) if not cache_gate.hold else InitGate()
-        # the after_init entries are restored over what the init run built
-        post_gate = CacheGate()
-        if not cache_gate.hold and not gate.hold:
-            session, post_gate = await self.cache.restore_step(session, "post")
+        # init waits for the volume restores, so a script never runs on a tree about to be replaced
+        gate = await self.init.step(session, attached) if not volume_gate.hold else InitGate()
 
         ready = await self._observe(session)
         draining = await self._draining(session.id, replicas)
@@ -620,15 +631,18 @@ class Reconciler:
             phase = "pending" if ready == 0 else "degraded"
             message = f"{ready} of {replicas} pods ready"
         problems: list[str] = []
-        gates = (sessions_gate, cache_gate, gate, post_gate)
+        gates = (volume_gate, sessions_gate, gate)
         if any(g.hold for g in gates):  # sessions wait for the restores and the init run
-            phase = "pending"
+            phase = "degraded" if volume_gate.hold and volume_gate.degraded else "pending"
         else:
             problems = await self._bootstrap_wrapper_sessions(session)
             if any(g.degraded for g in gates):  # a failed restore or init starts them anyway
                 phase = "degraded"
         rollout = await self.replacer.step(session)  # outdated pods roll one idle pod a tick
         fields: dict[str, Any] = {"phase": phase, "ready": ready, "replicas": replicas}
+        waited = set(session.status.get("volume_restores_waited") or [])
+        if not waited.issuperset(volume_gate.waited_restore):
+            fields["volume_restores_waited"] = sorted(waited | set(volume_gate.waited_restore))
         if rollout is not None:
             fields["rollout"] = rollout
         drain = ""
@@ -896,14 +910,6 @@ class Reconciler:
         session = await self._abandon_forced(session)
         if not await self._quiesce(session):
             return
-        session, saved = await self.cache.save_step(session)
-        if not saved:
-            await self._write_status(
-                session,
-                {"phase": "deleting", "message": "saving the backup entries"},
-                session.observed_generation,
-            )
-            return
         session, saved = await self.cache.transcripts_save_step(session)
         if not saved:
             await self._write_status(
@@ -938,6 +944,9 @@ class Reconciler:
             )
             return
         async with self.pool.connection() as conn, conn.transaction():
+            # every pod is gone: the volume claims end with the row (the volume PVCs never carry
+            # the session label, so the prune above never touched them)
+            await session_volumes.release(conn, session)
             await sessions.purge(conn, session.id)
             await notify(conn, "status", {"session_id": str(session.id)})
         log.info("session %s discarded", slug)
@@ -993,7 +1002,7 @@ class Reconciler:
         """Stop the agents and let the ingester drain before the history is exported or saved.
 
         Only when an export is still owed (a hook that has not delivered) or a workdir or
-        transcripts save is (a workspace backup entry, no save outcome yet). The StatefulSet is
+        transcripts save is (a backup_restore volume, no save outcome yet). The StatefulSet is
         scaled to zero; once no agent pod is left, the ingester gets `discard_drain_seconds` to
         store the last events of their streams. The wait is bounded by
         `discard_quiesce_timeout_seconds` from the first pass, after which the discard goes on
@@ -1001,7 +1010,7 @@ class Reconciler:
         """
         status = session.status
         hook_owed = bool(self._owed_hooks(session)[1])
-        save_owed = self.cache.save_owed(session) or self.cache.transcripts_save_owed(session)
+        save_owed = self.cache.transcripts_save_owed(session)
         if not hook_owed and not save_owed:
             return True
         ns, slug = self.settings.namespace, session.slug
@@ -1012,8 +1021,10 @@ class Reconciler:
         name = object_names(slug)["statefulset"]
         sts = await self.kube.get_object("StatefulSet", ns, name)
         if sts is not None and is_owned(sts, slug) and (sts.get("spec") or {}).get("replicas") != 0:
+            async with self.pool.connection() as conn:
+                attached, _ = await session_volumes.resolve(conn, session)
             for obj in render_session(
-                session, self.settings, tokens_for(self.settings, session.id)
+                session, self.settings, tokens_for(self.settings, session.id), attached
             ):
                 if obj["kind"] == "StatefulSet":
                     obj["spec"]["replicas"] = 0
@@ -1158,10 +1169,8 @@ class Reconciler:
         agent = replace(agent, wrapper_session_id=None, wrapper_session_created_at=None)
         if self.bootstrapper is None or not agent.ready:
             return "done", {"cleared": True, "bootstrapped": False}
-        cache_gate = CacheGate.of_restores(session.spec, session.status)
-        gate = InitGate.of(session.status.get("init"), session.spec.init_scripts)
-        held = cache_gate if cache_gate.hold else gate
-        if held.hold:  # the converge bootstraps it once the restore and the init run are over
+        held = InitGate.of(session.status.get("init"), session.spec.init_scripts)
+        if held.hold:  # the converge bootstraps it once the init run is over
             return "done", {"cleared": True, "bootstrapped": False, "message": held.message}
         token = tokens_for(self.settings, session.id).auth
         problem = await self.bootstrapper.bootstrap(agent, session.spec, token)

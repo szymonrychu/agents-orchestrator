@@ -86,6 +86,8 @@ def _plan(
             name, stamp = rel, rendering.format_now(obj.last_modified)
         try:
             validate_name(name, allow_prefix=False)
+            if backups.is_reserved(name):  # volume- names are written only by volumes
+                raise ArchiveNameError(name)
         except ArchiveNameError:
             res.invalid.append(obj.key)
             continue

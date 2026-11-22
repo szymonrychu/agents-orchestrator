@@ -30,7 +30,7 @@ from pydantic import ValidationError
 
 from agents_orchestrator import rendering
 from agents_orchestrator.cache.keys import ArchiveNameError, validate_name
-from agents_orchestrator.spec import SessionSpec, _backup_problems, legacy_context
+from agents_orchestrator.spec import SessionSpec, legacy_context, without_legacy_backup
 
 HASH_KEY = re.compile(r"preset-[0-9a-f]{16}")
 NOW_ONLY = re.compile(r"\{\{\s*now\s*\}\}")
@@ -226,15 +226,14 @@ def _compact(value: Any) -> str:
 
 
 def _problem(spec: dict[str, Any], pins: dict[str, Any] | None) -> str | None:
-    """Why the strict model refuses `spec`, or None. Names fields, never values."""
+    """Why the strict model refuses `spec` (minus its legacy `backup`), or None."""
     try:
-        parsed = SessionSpec.model_validate(spec, context=legacy_context(pins))
+        SessionSpec.model_validate(without_legacy_backup(spec), context=legacy_context(pins))
     except ValidationError as exc:
         return "; ".join(f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors())[
             :ERROR_MAX
         ]
-    errors = _backup_problems(parsed)
-    return "; ".join(errors)[:ERROR_MAX] if errors else None
+    return None
 
 
 def _rewrite(spec: dict[str, Any], preset: PresetLike | None, is_preset: bool):

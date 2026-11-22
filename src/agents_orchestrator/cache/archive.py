@@ -249,7 +249,6 @@ def unpack(src: BinaryIO, workdir: Path, *, max_bytes: int = UNPACK_MAX_BYTES) -
 
 # A manifest above this many files is not reported (the digest still is).
 MANIFEST_MAX_FILES = 10_000
-NO_PATH_DIGEST = "none"
 CREDENTIALS_FILE = ".credentials.json"
 # files of a claude root that hold tokens or connector credentials, never packed (S-68 step 16)
 SECRET_FILES = frozenset({CREDENTIALS_FILE, ".claude.json", ".mcp.json"})
@@ -329,25 +328,6 @@ def digest(entries: Sequence[ManifestEntry]) -> str:
     canonical = json.dumps(
         [e.as_dict() for e in entries], sort_keys=True, separators=(",", ":"), ensure_ascii=True
     )
-    return hashlib.sha256(canonical.encode("ascii")).hexdigest()
-
-
-def dir_sha256(root: Path, path: str, exclude: Sequence[str]) -> str:
-    """The digest a name template's `sha256(path)` uses: `none` for a missing path.
-
-    A file is the sha256 of its bytes; a directory is the sha256 over its sorted
-    `(relpath, exec bit, file sha256)` triples.
-    """
-    target = root if path in ("", ".") else root / path
-    if target.is_symlink() or not target.exists():
-        return NO_PATH_DIGEST
-    if target.is_file():
-        return _file_sha256(os.fspath(target))
-    triples = [
-        [rel, bool(os.stat(full).st_mode & 0o111), _file_sha256(full)]
-        for rel, full in _walk_files(target, exclude)
-    ]
-    canonical = json.dumps(triples, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(canonical.encode("ascii")).hexdigest()
 
 

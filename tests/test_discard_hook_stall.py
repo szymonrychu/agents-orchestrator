@@ -356,7 +356,7 @@ async def test_discard_skips_deletion_while_the_hook_budget_is_spent(stub_export
     async def quiesce(session):
         return True
 
-    async def save_step(session):
+    async def transcripts_save_step(session):
         return session, True
 
     async def reload(session):
@@ -374,7 +374,7 @@ async def test_discard_skips_deletion_while_the_hook_budget_is_spent(stub_export
     monkeypatch.setattr(loop.queue, "cancel_checks", cancel_checks)
     monkeypatch.setattr(loop.sessions, "purge", purge)
     monkeypatch.setattr(rec, "_quiesce", quiesce)
-    monkeypatch.setattr(rec.cache, "save_step", save_step)
+    monkeypatch.setattr(rec.cache, "transcripts_save_step", transcripts_save_step)
     monkeypatch.setattr(rec, "_reload", reload)
     monkeypatch.setattr(rec, "_write_status", write_status)
     monkeypatch.setattr(rec, "_run_hook", run_hook)

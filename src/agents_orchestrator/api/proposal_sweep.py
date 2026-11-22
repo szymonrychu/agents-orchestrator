@@ -7,7 +7,8 @@ in its own committed transaction on its own pooled connection, so its row lock i
 own commit:
 
 1. expire: active proposals past `expires_at` on the database clock become `expired`;
-2. stale: open preset, session, project grant and manageable request proposals whose live
+2. stale: open preset, session, project grant, manageable request and volume request proposals
+   (a volume request is stale once its name is taken) whose live
    fingerprint differs from the current revision's become `stale` (also the ones a review's SKIP
    LOCKED pass left unmarked);
 3. target_gone: active preset (and preset grant) proposals whose preset is deleted or no longer
@@ -89,6 +90,8 @@ async def _live(conn: AsyncConnection, p: repo.Proposal) -> str | None:
         return await proposals.live_projects_fingerprint(conn, p.kind, p.target_id)
     if p.kind == proposals.MANAGEABLE_KIND:
         return await proposals.live_manageable_fingerprint(conn, p.target_id)
+    if p.kind == proposals.VOLUME_KIND:
+        return await proposals.live_volume_fingerprint(conn, p.target_id)
     if p.kind == "session":
         found = await proposals.live_session(conn, uuid.UUID(p.target_id))
         return (
@@ -105,7 +108,13 @@ async def _live(conn: AsyncConnection, p: repo.Proposal) -> str | None:
 async def _ids(conn: AsyncConnection, statuses: tuple[str, ...]) -> list[int]:
     """The preset, session, project grant and manageable request proposals in `statuses`
     (schedules are compared at review only)."""
-    kinds = ("preset", "session", *proposals.PROJECT_KINDS, proposals.MANAGEABLE_KIND)
+    kinds = (
+        "preset",
+        "session",
+        *proposals.PROJECT_KINDS,
+        proposals.MANAGEABLE_KIND,
+        proposals.VOLUME_KIND,
+    )
     return [i for kind in kinds for i in await repo.ids_in(conn, kind, statuses)]
 
 

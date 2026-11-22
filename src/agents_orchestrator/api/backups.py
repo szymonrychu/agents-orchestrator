@@ -115,7 +115,7 @@ async def _db_now(pool: AsyncConnectionPool) -> datetime:
 
 
 def _version_view(v: repo.Version, refs: References) -> schemas.BackupVersionView:
-    by = refs.slugs_of("", [v.id])
+    by = refs.slugs_of([v.id])
     return schemas.BackupVersionView(
         id=v.id,
         name=v.name,
@@ -157,7 +157,7 @@ async def list_backups(
         by_name: dict[str, set[str]] = {}
         for n in page.items:
             versions = await repo.name_versions(conn, n.name)
-            by_name[n.name] = set(refs.slugs_of(n.name, [v.id for v in versions]))
+            by_name[n.name] = set(refs.slugs_of([v.id for v in versions]))
     items = [
         schemas.BackupNameView(
             name=n.name,
@@ -246,6 +246,8 @@ async def copy_backup(
     """
     creds = require_s3(settings)
     source, target = valid_name(body.source), valid_name(body.target)
+    if repo.is_reserved(target):
+        raise ApiError(403, "reserved_name", "volume- names are written only by volumes")
     async with pool.connection() as conn:
         src = (
             await _version_or_404(conn, source, body.source_version)
@@ -337,7 +339,7 @@ async def delete_backup(pool: AsyncConnectionPool, settings: Settings, name: str
         if not rows:
             raise ApiError(404, "backup_not_found", "no backup has that name")
         refs = await references(conn, settings)
-        used = refs.slugs_of(name, [v.id for v in rows])
+        used = refs.slugs_of([v.id for v in rows])
         if used:
             raise ApiError(409, "referenced", f"referenced by session {', '.join(used)}")
         young = await _db_now(pool) - timedelta(seconds=grace)

@@ -69,8 +69,8 @@ def jobs_of(session: Any, settings: Any) -> list[dict[str, Any]]:
     return [
         render_init_job(session, settings),
         render_job(session, check, settings),
-        render_cache_job(session, settings, "restore_pre", []),
-        render_cache_job(session, settings, "save", []),
+        render_cache_job(session, settings, "transcripts_restore", []),
+        render_cache_job(session, settings, "transcripts_save", []),
     ]
 
 
@@ -140,18 +140,8 @@ def test_sa_name_differs_per_session_id() -> None:
         {"static": True, "replicas": 2, "max_replicas": 2},
         {"session_messaging": True},
         {"kube_cluster_access": False},
-        {
-            "backup": [
-                {
-                    "root": "workspace",
-                    "path": ".",
-                    "mode": "both",
-                    "name": "preset-0123456789abcdef",
-                }
-            ]
-        },
     ],
-    ids=["alone", "hive", "static", "messaging-only", "kube-false", "backup"],
+    ids=["alone", "hive", "static", "messaging-only", "kube-false"],
 )
 def test_only_cluster_access_yields_privileged_account(spec: dict[str, Any]) -> None:
     session = make_session(**spec)

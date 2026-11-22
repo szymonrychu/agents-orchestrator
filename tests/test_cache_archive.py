@@ -439,19 +439,8 @@ def test_manifest_deterministic(tmp_path):
 def test_exec_bit_changes_digest(tmp_path):
     root = _tree_of(tmp_path / "t")
     before = archive.digest(archive.manifest(root, []))
-    dir_before = archive.dir_sha256(root, ".", [])
     (root / "a.txt").chmod(0o755)
     assert archive.digest(archive.manifest(root, [])) != before
-    assert archive.dir_sha256(root, ".", []) != dir_before
-
-
-def test_dir_sha256_missing_is_none(tmp_path):
-    root = _tree_of(tmp_path / "t")
-    assert archive.dir_sha256(root, "nope", []) == "none"
-    import hashlib
-
-    assert archive.dir_sha256(root, "a.txt", []) == hashlib.sha256(b"alpha").hexdigest()
-    assert archive.dir_sha256(root, "sub", []) != "none"
 
 
 def test_holds_secret(tmp_path):

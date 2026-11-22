@@ -107,6 +107,197 @@
         "title": "AdminLockReassigned",
         "type": "object"
       },
+      "AdminVolumeDetail": {
+        "properties": {
+          "attachments": {
+            "title": "Attachments",
+            "type": "integer"
+          },
+          "content_version": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Version"
+          },
+          "current_version": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Version"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "last_save_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Save At"
+          },
+          "mounted": {
+            "title": "Mounted",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "presets": {
+            "items": {
+              "$ref": "#/components/schemas/VolumeAttachmentView"
+            },
+            "title": "Presets",
+            "type": "array"
+          },
+          "projects": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Projects",
+            "type": "array"
+          },
+          "size": {
+            "title": "Size",
+            "type": "string"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "storage_class": {
+            "title": "Storage Class",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "projects",
+          "size",
+          "storage_class",
+          "state",
+          "attachments",
+          "mounted",
+          "current_version",
+          "content_version",
+          "last_save_at",
+          "presets"
+        ],
+        "title": "AdminVolumeDetail",
+        "type": "object"
+      },
+      "AdminVolumeView": {
+        "description": "What a superleader or retrospective session sees of a volume: names, ids, sizes, states\nand counts, never description, labels, exclusions or backup manifests.",
+        "properties": {
+          "attachments": {
+            "title": "Attachments",
+            "type": "integer"
+          },
+          "content_version": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Version"
+          },
+          "current_version": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Version"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "last_save_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Save At"
+          },
+          "mounted": {
+            "title": "Mounted",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "projects": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Projects",
+            "type": "array"
+          },
+          "size": {
+            "title": "Size",
+            "type": "string"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "storage_class": {
+            "title": "Storage Class",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "projects",
+          "size",
+          "storage_class",
+          "state",
+          "attachments",
+          "mounted",
+          "current_version",
+          "content_version",
+          "last_save_at"
+        ],
+        "title": "AdminVolumeView",
+        "type": "object"
+      },
       "AgentAttention": {
         "description": "The agent's claude is waiting on a person; `state` is unchanged by it.",
         "properties": {
@@ -455,6 +646,72 @@
         "title": "AgentView",
         "type": "object"
       },
+      "AgentVolumeView": {
+        "description": "One volume the calling session mounts, joined with the volume's state.",
+        "properties": {
+          "backup_restore": {
+            "title": "Backup Restore",
+            "type": "boolean"
+          },
+          "current_version": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Version"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "last_save_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Save At"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          },
+          "mount_path": {
+            "title": "Mount Path",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "id",
+          "mount_path",
+          "mode",
+          "backup_restore",
+          "state",
+          "current_version",
+          "last_save_at"
+        ],
+        "title": "AgentVolumeView",
+        "type": "object"
+      },
       "AutoCompact": {
         "additionalProperties": false,
         "properties": {
@@ -568,63 +825,6 @@
           "origin"
         ],
         "title": "BackupCurrentView",
-        "type": "object"
-      },
-      "BackupEntry": {
-        "additionalProperties": false,
-        "description": "One named directory of a session that is restored at start and or saved at discard.\n\n`root` picks the tree (`workspace` is the session workdir, `claude` the session PVC subPath\nshared by all pods); `path` is relative to it (`.` is the whole root). `name` is a Jinja\ntemplate (surface `archive_name`) naming the backup in the object store.",
-        "properties": {
-          "after_init": {
-            "default": false,
-            "title": "After Init",
-            "type": "boolean"
-          },
-          "exclude": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "title": "Exclude",
-            "type": "array"
-          },
-          "live": {
-            "default": false,
-            "title": "Live",
-            "type": "boolean"
-          },
-          "mode": {
-            "enum": [
-              "backup",
-              "restore",
-              "both"
-            ],
-            "title": "Mode",
-            "type": "string"
-          },
-          "name": {
-            "title": "Name",
-            "type": "string"
-          },
-          "path": {
-            "title": "Path",
-            "type": "string"
-          },
-          "root": {
-            "enum": [
-              "workspace",
-              "claude"
-            ],
-            "title": "Root",
-            "type": "string"
-          }
-        },
-        "required": [
-          "root",
-          "path",
-          "mode",
-          "name"
-        ],
-        "title": "BackupEntry",
         "type": "object"
       },
       "BackupManifestView": {
@@ -750,49 +950,6 @@
           "bytes"
         ],
         "title": "BackupRun",
-        "type": "object"
-      },
-      "BackupSaveAccepted": {
-        "properties": {
-          "entry_index": {
-            "title": "Entry Index",
-            "type": "integer"
-          },
-          "job": {
-            "title": "Job",
-            "type": "string"
-          }
-        },
-        "required": [
-          "entry_index",
-          "job"
-        ],
-        "title": "BackupSaveAccepted",
-        "type": "object"
-      },
-      "BackupSaveIn": {
-        "additionalProperties": false,
-        "properties": {
-          "path": {
-            "maxLength": 512,
-            "minLength": 1,
-            "title": "Path",
-            "type": "string"
-          },
-          "root": {
-            "enum": [
-              "workspace",
-              "claude"
-            ],
-            "title": "Root",
-            "type": "string"
-          }
-        },
-        "required": [
-          "root",
-          "path"
-        ],
-        "title": "BackupSaveIn",
         "type": "object"
       },
       "BackupVersionPage": {
@@ -1801,47 +1958,6 @@
           "session_id"
         ],
         "title": "DialogView",
-        "type": "object"
-      },
-      "EntryPlanView": {
-        "description": "What the discard does with one backup entry (`index` -1: the workspace root itself).\n\n`action` is `save`, `discard` (the directory goes with the session) or `skip` (with `reason`).",
-        "properties": {
-          "action": {
-            "enum": [
-              "save",
-              "discard",
-              "skip"
-            ],
-            "title": "Action",
-            "type": "string"
-          },
-          "index": {
-            "title": "Index",
-            "type": "integer"
-          },
-          "name_template": {
-            "title": "Name Template",
-            "type": "string"
-          },
-          "reason": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Reason"
-          }
-        },
-        "required": [
-          "index",
-          "name_template",
-          "action",
-          "reason"
-        ],
-        "title": "EntryPlanView",
         "type": "object"
       },
       "EnvVar-Input": {
@@ -3689,12 +3805,32 @@
           "max_sessions": {
             "title": "Max Sessions",
             "type": "integer"
+          },
+          "volume_default_size": {
+            "title": "Volume Default Size",
+            "type": "string"
+          },
+          "volume_max_per_preset": {
+            "title": "Volume Max Per Preset",
+            "type": "integer"
+          },
+          "volume_max_size": {
+            "title": "Volume Max Size",
+            "type": "string"
+          },
+          "volume_storage_class": {
+            "title": "Volume Storage Class",
+            "type": "string"
           }
         },
         "required": [
           "max_replicas",
           "max_pvc_size",
-          "max_sessions"
+          "max_sessions",
+          "volume_storage_class",
+          "volume_max_size",
+          "volume_default_size",
+          "volume_max_per_preset"
         ],
         "title": "MetaCaps",
         "type": "object"
@@ -5307,7 +5443,8 @@
               "session",
               "session_projects",
               "preset_projects",
-              "preset_manageable"
+              "preset_manageable",
+              "volume_create"
             ],
             "title": "Kind",
             "type": "string"
@@ -5593,16 +5730,8 @@
         "type": "object"
       },
       "SessionBackup": {
-        "description": "What a discard would save now; each flag is true only when that save would really run.\n\n`reason` is null when both run, else `no_session_cache` (no workspace backup entry),\n`cache_not_configured` (no S3 cache configured) or the save's skip reason, the workdir's first.\n`entries` is the per-entry plan the discard dialog shows.",
+        "description": "What a discard would save now; each flag is true only when that save would really run.\n\n`workdir` is true when a read-write backup_restore volume is mounted at the workdir or below it.\n`reason` is null when the transcripts save runs, else `no_session_cache` (no backup_restore\nvolume), `cache_not_configured` (no S3 cache configured) or the save's skip reason.",
         "properties": {
-          "entries": {
-            "default": [],
-            "items": {
-              "$ref": "#/components/schemas/EntryPlanView"
-            },
-            "title": "Entries",
-            "type": "array"
-          },
           "last_transcripts_backup": {
             "anyOf": [
               {
@@ -5871,20 +6000,6 @@
               }
             ],
             "title": "Autoclose After Seconds"
-          },
-          "backup": {
-            "anyOf": [
-              {
-                "items": {
-                  "$ref": "#/components/schemas/BackupEntry"
-                },
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Backup"
           },
           "discard_hook_url": {
             "anyOf": [
@@ -6176,6 +6291,20 @@
               }
             ]
           },
+          "volumes": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/VolumeAttachment"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Volumes"
+          },
           "workdir": {
             "default": "workdir",
             "maxLength": 63,
@@ -6250,20 +6379,6 @@
               }
             ],
             "title": "Autoclose After Seconds"
-          },
-          "backup": {
-            "anyOf": [
-              {
-                "items": {
-                  "$ref": "#/components/schemas/BackupEntry"
-                },
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Backup"
           },
           "discard_hook_url": {
             "anyOf": [
@@ -6554,6 +6669,20 @@
                 "type": "null"
               }
             ]
+          },
+          "volumes": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/VolumeAttachment"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Volumes"
           },
           "workdir": {
             "default": "workdir",
@@ -7712,6 +7841,765 @@
           "protected"
         ],
         "title": "VaultPinView",
+        "type": "object"
+      },
+      "VolumeAttachIn": {
+        "additionalProperties": false,
+        "description": "A superleader's attach of a volume to a manageable preset (the preset's volume entry).",
+        "properties": {
+          "backup_restore": {
+            "default": false,
+            "title": "Backup Restore",
+            "type": "boolean"
+          },
+          "mode": {
+            "enum": [
+              "ro",
+              "rw"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "mount_path": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mount Path"
+          }
+        },
+        "required": [
+          "mode"
+        ],
+        "title": "VolumeAttachIn",
+        "type": "object"
+      },
+      "VolumeAttachResult": {
+        "description": "`preset` when the attach was applied (200); `proposal` when it is a security attach that\nthe user must approve (202), the preset unchanged.",
+        "properties": {
+          "preset": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PresetView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "proposal": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProposalView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "VolumeAttachResult",
+        "type": "object"
+      },
+      "VolumeAttachment": {
+        "additionalProperties": false,
+        "description": "One shared volume mounted into the session pod. `mount_path` unset means\n`/volumes/<volume name>`, filled at preset save. `backup_restore` opts this attachment into\nthe volume's automatic restore and save-on-last-release.",
+        "properties": {
+          "backup_restore": {
+            "default": false,
+            "title": "Backup Restore",
+            "type": "boolean"
+          },
+          "mode": {
+            "enum": [
+              "ro",
+              "rw"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "mount_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mount Path"
+          },
+          "volume": {
+            "format": "uuid",
+            "title": "Volume",
+            "type": "string"
+          }
+        },
+        "required": [
+          "volume",
+          "mode"
+        ],
+        "title": "VolumeAttachment",
+        "type": "object"
+      },
+      "VolumeAttachmentView": {
+        "properties": {
+          "backup_restore": {
+            "title": "Backup Restore",
+            "type": "boolean"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          },
+          "mount_path": {
+            "title": "Mount Path",
+            "type": "string"
+          },
+          "preset_id": {
+            "format": "uuid",
+            "title": "Preset Id",
+            "type": "string"
+          },
+          "preset_name": {
+            "title": "Preset Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "preset_id",
+          "preset_name",
+          "mode",
+          "mount_path",
+          "backup_restore"
+        ],
+        "title": "VolumeAttachmentView",
+        "type": "object"
+      },
+      "VolumeClaimView": {
+        "properties": {
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          },
+          "session_slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Slug"
+          }
+        },
+        "required": [
+          "session_slug",
+          "mode"
+        ],
+        "title": "VolumeClaimView",
+        "type": "object"
+      },
+      "VolumeCreateIn": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "exclude": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Exclude",
+            "type": "array"
+          },
+          "labels": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Labels",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "projects": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Projects",
+            "type": "array"
+          },
+          "size": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size"
+          }
+        },
+        "required": [
+          "name",
+          "projects"
+        ],
+        "title": "VolumeCreateIn",
+        "type": "object"
+      },
+      "VolumeDetail": {
+        "properties": {
+          "attachments": {
+            "title": "Attachments",
+            "type": "integer"
+          },
+          "claims": {
+            "items": {
+              "$ref": "#/components/schemas/VolumeClaimView"
+            },
+            "title": "Claims",
+            "type": "array"
+          },
+          "content_version": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Version"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "current_version": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Version"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "exclude": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Exclude",
+            "type": "array"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "labels": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Labels",
+            "type": "array"
+          },
+          "last_save_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Save At"
+          },
+          "mounted": {
+            "title": "Mounted",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "presets": {
+            "items": {
+              "$ref": "#/components/schemas/VolumeAttachmentView"
+            },
+            "title": "Presets",
+            "type": "array"
+          },
+          "projects": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Projects",
+            "type": "array"
+          },
+          "size": {
+            "title": "Size",
+            "type": "string"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "state_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "State Reason"
+          },
+          "storage_class": {
+            "title": "Storage Class",
+            "type": "string"
+          },
+          "versions": {
+            "items": {
+              "$ref": "#/components/schemas/VolumeVersionView"
+            },
+            "title": "Versions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "projects",
+          "description",
+          "labels",
+          "exclude",
+          "size",
+          "storage_class",
+          "state",
+          "state_reason",
+          "attachments",
+          "mounted",
+          "current_version",
+          "content_version",
+          "last_save_at",
+          "created_at",
+          "presets",
+          "claims",
+          "versions"
+        ],
+        "title": "VolumeDetail",
+        "type": "object"
+      },
+      "VolumeEventPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/VolumeEventView"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "title": "VolumeEventPage",
+        "type": "object"
+      },
+      "VolumeEventView": {
+        "properties": {
+          "actor": {
+            "title": "Actor",
+            "type": "string"
+          },
+          "actor_kind": {
+            "title": "Actor Kind",
+            "type": "string"
+          },
+          "at": {
+            "format": "date-time",
+            "title": "At",
+            "type": "string"
+          },
+          "detail": {
+            "additionalProperties": true,
+            "title": "Detail",
+            "type": "object"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "at",
+          "actor_kind",
+          "actor",
+          "kind",
+          "detail"
+        ],
+        "title": "VolumeEventView",
+        "type": "object"
+      },
+      "VolumePatchIn": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "exclude": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exclude"
+          },
+          "labels": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Labels"
+          },
+          "projects": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Projects"
+          },
+          "size": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size"
+          }
+        },
+        "title": "VolumePatchIn",
+        "type": "object"
+      },
+      "VolumeProposalIn": {
+        "additionalProperties": false,
+        "description": "A superleader's request to create a volume (S-77 Q10): filed as a `volume_create` change\nproposal; nothing is created until the user approves. `size` defaults to the deploy default.",
+        "properties": {
+          "client_key": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Key"
+          },
+          "description": {
+            "default": "",
+            "maxLength": 2000,
+            "title": "Description",
+            "type": "string"
+          },
+          "exclude": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Exclude",
+            "type": "array"
+          },
+          "labels": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Labels",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "projects": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Projects",
+            "type": "array"
+          },
+          "reason": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "size": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size"
+          }
+        },
+        "required": [
+          "name",
+          "projects",
+          "reason"
+        ],
+        "title": "VolumeProposalIn",
+        "type": "object"
+      },
+      "VolumeRestoreIn": {
+        "additionalProperties": false,
+        "properties": {
+          "version": {
+            "format": "uuid",
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version"
+        ],
+        "title": "VolumeRestoreIn",
+        "type": "object"
+      },
+      "VolumeVersionView": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "live": {
+            "title": "Live",
+            "type": "boolean"
+          },
+          "origin": {
+            "title": "Origin",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "created_at",
+          "origin",
+          "live"
+        ],
+        "title": "VolumeVersionView",
+        "type": "object"
+      },
+      "VolumeView": {
+        "properties": {
+          "attachments": {
+            "title": "Attachments",
+            "type": "integer"
+          },
+          "content_version": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Version"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "current_version": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Version"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "exclude": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Exclude",
+            "type": "array"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "labels": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Labels",
+            "type": "array"
+          },
+          "last_save_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Save At"
+          },
+          "mounted": {
+            "title": "Mounted",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "projects": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Projects",
+            "type": "array"
+          },
+          "size": {
+            "title": "Size",
+            "type": "string"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "state_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "State Reason"
+          },
+          "storage_class": {
+            "title": "Storage Class",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "projects",
+          "description",
+          "labels",
+          "exclude",
+          "size",
+          "storage_class",
+          "state",
+          "state_reason",
+          "attachments",
+          "mounted",
+          "current_version",
+          "content_version",
+          "last_save_at",
+          "created_at"
+        ],
+        "title": "VolumeView",
         "type": "object"
       },
       "WebhookHook": {
@@ -11230,6 +12118,205 @@
         ]
       }
     },
+    "/agent/v1/admin/presets/{ref}/volumes/{volume_id}": {
+      "delete": {
+        "description": "Detach a volume from a manageable preset at once (toward safe); running sessions keep\ntheir mount.",
+        "operationId": "detach_volume_agent_v1_admin_presets__ref__volumes__volume_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ref",
+            "required": true,
+            "schema": {
+              "title": "Ref",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "volume_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Volume Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PresetView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader; not_manageable: the target is not superleader_manageable (needs the user's approval)"
+          },
+          "404": {
+            "description": "not_found, volume_not_found, or not_attached: nothing to remove"
+          },
+          "409": {
+            "description": "conflict: the preset changed meanwhile; retry"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Detach Volume",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "description": "Attach a volume to a manageable preset (replacing an earlier attachment of it). Free\nunless the volume would be shared with a privileged preset or attached read-write to one;\nthen the preset is unchanged and the answer is 202 with the filed proposal.",
+        "operationId": "attach_volume_agent_v1_admin_presets__ref__volumes__volume_id__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ref",
+            "required": true,
+            "schema": {
+              "title": "Ref",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "volume_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Volume Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VolumeAttachIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VolumeAttachResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VolumeAttachResult"
+                }
+              }
+            },
+            "description": "a security attach: filed as a preset proposal for the user, the preset is unchanged"
+          },
+          "403": {
+            "description": "not_superleader; not_manageable: the preset is not superleader_manageable; volume_cross_trust: the rule judged it security only after a concurrent attach (retry files the proposal)"
+          },
+          "404": {
+            "description": "not_found: unknown preset; volume_not_found: unknown volume"
+          },
+          "409": {
+            "description": "conflict: changed meanwhile; open_proposals: too_many_proposals: the caller's open-proposal cap is reached"
+          },
+          "422": {
+            "description": "volumes_invalid: scope, path or duplicate problems"
+          }
+        },
+        "summary": "Attach Volume",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/agent/v1/admin/projects": {
       "post": {
         "description": "Create a project, same body, answer and errors as the main-port route. The audit row\ncarries the field names only.",
@@ -14632,6 +15719,241 @@
         ]
       }
     },
+    "/agent/v1/admin/volumes": {
+      "get": {
+        "description": "The volumes that share a project with the caller, name order.",
+        "operationId": "list_volumes_agent_v1_admin_volumes_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AdminVolumeView"
+                  },
+                  "title": "Response List Volumes Agent V1 Admin Volumes Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Volumes",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "description": "File a request to create a volume as a `volume_create` proposal; nothing is created until\nthe user approves it. 200 with the first proposal on a `client_key` replay.",
+        "operationId": "create_volume_agent_v1_admin_volumes_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VolumeProposalIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProposalView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "not_superleader; project_out_of_scope: a project the caller lacks"
+          },
+          "409": {
+            "description": "volume_exists: a live volume has this name; too_many_proposals: the caller's open-proposal cap is reached"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Volume",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/agent/v1/admin/volumes/{volume_id}": {
+      "get": {
+        "description": "One volume of the caller's projects with the presets that attach it.",
+        "operationId": "get_volume_agent_v1_admin_volumes__volume_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "volume_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Volume Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminVolumeDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "not_superleader: the caller is not a superleader"
+          },
+          "404": {
+            "description": "volume_not_found: no live volume of the caller's projects"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Volume",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/agent/v1/admin/webhooks/endpoints": {
       "get": {
         "operationId": "admin_webhook_get_endpoints",
@@ -15350,150 +16672,6 @@
           }
         },
         "summary": "The caller's own taskboard approvals (taskboard relay)",
-        "tags": [
-          "agent"
-        ]
-      }
-    },
-    "/agent/v1/backup": {
-      "get": {
-        "description": "`status.backup` of the caller's session with each entry's spec fields (root, path, mode,\nname, live, after_init) beside its last restore, save and live delivery results, and the\npending on-demand save request, if any.",
-        "operationId": "backup_status_agent_v1_backup_get",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          },
-          {
-            "in": "header",
-            "name": "x-orch-session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Orch-Session"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Backup Status Agent V1 Backup Get",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "The backup status of the caller's session",
-        "tags": [
-          "agent"
-        ]
-      }
-    },
-    "/agent/v1/backup/save": {
-      "post": {
-        "description": "Any agent of the session (leader or member). 404 `no_entry` when no entry that is saved\n(mode backup or both) names this root and path, 409 `save_running` while another on-demand\nsave is queued or running, 409 `session_deleting`. The reconciler runs one save Job for the\nentry and records the outcome like a discard save; the answer is the entry index and the\nJob's name. 503 `cache_unavailable` when no cache is configured (nothing could run the save).",
-        "operationId": "backup_save_agent_v1_backup_save_post",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          },
-          {
-            "in": "header",
-            "name": "x-orch-session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Orch-Session"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/BackupSaveIn"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BackupSaveAccepted"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Save one backup entry of the caller's session now",
         "tags": [
           "agent"
         ]
@@ -19529,6 +20707,160 @@
         ]
       }
     },
+    "/agent/v1/volumes": {
+      "get": {
+        "description": "The attachments of the caller's session (its own spec, set from the preset when it was\ncreated) joined with each volume's state, current version and last save time. Another\nsession's volumes, and a deleted volume, never appear.",
+        "operationId": "volumes_status_agent_v1_volumes_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AgentVolumeView"
+                  },
+                  "title": "Response Volumes Status Agent V1 Volumes Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "The volumes the caller's session mounts",
+        "tags": [
+          "agent"
+        ]
+      }
+    },
+    "/agent/v1/volumes/{name}/save": {
+      "post": {
+        "description": "On-demand save of a volume the session mounts, only when that attachment has\n`backup_restore` (Q12: any mounter with backup on). The save is recorded under the volume\nrow lock and run by the volume reconciler; a volume that is not `ready` is 409.",
+        "operationId": "volume_save_agent_v1_volumes__name__save_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-orch-session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Orch-Session"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentVolumeView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "backup_not_enabled: the session's attachment has backup_restore off"
+          },
+          "404": {
+            "description": "volume_not_found: the session does not attach a volume of that name"
+          },
+          "409": {
+            "description": "volume_busy: the volume is not ready (saving, restoring, resizing)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Save a volume of the caller's session now",
+        "tags": [
+          "agent"
+        ]
+      }
+    },
     "/api/v1/agents/{agent_id}/compact": {
       "post": {
         "operationId": "compact_agent_api_v1_agents__agent_id__compact_post",
@@ -21372,6 +22704,9 @@
             },
             "description": "Successful Response"
           },
+          "409": {
+            "description": "preset_migration_pending: the preset still carries the removed `backup` entries and the volume migration has not moved them yet"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -22878,6 +24213,411 @@
           }
         },
         "summary": "Preview"
+      }
+    },
+    "/api/v1/volumes": {
+      "get": {
+        "operationId": "list_volumes_api_v1_volumes_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "project",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Project"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/VolumeView"
+                  },
+                  "title": "Response List Volumes Api V1 Volumes Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Volumes"
+      },
+      "post": {
+        "operationId": "create_volume_api_v1_volumes_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VolumeCreateIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VolumeView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "volume_exists: a live volume has this name"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Volume"
+      }
+    },
+    "/api/v1/volumes/{volume_id}": {
+      "delete": {
+        "description": "Mark the volume `deleting`; the reconciler removes the PVC. The checks run under the\nrow lock the state change takes, so an attach or claim cannot slip in between; a refusal\nrolls the state change back and records `delete_refused`.",
+        "operationId": "delete_volume_api_v1_volumes__volume_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "volume_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Volume Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VolumeView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "Unknown or deleted volume"
+          },
+          "409": {
+            "description": "volume_attached (a preset attaches it), volume_mounted or volume_busy (a restore or save is running)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Volume"
+      },
+      "get": {
+        "operationId": "get_volume_api_v1_volumes__volume_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "volume_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Volume Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VolumeDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "Unknown or deleted volume"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Volume"
+      },
+      "patch": {
+        "operationId": "patch_volume_api_v1_volumes__volume_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "volume_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Volume Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VolumePatchIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VolumeView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "Unknown or deleted volume"
+          },
+          "409": {
+            "description": "shrink_refused, project_in_use (an attaching preset would lose its scope) or volume_busy (the volume is not ready to grow, or is being deleted)"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Volume"
+      }
+    },
+    "/api/v1/volumes/{volume_id}/events": {
+      "get": {
+        "operationId": "volume_events_api_v1_volumes__volume_id__events_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "volume_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Volume Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VolumeEventPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "Unknown or deleted volume"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Volume Events"
+      }
+    },
+    "/api/v1/volumes/{volume_id}/restore": {
+      "post": {
+        "operationId": "restore_volume_api_v1_volumes__volume_id__restore_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "volume_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Volume Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VolumeRestoreIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VolumeView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "volume_not_found, or version_not_found (not a version of volume-<name>)"
+          },
+          "409": {
+            "description": "volume_mounted (HARD RULE: a session has it mounted) or volume_busy"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Restore Volume"
+      }
+    },
+    "/api/v1/volumes/{volume_id}/save": {
+      "post": {
+        "operationId": "save_volume_api_v1_volumes__volume_id__save_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "volume_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Volume Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VolumeView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "Unknown or deleted volume"
+          },
+          "409": {
+            "description": "volume_busy: the volume is not ready"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Save Volume"
       }
     }
   }

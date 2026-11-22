@@ -111,7 +111,7 @@ async def test_patch_session_retired_405(http):
         if path.startswith("/api/v1")
         and "PATCH" in methods
         and not path.endswith(("/labels", "/project"))
-        and not path.startswith("/api/v1/projects/")
+        and not path.startswith(("/api/v1/projects/", "/api/v1/volumes/"))
     ]
     spec = (await http.get("/api/v1/openapi.json")).json()
     assert not [
@@ -120,7 +120,7 @@ async def test_patch_session_retired_405(http):
         if p.startswith("/api/v1")
         and "patch" in ops
         and not p.endswith(("/labels", "/project"))
-        and not p.startswith("/api/v1/projects/")
+        and not p.startswith(("/api/v1/projects/", "/api/v1/volumes/"))
     ]
 
 
@@ -403,7 +403,15 @@ async def test_meta_defaults(pool, dsn):
     assert meta["agent_image"] == "img:1"
     assert meta["agent_images"] == ["img:1", "img:2"]
     assert meta["models"] == ["m1", "m2"]
-    assert meta["caps"] == {"max_replicas": 4, "max_pvc_size": "50Gi", "max_sessions": 7}
+    assert meta["caps"] == {
+        "max_replicas": 4,
+        "max_pvc_size": "50Gi",
+        "max_sessions": 7,
+        "volume_storage_class": "rook-ceph-rwx",
+        "volume_max_size": "200Gi",
+        "volume_default_size": "10Gi",
+        "volume_max_per_preset": 8,
+    }
     assert meta["discard_hook"] == "url"
 
     async with client_for(create_app(make_settings(dsn), pool)) as c:
@@ -841,3 +849,26 @@ async def test_existing_session_keeps_working_after_project_archived(http):
     assert (await http.get(f"{S}/{sid}")).json()["project"] == "alpha"
     r = await http.patch(f"{S}/{sid}/labels", json={"labels": ["kept"]})
     assert r.status_code == 200, r.text
+
+
+async def test_create_from_an_unmigrated_preset_is_409_preset_migration_pending(http, pool):
+    entry = {"root": "workspace", "path": ".", "mode": "both", "name": "k"}
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE presets SET spec = %s WHERE id = %s",
+            (Jsonb({"backup": [entry]}), "00000000-0000-0000-0000-000000000001"),
+        )
+    r = await http.post(S, json={"preset_id": "00000000-0000-0000-0000-000000000001"})
+    assert_error(r, 409, "preset_migration_pending")
+    assert "raw" not in r.json()["error"]["message"] and "extra_forbidden" not in r.text
+
+
+@pytest.mark.parametrize("empty", [[], None])
+async def test_create_from_a_preset_with_an_empty_backup_key_is_not_refused(http, pool, empty):
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE presets SET spec = %s WHERE id = %s",
+            (Jsonb({"backup": empty}), "00000000-0000-0000-0000-000000000001"),
+        )
+    r = await http.post(S, json={"preset_id": "00000000-0000-0000-0000-000000000001"})
+    assert r.status_code == 201, r.text

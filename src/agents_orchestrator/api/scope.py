@@ -73,9 +73,6 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("POST", f"{_A}/envelope/stop"): "own",
     ("GET", f"{_A}/activity"): "own",
     ("PUT", f"{_A}/session/labels"): "own",
-    # the session's own backup entries: save one now, read the status (S-68)
-    ("POST", f"{_A}/backup/save"): "own",
-    ("GET", f"{_A}/backup"): "own",
     # cross-session messaging
     ("GET", f"{_A}/sessions"): "peers",
     ("POST", f"{_A}/sessions/{{slug}}/messages"): "peers",
@@ -148,6 +145,14 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("GET", f"{_ADMIN}/meta"): "superleader",
     ("GET", f"{_ADMIN}/backups"): "reader",
     ("POST", f"{_ADMIN}/backups/copy"): "reader",
+    # volumes (S-77): the session's own mounts; reads scoped to the caller's projects; writes
+    ("GET", f"{_A}/volumes"): "own",
+    ("POST", f"{_A}/volumes/{{name}}/save"): "own",
+    ("GET", f"{_ADMIN}/volumes"): "reader",
+    ("GET", f"{_ADMIN}/volumes/{{volume_id}}"): "reader",
+    ("POST", f"{_ADMIN}/volumes"): "superleader",
+    ("POST", f"{_ADMIN}/presets/{{ref}}/volumes/{{volume_id}}"): "superleader",
+    ("DELETE", f"{_ADMIN}/presets/{{ref}}/volumes/{{volume_id}}"): "superleader",
     ("GET", f"{_ADMIN}/backups/cleanup/settings"): "superleader",
     ("GET", f"{_ADMIN}/backups/cleanup/preview"): "superleader",
     ("GET", f"{_ADMIN}/backups/{{name:path}}/versions"): "reader",

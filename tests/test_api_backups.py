@@ -7,7 +7,6 @@ from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
-from backup_helpers import workspace_entries
 from test_api_sessions import assert_error, client_for, make_settings
 
 from agents_orchestrator.api import backups as backups_mod
@@ -94,6 +93,7 @@ async def add_version(pool, name, *, age=OLD, digest=None, size=100, manifest=No
             project="p",
             created_by="actor",
             orphan=False,
+            volume_writer=name.startswith(backups.RESERVED_PREFIX),
         )
         await conn.execute("UPDATE backup_versions SET created_at = %s WHERE id = %s", (age, v.id))
     return v
@@ -139,13 +139,23 @@ async def test_old_archive_routes_404(pool, dsn, s3):
 # ------------------------------------------------------------------ list and versions
 
 
+async def reference(pool, slug, version) -> None:
+    """A session whose recorded status names `version` as its restore source."""
+    async with pool.connection() as conn:
+        s = await sessions.create(conn, slug, SessionSpec())
+        await conn.execute(
+            "UPDATE sessions SET status = jsonb_build_object('backup', jsonb_build_object("
+            "'entries', jsonb_build_array(jsonb_build_object('version', %s::text)))) WHERE id = %s",
+            (str(version.id), s.id),
+        )
+
+
 async def test_list_by_name(pool, dsn, s3):
     for i in range(5):
         await add_version(pool, f"proj/{i:02d}")
     await add_version(pool, "other/x")
     second = await add_version(pool, "proj/00")
-    async with pool.connection() as conn:
-        await sessions.create(conn, "alpha", SessionSpec(backup=workspace_entries("proj/00")))
+    await reference(pool, "alpha", second)
     async with client(pool, dsn) as c:
         first = (await c.get(A, params={"limit": 3})).json()
         assert [i["name"] for i in first["items"]] == ["other/x", "proj/00", "proj/01"]
@@ -370,9 +380,8 @@ async def test_delete_name_removes_every_version(pool, dsn, s3):
     assert sorted(s3.deleted[0]) == sorted([one.object_key, two.object_key])
 
 
-async def test_delete_name_refused_while_a_session_renders_to_it(pool, dsn, s3):
-    await add_version(pool, "proj/a")
-    async with pool.connection() as conn:
-        await sessions.create(conn, "alpha", SessionSpec(backup=workspace_entries("proj/a")))
+async def test_delete_name_refused_while_a_session_references_a_version(pool, dsn, s3):
+    v = await add_version(pool, "proj/a")
+    await reference(pool, "alpha", v)
     async with client(pool, dsn) as c:
         assert_error(await c.delete(f"{A}/proj/a"), 409, "referenced")

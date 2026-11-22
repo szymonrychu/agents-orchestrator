@@ -162,6 +162,17 @@ class Settings(BaseSettings):
 
     pvc_storage_class: str = "rook-ceph-rwx"
     pvc_size: str = "20Gi"
+    #: Shared volumes (S-77): the one storage class of every volume PVC, the size a create
+    #: without size gets, the grow-only cap and the most volumes one preset may attach.
+    volume_storage_class: str = "rook-ceph-rwx"
+    volume_default_size: str = "10Gi"
+    volume_max_size: str = "200Gi"
+    volume_max_per_preset: int = Field(default=8, ge=1, le=64)
+    #: The startup migration of preset backup entries to volumes only plans and logs.
+    volume_migration_dry_run: bool = False
+    #: Per seed copy and for the whole startup migration (it runs in the background).
+    volume_migration_copy_timeout_seconds: float = Field(default=120.0, gt=0)
+    volume_migration_deadline_seconds: float = Field(default=1800.0, gt=0)
     claude_secret_name: str = "agents-orchestrator-claude"
     image_pull_secret: str = "regcred"
     any_mcp_config_file: str = ""
@@ -561,6 +572,8 @@ class Settings(BaseSettings):
         "default_cpu_limit",
         "default_memory_request",
         "default_memory_limit",
+        "volume_default_size",
+        "volume_max_size",
     )
     @classmethod
     def _check_quantity(cls, v: str) -> str:
@@ -570,6 +583,20 @@ class Settings(BaseSettings):
             raise _Bad(str(exc)) from None
         if not positive:
             raise _Bad(f"{v!r} must be a positive quantity")
+        return v
+
+    @field_validator("volume_max_size")
+    @classmethod
+    def _check_volume_default_within_max(cls, v: str, info: ValidationInfo) -> str:
+        default = info.data.get("volume_default_size")
+        if default is None:
+            return v
+        try:
+            over = parse_quantity(default) > parse_quantity(v)
+        except ValueError:
+            return v  # reported on its own
+        if over:
+            raise _Bad("ORCH_VOLUME_DEFAULT_SIZE::must not exceed ORCH_VOLUME_MAX_SIZE")
         return v
 
     @field_validator("efforts")

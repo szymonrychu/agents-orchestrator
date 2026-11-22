@@ -7,13 +7,17 @@ import hashlib
 import json
 import math
 import re
+from collections.abc import Sequence
 from typing import Any
 
 import yaml
 
 from agents_orchestrator import handoff_texts, rendering, runaway
 from agents_orchestrator.db.sessions import Session
+from agents_orchestrator.db.volumes import Volume
 from agents_orchestrator.k8s.labels import (
+    VOLUME_FINALIZER,
+    VOLUME_PROJECTS_ANNOTATION,
     cluster_binding_name,
     kube_labels,
     kube_service_account,
@@ -22,6 +26,8 @@ from agents_orchestrator.k8s.labels import (
     prefix,
     selector,
     session_labels,
+    volume_labels,
+    volume_pod_label,
     workspace_pvc,
 )
 from agents_orchestrator.k8s.on_start import READ_ONLY_TOOLS, orchestrator_allow, render_on_start
@@ -31,8 +37,9 @@ from agents_orchestrator.spec import (
     KUBE_TIERS,
     WORKDIR_ROOT,
     SessionSpec,
+    VolumeAttachment,
     WrapperSettings,
-    backups,
+    effective_mount_path,
     parse_quantity,
 )
 from agents_orchestrator.tokens import SessionTokens
@@ -44,8 +51,6 @@ SESSIONS_ROOT = "/sessions"
 # dir lives: the wrapper links <config>/skills and rules to it and has no guard against equal paths.
 CLAUDE_ROOT = "/claude"
 CLAUDE_SUBPATH = "claude"
-BACKUP_STATE_ROOT = "/backup-state"
-BACKUP_STATE_SUBPATH = "backup-state"
 WORKSPACE_VOLUME = "workspace"
 PROBE_PERIOD = 5
 STARTUP_SLACK = 12
@@ -58,7 +63,7 @@ DOCKER_CONFIG_DIR = "/docker-config"
 # The wrapper commands the orchestrator itself sends (`sessions.commands.client`): `compact`
 # (api and dispatcher), `clear`, the ex-leader reset after a voluntary handover
 # (claude-code-wrapper >= 0.10.0; an older wrapper refuses it with 403 command_denied), and
-# `reload-skills`, sent after a live backup delivery.
+# `reload-skills` (granted to the client; no live delivery sends it any more).
 CLIENT_COMMANDS = ("compact", "clear", "reload-skills")
 AGENT_PASSTHROUGH_ENV = ("ORCH_AGENT_TOKEN", "ORCH_AGENT_URL", "ORCH_SESSION_ID", "POD_NAME")
 
@@ -493,11 +498,10 @@ CHAT_ENVELOPE_PROMPT = (
     "silent, write no envelope."
 )
 
-BACKUP_SAVE_PROMPT = (
-    "After you create or change a skill, a rule or a script that lives in a backed up directory, "
-    "call orchestrator_backup_save (root and path of the backup entry) so the other sessions of "
-    "the project get it; the directory is saved at the end of the session too, but only this "
-    "call shares it while the session runs."
+VOLUME_SAVE_PROMPT = (
+    "A volume mounted with backup_restore is saved when the last session releases it; to share "
+    "files you changed in it sooner, call orchestrator_volume_save with the volume name "
+    "(orchestrator_volumes_status lists your volumes)."
 )
 
 
@@ -509,7 +513,7 @@ def _ask_prompt(settings: Settings) -> str:
 
 
 def _system_append(spec: SessionSpec, settings: Settings) -> str:
-    """The ask prompt, plus the project room guidance and, with backup entries, the save
+    """The ask prompt, plus the project room guidance and, with backup_restore volumes, the save
     guidance, when the agent relay is reachable."""
     ask = _ask_prompt(settings)
     if not settings.agent_api_url:
@@ -518,8 +522,8 @@ def _system_append(spec: SessionSpec, settings: Settings) -> str:
     parts = [ask, room]
     if settings.chat_available:
         parts.append(CHAT_ENVELOPE_PROMPT)
-    if backups(spec):
-        parts.append(BACKUP_SAVE_PROMPT)
+    if any(a.backup_restore for a in spec.volumes or []):
+        parts.append(VOLUME_SAVE_PROMPT)
     return "\n\n".join(parts)
 
 
@@ -662,6 +666,58 @@ def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
     return cfg
 
 
+VolumeAttachments = Sequence[tuple[VolumeAttachment, Volume]]
+"""A session's resolved volume attachments: (preset attachment, volume row), in spec order."""
+
+
+def render_volume_pvc(volume: Volume, settings: Settings) -> dict[str, Any]:
+    """The RWX PVC of one volume. No session label; the finalizer keeps a stray delete Terminating
+    until the volume delete path removes it."""
+    return {
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {
+            "name": volume.pvc_name,
+            "namespace": settings.namespace,
+            "labels": volume_labels(volume.id),
+            "annotations": {VOLUME_PROJECTS_ANNOTATION: ",".join(volume.projects)},
+            "finalizers": [VOLUME_FINALIZER],
+        },
+        "spec": {
+            "accessModes": ["ReadWriteMany"],
+            "storageClassName": volume.storage_class,
+            "resources": {"requests": {"storage": volume.size}},
+        },
+    }
+
+
+def volume_pod_parts(
+    attachments: VolumeAttachments,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, str]]:
+    """(pod volumes, container volumeMounts, pod labels) of the attachments: whole volume, no
+    subPath, readOnly on both the pod volume and the mount for `ro`."""
+    volumes: list[dict[str, Any]] = []
+    mounts: list[dict[str, Any]] = []
+    pod_labels: dict[str, str] = {}
+    for n, (att, vol) in enumerate(attachments):
+        name, read_only = f"vol-{n}", att.mode == "ro"
+        volumes.append(
+            {
+                "name": name,
+                "persistentVolumeClaim": {"claimName": vol.pvc_name, "readOnly": read_only},
+            }
+        )
+        mounts.append(
+            {
+                "name": name,
+                "mountPath": effective_mount_path(att, vol.name),
+                "readOnly": read_only,
+            }
+        )
+        pod_labels[volume_pod_label(vol.id)] = att.mode
+    return volumes, mounts, pod_labels
+
+
 def _meta(slug: str, kind_name: str, settings: Settings) -> dict[str, Any]:
     return {
         "name": kind_name,
@@ -758,7 +814,12 @@ def env_entries(session: Session) -> list[dict[str, Any]]:
     return [{"name": name, **out[name]} for name in sorted(out)]
 
 
-def _container(session: Session, settings: Settings, names: dict[str, str]) -> dict[str, Any]:
+def _container(
+    session: Session,
+    settings: Settings,
+    names: dict[str, str],
+    volume_mounts: list[dict[str, Any]],
+) -> dict[str, Any]:
     spec, slug = session.spec, session.slug
     port = settings.wrapper_port
     env: list[dict[str, Any]] = [
@@ -813,6 +874,7 @@ def _container(session: Session, settings: Settings, names: dict[str, str]) -> d
             {"name": "mise", "mountPath": "/opt/mise"},
             {"name": "any-mcp", "mountPath": "/opt/any-mcp"},
             {"name": "config", "mountPath": "/etc/ccw"},
+            *volume_mounts,
         ],
     }
     if docker_enabled(spec, settings):
@@ -851,7 +913,10 @@ def _container(session: Session, settings: Settings, names: dict[str, str]) -> d
 
 
 def render_session(
-    session: Session, settings: Settings, tokens: SessionTokens
+    session: Session,
+    settings: Settings,
+    tokens: SessionTokens,
+    volumes: VolumeAttachments = (),
 ) -> list[dict[str, Any]]:
     spec, slug = session.spec, session.slug
     names = {**object_names(slug), "pvc": workspace_pvc(slug, session.status)}
@@ -907,6 +972,7 @@ def render_session(
             ],
         },
     }
+    att_volumes, att_mounts, att_labels = volume_pod_parts(volumes)
     pod_spec: dict[str, Any] = {
         **pod_identity(session, settings),
         "securityContext": {
@@ -915,12 +981,13 @@ def render_session(
             "fsGroupChangePolicy": "OnRootMismatch",
         },
         "terminationGracePeriodSeconds": settings.agent_termination_grace_seconds,
-        "containers": [_container(session, settings, names)],
+        "containers": [_container(session, settings, names, att_mounts)],
         "volumes": [
             {"name": WORKSPACE_VOLUME, "persistentVolumeClaim": {"claimName": names["pvc"]}},
             {"name": "config", "configMap": {"name": names["configmap"]}},
             {"name": "mise", "emptyDir": {}},
             {"name": "any-mcp", "emptyDir": {}},
+            *att_volumes,
         ],
     }
     if docker_enabled(spec, settings):
@@ -942,7 +1009,10 @@ def render_session(
             "serviceName": names["service"],
             "selector": selector(slug),
             "template": {
-                "metadata": {"labels": dict(labels), "annotations": {HASH_ANNOTATION: config_hash}},
+                "metadata": {
+                    "labels": {**labels, **att_labels},
+                    "annotations": {HASH_ANNOTATION: config_hash},
+                },
                 "spec": pod_spec,
             },
         },

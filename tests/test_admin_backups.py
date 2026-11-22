@@ -136,6 +136,13 @@ async def test_admin_copy_guard(pool, dsn, s3):  # noqa: F811
     assert row["path"] == f"{A}/copy" and row["status"] == 404
 
 
+async def test_admin_copy_into_a_volume_name_is_refused(pool, dsn, s3):  # noqa: F811
+    await add_version(pool, "proj/a")
+    r, _ = await admin_copy(pool, dsn, {"source": "proj/a", "target": "volume-x"})
+    assert_error(r, 403, "reserved_name")
+    assert s3.copied == []
+
+
 POLICY = {
     "enabled": True,
     "dry_run": True,

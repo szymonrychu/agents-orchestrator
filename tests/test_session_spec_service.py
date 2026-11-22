@@ -347,7 +347,6 @@ FIXED = [
     ("static", {"static": True}),
     ("workdir", {"workdir": "other"}),
     ("pvc_size", {"pvc_size": "5Gi"}),
-    ("backup", {"backup": [{"root": "claude", "path": "x", "mode": "both", "name": "mine"}]}),
 ]
 
 

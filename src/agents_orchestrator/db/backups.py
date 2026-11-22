@@ -25,6 +25,9 @@ from agents_orchestrator.db.pool import notify
 CURRENT_CHANNEL = "backups_current"  # NOTIFY {"name"}: a name got a new current version
 SaveResult = Literal["advanced", "unchanged", "orphan"]
 MAX_LIMIT = 200
+RESERVED_PREFIX = (
+    "volume-"  # backup names of volumes: only the volume path and the migration write them
+)
 _COLUMNS = (
     "id, name, object_key, size, digest, manifest, base_version, origin, session_slug,"
     " preset_id, project, created_by, created_at, state"
@@ -64,6 +67,14 @@ class Page[T]:
     next_cursor: str | None = None
 
 
+class ReservedName(ValueError):
+    """A write into a reserved (`volume-`) name without the volume-writer flag."""
+
+
+def is_reserved(name: str) -> bool:
+    return name.startswith(RESERVED_PREFIX)
+
+
 def _limit(limit: int) -> int:
     return max(1, min(limit, MAX_LIMIT))
 
@@ -101,13 +112,18 @@ async def record_save(
     project: str | None,
     created_by: str,
     orphan: bool,
+    volume_writer: bool = False,
 ) -> tuple[SaveResult, Version | None]:
     """Record a stored object as a version of `name`.
 
     Not orphan and a digest different from the current one: new `current` row, the previous
     current becomes `superseded` ("advanced"). Equal digest: no row, the caller deletes the
     fresh object ("unchanged", None). Orphan: a row `orphan`, the pointer stays ("orphan").
+    A `volume-` name is written only with `volume_writer` (the volume reconciler, the migration):
+    ReservedName otherwise.
     """
+    if is_reserved(name) and not volume_writer:
+        raise ReservedName(name)
     locked = await _lock(conn, name, create=True)
     assert locked is not None
     previous = locked["current_version"]
@@ -302,7 +318,21 @@ async def referenced_versions(conn: psycopg.AsyncConnection) -> set[uuid.UUID]:
             out.add(uuid.UUID(text))
         except ValueError:
             continue
+    out.update(vid for vid, _name, _holder in await _volume_pins(conn))
     return out
+
+
+async def _volume_pins(conn: psycopg.AsyncConnection) -> list[tuple[uuid.UUID, str, str]]:
+    """(version id, name, holder) for `volumes.content_version` of every live volume and the
+    current version of every `volume-` name (read-only join over the volumes table)."""
+    cur = await conn.execute(
+        "SELECT v.id, v.name, v.name FROM volumes vol JOIN backup_versions v"
+        " ON v.id = vol.content_version WHERE vol.deleted_at IS NULL"
+        " UNION SELECT v.id, v.name, v.name FROM backups b JOIN backup_versions v"
+        " ON v.id = b.current_version WHERE starts_with(b.name, %s)",
+        (RESERVED_PREFIX,),
+    )
+    return [(vid, name, holder) for vid, name, holder in await cur.fetchall()]
 
 
 async def name_versions(conn: psycopg.AsyncConnection, name: str) -> list[Version]:
@@ -333,7 +363,8 @@ async def name_activity(conn: psycopg.AsyncConnection) -> dict[str, datetime]:
 
 async def referencing(conn: psycopg.AsyncConnection) -> list[tuple[uuid.UUID, str, str]]:
     """(version id, backup name, session slug) for every stored session status that names an
-    existing version as restore source or base (same reading as `referenced_versions`)."""
+    existing version as restore source or base (same reading as `referenced_versions`), plus the
+    volume pins (holder: the volume's backup name)."""
     cur = await conn.execute(
         "SELECT DISTINCT v.id, v.name, s.slug FROM sessions s,"
         " jsonb_array_elements(CASE WHEN jsonb_typeof(s.status #> '{backup,entries}') = 'array'"
@@ -342,7 +373,8 @@ async def referencing(conn: psycopg.AsyncConnection) -> list[tuple[uuid.UUID, st
         " backup_versions v"
         " WHERE jsonb_typeof(e.value) = 'object' AND e.value ->> k = v.id::text"
     )
-    return [(vid, name, slug) for vid, name, slug in await cur.fetchall()]
+    found = [(vid, name, slug) for vid, name, slug in await cur.fetchall()]
+    return found + await _volume_pins(conn)
 
 
 async def known_keys(conn: psycopg.AsyncConnection, keys: list[str]) -> set[str]:

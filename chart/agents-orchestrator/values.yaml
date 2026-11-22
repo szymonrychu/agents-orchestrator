@@ -358,6 +358,19 @@ credentialWarnDays: 10
 credentialRefuseHours: 24
 credentialNoticeProject: ""
 
+# Shared volumes (S-77): the storage class of every volume PVC (ORCH_VOLUME_STORAGE_CLASS; empty keeps the
+# orchestrator default), the
+# size of a volume created without one (ORCH_VOLUME_DEFAULT_SIZE), the grow-only cap
+# (ORCH_VOLUME_MAX_SIZE), the most volumes one preset may attach (ORCH_VOLUME_MAX_PER_PRESET) and
+# whether the api's one-shot startup migration of preset backup entries only plans and logs
+# (ORCH_VOLUME_MIGRATION_DRY_RUN).
+agentVolumes:
+  storageClass: ""
+  defaultSize: 10Gi
+  maxSize: 200Gi
+  maxPerPreset: 8
+  migrationDryRun: false
+
 # Seconds between two restarts an agent asks for on its own session (ORCH_SELF_RESTART_COOLDOWN_SECONDS).
 selfRestartCooldownSeconds: 600
 

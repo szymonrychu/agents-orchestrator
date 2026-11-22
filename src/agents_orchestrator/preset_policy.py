@@ -90,7 +90,7 @@ SESSION_FIXED: tuple[str, ...] = (
     "static",
     "workdir",
     "pvc_size",
-    "backup",
+    "volumes",
 )
 _FIXED_DEFAULTS: dict[str, Any] = {"replicas": 1, "static": False, "workdir": "workdir"}
 
@@ -152,6 +152,21 @@ def classify_schedule(fields: Iterable[str]) -> dict[str, tuple[bool, bool]]:
 
 def privileged(spec: dict[str, Any]) -> list[str]:
     return sorted(f for f in PRIVILEGED if bool(spec.get(f)))
+
+
+def volume_attach_is_security(
+    spec: dict[str, Any], mode: str, other_specs: Iterable[dict[str, Any]]
+) -> bool:
+    """Whether attaching a volume to a preset with `spec` in `mode` is a security change (Q7):
+    after it the volume would be attached to a privileged preset (`PRIVILEGED`: cluster access,
+    namespace access, docker) and to any other preset, or it attaches `rw` to a privileged one.
+    `other_specs` are the specs of the other presets that attach the same volume. Any other
+    attach, `ro` or `rw`, is free. Fail closed: a spec that is not a dict counts as privileged."""
+    others = list(other_specs)
+    own = bool(privileged(spec)) if isinstance(spec, dict) else True
+    if own:
+        return mode == "rw" or bool(others)
+    return any(not isinstance(o, dict) or bool(privileged(o)) for o in others)
 
 
 def human_only_changes(stored: dict[str, Any], new: dict[str, Any]) -> list[str]:

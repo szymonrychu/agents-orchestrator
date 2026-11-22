@@ -19,6 +19,7 @@ from agents_orchestrator.api import (
     admin_handoffs,  # noqa: F401  (registers its routes on admin.router)
     admin_relay,
     admin_specs,  # noqa: F401  (registers its routes on admin.router)
+    admin_volumes,  # noqa: F401  (registers its routes on admin.router)
     agent,
     autoclose,
     backups,
@@ -43,6 +44,7 @@ from agents_orchestrator.api import (
     streams,
     tasks,
     templates,
+    volumes,
     workspace,
 )
 from agents_orchestrator.api.allowlist import PortGate, SourceAllowlist
@@ -53,6 +55,7 @@ from agents_orchestrator.api.secret_store import KubeApi
 from agents_orchestrator.api.service_auth import ServiceGate
 from agents_orchestrator.api.usage_gate import UsageSource
 from agents_orchestrator.api.vault_client import VaultClient
+from agents_orchestrator.db import migrate_volumes
 from agents_orchestrator.db.pool import open_pool
 from agents_orchestrator.settings import Settings
 
@@ -106,6 +109,12 @@ def create_app(
         if owns_pool:
             app.state.pool = await open_pool(settings.database_url)
         await listener.start()
+        # one-shot, in the background so the api serves meanwhile: preset backup entries become
+        # volumes (S-77); never raises
+        migration = asyncio.create_task(
+            migrate_volumes.startup(app.state.pool, settings), name="volume_migration"
+        )
+        app.state.volume_migration_task = migration
         sweeper = asyncio.create_task(autoclose.sweep(app.state.pool, settings), name="autoclose")
         app.state.autoclose_task = sweeper
         proposal_sweeper = asyncio.create_task(proposal_sweep.sweep(app), name="proposal_sweep")
@@ -117,7 +126,7 @@ def create_app(
         try:
             yield
         finally:
-            for task in (sweeper, proposal_sweeper, post_sweeper, cred_sweeper):
+            for task in (migration, sweeper, proposal_sweeper, post_sweeper, cred_sweeper):
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
@@ -179,6 +188,7 @@ def create_app(
     app.include_router(project_chat.main_router)
     app.include_router(templates.router)
     app.include_router(backups.router)
+    app.include_router(volumes.router)
     app.include_router(messages.router)
     app.include_router(streams.router)
     app.include_router(workspace.router)

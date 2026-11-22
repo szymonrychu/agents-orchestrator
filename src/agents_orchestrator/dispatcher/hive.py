@@ -76,7 +76,7 @@ from agents_orchestrator.pressure_levels import (
     levels,
 )
 from agents_orchestrator.settings import Settings
-from agents_orchestrator.spec import SessionSpec, legacy_context
+from agents_orchestrator.spec import load_stored_spec
 from agents_orchestrator.wrapper.client import NoteOutcome, WrapperClient
 from agents_orchestrator.wrapper.models import WrapperError, WrapperUnreachable
 
@@ -314,7 +314,7 @@ async def _read(
             (cid, OUTCOME_WINDOW_SECONDS),
         )
         outcomes = await cur.fetchall()
-    typed = SessionSpec.model_validate(spec, context=legacy_context(session.get("secret_versions")))
+    typed = load_stored_spec(spec, session.get("secret_versions"))
     return _Plan(
         session_id=cid,
         slug=session["slug"],

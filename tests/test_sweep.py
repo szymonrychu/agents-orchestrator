@@ -8,14 +8,13 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from backup_helpers import workspace_entries
 from test_api_backups import PRE, add_version, settings_for
 
 from agents_orchestrator.cache import sweep
 from agents_orchestrator.cache.policy import SweepPolicy
 from agents_orchestrator.cache.presign import ArchiveObject, DeleteFailure
 from agents_orchestrator.cache.sweep import References, plan_sweep, references, run_sweep
-from agents_orchestrator.db import backups, sessions
+from agents_orchestrator.db import backups, sessions, volumes
 from agents_orchestrator.spec import SessionSpec
 
 NOW = datetime(2026, 10, 31, 12, tzinfo=UTC)
@@ -90,11 +89,10 @@ def test_sweep_deletes_stale_name():
     assert p.deletes[0].reason.startswith("name not restored or saved")
 
 
-def test_a_stale_name_with_a_referenced_version_or_spec_name_is_kept():
+def test_a_stale_name_with_a_referenced_version_is_kept():
     vs = history("proj/a", [40, 50])
     act = {"proj/a": NOW - 45 * DAY}
     assert plan(vs, activity=act, refs=References(versions={vs[1].id: ["x"]}), keep=5).keys == []
-    assert plan(vs, activity=act, refs=References(names={"proj/a": ["x"]}), keep=5).keys == []
 
 
 def test_a_stale_name_with_a_young_version_is_kept():
@@ -180,12 +178,22 @@ def test_invariants_on_random_listings(seed):
 # ------------------------------------------------------------------ references
 
 
-async def test_references_cover_versions_spec_names_and_transcripts(pool, dsn):
+TRANSCRIPTS = SessionSpec(
+    volumes=[
+        {
+            "volume": "11111111-1111-4111-8111-111111111111",
+            "mount_path": "/workdir/workdir",
+            "mode": "rw",
+            "backup_restore": True,
+        }
+    ]
+)
+
+
+async def test_references_cover_versions_and_transcripts(pool, dsn):
     v = await add_version(pool, "proj/a")
     async with pool.connection() as conn:
-        s = await sessions.create(
-            conn, "alpha", SessionSpec(backup=workspace_entries("proj/a", "fixed"))
-        )
+        s = await sessions.create(conn, "alpha", TRANSCRIPTS)
         await conn.execute(
             "UPDATE sessions SET status = jsonb_build_object('backup', jsonb_build_object("
             "'entries', jsonb_build_array(jsonb_build_object("
@@ -195,44 +203,52 @@ async def test_references_cover_versions_spec_names_and_transcripts(pool, dsn):
         await sessions.create(conn, "plain", SessionSpec())
         refs = await references(conn, settings_for(dsn))
     assert refs.versions == {v.id: ["alpha"]}  # the unknown base_version is not a reference
-    assert refs.names == {"proj/a": ["alpha"], "fixed": ["alpha"]}
     assert refs.transcripts == {f"{PRE}sessions/alpha.tar.zst"}
-
-
-async def test_a_version_restored_through_a_save_time_template_is_pinned(pool, dsn):
-    """M3: a name that renders only at save time (`now`) yields no spec name, so the restored
-    version stays protected through the session's recorded entry (`status.backup.entries`)."""
-    v = await add_version(pool, "tpl/x")
-    async with pool.connection() as conn:
-        s = await sessions.create(
-            conn, "gamma", SessionSpec(backup=workspace_entries("tpl/x", "tpl/{{ now }}"))
-        )
-        await conn.execute(
-            "UPDATE sessions SET status = jsonb_build_object('backup', jsonb_build_object("
-            "'entries', jsonb_build_array(jsonb_build_object('version', %s::text)))) WHERE id = %s",
-            (str(v.id), s.id),
-        )
-        refs = await references(conn, settings_for(dsn))
-    assert refs.versions == {v.id: ["gamma"]}
-    assert "tpl/x" in refs.names
-
-
-async def test_spec_names_render_before_the_reconciler_resolves_them(pool, dsn):
-    async with pool.connection() as conn:
-        await sessions.create(
-            conn, "beta", SessionSpec(backup=workspace_entries("shared/{{ session_slug }}"))
-        )
-        refs = await references(conn, settings_for(dsn))
-    assert refs.names == {"shared/beta": ["beta"]}
 
 
 async def test_a_deleted_session_references_nothing(pool, dsn):
     async with pool.connection() as conn:
-        gone = await sessions.create(conn, "gone", SessionSpec(backup=workspace_entries("a")))
+        gone = await sessions.create(conn, "gone", TRANSCRIPTS)
         await sessions.request_delete(conn, gone.id)
         await sessions.purge(conn, gone.id)
         refs = await references(conn, settings_for(dsn))
-    assert refs.names == {} and refs.transcripts == set()
+    assert refs.versions == {} and refs.transcripts == set()
+
+
+async def test_content_version_and_current_of_volume_names_survive_a_sweep(pool, dsn):
+    loose = await add_version(pool, "volume-data", digest="c" * 64, age=NOW - 350 * DAY)
+    old = await add_version(pool, "volume-data", digest="a" * 64, age=NOW - 400 * DAY)
+    newer = await add_version(pool, "volume-data", digest="b" * 64, age=NOW - 300 * DAY)
+    async with pool.connection() as conn, conn.transaction():
+        v = await volumes.create(
+            conn,
+            name="data",
+            projects=["p"],
+            size="1Gi",
+            description="",
+            storage_class="c",
+            created_by="a",
+            actor_kind="user",
+            actor="a",
+        )
+        await conn.execute("UPDATE volumes SET content_version = %s WHERE id = %s", (old.id, v.id))
+        refs = await references(conn, settings_for(dsn))
+        assert await backups.referenced_versions(conn) >= {old.id, newer.id}
+        found = await backups.all_versions(conn)
+    assert set(refs.versions) == {old.id, newer.id}
+    p = plan_sweep(
+        versions=found,
+        activity={},
+        objects=[],
+        refs=refs,
+        now=NOW + 1000 * DAY,
+        retention_days=30,
+        keep_newest=0,
+        grace_seconds=600,
+        prefix=PRE,
+    )
+    deleted = {d.key for d in p.decisions if d.delete}
+    assert deleted == {loose.object_key}
 
 
 # ------------------------------------------------------------------ executor
