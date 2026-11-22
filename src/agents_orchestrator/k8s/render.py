@@ -52,6 +52,9 @@ SESSIONS_ROOT = "/sessions"
 CLAUDE_ROOT = "/claude"
 CLAUDE_SUBPATH = "claude"
 WORKSPACE_VOLUME = "workspace"
+# the agent user of every agent pod and volume Job (the image's uid and group)
+AGENT_UID = 1000
+AGENT_GID = 1000
 PROBE_PERIOD = 5
 STARTUP_SLACK = 12
 
@@ -986,8 +989,8 @@ def render_session(
     pod_spec: dict[str, Any] = {
         **pod_identity(session, settings),
         "securityContext": {
-            "runAsUser": 1000,
-            "fsGroup": 1000,
+            "runAsUser": AGENT_UID,
+            "fsGroup": AGENT_GID,
             "fsGroupChangePolicy": "OnRootMismatch",
         },
         "terminationGracePeriodSeconds": settings.agent_termination_grace_seconds,

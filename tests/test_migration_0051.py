@@ -62,7 +62,7 @@ def test_legacy_open_strong_and_voluntary_rows_closed_superseded(empty_dsn, tmp_
             s, a = _agent(c, n)
             ids.append(_row(c, s, a, trigger, phase))
     assert run_migrations(empty_dsn) == [
-        "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058",
+        "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058", "0059",
     ]  # fmt: skip
     with psycopg.connect(empty_dsn) as c:
         for row_id in ids:

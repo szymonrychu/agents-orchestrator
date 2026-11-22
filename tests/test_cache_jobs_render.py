@@ -19,6 +19,7 @@ from agents_orchestrator.reconciler.cache import (
     job_name,
     render_cache_job,
     render_volume_job,
+    render_volume_owner_job,
 )
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import SessionSpec
@@ -283,3 +284,19 @@ def test_volume_job_mounts_the_pvc_at_volume_and_is_not_a_session_job(action, re
     mount = next(m for m in container_of(job)["volumeMounts"] if m["mountPath"] == "/volume")
     assert mount.get("readOnly", False) is read_only
     assert pod["securityContext"]["fsGroupChangePolicy"] == "OnRootMismatch"
+
+
+def test_owner_job_hands_the_volume_root_to_the_agent_user():
+    """The CSI driver creates the root as uid 0: the owner Job of a new volume chowns `/volume`
+    itself (not recursive), as uid 0 with CAP_CHOWN only, named per owner attempt."""
+    vol = make_volume()
+    vol.owner_attempts = 3
+    job = render_volume_owner_job(vol, make_settings())
+    assert job["metadata"]["name"] == f"vol-{vol.id}-owner-3"
+    assert job["spec"]["ttlSecondsAfterFinished"] > 0
+    (c,) = pod_of(job)["containers"]
+    assert (c["image"], c["command"]) == (CACHE_IMAGE, ["chown", "1000:1000", "/volume"])
+    sc = c["securityContext"]
+    assert (sc["runAsUser"], sc["capabilities"]) == (0, {"drop": ["ALL"], "add": ["CHOWN"]})
+    assert c["volumeMounts"] == [{"name": "volume", "mountPath": "/volume"}]
+    assert c["resources"]["requests"] and c["resources"]["limits"]

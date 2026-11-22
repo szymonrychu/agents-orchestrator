@@ -3,8 +3,11 @@
 Leader-only like the cache sweep: the reconciler singleton constructs it. A pass runs on NOTIFY
 `volumes_changed` and every `reconcile_poll_seconds`. The PVC `vol-<name>` is applied by
 server-side apply, grown by a patch of the storage request and deleted only here, after the
-finalizer is removed. Restoring and saving drive one Job each (`render_volume_job`, named by
-the id of the `restore_started`/`save_started` event, so a pass after a crash finds its own Job):
+finalizer is removed. A bound PVC turns ready only after its owner Job hands the volume root to
+the agent user (`render_volume_owner_job`, named by the volume id and its owner attempt count).
+Restoring and saving drive one Job each
+(`render_volume_job`, named by the id of the `restore_started`/`save_started` event, so a pass
+after a crash finds its own Job):
 a restore first re-checks the pods (HARD RULE, `pods_using`) right before creating the Job. Orphan
 claims (session row gone, no pod left) are released with actor system.
 """
@@ -35,7 +38,9 @@ from agents_orchestrator.reconciler.cache import (
     outcome_line,
     parse_outcome,
     render_volume_job,
+    render_volume_owner_job,
     volume_job_name,
+    volume_owner_job_name,
 )
 from agents_orchestrator.reconciler.checks import TAIL_LINES, container_exit_code, job_condition
 from agents_orchestrator.reconciler.init import REASON_MAX
@@ -52,15 +57,34 @@ PVC_APPLY_FAILED = "pvc_apply_failed"
 PVC_LOST = "pvc_lost"
 PVC_MISSING = "pvc_missing"
 PVC_RESIZE_FAILED = "pvc_resize_failed"
+# the label the Job controller puts on each pod of a Job: the Job's uid
+JOB_UID_LABEL = "batch.kubernetes.io/controller-uid"
 
 # transient failures: back to the state that failed, after RETRY_BASE_SECONDS * 2**attempt, at
-# most RETRY_MAX times per process (the count resets when the volume turns ready)
-RETRY_STATE = {PVC_APPLY_FAILED: "provisioning", PVC_RESIZE_FAILED: "resizing"}
+# most RETRY_MAX times per process (the count resets when the volume turns ready); an owner
+# failure instead retries until `volumes.OWNER_ATTEMPTS_MAX` owner Jobs, counted on the row only
+RETRY_STATE = {
+    PVC_APPLY_FAILED: "provisioning",
+    PVC_RESIZE_FAILED: "resizing",
+    volumes.OWNER_FAILED: "provisioning",
+}
 RETRY_BASE_SECONDS = 30.0
 RETRY_MAX = 5
 
 KEY_ANNOTATION = "agents.szymonrichert.pl/object-key"
 BASE_ANNOTATION = "agents.szymonrichert.pl/base-version"
+
+
+def job_end(job: dict[str, Any]) -> str | None:
+    """A Job's outcome from its terminal conditions only (a failed pod of a Job still inside its
+    backoffLimit is no end): None while running, `ok` (Complete), `job_timeout` (Failed with
+    DeadlineExceeded) or `job_failed` (Failed)."""
+    if job_condition(job, "Complete") is not None:
+        return "ok"
+    failed = job_condition(job, "Failed")
+    if failed is None:
+        return None
+    return "job_timeout" if failed.get("reason") == "DeadlineExceeded" else "job_failed"
 
 
 class VolumeReconciler:
@@ -99,13 +123,61 @@ class VolumeReconciler:
             await self.kube.apply(render_volume_pvc(vol, self.settings))
         except KubeError:
             log.warning("volume %s: PVC apply failed", vol.name, exc_info=True)
+            await self._drop_owner_jobs(vol)
             await self._set(vol, "failed", PVC_APPLY_FAILED)
             return
         phase = ((await self._pvc(vol)) or {}).get("status", {}).get("phase")
         if phase == "Bound":
-            await self._set(vol, "ready")
+            await self._own(vol)
         elif phase == "Lost":
+            await self._drop_owner_jobs(vol)
             await self._set(vol, "failed", PVC_LOST)
+
+    async def _own(self, vol: volumes.Volume) -> None:
+        """The owner Job hands the bound PVC's root to the agent user, then the volume turns
+        ready; nothing mounts a provisioning volume (claims wait), so it runs before any pod.
+        Its name comes from the row alone (`volume_owner_job_name`), so a pass after a crash
+        finds its own Job; a Job that ended Failed counts one owner attempt and the retry gets a
+        new name."""
+        if not self.settings.cache_image:
+            log.warning("volume %s: no cache image, the root stays owned by uid 0", vol.name)
+            await self._set(vol, "ready")
+            return
+        job = await self.kube.get_job(self.settings.namespace, volume_owner_job_name(vol))
+        if job is None:
+            try:  # an API error is no owner attempt: retried next pass
+                await self.kube.create_job(render_volume_owner_job(vol, self.settings))
+            except KubeError:
+                log.warning("volume %s: creating the owner Job failed", vol.name, exc_info=True)
+            return
+        end = job_end(job)
+        if end is None:
+            return
+        if end == "ok":
+            await self._set(vol, "ready")
+        else:
+            pod = await self._job_pod(job)
+            code = container_exit_code(pod) if pod is not None else None
+            log.warning("volume %s: the owner Job failed (%s, exit %s)", vol.name, end, code)
+            await self._fail_owner(vol)
+        await self._delete_job(job)  # after the row: a crash in between leaves it to its TTL
+
+    async def _fail_owner(self, vol: volumes.Volume) -> None:
+        async with self.pool.connection() as conn, conn.transaction():
+            changed = await volumes.fail_owner(conn, vol.id)
+        if not changed:
+            log.info("volume %s: state changed meanwhile, owner failure skipped", vol.name)
+
+    async def _drop_owner_jobs(self, vol: volumes.Volume) -> None:
+        """Delete every owner Job of a volume leaving provisioning (its pod mounts the PVC)."""
+        selector = {**volume_labels(vol.id), CACHE_LABEL: "volume-owner"}
+        try:
+            jobs = await self.kube.list_objects("Job", self.settings.namespace, selector)
+        except KubeError:
+            log.warning("volume %s: listing the owner Jobs failed", vol.name, exc_info=True)
+            return
+        for job in jobs:
+            await self._delete_job(job)
 
     async def _resizing(self, vol: volumes.Volume) -> None:
         pvc = await self._pvc(vol)
@@ -150,6 +222,7 @@ class VolumeReconciler:
                 await volumes.finish_delete(conn, vol.id)
             return
         if pvc["metadata"].get("finalizers"):
+            await self._drop_owner_jobs(vol)  # once: a volume deleted while provisioning
             await self.kube.merge_patch(
                 PVC, self.settings.namespace, vol.pvc_name, {"metadata": {"finalizers": None}}
             )
@@ -157,13 +230,14 @@ class VolumeReconciler:
 
     async def _failed(self, vol: volumes.Volume) -> None:
         target = RETRY_STATE.get(vol.state_reason or "")
-        if target is None:
+        if target is None or vol.owner_exhausted:
             return
         attempts, not_before = self._retries.get(vol.id, (0, self._clock() + RETRY_BASE_SECONDS))
         self._retries[vol.id] = (attempts, not_before)
-        if attempts >= RETRY_MAX or self._clock() < not_before:
+        owner = vol.state_reason == volumes.OWNER_FAILED  # bounded by owner_attempts alone
+        if (not owner and attempts >= RETRY_MAX) or self._clock() < not_before:
             return
-        backoff = RETRY_BASE_SECONDS * 2 ** (attempts + 1)
+        backoff = RETRY_BASE_SECONDS * 2 ** (vol.owner_attempts if owner else attempts + 1)
         self._retries[vol.id] = (attempts + 1, self._clock() + backoff)
         log.info(
             "volume %s: retrying after %s (attempt %d)", vol.name, vol.state_reason, attempts + 1
@@ -379,18 +453,14 @@ class VolumeReconciler:
     ) -> tuple[str, dict[str, Any] | None, str | None]:
         """(state, result, reason): `running`, `ok` (the CLI reported one of `ok_states`) or
         `failed` with a fixed reason (`volumes.JOB_REASONS`; raw CLI text goes to the log only)."""
-        status = job.get("status") or {}
-        failed = job_condition(job, "Failed")
-        if failed is not None and failed.get("reason") == "DeadlineExceeded":
-            return "failed", None, "job_timeout"
-        done = job_condition(job, "Complete") is not None or bool(status.get("succeeded"))
-        broke = failed is not None or bool(status.get("failed"))
-        if not done and not broke:
+        end = job_end(job)
+        if end is None:
             return "running", None, None
+        if end == "job_timeout":
+            return "failed", None, end
+        broke = end == "job_failed"
         ns = self.settings.namespace
-        selector = {**volume_labels(vol.id), CACHE_LABEL: f"volume-{action}"}
-        pods = await self.kube.list_pods(ns, selector)
-        pod = pods[-1] if pods else None
+        pod = await self._job_pod(job)
         tail = None
         if pod is not None:
             try:
@@ -413,6 +483,15 @@ class VolumeReconciler:
             missing = "NoSuchKey" in raw or "HTTP 404" in raw
             return "failed", None, "object_missing" if missing else "transfer_failed"
         return "ok", result, None
+
+    async def _job_pod(self, job: dict[str, Any]) -> dict[str, Any] | None:
+        """The newest pod of this Job (by its controller-uid label), never a pod of another Job
+        of the volume; a Job inside its backoffLimit has one pod per try."""
+        uid = (job.get("metadata") or {}).get("uid")
+        if not uid:
+            return None
+        pods = await self.kube.list_pods(self.settings.namespace, {JOB_UID_LABEL: uid})
+        return max(pods, key=lambda p: p["metadata"].get("creationTimestamp") or "", default=None)
 
     async def _delete_job(self, job: dict[str, Any]) -> None:
         try:
