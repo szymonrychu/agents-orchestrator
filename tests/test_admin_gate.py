@@ -198,3 +198,25 @@ async def test_flag_does_not_bypass_gate(pool, dsn):
     async with client_for(app, plain.leader_ip) as http:
         r = await http.get(GET_PRESETS, headers=headers(plain.id))
     assert_error(r, 403, "not_superleader")
+
+
+@pytest.mark.parametrize(
+    "router",
+    ROUTERS,
+    ids=["superleader", "session_editor", "proposer", "reader", "notes_writer"],
+)
+async def test_superleader_member_pod_refused(pool, dsn, router):
+    """Decision 919: a member pod of a superleader hive is not a superleader; every admin gate
+    refuses it 403 not_leader, on another session's slug and on its own, while its leader
+    passes."""
+    app = create_app(make_settings(dsn), pool)
+    boss = await hive(pool, f"g-sm-{id(router) % 1000}", superleader=True)
+    for route in router.routes:
+        for method in route.methods - {"HEAD", "OPTIONS"}:
+            path = concrete(route.path.replace("{slug}", boss.slug))
+            async with client_for(app, boss.member_ip) as http:
+                r = await http.request(method, path, json={}, headers=headers(boss.id))
+            assert_error(r, 403, "not_leader")
+            async with client_for(app, boss.leader_ip) as http:
+                ok = await http.request(method, path, json={}, headers=headers(boss.id))
+            assert ok.status_code not in (401, 403), (method, route.path, ok.text)

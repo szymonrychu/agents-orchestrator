@@ -32,13 +32,14 @@ Limit = Annotated[int, Query(ge=1, le=LIST_LIMIT_MAX)]
 
 
 async def require_proposer(request: Request, agent: Caller, pool: Pool) -> sessions_repo.Session:
-    """The caller's session, admitted for the audit like `require_superleader`: a superleader
-    session (any of its agents), or any other session's leader (else 403 not_leader). The
-    create and revise handlers keep a regular leader on its own session (plan 3.3)."""
+    """The caller's session, admitted for the audit like `require_superleader`: the leader of
+    any session, a superleader's included (decision 919: its member pods are refused like any
+    other member, 403 not_leader). The create and revise handlers keep a regular leader on its
+    own session (plan 3.3)."""
     async with pool.connection() as conn:
         session = await sessions_repo.get(conn, agent.session_id)
         assert session is not None
-        if not session.spec.session_messaging and not await _leads(conn, agent, session):
+        if not await _leads(conn, agent, session):
             raise ApiError(403, "not_leader", "only the session's leader may propose changes")
     return _admit(request, agent, session)
 

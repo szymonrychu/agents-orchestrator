@@ -6,14 +6,18 @@ it needs no Docker.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 
 import httpx
 import pytest
+from test_agent_session_messaging import hive
 from test_agent_tasks import TB_TOKEN, kwargs, make_rig
+from test_api_agent import client_for, headers, make_settings
 from test_api_sessions import assert_error
 
 from agents_orchestrator.api import specs, tasks
+from agents_orchestrator.api.app import create_app
 
 P = "research/a.md"
 _CASES = (
@@ -24,7 +28,7 @@ _CASES = (
     ("GET", "/S-1/plan"), ("PUT", "/S-1/plan"), ("GET", "/S-1/steps"), ("PUT", "/S-1/steps"),
     ("POST", "/S-1/steps"), ("PUT", "/S-1/steps/order"), ("POST", "/S-1/steps/next"),
     ("GET", "/S-1/gate"), ("GET", f"/S-1/docs/{P}/section"),
-    ("GET", "/queue"), ("POST", "/queue/12/move"),
+    ("GET", "/queue"),
 )  # fmt: skip
 ROUTES = tuple(
     (method, "/agent/v1/specs" + tail, "/taskboard/api/v1/specs" + tail) for method, tail in _CASES
@@ -205,6 +209,9 @@ async def test_queue_list_is_relayed(monkeypatch):
 
 async def test_queue_move_is_relayed(monkeypatch):
     rig = make_rig(monkeypatch)
+    rig.db.sessions[rig.session.id] = dataclasses.replace(
+        rig.session, spec=rig.session.spec.model_copy(update={"session_messaging": True})
+    )
     body = {"position": 1}
     r = await rig.call("POST", "/agent/v1/specs/queue/12/move", json=body)
     assert r.status_code == 200
@@ -219,3 +226,41 @@ async def test_queue_delete_stays_unrelayed(monkeypatch):
     r = await rig.call("DELETE", "/agent/v1/specs/queue/12")
     assert r.status_code in (404, 405)
     assert rig.upstream.seen == []
+
+
+@pytest.mark.parametrize(
+    ("caller", "status"),
+    [("member", 403), ("leader", 403), ("superleader_member", 403), ("superleader", 200)],
+)
+async def test_spec_queue_move_relay_superleader_only(pool, dsn, caller, status):
+    """Decision 922: the queue move reaches the taskboard only for a superleader (the leader of
+    a superleader session); anyone else is 403 superleader_required and nothing is forwarded.
+    The queue read stays open to every role."""
+    seen: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"items": [], "next_cursor": None})
+
+    settings = make_settings(dsn).model_copy(
+        update={"taskboard_url": "http://taskboard.test:9002", "taskboard_token": TB_TOKEN}
+    )
+    app = create_app(settings, pool)
+    app.state.taskboard_http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    if caller.startswith("superleader"):
+        s = await hive(pool, "q-boss", superleader=True)
+    else:
+        s = await hive(pool, "q-hive")
+    ip = s.member_ip if caller.endswith("member") else s.leader_ip
+    async with client_for(app, ip) as http:
+        move = await http.post(
+            "/agent/v1/specs/queue/12/move", json={"position": 1}, headers=headers(s.id)
+        )
+        listed = await http.get("/agent/v1/specs/queue", headers=headers(s.id))
+    assert listed.status_code == 200, listed.text
+    if status == 403:
+        assert_error(move, 403, "superleader_required")
+        assert [r.method for r in seen] == ["GET"]
+    else:
+        assert move.status_code == 200, move.text
+        assert [r.method for r in seen] == ["POST", "GET"]
