@@ -1220,6 +1220,9 @@ def test_subagent_allowed_rendered_for_every_session(tmp_path, monkeypatch):
     monkeypatch.setenv("CCW_AUTH_TOKEN", TOKENS.auth)
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth")
     monkeypatch.setenv("POD_NAME", "agent-alpha-0")
+    monkeypatch.setenv("ORCH_AGENT_URL", AGENT_URL)
+    monkeypatch.setenv("ORCH_AGENT_TOKEN", "agent-token")
+    monkeypatch.setenv("ORCH_SESSION_ID", "session-id")
     objs = _render(make_session(replicas=1, retrospective=True))
     path = tmp_path / "config.yaml"
     path.write_text(by_kind(objs)["ConfigMap"]["data"]["config.yaml"])
