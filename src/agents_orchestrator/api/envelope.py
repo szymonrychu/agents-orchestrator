@@ -29,6 +29,7 @@ from agents_orchestrator.api.sessions import Pool
 from agents_orchestrator.db import envelope_outbox, leadership
 from agents_orchestrator.db import sessions as sessions_repo
 from agents_orchestrator.db.envelope_outbox import Row
+from agents_orchestrator.envelope_outbox.worker import tell_row
 from agents_orchestrator.ingester.envelopes import (
     REGISTRY,
     has_marker,
@@ -179,6 +180,20 @@ def _delivering(rows: list[dict[str, Any]], room: str | None) -> bool:
     )
 
 
+async def _tell_missed(
+    conn: psycopg.AsyncConnection, agent_id: uuid.UUID, turn_id: str, seen: list[dict[str, Any]]
+) -> None:
+    """Close the race between the read of the turn's rows and the allowed record: a row the
+    relay refused in between saw no ended turn (no notice) and is in no Stop reason. Once the
+    allowed record is committed the relay does tell, so only rows refused earlier can be lost;
+    re-read and send the relay's own notice for each refused row this Stop did not see. A
+    duplicate notice is possible, a lost one is not."""
+    known = {r["id"] for r in seen if r["status"] == "refused"}
+    for row in await envelope_outbox.rows_for_turn(conn, agent_id, turn_id):
+        if row["status"] == "refused" and row["id"] not in known:
+            await tell_row(conn, row, "refused", row["error_code"] or "refused")
+
+
 async def decide(
     conn: psycopg.AsyncConnection,
     session_id: uuid.UUID,
@@ -205,6 +220,7 @@ async def decide(
         problems, _ = _parse(blocks, leads)
         if not problems and not refused:
             await _record_allowed(conn, agent_id, turn_id)
+            await _tell_missed(conn, agent_id, turn_id, rows)
             return StopOut()
         await _record_blocked(conn, agent_id, turn_id, len(blocks))
         return StopOut(decision="block", reason=_reason(problems, refused, rows))
@@ -218,6 +234,7 @@ async def decide(
     later_valid_chat = [t for t in later_valid if t.startswith("chat-")]
     failed = bool(later_chat) or (bool(first_chat or refused_chat) and not later_valid_chat)
     await _record_allowed(conn, agent_id, turn_id)
+    await _tell_missed(conn, agent_id, turn_id, rows)
     if not failed:
         return StopOut()
     room = _target_room(later_chat or first_chat, refused_chat)

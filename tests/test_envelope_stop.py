@@ -317,3 +317,55 @@ async def test_member_failed_chat_retry_posts_no_apology(dsn, pool):
     again = texts(BAD_ROOM) + texts(BAD_ROOM, start=2)
     assert (await stop(dsn, pool, c, payload("t1", again), ip=member_ip)) == {"decision": "allow"}
     assert await notices(pool) == []
+
+
+async def test_refusal_between_the_read_and_the_allowed_record_is_still_told(
+    dsn, pool, monkeypatch
+):
+    c, a0, _ = await hive(pool)
+    async with pool.connection() as conn:
+        await outbox.insert_rows(
+            conn,
+            [
+                Row(
+                    session_id=c["id"],
+                    agent_id=a0["id"],
+                    wrapper_session_id="w",
+                    event_seq=1,
+                    envelope_index=1,
+                    turn_id="t1",
+                    kind="session",
+                    target="other",
+                    body="x",
+                )
+            ],
+        )
+    real = outbox.rows_for_turn
+    calls = 0
+
+    async def racing(conn, agent_id, turn_id):
+        nonlocal calls
+        calls += 1
+        rows = await real(conn, agent_id, turn_id)
+        if calls == 1:  # the relay refuses the row right after the Stop read the rows
+            await conn.execute(
+                "UPDATE envelope_outbox SET status = 'refused', error_code = 'not_found'"
+            )
+        return rows
+
+    monkeypatch.setattr(outbox, "rows_for_turn", racing)
+    out = await stop(
+        dsn, pool, c, payload("t1", texts('<session-send to="other">x</session-send>'))
+    )
+    assert out == {"decision": "allow"}
+    rid = (await db_rows(pool, "SELECT id FROM envelope_outbox"))[0][0]
+    told = await db_rows(
+        pool, "SELECT text, target_agent_id FROM messages WHERE session_id = %s", c["id"]
+    )
+    assert told == [
+        (
+            f'<message-in channel="notice" from="{c["slug"]}" for="a{rid}" status="refused"'
+            ' reason="not_found"/>\n',
+            a0["id"],
+        )
+    ]

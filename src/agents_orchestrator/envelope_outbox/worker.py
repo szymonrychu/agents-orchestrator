@@ -353,6 +353,11 @@ async def _tell_if_late(conn: Any, row: dict[str, Any], status: str, code: str) 
     """When the row's turn is over, queue a notice frame for the row to the sending agent."""
     if not row["agent_id"] or not await outbox.turn_ended(conn, row["agent_id"], row["turn_id"]):
         return
+    await tell_row(conn, row, status, code)
+
+
+async def tell_row(conn: Any, row: dict[str, Any], status: str, code: str) -> None:
+    """Queue a notice frame for the row to the sending agent, whatever the turn state."""
     own = await sessions_repo.get(conn, row["session_id"])
     if own is None:
         return
