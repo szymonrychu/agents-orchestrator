@@ -3,6 +3,8 @@ the full views. Relays are checked on the taskboard/mindmap rig (no Docker), the
 
 from __future__ import annotations
 
+import dataclasses
+
 import httpx
 import pytest
 from fakes.fake_kube import FakeKube
@@ -70,6 +72,19 @@ async def test_plugin_shaped_relay_writes_return_full_body(monkeypatch, method, 
     rig.upstream.reply = httpx.Response(200, json=upstream)
     r = await rig.call(method, path, json={})
     assert r.json() == upstream
+
+
+async def test_relay_writes_off_the_ack_list_keep_full_body(monkeypatch):
+    """Only the listed single-object writes are acked: the queue move answers the whole queue
+    (a `project` field, a list of items), which reaches the caller unchanged."""
+    rig = make_rig(monkeypatch)
+    rig.db.sessions[rig.session.id] = dataclasses.replace(
+        rig.session, spec=rig.session.spec.model_copy(update={"session_messaging": True})
+    )
+    queue = {"project": "a", "state": {"status": "on"}, "items": [{"id": 12, "position": 1}]}
+    rig.upstream.reply = httpx.Response(200, json=queue)
+    r = await rig.call("POST", "/agent/v1/specs/queue/12/move", json={"position": 1})
+    assert r.json() == queue
 
 
 async def _admin(pool, dsn, who, method, path, **kw):

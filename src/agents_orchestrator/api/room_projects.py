@@ -6,11 +6,14 @@ the room's configured (effective) preset. Those projects are the preset's `proje
 `extra_projects`; a room with no preset belongs to no project, so only a superleader reaches it.
 
 `RoomMap` caches what the upstream says about each room (the bound session and the fallback
-preset), built from one upstream rooms list and kept for `TTL_SECONDS`; a relayed room settings
-change or allow (`invalidate`) drops it, and the next lookup rebuilds it. The projects are
-resolved from the database on every lookup with one query, so a preset moved to another project
-(patch, copy, delete, a project grant) changes the answer at once, without an invalidation hook
-on every path that writes a preset.
+preset), built from one upstream rooms list and kept for `TTL_SECONDS` for reads; a relayed room
+settings change or allow (`invalidate`) drops it, and the next lookup rebuilds it. A write looks
+the room up fresh, so a binding changed on another replica or in the connector itself never lets
+the old project write. A room the map does not hold triggers a rebuild at most once per
+`MISS_REFRESH_SECONDS`, so reads of unknown room ids cannot make every call an upstream fetch.
+The projects are resolved from the database on every lookup with one query, so a preset moved to
+another project (patch, copy, delete, a project grant) changes the answer at once, without an
+invalidation hook on every path that writes a preset.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
 
 TTL_SECONDS = 60.0
+MISS_REFRESH_SECONDS = 5.0
 
 # room_id -> (bound session id, fallback preset id)
 Entry = tuple[uuid.UUID | None, uuid.UUID | None]
@@ -86,16 +90,24 @@ class RoomMap:
     def invalidate(self) -> None:
         self._at = None
 
-    def _fresh(self) -> bool:
-        return self._at is not None and self._clock() - self._at < TTL_SECONDS
+    def _younger_than(self, seconds: float) -> bool:
+        return self._at is not None and self._clock() - self._at < seconds
 
     def replace(self, entries: dict[str, Entry]) -> None:
         """Take a full rooms list as the new map."""
         self._entries, self._at = dict(entries), self._clock()
 
-    async def entry(self, room_id: str, fetch_rooms: Callable[[], Awaitable[Any]]) -> Entry | None:
-        """The room's entry; a stale map, or a room it does not hold, is rebuilt from one upstream
-        rooms list. None when the upstream does not list the room."""
-        if not self._fresh() or room_id not in self._entries:
+    async def entry(
+        self, room_id: str, fetch_rooms: Callable[[], Awaitable[Any]], *, fresh: bool = False
+    ) -> Entry | None:
+        """The room's entry. The map is rebuilt from one upstream rooms list when `fresh` (a
+        write), when it is stale, or when it lacks the room and was built at least
+        `MISS_REFRESH_SECONDS` ago. None when the map does not hold the room."""
+        missing = room_id not in self._entries
+        if (
+            fresh
+            or not self._younger_than(TTL_SECONDS)
+            or (missing and not self._younger_than(MISS_REFRESH_SECONDS))
+        ):
             self.replace(entries_of(await fetch_rooms()))
         return self._entries.get(room_id)

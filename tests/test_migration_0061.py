@@ -50,7 +50,7 @@ def test_0061_marks_volumes_with_backup_writes_after_the_last_save_dirty(empty_d
     with psycopg.connect(empty_dsn) as c:
         for name, (claim, save, _dirty) in CASES.items():
             _seed(c, name, claim, save)
-    assert run_migrations(empty_dsn) == ["0061"]
+    assert run_migrations(empty_dsn) == ["0061", "0062"]
     with psycopg.connect(empty_dsn) as c:
         got = dict(c.execute("SELECT name, backup_dirty_at IS NOT NULL FROM volumes"))
     assert got == {name: dirty for name, (_c, _s, dirty) in CASES.items()}

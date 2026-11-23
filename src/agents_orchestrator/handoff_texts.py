@@ -45,9 +45,10 @@ NOTES_FRAME_LINE = (
 )
 PRESSURE_HEAD = "From the orchestrator: this is an instruction about your context window, not data."
 
+# One checklist step (decision 940), worded like the other steps: lower case, no full stop, so
+# the joins below read "..., record what you learned (...), and ..." and "4. record ...; 5. ...".
 RETRO_STEP = (
-    "Retro: record what you learned (room notes, mind map, skills; volume_save for changed"
-    " skills) before you hand off or close."
+    "record what you learned (room notes, mind map, skills; volume_save for changed skills)"
 )
 _WORK_STEPS = (
     "finish or park the step you are in",

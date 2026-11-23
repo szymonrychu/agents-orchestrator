@@ -800,12 +800,16 @@ class SessionMessageQueued(BaseModel):
     summary="Sessions the caller may message (superleaders, own projects; all for a superleader)",
 )
 async def sessions_list(agent: Caller, pool: Pool) -> SessionPeers:
+    """Every other active session for a superleader (`is_superleader`: a member pod of its
+    session reads its own projects, decision 919), else those of the caller's projects plus
+    every superleader session."""
     async with pool.connection() as conn:
         session = await _session(conn, agent)
+        superleader = await is_superleader(conn, agent, session)
         peers = await sessions_repo.list_messaging_peers(
             conn,
             agent.session_id,
-            projects=None if session.spec.session_messaging else session.projects,
+            projects=None if superleader else session.projects,
         )
     return SessionPeers(
         sessions=[

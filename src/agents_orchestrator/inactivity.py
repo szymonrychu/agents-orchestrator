@@ -107,8 +107,9 @@ def reminder_text(
 
 
 def _handoff_steps(chat: bool, taskboard: bool, workdir_saved: bool) -> list[str]:
-    """What the agent does before it closes: only the configured update tools are named, and the
-    workdir only when the session saves its workspace."""
+    """What the agent does before it closes: only the configured update tools are named, the
+    workdir only when the session saves its workspace, and always the retro step (decision 940),
+    last, so it comes before the self-close."""
     steps: list[str] = []
     if chat and taskboard:
         steps.append("post a final status (a <chat-send> envelope or a task comment)")
@@ -118,6 +119,7 @@ def _handoff_steps(chat: bool, taskboard: bool, workdir_saved: bool) -> list[str
         steps.append("post a final status (a task comment with orchestrator_task_comment)")
     if workdir_saved:
         steps.append("since this session saves its workspace, write handoff notes into the workdir")
+    steps.append(RETRO_STEP)
     return steps
 
 
@@ -131,19 +133,13 @@ def close_text(
     workdir_saved: bool,
 ) -> str:
     """The inactivity ask; the hand-off sentence names only the configured update tools and
-    the workdir only when the session saves its workspace, and is left out when neither applies."""
+    the workdir only when the session saves its workspace, and always the retro step."""
     steps = _handoff_steps(chat, taskboard, workdir_saved)
     parts = [
         f"{CLOSE_PREFIX} this session has sent no update and done no tool work for"
-        f" {humanize(quiet_seconds)}, so the orchestrator asks you to close it."
+        f" {humanize(quiet_seconds)}, so the orchestrator asks you to close it.",
+        f"If your work is finished: {' and '.join(steps)}, then call orchestrator_self_close.",
     ]
-    if steps:
-        parts.append(
-            f"If your work is finished: {' and '.join(steps)}, then call orchestrator_self_close."
-        )
-    else:
-        parts.append("If your work is finished, call orchestrator_self_close.")
-    parts.append(RETRO_STEP)
     parts.append(
         "If you are still working, post a progress update now to keep the session. It is never"
         f" closed while you work; if it is idle after {clock(deadline)} without a self-close or"
@@ -182,14 +178,10 @@ def autoclose_text(
     ]
     if can_self_close:
         steps = _handoff_steps(chat, taskboard, workdir_saved)
-        if steps:
-            parts.append(
-                f"Finish or checkpoint your work, {' and '.join(steps)}, then call"
-                " orchestrator_self_close."
-            )
-        else:
-            parts.append("Finish or checkpoint your work, then call orchestrator_self_close.")
-        parts.append(RETRO_STEP)
+        parts.append(
+            f"Finish or checkpoint your work, {' and '.join(steps)}, then call"
+            " orchestrator_self_close."
+        )
     parts.append(
         f"The session is never closed while you work; if it is idle after {clock(deadline)}"
         f" without a self-close, it is discarded {humanize(grace_seconds)} later. Only the user"

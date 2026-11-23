@@ -20,6 +20,7 @@ from test_api_sessions import assert_error
 from test_api_sessions import client_for as main_client
 from test_api_usage_gate import Upstream, close_usage_sources, gated, windows  # noqa: F401
 
+from agents_orchestrator.api import admin_relay
 from agents_orchestrator.api.admin import ADMIN_PREFIX
 
 ROOMS = f"{ADMIN_PREFIX}/chats/rooms"
@@ -229,3 +230,36 @@ async def test_usage_current_leader_history_superleader(pool, dsn, role):
             assert r.status_code not in (401, 403), r.text
         else:
             assert r.status_code == 403, r.text
+
+
+async def test_notes_update_reads_the_binding_fresh(pool, dsn):
+    """A room the upstream moved to another project is refused for a write at once, though the
+    room map (kept for reads) still holds the old binding."""
+    seats, app, fakes, rooms, (_, out_p) = await rig(pool, dsn)
+    assert (await call(app, seats["L"], "GET", f"{ROOMS}/in/notes")).status_code == 200
+    rooms[0] = room("in", out_p)
+    fake = fakes["connector"]
+    body = fu.sample(DOCS["connector"], _body_schema(fake, ("PUT", "/chat/v1/admin" + NOTES_PUT)))
+    r = await call(app, seats["L"], "PUT", f"{ROOMS}/in/notes/sections/preferences", json=body)
+    assert_error(r, 403, "project_forbidden")
+    assert [c for c in fake.calls if c.method == "PUT"] == []
+
+
+async def test_unknown_room_reads_do_not_refetch_every_call(pool, dsn):
+    """Reads of a room the upstream does not list refetch the rooms list at most once per
+    miss interval, not on every call."""
+    seats, app, fakes, *_ = await rig(pool, dsn)
+    for _ in range(3):
+        r = await call(app, seats["L"], "GET", f"{ROOMS}/nope/notes")
+        assert_error(r, 403, "project_forbidden")
+    assert len([c for c in fakes["connector"].calls if c.path.endswith("/rooms")]) == 1
+
+
+async def test_rooms_list_non_json_answer_is_502(pool, dsn, monkeypatch):
+    seats, app, *_ = await rig(pool, dsn)
+
+    async def not_json(*args, **kwargs):
+        return 200, b"<html>"
+
+    monkeypatch.setattr(admin_relay.forward_core, "forward", not_json)
+    assert_error(await call(app, seats["L"], "GET", ROOMS), 502, "upstream_shape")

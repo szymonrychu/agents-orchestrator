@@ -156,14 +156,14 @@ def test_close_text_example():
         "Orchestrator notice (inactivity limit): this session has sent no update and done no tool"
         " work for 4 h, so the orchestrator asks you to close it. If your work is finished: post a"
         " final status (a <chat-send> envelope or a task comment) and since this session saves its"
-        " workspace, write handoff notes into the workdir, then call orchestrator_self_close."
-        " Retro: record what you learned (room notes, mind map, skills; volume_save for changed"
-        " skills) before you hand off or close. If you are still working, post a progress update"
-        " now to keep the session. It is never closed while you work; if it is idle after 14:05Z"
+        " workspace, write handoff notes into the workdir and record what you learned (room"
+        " notes, mind map, skills; volume_save for changed skills), then call"
+        " orchestrator_self_close. If you are still working, post a progress update now to keep"
+        " the session. It is never closed while you work; if it is idle after 14:05Z"
         " without a self-close or an update, it is discarded 30 s later."
     )
     assert "workdir" not in _close(workdir_saved=False)
-    assert "post a final status (a <chat-send> envelope or a task comment), then call" in (
+    assert "post a final status (a <chat-send> envelope or a task comment) and record what" in (
         _close(workdir_saved=False)
     )
 
@@ -177,10 +177,10 @@ def test_close_text_asks_self_close():
 
 
 def test_close_text_tools():
-    assert "post a final status (a <chat-send> envelope), then" in _close(
+    assert "post a final status (a <chat-send> envelope) and record" in _close(
         taskboard=False, workdir_saved=False
     )
-    assert "post a final status (a task comment with orchestrator_task_comment), then" in _close(
+    assert "post a final status (a task comment with orchestrator_task_comment) and" in _close(
         chat=False, workdir_saved=False
     )
     text = _close(chat=False, taskboard=False)
@@ -188,7 +188,7 @@ def test_close_text_tools():
     assert "If your work is finished: since this session saves its workspace, write handoff" in text
     text = _close(chat=False, taskboard=False, workdir_saved=False)
     assert "handoff" not in text
-    assert "If your work is finished, call orchestrator_self_close." in text
+    assert "If your work is finished: record what you learned" in text
 
 
 def _autoclose(**overrides) -> str:
@@ -210,14 +210,13 @@ def test_autoclose_text():
         "Orchestrator notice (session lifetime): this session reached its lifetime of 1 h set by"
         " its preset, so the orchestrator asks you to wrap up. Finish or checkpoint your work,"
         " post a final status (a <chat-send> envelope or a task comment) and since this session"
-        " saves its workspace, write handoff notes into the workdir, then call"
-        " orchestrator_self_close. Retro: record what you learned (room notes, mind map,"
-        " skills; volume_save for changed skills) before you hand off or close. The session is"
-        " never closed while you work; if it is idle after 14:05Z without a self-close, it is"
-        " discarded 30 s later. Only the user can keep it."
+        " saves its workspace, write handoff notes into the workdir and record what you learned"
+        " (room notes, mind map, skills; volume_save for changed skills), then call"
+        " orchestrator_self_close. The session is never closed while you work; if it is idle"
+        " after 14:05Z without a self-close, it is discarded 30 s later. Only the user can keep it."
     )
     plain = _autoclose(chat=False, taskboard=False, workdir_saved=False)
-    assert "Finish or checkpoint your work, then call orchestrator_self_close." in plain
+    assert "Finish or checkpoint your work, record what you learned" in plain
     text = _autoclose(can_self_close=False)
     assert "orchestrator_self_close" not in text and "Finish or checkpoint" not in text
     assert "it is discarded 30 s later" in text

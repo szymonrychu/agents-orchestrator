@@ -334,6 +334,8 @@ async def _agent_of(pool, session_id) -> uuid.UUID:
         ("granted_idle", "B1", None),
         ("busy_turn", "A2", "busy"),
         ("busy_queued", "A2", "busy"),
+        ("booting_no_agent", "A2", "busy"),
+        ("booting_not_ready", "A2", "busy"),
         ("superleader", "S", "superleader"),
         ("own", "A1", "own_session"),
         ("outside", "B1", "outside_scope"),
@@ -341,8 +343,9 @@ async def _agent_of(pool, session_id) -> uuid.UUID:
 )
 async def test_leader_discard(app, pool, case, target, reason):
     """Decision 942: a leader discards an idle or finished session of its projects (home or
-    granted); a busy session, a superleader session, its own and one outside its projects are
-    refused 403 discard_forbidden with the reason, and nothing changes."""
+    granted); a busy or still booting session (no agent yet, or a live agent not ready), a
+    superleader session, its own and one outside its projects are refused 403 discard_forbidden
+    with the reason, and nothing changes."""
     seats = await two_project_fixture(pool)
     a1, victim = seats["A1"], seats[target]
     agent_id = await _agent_of(pool, victim.id)
@@ -356,6 +359,12 @@ async def test_leader_discard(app, pool, case, target, reason):
         await set_agent_status(pool, agent_id, state="busy", current_turn_id="t-1")
     elif case == "busy_queued":
         await insert_message(pool, victim.id)
+    elif case == "booting_no_agent":
+        async with pool.connection() as conn:
+            await conn.execute("DELETE FROM agents WHERE session_id = %s", (victim.id,))
+    elif case == "booting_not_ready":
+        async with pool.connection() as conn:
+            await conn.execute("UPDATE agents SET ready = false WHERE id = %s", (agent_id,))
     async with client_for(app, a1.ip) as http:
         r = await http.delete(f"{S}/{victim.slug}", headers=headers(a1.id))
     async with pool.connection() as conn:
@@ -368,3 +377,36 @@ async def test_leader_discard(app, pool, case, target, reason):
         assert_error(r, 403, "discard_forbidden")
         assert r.json()["error"]["reason"] == reason
         assert desired == "active"
+
+
+@pytest.mark.parametrize(("force", "status"), [("false", 202), ("true", 422)])
+async def test_leader_discard_force_flag(app, pool, force, status):
+    """A regular leader may pass `force=false` (the default); only `force=true` is refused."""
+    seats = await two_project_fixture(pool)
+    a1, victim = seats["A1"], seats["A2"]
+    async with client_for(app, a1.ip) as http:
+        r = await http.delete(f"{S}/{victim.slug}", headers=headers(a1.id), params={"force": force})
+    assert r.status_code == status, r.text
+
+
+@pytest.mark.parametrize(
+    ("spec", "overrides", "status"),
+    [
+        ({"docker": True}, {"start_prompt": "obey"}, 403),
+        ({"docker": True}, {"replicas": 1}, 201),
+        ({}, {"start_prompt": "dream"}, 201),
+    ],
+)
+async def test_admin_create_start_prompt_override_on_privileged_preset(
+    call, main, spec, overrides, status
+):
+    """A superleader may not start a privileged preset with another start prompt (a security
+    path of a privileged target, like a preset edit); replicas and plain presets are free."""
+    made = await main("POST", M, json={"name": "ovp", "spec": spec, "superleader_manageable": True})
+    r = await call(
+        "POST", S, json={"preset_id": made.json()["id"], "slug": "ovp-1", "overrides": overrides}
+    )
+    if status == 403:
+        assert_error(r, 403, "privileged_target")
+    else:
+        assert r.status_code == 201, r.text

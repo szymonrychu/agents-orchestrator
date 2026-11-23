@@ -14,7 +14,7 @@ from fastapi.concurrency import run_in_threadpool
 from psycopg_pool import AsyncConnectionPool
 from pydantic import ValidationError
 
-from agents_orchestrator import credential, inactivity, rendering
+from agents_orchestrator import credential, inactivity, preset_policy, rendering
 from agents_orchestrator.api import credential_gate, schemas, usage_gate, vault_client, vault_refs
 from agents_orchestrator.api.errors import ApiError, not_found, not_manageable, project_error
 from agents_orchestrator.api.service_auth import calling_service
@@ -637,8 +637,15 @@ async def _placed_preset(
     raise ApiError(409, "conflict", "the preset moved to another project meanwhile; retry")
 
 
-def _apply_overrides(raw: dict, overrides: schemas.SessionOverrides) -> None:
-    """Set the given overrides on the raw preset spec (None leaves a field as the preset has it)."""
+def _apply_overrides(
+    raw: dict, overrides: schemas.SessionOverrides, *, by_superleader: bool
+) -> None:
+    """Set the given overrides on the raw preset spec (None leaves a field as the preset has it).
+
+    `replicas` changes the start count only: the preset's ceiling (max_replicas, else its
+    replicas) stays the session's max_replicas unless the preset is static. A superleader
+    (`by_superleader`) may not give a privileged preset another start prompt: it is a security
+    path of a privileged target, which only a human changes (403 `privileged_target`)."""
     if overrides.replicas is not None:
         ceiling = raw.get("max_replicas") or raw["replicas"]
         if overrides.replicas > ceiling:
@@ -647,9 +654,20 @@ def _apply_overrides(raw: dict, overrides: schemas.SessionOverrides) -> None:
                 "overrides_replicas_above_max",
                 f"replicas {overrides.replicas} exceeds the preset's max_replicas {ceiling}",
             )
+        if not raw.get("static"):
+            raw["max_replicas"] = ceiling
         raw["replicas"] = overrides.replicas
     if overrides.start_prompt is not None:
-        raw["start_prompt"] = overrides.start_prompt or None
+        prompt = overrides.start_prompt or None
+        if by_superleader and preset_policy.privileged(raw) and prompt != raw.get("start_prompt"):
+            raise ApiError(
+                403,
+                "privileged_target",
+                "only a human can start a preset with kube_cluster_access, kube_namespace_access"
+                " or docker on with another start_prompt",
+                extra={"fields": ["start_prompt"]},
+            )
+        raw["start_prompt"] = prompt
 
 
 async def _create_from_preset(
@@ -688,7 +706,7 @@ async def _create_from_preset(
         )
     raw.setdefault("replicas", settings.default_replicas)
     if overrides is not None:
-        _apply_overrides(raw, overrides)
+        _apply_overrides(raw, overrides, by_superleader=created_by_session is not None)
     try:
         spec = await run_in_threadpool(
             check_spec,
@@ -815,10 +833,10 @@ async def discard_session(
 
 
 def force_flag(request: Request, *, allowed: bool = True) -> bool:
-    """The discard's only query parameter, `force` (`true` or `false`); anything else is 422."""
+    """The discard's only query parameter, `force` (`true` or `false`); anything else is 422, and
+    `force=true` too when the caller may not force (`allowed` False)."""
     params = request.query_params
-    extra = set(params) - {"force"}
-    if extra or not allowed and params:
+    if set(params) - {"force"}:
         raise ApiError(
             422,
             "invalid_request",
@@ -830,6 +848,8 @@ def force_flag(request: Request, *, allowed: bool = True) -> bool:
         return False
     if len(value) > 1 or value[0] not in ("true", "false"):
         raise ApiError(422, "invalid_request", "force must be true or false")
+    if value[0] == "true" and not allowed:
+        raise ApiError(422, "invalid_request", "this caller may not discard with force=true")
     return value[0] == "true"
 
 

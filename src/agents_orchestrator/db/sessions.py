@@ -254,9 +254,10 @@ async def get_by_slug(
 
 
 async def has_work(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> bool:
-    """True while the session runs work: a live agent is busy, in a turn or has a fresh
-    background subagent, a message is queued, dispatching or verifying, or its init runs. An
-    idle session, or a finished one (no live agent left), has none."""
+    """True while the session runs work or is still starting: a live agent is busy, in a turn,
+    has a fresh background subagent or is not ready yet without a recorded start failure, no
+    agent was ever observed (just created), a message is queued, dispatching or verifying, or its
+    init runs. An idle session, or a finished one (agents seen, none live left), has none."""
     async with conn.cursor() as cur:
         await cur.execute(
             f"""SELECT EXISTS (
@@ -264,6 +265,11 @@ async def has_work(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> bool
                     WHERE a.session_id = %(id)s AND a.gone_at IS NULL
                       AND (st.state = 'busy' OR st.current_turn_id IS NOT NULL
                            OR {background_busy("st")}))
+                OR EXISTS (
+                    SELECT 1 FROM agents a
+                    WHERE a.session_id = %(id)s AND a.gone_at IS NULL AND NOT a.ready
+                      AND a.start_failure IS NULL)
+                OR NOT EXISTS (SELECT 1 FROM agents a WHERE a.session_id = %(id)s)
                 OR EXISTS (
                     SELECT 1 FROM messages m
                     WHERE m.session_id = %(id)s

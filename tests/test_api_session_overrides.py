@@ -46,3 +46,13 @@ async def test_overrides_replicas_above_max_refused(pool, dsn):
         pid = await _preset(http, "ov-max", {"replicas": 1, "max_replicas": 2})
         r = await http.post(C, json={"preset_id": pid, "slug": "big", "overrides": {"replicas": 3}})
     assert_error(r, 422, "overrides_replicas_above_max")
+
+
+async def test_overrides_replicas_keep_the_preset_ceiling(pool, dsn):
+    """A preset without max_replicas keeps its replicas as the session's ceiling: the override
+    changes the start count only, so the session can scale back up to the preset's size."""
+    async with client_for(create_app(make_settings(dsn), pool)) as http:
+        pid = await _preset(http, "ov-ceil", {"replicas": 3})
+        r = await http.post(C, json={"preset_id": pid, "slug": "one", "overrides": {"replicas": 1}})
+    assert r.status_code == 201, r.text
+    assert (r.json()["spec"]["replicas"], r.json()["spec"]["max_replicas"]) == (1, 3)
