@@ -51,6 +51,12 @@ async def _grant(app, who, slug, project, **extra):
     return await _agent(app, who, "POST", f"/sessions/{slug}/projects", json=body)
 
 
+async def _full(app, r):
+    """The full proposal view behind an agent-port ack, read on the human route."""
+    async with main_client(app) as http:
+        return (await http.get(f"/api/v1/proposals/{r.json()['id']}")).json()
+
+
 async def _review(app, proposal, decision="approve"):
     items = [{"path": i["path"], "decision": decision} for i in proposal["revisions"][0]["items"]]
     async with main_client(app) as http:
@@ -80,7 +86,7 @@ async def test_grant_files_a_proposal_and_approval_applies_it(pool, app, world):
     boss, target = world["S"], world["T"]
     r = await _grant(app, boss, target.slug, "a")
     assert r.status_code == 202, r.text
-    proposal = r.json()
+    proposal = await _full(app, r)
     assert (proposal["kind"], proposal["target_name"], proposal["status"]) == (
         "session_projects",
         target.slug,
@@ -104,7 +110,7 @@ async def test_grant_files_a_proposal_and_approval_applies_it(pool, app, world):
 
 async def test_deny_grants_nothing(pool, app, world):
     r = await _grant(app, world["S"], world["T"].slug, "a")
-    r = await _review(app, r.json(), "deny")
+    r = await _review(app, await _full(app, r), "deny")
     assert r.status_code == 200 and r.json()["status"] == "denied"
     assert await _extra(pool, world["T"].id) == ()
     assert await _notices(pool, world["T"].id, "project_grant") == []
@@ -156,7 +162,7 @@ async def test_client_key_replays_the_first(app, world):
 
 
 async def test_changed_target_makes_the_grant_stale(pool, app, world):
-    proposal = (await _grant(app, world["S"], world["T"].slug, "a")).json()
+    proposal = await _full(app, await _grant(app, world["S"], world["T"].slug, "a"))
     async with pool.connection() as conn:
         await sessions_repo.set_project(conn, world["T"].id, "a")
     r = await _review(app, proposal)
@@ -165,7 +171,7 @@ async def test_changed_target_makes_the_grant_stale(pool, app, world):
 
 
 async def test_sweeper_marks_stale_and_target_gone(pool, app, world):
-    stale = (await _grant(app, world["S"], world["T"].slug, "a")).json()
+    stale = await _full(app, await _grant(app, world["S"], world["T"].slug, "a"))
     async with pool.connection() as conn:
         await sessions_repo.set_extra_projects(conn, world["T"].id, ["a"])
     await proposal_sweep.sweep_once(pool)
@@ -174,7 +180,7 @@ async def test_sweeper_marks_stale_and_target_gone(pool, app, world):
     assert got["status"] == "stale"
     other = await alone(pool, "grant-gone", project="b")
     await attach_preset(pool, other.id)
-    gone = (await _grant(app, world["S"], other.slug, "a")).json()
+    gone = await _full(app, await _grant(app, world["S"], other.slug, "a"))
     await _exec(pool, "UPDATE sessions SET desired = 'deleting' WHERE id = %s", (other.id,))
     await proposal_sweep.sweep_once(pool)
     async with main_client(app) as http:
@@ -183,7 +189,7 @@ async def test_sweeper_marks_stale_and_target_gone(pool, app, world):
 
 
 async def test_grant_proposals_are_not_revised_but_withdrawn(app, world):
-    proposal = (await _grant(app, world["S"], world["T"].slug, "a")).json()
+    proposal = await _full(app, await _grant(app, world["S"], world["T"].slug, "a"))
     r = await _agent(
         app, world["S"], "POST", f"/proposals/{proposal['id']}/revise", json={"patch": {}}
     )
@@ -212,7 +218,7 @@ async def test_revoke_is_direct_and_live(pool, app, world):
         await sessions_repo.set_extra_projects(conn, target.id, ["a"])
     r = await _agent(app, world["S"], "DELETE", f"/sessions/{target.slug}/projects/a")
     assert r.status_code == 200, r.text
-    assert r.json()["extra_projects"] == []
+    assert r.json() == {"id": target.slug, "version": r.json()["version"], "status": "active"}
     assert await _extra(pool, target.id) == ()
     [notice] = await _notices(pool, target.id, "project_grant")
     assert "no longer" in notice
@@ -237,7 +243,7 @@ async def test_preset_grant_proposal_and_revoke(pool, app, world):
     body = {"project": "a", "reason": "T-120"}
     r = await _agent(app, world["S"], "POST", f"/presets/{preset.name}/projects", json=body)
     assert r.status_code == 202, r.text
-    proposal = r.json()
+    proposal = await _full(app, r)
     assert (proposal["kind"], proposal["target_name"]) == ("preset_projects", preset.name)
     assert (await _review(app, proposal)).json()["status"] == "applied"
     async with pool.connection() as conn:
@@ -247,6 +253,8 @@ async def test_preset_grant_proposal_and_revoke(pool, app, world):
     assert r.json()["extra_projects"] == ["a"]
     r = await _agent(app, world["S"], "DELETE", f"/presets/{preset.id}/projects/a")
     assert r.status_code == 200, r.text
+    assert r.json() == {"id": str(preset.id), "version": None, "status": None}
+    r = await _agent(app, world["S"], "GET", f"/presets/{preset.id}")
     assert r.json()["extra_projects"] == []
     r = await _agent(app, world["S"], "POST", f"/presets/{preset.id}/projects", json=body)
     assert r.status_code == 202

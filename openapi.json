@@ -4156,28 +4156,6 @@
         "title": "MetaUsage",
         "type": "object"
       },
-      "OwnLabelsView": {
-        "properties": {
-          "labels": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Labels",
-            "type": "array"
-          },
-          "session_id": {
-            "format": "uuid",
-            "title": "Session Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "session_id",
-          "labels"
-        ],
-        "title": "OwnLabelsView",
-        "type": "object"
-      },
       "PermissionModeIn": {
         "additionalProperties": false,
         "properties": {
@@ -8994,6 +8972,42 @@
         "title": "WrapperSettings",
         "type": "object"
       },
+      "WriteAck": {
+        "description": "The short answer an agent-port write gets instead of the full view (decision 926): the\ntarget's id (a session by slug, a project by slug, a preset and a proposal by id), its new\nversion when it has one (proposal revision, session generation, relayed version) and its\nstatus when it has one. The web routes keep the full views.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "WriteAck",
+        "type": "object"
+      },
       "WriteFile": {
         "additionalProperties": false,
         "description": "Body of a file save: both keys required; `expected: null` overwrites unconditionally.\n\nA body over 6 MiB + 16 KiB (1 MiB of content, every byte escaped) is 413 `too_large`\nbefore it is read in full.",
@@ -11239,7 +11253,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PresetView"
+                  "$ref": "#/components/schemas/WriteAck"
                 }
               }
             },
@@ -11467,7 +11481,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PresetView"
+                  "$ref": "#/components/schemas/WriteAck"
                 }
               }
             },
@@ -11558,7 +11572,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PresetView"
+                  "$ref": "#/components/schemas/WriteAck"
                 }
               }
             },
@@ -11649,7 +11663,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PresetView"
+                  "$ref": "#/components/schemas/WriteAck"
                 }
               }
             },
@@ -11734,7 +11748,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ProposalView"
+                  "$ref": "#/components/schemas/WriteAck"
                 }
               }
             },
@@ -11828,7 +11842,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ProposalView"
+                  "$ref": "#/components/schemas/WriteAck"
                 }
               }
             },
@@ -11912,7 +11926,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PresetView"
+                  "$ref": "#/components/schemas/WriteAck"
                 }
               }
             },
@@ -12013,7 +12027,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PresetView"
+                  "$ref": "#/components/schemas/WriteAck"
                 }
               }
             },
@@ -12191,7 +12205,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PresetView"
+                  "$ref": "#/components/schemas/WriteAck"
                 }
               }
             },
@@ -12330,7 +12344,7 @@
     },
     "/agent/v1/admin/projects": {
       "post": {
-        "description": "Create a project, same body, answer and errors as the main-port route. The audit row\ncarries the field names only.",
+        "description": "Create a project, same body and errors as the main-port route, answered as a `WriteAck`.\nThe audit row carries the field names only.",
         "operationId": "create_project_agent_v1_admin_projects_post",
         "parameters": [
           {
@@ -12381,7 +12395,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ProjectView"
+                  "$ref": "#/components/schemas/WriteAck"
                 }
               }
             },
@@ -12406,7 +12420,7 @@
     },
     "/agent/v1/admin/projects/{slug}": {
       "patch": {
-        "description": "Rename, describe, archive or unarchive a project, same body, answer and errors as the\nmain-port route. An explicit null keeps the stored value and is still listed in the audit\nrow, which carries the set field names only.",
+        "description": "Rename, describe, archive or unarchive a project, same body and errors as the main-port\nroute, answered as a `WriteAck`. An explicit null keeps the stored value and is still listed\nin the audit row, which carries the set field names only.",
         "operationId": "update_project_agent_v1_admin_projects__slug__patch",
         "parameters": [
           {
@@ -12466,7 +12480,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ProjectView"
+                  "$ref": "#/components/schemas/WriteAck"
                 }
               }
             },
@@ -12592,7 +12606,7 @@
         ]
       },
       "post": {
-        "description": "201 with the new proposal; 200 with the first one on a `client_key` replay.",
+        "description": "201 with the ack of the new proposal; 200 with the first one's on a `client_key` replay.",
         "operationId": "create_proposal_agent_v1_admin_proposals_post",
         "parameters": [
           {
@@ -12643,7 +12657,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ProposalView"
+                  "$ref": "#/components/schemas/WriteAck"
                 }
               }
             },
@@ -12802,7 +12816,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ProposalView"
+                  "$ref": "#/components/schemas/WriteAck"
                 }
               }
             },
@@ -12876,7 +12890,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ProposalView"
+                  "$ref": "#/components/schemas/WriteAck"
                 }
               }
             },
@@ -13621,7 +13635,7 @@
         ]
       },
       "post": {
-        "description": "Same body and rules as the main port, usage gate included; the caller's session is\nrecorded as the creator and `created_by_service` stays empty.",
+        "description": "Same body and rules as the main port, usage gate included; the caller's session is\nrecorded as the creator and `created_by_service` stays empty. Answers the slug as a\n`WriteAck`.",
         "operationId": "create_session_agent_v1_admin_sessions_post",
         "parameters": [
           {
@@ -13672,7 +13686,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SessionView"
+                  "$ref": "#/components/schemas/WriteAck"
                 }
               }
             },
@@ -13759,7 +13773,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SessionView"
+                  "$ref": "#/components/schemas/WriteAck"
                 }
               }
             },
@@ -13915,7 +13929,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SessionView"
+                  "$ref": "#/components/schemas/WriteAck"
                 }
               }
             },
@@ -14456,7 +14470,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OwnLabelsView"
+                  "$ref": "#/components/schemas/WriteAck"
                 }
               }
             },
@@ -14999,7 +15013,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ProposalView"
+                  "$ref": "#/components/schemas/WriteAck"
                 }
               }
             },
@@ -15083,7 +15097,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SessionView"
+                  "$ref": "#/components/schemas/WriteAck"
                 }
               }
             },
@@ -15851,7 +15865,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ProposalView"
+                  "$ref": "#/components/schemas/WriteAck"
                 }
               }
             },
@@ -19195,7 +19209,7 @@
     },
     "/agent/v1/session/labels": {
       "put": {
-        "description": "Replace the calling session's labels.",
+        "description": "Replace the calling session's labels; the answer is a `WriteAck` with its slug.",
         "operationId": "set_own_labels_agent_v1_session_labels_put",
         "parameters": [
           {
@@ -19246,7 +19260,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OwnLabelsView"
+                  "$ref": "#/components/schemas/WriteAck"
                 }
               }
             },

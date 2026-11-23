@@ -143,8 +143,9 @@ async def test_privileged_preset_200(app, call):
     assert r.json()["spec"]["env"]["GH"] == ref()
     r = await call("DELETE", f"{A}/priv/vault/{ENTRY}")
     assert r.status_code == 200, r.text
-    assert "GH" not in r.json()["spec"]["env"]
-    assert r.json()["id"] == made["id"]
+    assert r.json() == {"id": made["id"], "version": None, "status": None}
+    stored = await call("GET", f"{A}/priv")
+    assert "GH" not in stored.json()["spec"]["env"]
 
 
 async def test_attach_without_envs_attaches_every_env_of_the_entry(app, call, pool, vault):
@@ -320,10 +321,10 @@ async def test_detach_by_entry_and_by_env(app, call, pool):
     await call("PUT", f"{A}/det/vault/{ENTRY}", json={"envs": {"TOKEN": "TOKEN"}})
     r = await call("DELETE", f"{A}/det/vault/{HARBOR}?env=ADMIN_PW")
     assert r.status_code == 200, r.text
-    assert set(r.json()["spec"]["env"]) == {pw, "TOKEN"}
+    assert set((await call("GET", f"{A}/det")).json()["spec"]["env"]) == {pw, "TOKEN"}
     assert_error(await call("DELETE", f"{A}/det/vault/{HARBOR}?env=ADMIN_PW"), 404, "not_attached")
     r = await call("DELETE", f"{A}/det/vault/{HARBOR}")
-    assert set(r.json()["spec"]["env"]) == {"TOKEN"}
+    assert set((await call("GET", f"{A}/det")).json()["spec"]["env"]) == {"TOKEN"}
     rows = await vault_events(pool, made["id"])
     detached = sorted(x["data"]["env"] for x in rows if x["kind"] == "preset_vault_detached")
     assert detached == ["ADMIN_PW", pw]

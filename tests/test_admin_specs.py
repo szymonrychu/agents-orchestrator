@@ -72,7 +72,7 @@ async def test_admin_suggestion_dismiss_forwarded(pool, dsn, boss, seen):
     app = make_app(dsn, pool, seen, reply=lambda r: httpx.Response(200, json=DISMISSED))
     r = await call(app, boss, "POST", f"{S}/S-1/comments/7/dismiss", json={})
     assert r.status_code == 200, r.text
-    assert r.json() == DISMISSED
+    assert r.json() == {"id": "7", "version": None, "status": None}
     (up,) = seen
     assert up.method == "POST"
     assert up.url.raw_path == b"/taskboard/api/v1/specs/S-1/comments/7/dismiss"

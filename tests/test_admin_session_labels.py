@@ -40,7 +40,7 @@ async def test_superleader_sets_labels_of_manageable_session(app, pool):
     r = await put(app, boss, other.slug, {"labels": ["Team-A", " x "]})
     assert r.status_code == 200, r.text
     want = normalize_labels(["Team-A", " x "])
-    assert r.json() == {"session_id": str(other.id), "labels": want}
+    assert r.json() == {"id": other.slug, "version": None, "status": None}
     assert await stored(pool, other.id) == want
 
 

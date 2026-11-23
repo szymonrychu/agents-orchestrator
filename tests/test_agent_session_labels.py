@@ -68,7 +68,8 @@ async def test_sets_own_session_labels(monkeypatch):
     rig = Rig(monkeypatch)
     r = await rig.put({"labels": [" Team-A ", "bot", "team-a"]})
     assert r.status_code == 200, r.text
-    assert r.json() == {"session_id": str(rig.session.id), "labels": ["team-a", "bot"]}
+    assert r.json() == {"id": "lab-caller", "version": None, "status": None}
+    assert rig.labels(rig.session) == ["team-a", "bot"]
     assert rig.labels(rig.session) == ["team-a", "bot"]
 
 
@@ -140,4 +141,4 @@ async def test_idempotent_put(monkeypatch):
     assert first.json() == second.json()
     assert rig.labels(rig.session) == ["a", "b"]
     cleared = await rig.put({"labels": []})
-    assert cleared.json()["labels"] == []
+    assert rig.labels(rig.session) == []

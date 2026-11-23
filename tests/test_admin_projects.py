@@ -28,12 +28,13 @@ async def test_superleader_creates_project_and_audit_row(pool, dsn):
     boss = await alone(pool, "pj-boss", superleader=True)
     app, r = await post(pool, dsn, boss, BODY)
     assert r.status_code == 201, r.text
-    body = r.json()
-    assert {k: body[k] for k in ("slug", "name", "description", "archived")} == {
-        **BODY,
-        "archived": False,
-    }
+    assert r.json() == {"id": "alpha", "version": None, "status": "active"}
     async with main_client(app) as main:
+        body = (await main.get("/api/v1/projects/alpha")).json()
+        assert {k: body[k] for k in ("slug", "name", "description", "archived")} == {
+            **BODY,
+            "archived": False,
+        }
         assert (await main.get("/api/v1/projects/alpha")).json()["name"] == "Alpha"
     async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
@@ -101,6 +102,11 @@ async def patch(pool, dsn, who, slug, body):
         return await http.patch(f"{URL}/{slug}", headers=headers(who.id), json=body)
 
 
+async def stored_project(pool, dsn, slug):
+    async with main_client(create_app(make_settings(dsn), pool)) as main:
+        return (await main.get(f"/api/v1/projects/{slug}")).json()
+
+
 async def seed_project(pool, slug="pa"):
     async with pool.connection() as conn:
         await conn.execute(
@@ -113,7 +119,8 @@ async def test_superleader_renames_project(pool, dsn):
     await seed_project(pool)
     r = await patch(pool, dsn, boss, "pa", {"name": "Renamed"})
     assert r.status_code == 200, r.text
-    assert r.json()["name"] == "Renamed"
+    assert r.json() == {"id": "pa", "version": None, "status": "active"}
+    assert (await stored_project(pool, dsn, "pa"))["name"] == "Renamed"
     (row,) = await admin_rows(pool)
     assert row["fields"] == ["name"]
 
@@ -123,7 +130,7 @@ async def test_superleader_sets_description(pool, dsn):
     await seed_project(pool)
     r = await patch(pool, dsn, boss, "pa", {"description": "d"})
     assert r.status_code == 200, r.text
-    assert r.json()["description"] == "d"
+    assert (await stored_project(pool, dsn, "pa"))["description"] == "d"
 
 
 async def test_superleader_archives_and_unarchives_project(pool, dsn):
@@ -131,10 +138,10 @@ async def test_superleader_archives_and_unarchives_project(pool, dsn):
     await seed_project(pool)
     r = await patch(pool, dsn, boss, "pa", {"archived": True})
     assert r.status_code == 200, r.text
-    assert r.json()["archived"] is True
+    assert r.json()["status"] == "archived"
     r = await patch(pool, dsn, boss, "pa", {"archived": False})
     assert r.status_code == 200, r.text
-    assert r.json()["archived"] is False
+    assert r.json()["status"] == "active"
 
 
 async def test_admin_archive_default_refused(pool, dsn):
@@ -168,6 +175,6 @@ async def test_admin_project_update_null_keeps_value(pool, dsn):
     await seed_project(pool)
     r = await patch(pool, dsn, boss, "pa", {"name": None})
     assert r.status_code == 200, r.text
-    assert r.json()["name"] == "Pa"
+    assert (await stored_project(pool, dsn, "pa"))["name"] == "Pa"
     (row,) = await admin_rows(pool)
     assert row["fields"] == ["name"]

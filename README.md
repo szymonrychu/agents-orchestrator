@@ -396,6 +396,24 @@ ingress:
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
 ```
 
+## Write acks (agent port)
+
+An agent-port write answers a short `WriteAck` (`id`, `version` or null, `status` or null) instead of the
+full view (S-83, decision 926); the web routes under `/api/v1` keep the full views. The ack routes:
+
+- `/agent/v1/admin`: `POST` and `PATCH /projects`, `POST /presets`, `PUT`, `PATCH /presets/{ref}`,
+  `POST /presets/{ref}/copy`, `DELETE /presets/{ref}/vault/{entry_id}`, `DELETE /presets/{ref}/volumes/{volume_id}`,
+  `POST /sessions`, `PATCH` and `DELETE /sessions/{slug}`, `PUT /sessions/{slug}/labels`, the project grant
+  routes (`POST` and `DELETE /sessions/{slug}/projects`, `POST` and `DELETE /presets/{ref}/projects`), the
+  proposal routes (`POST /proposals`, `/revise`, `/withdraw`, `POST /presets/{ref}/manageable`, `POST /volumes`)
+  and `PUT /agent/v1/session/labels`. Ids: a preset and a proposal by id, a session and a project by slug;
+  `version` is the proposal revision or the session generation; `status` is the proposal status, the session
+  `desired` or the project `active`/`archived`.
+- The task, spec (plan, steps, documents, comments) and mindmap relays: a 2xx answer to a POST, PUT or PATCH
+  becomes the ack read from the upstream body (`key`, `id`, `path`, `slug` or `project`; `version`,
+  `revision` or `steps_version`; `status`). `steps/next` (the claimed step) and a body that names nothing
+  (`{"keys": [...]}` of a steps push) stay whole.
+
 ## Projects
 
 A project groups presets and sessions; it is the unit of permission scope for agents. Projects live in the orchestrator (table `projects`, one writer), a fresh database has the `default` project, and every preset and session carries a `project` slug (default `default`). The slug is 1 to 40 lowercase letters, digits and dashes and never changes. A session moves only through the main port (`PATCH /api/v1/sessions/{session_id}/project`); no agent-port route moves a session. A preset moves through the main-port `PUT /api/v1/presets/{preset_id}` and, for a superleader, through the admin `PUT` and `PATCH` (`/agent/v1/admin/presets/{ref}`, field `project`, audited with `project` among the fields): the target must exist (422 `unknown_project`) and be active (422 `project_archived`), the vault refs are rechecked against the new project label (422 `vault_label_mismatch`), and running sessions keep their project. A preset with a grant flag on moves like any other (decision 363); the move is audited as `admin_call`. A create places one: the main-port creates and copies (`POST /api/v1/presets`, `POST /api/v1/presets/{preset_id}/copy`, `POST /api/v1/sessions`), and the superleader admin creates and copies (`POST /agent/v1/admin/presets`, `.../copy`, `POST /agent/v1/admin/sessions`). A preset `PUT` without `project` keeps the stored project; a create without it uses `default` (a session from a preset: the preset's project).

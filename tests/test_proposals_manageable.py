@@ -50,6 +50,12 @@ async def _main(app, method, path, **kw):
         return await http.request(method, f"/api/v1{path}", **kw)
 
 
+async def _full(app, r):
+    """The full proposal view behind an agent-port ack, read on the human route."""
+    async with main_client(app) as http:
+        return (await http.get(f"/api/v1/proposals/{r.json()['id']}")).json()
+
+
 async def _review(app, proposal, decision="approve"):
     items = [{"path": i["path"], "decision": decision} for i in proposal["revisions"][0]["items"]]
     return await _main(
@@ -93,7 +99,7 @@ def test_fingerprint_is_the_canonical_flag():
 async def test_request_files_a_proposal_and_replays(app, boss, preset):
     r = await _request(app, boss, preset.name, client_key="k1")
     assert r.status_code == 202, r.text
-    proposal = r.json()
+    proposal = await _full(app, r)
     assert (proposal["kind"], proposal["target_id"], proposal["target_name"]) == (
         "preset_manageable",
         str(preset.id),
@@ -111,7 +117,7 @@ async def test_request_files_a_proposal_and_replays(app, boss, preset):
     }
     again = await _request(app, boss, str(preset.id), client_key="k1")
     assert again.status_code == 200, again.text
-    assert again.json()["id"] == proposal["id"]
+    assert again.json()["id"] == str(proposal["id"])
 
 
 async def test_request_refusals(pool, app, boss, preset):
@@ -139,7 +145,7 @@ async def test_request_is_audited_with_the_field_name(pool, app, boss, preset):
 
 
 async def test_proposer_sees_it_although_the_preset_is_unmanageable(app, boss, preset):
-    proposal = (await _request(app, boss, preset.name)).json()
+    proposal = await _full(app, await _request(app, boss, preset.name))
     r = await _agent(app, boss, "GET", "/proposals")
     assert [p["id"] for p in r.json()] == [proposal["id"]]
     r = await _agent(app, boss, "GET", f"/proposals/{proposal['id']}")
@@ -148,7 +154,7 @@ async def test_proposer_sees_it_although_the_preset_is_unmanageable(app, boss, p
 
 
 async def test_not_revised_but_withdrawn(app, boss, preset):
-    proposal = (await _request(app, boss, preset.name)).json()
+    proposal = await _full(app, await _request(app, boss, preset.name))
     r = await _agent(app, boss, "POST", f"/proposals/{proposal['id']}/revise", json={"patch": {}})
     assert_error(r, 422, "not_revisable")
     r = await _agent(app, boss, "POST", f"/proposals/{proposal['id']}/withdraw")
@@ -157,7 +163,7 @@ async def test_not_revised_but_withdrawn(app, boss, preset):
 
 
 async def test_approve_sets_the_column_and_notifies(pool, app, boss, preset):
-    proposal = (await _request(app, boss, preset.name)).json()
+    proposal = await _full(app, await _request(app, boss, preset.name))
     assert await _manageable(pool, preset.id) is False
     r = await _review(app, proposal)
     assert r.status_code == 200, r.text
@@ -170,7 +176,7 @@ async def test_approve_sets_the_column_and_notifies(pool, app, boss, preset):
 
 
 async def test_deny_leaves_the_column(pool, app, boss, preset):
-    proposal = (await _request(app, boss, preset.name)).json()
+    proposal = await _full(app, await _request(app, boss, preset.name))
     r = await _review(app, proposal, "deny")
     assert r.status_code == 200, r.text
     assert r.json()["status"] == "denied"
@@ -179,7 +185,7 @@ async def test_deny_leaves_the_column(pool, app, boss, preset):
 
 
 async def test_human_flip_makes_the_review_stale(pool, app, boss, preset):
-    proposal = (await _request(app, boss, preset.name)).json()
+    proposal = await _full(app, await _request(app, boss, preset.name))
     r = await _main(
         app,
         "PUT",
@@ -194,7 +200,7 @@ async def test_human_flip_makes_the_review_stale(pool, app, boss, preset):
 
 
 async def test_deleted_preset_makes_the_review_target_gone(app, boss, preset):
-    proposal = (await _request(app, boss, preset.name)).json()
+    proposal = await _full(app, await _request(app, boss, preset.name))
     r = await _main(app, "DELETE", f"/presets/{preset.id}")
     assert r.status_code == 204, r.text
     assert_error(await _review(app, proposal), 409, "target_gone")
@@ -212,8 +218,8 @@ async def test_direct_patch_true_stays_422(pool, app, boss):
 
 async def test_approving_one_request_marks_the_other_stale(pool, app, boss, preset):
     other = await alone(pool, "man-boss-2", superleader=True)
-    first = (await _request(app, boss, preset.name)).json()
-    second = (await _request(app, other, preset.name, client_key="second")).json()
+    first = await _full(app, await _request(app, boss, preset.name))
+    second = await _full(app, await _request(app, other, preset.name, client_key="second"))
     assert first["id"] != second["id"]
     r = await _review(app, first)
     assert r.status_code == 200, r.text

@@ -74,9 +74,11 @@ async def test_superleader_created_session_names_the_creating_session(app, boss)
             S, headers=headers(boss.id), json={"preset_id": preset["id"], "slug": "child-1"}
         )
         assert r.status_code == 201, r.text
+    assert r.json()["id"] == "child-1"
     async with main_client(app) as http:
-        listed, detail = await views(http, r.json()["id"])
-    for view in (r.json(), listed, detail):
+        by_slug = {s["slug"]: s["id"] for s in (await http.get("/api/v1/sessions")).json()}
+        listed, detail = await views(http, by_slug["child-1"])
+    for view in (listed, detail):
         assert view["created_by_service"] is None
         assert view["created_by_session"] == str(boss.id)
 

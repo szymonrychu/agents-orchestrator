@@ -20,8 +20,8 @@ import uuid
 
 from fastapi import APIRouter, Request, Response
 
+from agents_orchestrator.api import ack, project_grants, proposals, schemas
 from agents_orchestrator.api import presets as presets_api
-from agents_orchestrator.api import project_grants, proposals, schemas
 from agents_orchestrator.api import sessions as sessions_api
 from agents_orchestrator.api.admin import FORBIDDEN, caller_of, writable_preset
 from agents_orchestrator.api.admin import _writable_target as admin_target
@@ -59,9 +59,7 @@ async def _file(
     return view
 
 
-@admin_router.post(
-    "/sessions/{slug}/projects", status_code=202, response_model=schemas.ProposalView
-)
+@admin_router.post("/sessions/{slug}/projects", status_code=202, response_model=schemas.WriteAck)
 async def grant_session_project(
     slug: str,
     body: schemas.ProjectGrantIn,
@@ -69,17 +67,19 @@ async def grant_session_project(
     response: Response,
     pool: Pool,
     settings: Cfg,
-) -> schemas.ProposalView:
+) -> schemas.WriteAck:
     """File a grant of an extra project to a session as a `session_projects` proposal; the
     session gets full membership in that project once the user approves it (no restart). 200
     with the first proposal on a `client_key` replay."""
-    return await _file(request, response, pool, settings, "session_projects", slug, body)
+    return ack.proposal_ack(
+        await _file(request, response, pool, settings, "session_projects", slug, body)
+    )
 
 
-@admin_router.delete("/sessions/{slug}/projects/{project}", response_model=schemas.SessionView)
+@admin_router.delete("/sessions/{slug}/projects/{project}", response_model=schemas.WriteAck)
 async def revoke_session_project(
     slug: str, project: str, request: Request, pool: Pool, settings: Cfg
-) -> schemas.SessionView:
+) -> schemas.WriteAck:
     """Remove an extra project from a session at once (toward safe, the superleader's alone);
     the session gets a notice. 404 when the project is not one of its extra projects."""
     _, caller = caller_of(request)
@@ -96,10 +96,10 @@ async def revoke_session_project(
             kept = [p for p in locked.extra_projects if p != project]
             session = await sessions_repo.set_extra_projects(conn, target.id, kept)
             await project_grants.notify(conn, target.id, project_grants.revoked_text(project))
-        return await sessions_api.one_view(conn, session, settings)
+        return ack.session_ack(await sessions_api.one_view(conn, session, settings))
 
 
-@admin_router.post("/presets/{ref}/projects", status_code=202, response_model=schemas.ProposalView)
+@admin_router.post("/presets/{ref}/projects", status_code=202, response_model=schemas.WriteAck)
 async def grant_preset_project(
     ref: str,
     body: schemas.ProjectGrantIn,
@@ -107,16 +107,18 @@ async def grant_preset_project(
     response: Response,
     pool: Pool,
     settings: Cfg,
-) -> schemas.ProposalView:
+) -> schemas.WriteAck:
     """File a grant of an extra project to a preset as a `preset_projects` proposal; sessions
     created from the preset after the approval get it."""
-    return await _file(request, response, pool, settings, "preset_projects", ref, body)
+    return ack.proposal_ack(
+        await _file(request, response, pool, settings, "preset_projects", ref, body)
+    )
 
 
 @admin_router.post(
     "/presets/{ref}/manageable",
     status_code=202,
-    response_model=schemas.ProposalView,
+    response_model=schemas.WriteAck,
     responses={
         403: FORBIDDEN,
         404: {"description": "not_found: no preset has that id or name"},
@@ -133,7 +135,7 @@ async def request_preset_manageable(
     response: Response,
     pool: Pool,
     settings: Cfg,
-) -> schemas.ProposalView:
+) -> schemas.WriteAck:
     """Ask the user to make a preset (any the superleader can read) superleader-manageable: files
     a `preset_manageable` proposal the user approves or denies on the Proposals page. 200 with the
     first proposal on a `client_key` replay."""
@@ -144,13 +146,13 @@ async def request_preset_manageable(
         )
     if not created:
         response.status_code = 200
-    return view
+    return ack.proposal_ack(view)
 
 
-@admin_router.delete("/presets/{ref}/projects/{project}", response_model=schemas.PresetView)
+@admin_router.delete("/presets/{ref}/projects/{project}", response_model=schemas.WriteAck)
 async def revoke_preset_project(
     ref: str, project: str, request: Request, pool: Pool
-) -> schemas.PresetView:
+) -> schemas.WriteAck:
     """Remove an extra project from a preset at once; running sessions keep theirs (revoke those
     on each session). 404 when the project is not one of its extra projects."""
     note_fields(request, ["projects"])
@@ -164,7 +166,7 @@ async def revoke_preset_project(
                 raise not_found("project grant")
             kept = [p for p in locked.extra_projects if p != project]
             await presets_repo.set_extra_projects(conn, found.id, kept)
-        return await presets_api.get_one(conn, found.id)
+        return ack.preset_ack(await presets_api.get_one(conn, found.id))
 
 
 @main_router.put("/sessions/{session_id}/extra-projects", response_model=schemas.SessionView)
