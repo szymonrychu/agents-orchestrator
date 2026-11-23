@@ -149,6 +149,7 @@ _SCHEDULES = [
     ("POST", "/schedules/{schedule_id}/run", 202),
     ("GET", "/schedules/{schedule_id}/runs", 200),
 ]
+NOTES_ROUTE = ("connector", "PUT", "/rooms/{room_id}/notes/sections/{section}")
 _CHATS = [
     ("GET", "/rooms", 200),
     ("GET", "/rooms/{room_id}", 200),
