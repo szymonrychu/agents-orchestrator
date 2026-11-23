@@ -196,7 +196,7 @@ async def _notify_parked(conn: AsyncConnection, settings: Settings) -> None:
             settings,
             session.id,
             session.slug,
-            scope_of(session),
+            scope_of(session, leader=True),
             title=title,
             body=body,
             client_key=runaway.client_key(session.id, session.parked_at),

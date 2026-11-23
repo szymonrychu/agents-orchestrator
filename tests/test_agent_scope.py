@@ -75,7 +75,7 @@ async def test_scope_of_superleader_is_star(pool):
         for name, seat in seats.items():
             session = await sessions_repo.get(conn, seat.id)
             assert session is not None
-            scopes[name] = scope_of(session)
+            scopes[name] = scope_of(session, leader=True)
     assert scopes == {"A1": "a", "A2": "a", "B1": "b", "S": "*"}
 
 

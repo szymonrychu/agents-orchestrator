@@ -29,8 +29,8 @@ async def test_scope_lists_home_then_extra_projects(pool, dsn):
         b1 = await sessions_repo.get(conn, seats["B1"].id)
         s = await sessions_repo.get(conn, seats["S"].id)
     assert b1 is not None and s is not None
-    assert scope_of(b1) == "b,a"
-    assert scope_of(s) == "*"
+    assert scope_of(b1, leader=True) == "b,a"
+    assert scope_of(s, leader=True) == "*"
 
 
 async def test_relay_header_follows_grant_and_revoke_live(pool, dsn):

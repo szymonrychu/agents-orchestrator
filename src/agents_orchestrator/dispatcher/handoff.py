@@ -1325,7 +1325,7 @@ async def _post_user_notice(
     none, a notice task (`client_key` makes a retry a no-op there). Returns the claimed task key
     or `"notice"`, None when the post failed; raises `TaskboardUnavailable` when the claimed
     task cannot be looked up."""
-    scope = scope_of(session)
+    scope = scope_of(session, leader=True)
     key = await taskboard_client.claimed_task(
         settings, session.id, session.slug, scope, transport=transport
     )

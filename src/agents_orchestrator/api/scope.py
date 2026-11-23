@@ -1,11 +1,12 @@
 """Project scope of an agent session and the classification of every agent-port route (projects
 plan 3.2, 3.3).
 
-A superleader session (`spec.session_messaging`) is `*`, every project; any other session is
-its home project followed by its extra projects (T-120), comma-separated, read live from the
-session row on every request. The orchestrator computes
-the scope and the service that owns the data enforces it on `X-Orch-Projects`, which the relay
-sets itself (`forward` never passes an inbound header, so an agent cannot forge it).
+The leader pod of a superleader session (`spec.session_messaging`) is `*`, every project; any
+other pod (a member pod of such a session too, decision 919) is its session's home project
+followed by its extra projects (T-120), comma-separated, read live from the session row on every
+request. The orchestrator computes the scope and the service that owns the data enforces it on
+`X-Orch-Projects`, which the relay sets itself (`forward` never passes an inbound header, so an
+agent cannot forge it).
 
 `AGENT_SCOPE` pins every route of the agent port, built like `admin.ADMIN_VISIBILITY`: a new
 agent route fails CI until it is classified.
@@ -39,10 +40,13 @@ _A = "/agent/v1"
 _ADMIN = f"{_A}/admin"
 
 
-def scope_of(session: sessions_repo.Session) -> str:
-    """`*` for a superleader session only; else its projects comma-separated, home first (the
-    taskboard reads the first as the home project)."""
-    return scope_value(None if session.spec.session_messaging else session.projects)
+def scope_of(session: sessions_repo.Session, *, leader: bool) -> str:
+    """`*` for the leader pod of a superleader session only; any other pod, a member pod of a
+    superleader session included (decision 919), gets its projects comma-separated, home first
+    (the taskboard reads the first as the home project). `leader` is the caller's leadership of
+    its session (`agent._leads`, `agent.is_superleader`); a caller acting for the session
+    itself (a notice, a handover) passes True."""
+    return scope_value(None if leader and session.spec.session_messaging else session.projects)
 
 
 def scope_value(projects: tuple[str, ...] | None) -> str:
@@ -51,9 +55,9 @@ def scope_value(projects: tuple[str, ...] | None) -> str:
     return ALL_PROJECTS if projects is None else ",".join(projects)
 
 
-def projects_header(session: sessions_repo.Session) -> dict[str, str]:
-    """The `X-Orch-Projects` header a relay sends for the calling session."""
-    return {PROJECTS_HEADER: scope_of(session)}
+def projects_header(session: sessions_repo.Session, *, leader: bool) -> dict[str, str]:
+    """The `X-Orch-Projects` header a relay sends for the calling pod."""
+    return {PROJECTS_HEADER: scope_of(session, leader=leader)}
 
 
 AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {

@@ -222,6 +222,7 @@ async def me(agent: Caller, pool: Pool, settings: Cfg) -> Me:
         leader = await agents_repo.leader_of(conn, agent.session_id)
         members = await agents_repo.list_members(conn, agent.session_id)
         leads = leader is not None and leader[0] == agent.id
+        leads_session = session is not None and await _leads(conn, agent, session)
         state = await leader_state.collect(conn, agent.session_id) if leads else None
         pressure = None
         if session is not None and (leads or session.spec.alone):
@@ -240,7 +241,7 @@ async def me(agent: Caller, pool: Pool, settings: Cfg) -> Me:
     assert session is not None
     if state is not None:  # the taskboard call happens after the connection is released
         decisions = await taskboard_client.open_decisions(
-            settings, session.id, session.slug, scope_of(session)
+            settings, session.id, session.slug, scope_of(session, leader=True)
         )
         state = replace(state, decisions=decisions)
     leader_id = leader[0] if leader else None
@@ -256,7 +257,7 @@ async def me(agent: Caller, pool: Pool, settings: Cfg) -> Me:
         static=session.spec.static,
         project=session.project,
         extra_projects=list(session.extra_projects),
-        projects_scope=scope_of(session),
+        projects_scope=scope_of(session, leader=leads_session),
         leader_state=leader_state.render_state(state) if state is not None else None,
         project_rooms=rooms,
         pressure=pressure,
@@ -284,7 +285,7 @@ async def projects(agent: Caller, pool: Pool) -> list[schemas.ProjectView]:
     included. No counts, as on the service port."""
     async with pool.connection() as conn:
         session = await _session(conn, agent)
-        if scope_of(session) == ALL_PROJECTS:
+        if scope_of(session, leader=await _leads(conn, agent, session)) == ALL_PROJECTS:
             rows = await projects_repo.list_projects(conn, archived=None)
         else:
             rows = []

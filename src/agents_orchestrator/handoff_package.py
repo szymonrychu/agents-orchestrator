@@ -58,7 +58,9 @@ class Package:
 
 def default_taskboard(settings: Settings) -> TaskboardFetch:
     async def fetch(session: sessions_repo.Session) -> list[dict[str, Any]]:
-        return await tb.claimed_tasks(settings, session.id, session.slug, scope_of(session))
+        return await tb.claimed_tasks(
+            settings, session.id, session.slug, scope_of(session, leader=True)
+        )
 
     return fetch
 

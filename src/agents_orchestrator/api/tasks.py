@@ -29,7 +29,7 @@ import httpx
 from fastapi import APIRouter, FastAPI, Request, Response
 
 from agents_orchestrator.api import forward as forward_core
-from agents_orchestrator.api.agent import Caller, _session
+from agents_orchestrator.api.agent import Caller, _leads, _session
 from agents_orchestrator.api.errors import ApiError
 from agents_orchestrator.api.scope import projects_header
 from agents_orchestrator.api.sessions import Cfg, Pool
@@ -132,6 +132,7 @@ async def relay(
         raise ApiError(404, "not_found", "no such relay path")
     async with pool.connection() as conn:
         own = await _session(conn, agent)
+        leader = await _leads(conn, agent, own)
     if not available:
         raise ApiError(503, unconfigured, "no upstream is configured")
     query = None
@@ -150,7 +151,7 @@ async def relay(
         str(own.id),
         own.slug,
         query=query,
-        extra_headers=projects_header(own),
+        extra_headers=projects_header(own, leader=leader),
         empty_ok=True,
     )
     if not content and status != 204:

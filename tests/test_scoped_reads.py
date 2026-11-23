@@ -220,3 +220,33 @@ async def test_history_backfill_command_posts_known_projects(pool, dsn, monkeypa
     )
     assert "3 sessions sent, 3 history sessions updated" in out.getvalue()
     assert "ingest-test-token" not in out.getvalue()
+
+
+@pytest.mark.parametrize("role", ROLES)
+async def test_agent_scope_star_only_for_superleader_leader_pod(pool, dsn, role):
+    """The task relay header, `/me` projects_scope and `/projects` give `*` to S only; a member
+    pod of the superleader session (SM) gets its session's projects (decision 919); L and M are
+    unchanged."""
+    seats = await callers(pool)
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE sessions SET extra_projects = '{b}'")
+    sent: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(200, json={"items": [], "next_cursor": None})
+
+    settings = make_settings(dsn).model_copy(
+        update={"taskboard_url": "http://taskboard.test:9002", "taskboard_token": "tb-token"}
+    )
+    app = create_app(settings, pool)
+    app.state.taskboard_http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    want = "*" if role == "S" else "a,b"
+    r = await get(app, seats[role], "/agent/v1/tasks")
+    assert r.status_code == 200, r.text
+    assert sent[0].headers["x-orch-projects"] == want
+    me = await get(app, seats[role], "/agent/v1/me")
+    assert me.json()["projects_scope"] == want
+    projects = await get(app, seats[role], "/agent/v1/projects")
+    slugs = [p["slug"] for p in projects.json()]
+    assert (len(slugs) > 2) == (role == "S")
