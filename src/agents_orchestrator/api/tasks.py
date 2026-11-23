@@ -28,6 +28,7 @@ from urllib.parse import parse_qsl, urlencode
 import httpx
 from fastapi import APIRouter, FastAPI, Request, Response
 
+from agents_orchestrator.api import ack as ack_core
 from agents_orchestrator.api import forward as forward_core
 from agents_orchestrator.api.agent import Caller, _leads, _session
 from agents_orchestrator.api.errors import ApiError
@@ -49,6 +50,13 @@ _KEY = r"T-[0-9]+"
 _ALLOWED = re.compile(
     rf"/tasks(?:|/{_KEY}(?:|/comments|/todo|/todo/{_ID}|/deps|/decisions"
     rf"|/decisions/{_ID}/withdraw|/approvals))"
+)
+# Relayed writes that keep the full upstream body (plan ruling on 925/926: the answer is shaped
+# where the plugin shapes it): every task write (the plugin's views.py ACKS read key, url, comments,
+# todo; plan_local.py reads the decision id), the spec create and document PUT (specs_local.py
+# spec_push), the steps push (plan_local.py reads keys) and the claimed step (the work itself).
+_KEPT_FULL = re.compile(
+    r"/tasks(?:/.*)?|/specs|/specs/S-[0-9]+/docs/.+|/specs/S-[0-9]+/steps(?:|/next)"
 )
 _APPROVALS = re.compile(r"/approvals")
 _SUMMARY = re.compile(r"/projects/summary")
@@ -158,6 +166,14 @@ async def relay(
         raise ApiError(503, "taskboard_unavailable", "taskboard relay upstream is unavailable")
     if request.method in _WRITES:
         await forward_core.touch_on_success(pool, own.id, status)
+    if (
+        request.method in _WRITES
+        and 200 <= status < 300
+        and not _KEPT_FULL.fullmatch(upstream_path)
+    ):
+        acked = ack_core.json_ack(content, upstream_path)
+        if acked is not None:
+            content = acked
     if not content:
         return Response(status_code=status)
     return Response(content, status, media_type="application/json")

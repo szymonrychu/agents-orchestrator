@@ -8,6 +8,7 @@ import secrets as stdlib_secrets
 import uuid
 
 import pytest
+from ack_expand import expand
 from fakes.fake_kube import FakeKube
 from psycopg.rows import dict_row
 from test_agent_session_messaging import alone
@@ -39,7 +40,10 @@ def call(pool, dsn, boss):
 
     async def go(method, path, **kw):
         async with client_for(app, boss.leader_ip) as http:
-            return await http.request(method, path, headers=headers(boss.id), **kw)
+            r = await http.request(method, path, headers=headers(boss.id), **kw)
+            return await expand(
+                method, path, r, lambda p: http.get(p, headers=headers(boss.id)), app
+            )
 
     go.kube = kube
     go.app = app

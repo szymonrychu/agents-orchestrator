@@ -19,8 +19,8 @@ from typing import Any
 
 from fastapi import Request, Response
 
+from agents_orchestrator.api import ack, proposals, schemas
 from agents_orchestrator.api import presets as presets_api
-from agents_orchestrator.api import proposals, schemas
 from agents_orchestrator.api import volumes as volumes_api
 from agents_orchestrator.api.admin import (
     FORBIDDEN,
@@ -169,7 +169,7 @@ async def attach_volume(
 
 @router.delete(
     "/presets/{ref}/volumes/{volume_id}",
-    response_model=schemas.PresetView,
+    response_model=schemas.WriteAck,
     responses={
         403: WRITE_FORBIDDEN,
         404: {"description": "not_found, volume_not_found, or not_attached: nothing to remove"},
@@ -178,7 +178,7 @@ async def attach_volume(
 )
 async def detach_volume(
     ref: str, volume_id: uuid.UUID, request: Request, pool: Pool, settings: Cfg
-) -> schemas.PresetView:
+) -> schemas.WriteAck:
     """Detach a volume from a manageable preset at once (toward safe); running sessions keep
     their mount."""
     _, caller = caller_of(request)
@@ -196,7 +196,7 @@ async def detach_volume(
             file_proposal=_never,
         )
     assert isinstance(result, schemas.PresetView)
-    return result
+    return ack.preset_ack(result)
 
 
 async def _never(new_atts: list[dict[str, Any]]) -> schemas.ProposalView:
@@ -206,7 +206,7 @@ async def _never(new_atts: list[dict[str, Any]]) -> schemas.ProposalView:
 @router.post(
     "/volumes",
     status_code=202,
-    response_model=schemas.ProposalView,
+    response_model=schemas.WriteAck,
     responses={
         403: {"description": "not_superleader; project_out_of_scope: a project the caller lacks"},
         409: {
@@ -221,7 +221,7 @@ async def create_volume(
     response: Response,
     pool: Pool,
     settings: Cfg,
-) -> schemas.ProposalView:
+) -> schemas.WriteAck:
     """File a request to create a volume as a `volume_create` proposal; nothing is created until
     the user approves it. 200 with the first proposal on a `client_key` replay."""
     _, caller = caller_of(request)
@@ -232,4 +232,4 @@ async def create_volume(
         )
     if not created:
         response.status_code = 200
-    return view
+    return ack.proposal_ack(view)

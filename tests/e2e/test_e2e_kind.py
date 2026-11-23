@@ -3031,10 +3031,15 @@ def target(api: httpx.Client, superleader: dict[str, Any]) -> Iterator[dict[str,
     assert status == 201, preset
     pid = preset["id"]
     try:
+        status, preset = admin_call(pod, "GET", f"/presets/{pid}")
+        assert status == 200, preset
         status, created = admin_call(
             pod, "POST", "/sessions", {"preset_id": pid, "slug": TARGET_SLUG}
         )
         assert status == 201, created
+        # the agent-port write answers a WriteAck (session id is the slug); read the full view
+        status, created = admin_call(pod, "GET", f"/sessions/{TARGET_SLUG}")
+        assert status == 200, created
         agent = only_agent(api, created["id"])
         yield {"session": created, "agent": agent, "pod": pod_name_of(agent), "preset": preset}
     finally:
@@ -3078,10 +3083,14 @@ def test_admin_preset_crud(superleader: dict[str, Any]) -> None:
             f"/presets/{pid}",
             {"name": "E2E crud renamed", "spec": {**spec, "replicas": 2}},
         )
+        assert status == 200, replaced
+        status, replaced = admin_call(pod, "GET", f"/presets/{pid}")
         assert status == 200 and replaced["name"] == "E2E crud renamed", replaced
         assert replaced["spec"]["replicas"] == 2, replaced
         status, copy = admin_call(pod, "POST", f"/presets/{pid}/copy", {"name": "E2E crud copy"})
-        assert status == 201 and copy["name"] == "E2E crud copy" and copy["id"] != pid, copy
+        assert status == 201 and copy["id"] != pid, copy
+        status, copy = admin_call(pod, "GET", f"/presets/{copy['id']}")
+        assert status == 200 and copy["name"] == "E2E crud copy", copy
         status, _ = admin_call(pod, "DELETE", f"/presets/{copy['id']}")
         assert status == 204
         status, _ = admin_call(pod, "GET", f"/presets/{copy['id']}")

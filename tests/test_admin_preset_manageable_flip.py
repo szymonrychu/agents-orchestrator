@@ -5,6 +5,7 @@ grant or schedule proposal on it is active (open, rework, stale)."""
 from __future__ import annotations
 
 import pytest
+from ack_expand import expand
 from fakes.fake_kube import FakeKube
 from test_admin_audit_detail import admin_rows
 from test_admin_presets import M, main_call
@@ -31,7 +32,10 @@ def call(pool, dsn, boss):
 
     async def go(method, path, **kw):
         async with client_for(app, boss.leader_ip) as http:
-            return await http.request(method, path, headers=headers(boss.id), **kw)
+            r = await http.request(method, path, headers=headers(boss.id), **kw)
+            return await expand(
+                method, path, r, lambda p: http.get(p, headers=headers(boss.id)), app
+            )
 
     go.app = app
     return go
@@ -56,7 +60,7 @@ async def file_preset_proposal(call, target):
         },
     )
     assert r.status_code == 201, r.text
-    return r.json()["id"]
+    return int(r.json()["id"])
 
 
 async def set_status(pool, proposal_id, status):
@@ -151,7 +155,7 @@ async def test_flip_refused_while_project_grant_open(call, p, pool):
         await conn.execute("INSERT INTO projects (slug, name) VALUES ('gp', 'GP')")
     r = await call("POST", f"{A}/{p['id']}/projects", json={"project": "gp", "reason": "r"})
     assert r.status_code == 202, r.text
-    gid = r.json()["id"]
+    gid = int(r.json()["id"])
     r = await call("PATCH", f"{A}/{p['id']}", json=FLIP)
     assert_error(r, 409, "open_proposals")
     assert r.json()["error"]["proposals"] == [gid]

@@ -91,6 +91,7 @@ from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import SecretStr
 
+from agents_orchestrator.api import ack as ack_core
 from agents_orchestrator.api import (
     chat_requests,
     room_projects,
@@ -148,6 +149,7 @@ _SCHEDULES = [
     ("POST", "/schedules/{schedule_id}/run", 202),
     ("GET", "/schedules/{schedule_id}/runs", 200),
 ]
+NOTES_ROUTE = ("connector", "PUT", "/rooms/{room_id}/notes/sections/{section}")
 _CHATS = [
     ("GET", "/rooms", 200),
     ("GET", "/rooms/{room_id}", 200),
@@ -601,6 +603,10 @@ def _handler(service: str, method: str, template: str) -> Callable[..., Awaitabl
                     await secret_store.delete_webhook_credential(
                         secret_store.kube_of(request), settings.namespace, int(endpoint_id)
                     )
+        if (service, method, template) == NOTES_ROUTE and 200 <= status < 300 and content:
+            params = request.path_params
+            acked = ack_core.json_ack(content, f"{params['room_id']}/{params['section']}")
+            content = content if acked is None else acked
         return Response(
             content, status, headers, media_type="application/json" if content else None
         )

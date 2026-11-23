@@ -52,7 +52,8 @@ async def _patched(pool, app, settings, caller: Sess, target: Sess, **kw) -> Non
     before = await _row(pool, target.id)
     r = await call(app, caller, "PATCH", target.slug, json=PEERS_OFF, **kw)
     assert r.status_code == 200, r.text
-    assert r.json()["slug"] == target.slug and r.json()["spec"]["peers"] is False
+    assert r.json()["id"] == target.slug and r.json()["version"] == before["generation"] + 1
+    assert (await _row(pool, target.id))["spec"]["peers"] is False
     after = await _row(pool, target.id)
     assert after["generation"] == before["generation"] + 1
     rows = await audits(pool, caller.id)
@@ -99,7 +100,7 @@ async def test_patch_of_a_session_stored_with_the_removed_backup_key(app, pool, 
         )
     r = await call(app, me, "PATCH", me.slug, json=PEERS_OFF)
     assert r.status_code == 200, r.text
-    assert r.json()["spec"]["peers"] is False
+    assert (await _row(pool, me.id))["spec"]["peers"] is False
     assert (await _row(pool, me.id))["spec"]["backup"] == [entry]
 
 

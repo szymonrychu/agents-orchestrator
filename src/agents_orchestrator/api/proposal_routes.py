@@ -18,7 +18,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 
-from agents_orchestrator.api import proposals, schemas
+from agents_orchestrator.api import ack, proposals, schemas
 from agents_orchestrator.api.admin import ADMIN_PREFIX, AdminRoute, _admit, caller_of
 from agents_orchestrator.api.agent import Caller, _leads
 from agents_orchestrator.api.errors import ApiError, not_found
@@ -66,11 +66,11 @@ async def _own(conn, proposal_id: int, caller: sessions_repo.Session) -> None:
 # ---------------------------------------------------------------- agent port
 
 
-@proposal_router.post("/proposals", status_code=201, response_model=schemas.ProposalView)
+@proposal_router.post("/proposals", status_code=201, response_model=schemas.WriteAck)
 async def create_proposal(
     body: schemas.ProposalIn, request: Request, response: Response, pool: Pool, settings: Cfg
-) -> schemas.ProposalView:
-    """201 with the new proposal; 200 with the first one on a `client_key` replay."""
+) -> schemas.WriteAck:
+    """201 with the ack of the new proposal; 200 with the first one's on a `client_key` replay."""
     _, caller = caller_of(request)
     async with pool.connection() as conn:
         view, created = await proposals.create(
@@ -83,7 +83,7 @@ async def create_proposal(
         )
     if not created:
         response.status_code = 200
-    return view
+    return ack.proposal_ack(view)
 
 
 @proposal_router.get("/proposals", response_model=list[schemas.ProposalView])
@@ -126,28 +126,30 @@ async def get_own_proposal(
         )
 
 
-@proposal_router.post("/proposals/{proposal_id}/revise", response_model=schemas.ProposalView)
+@proposal_router.post("/proposals/{proposal_id}/revise", response_model=schemas.WriteAck)
 async def revise_proposal(
     proposal_id: int,
     body: schemas.ProposalRevise,
     request: Request,
     pool: Pool,
     settings: Cfg,
-) -> schemas.ProposalView:
+) -> schemas.WriteAck:
     _, caller = caller_of(request)
     async with pool.connection() as conn:
         await _own(conn, proposal_id, caller)
-        return await proposals.revise(request, conn, settings, proposal_id, body, caller=caller)
+        view = await proposals.revise(request, conn, settings, proposal_id, body, caller=caller)
+    return ack.proposal_ack(view)
 
 
-@proposal_router.post("/proposals/{proposal_id}/withdraw", response_model=schemas.ProposalView)
+@proposal_router.post("/proposals/{proposal_id}/withdraw", response_model=schemas.WriteAck)
 async def withdraw_proposal(
     proposal_id: int, request: Request, pool: Pool, settings: Cfg
-) -> schemas.ProposalView:
+) -> schemas.WriteAck:
     _, caller = caller_of(request)
     async with pool.connection() as conn:
         await _own(conn, proposal_id, caller)
-        return await proposals.withdraw(request, conn, settings, proposal_id, caller=caller)
+        view = await proposals.withdraw(request, conn, settings, proposal_id, caller=caller)
+    return ack.proposal_ack(view)
 
 
 # ---------------------------------------------------------------- main port (human only)

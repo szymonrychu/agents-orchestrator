@@ -100,7 +100,7 @@ def body(**over):
 async def filed(app, who: Sess, **over) -> dict:
     r = await agent(app, who, "POST", P, json=body(**over))
     assert r.status_code == 201, r.text
-    return r.json()
+    return (await human(app, "GET", f"{M}/{r.json()['id']}")).json()
 
 
 async def hide(pool, preset_id) -> None:
@@ -152,7 +152,8 @@ async def test_create_201_audited_with_fields_only(app, pool, kube, boss, preset
     caplog.set_level(logging.INFO)
     r = await agent(app, boss, "POST", P, json=body(patch={**MCP_PATCH, **PLAIN_PATCH}))
     assert r.status_code == 201, r.text
-    view = r.json()
+    assert set(r.json()) == {"id", "version", "status"}
+    view = (await human(app, "GET", f"{M}/{r.json()['id']}")).json()
     assert view["status"] == "open" and view["revision"] == 1
     assert view["proposer_slug"] == boss.slug and view["target_name"] == "infra"
     items = {i["path"]: i for i in view["revisions"][0]["items"]}
@@ -371,7 +372,7 @@ async def test_revise_and_withdraw_audited(app, pool, kube, boss, preset, canary
     view = await filed(app, boss)
     r = await agent(app, boss, "POST", f"{P}/{view['id']}/revise", json={"patch": PLAIN_PATCH})
     assert r.status_code == 200, r.text
-    assert r.json()["revision"] == 2 and r.json()["status"] == "open"
+    assert r.json()["version"] == 2 and r.json()["status"] == "open"
     w = await agent(app, boss, "POST", f"{P}/{view['id']}/withdraw")
     assert w.status_code == 200 and w.json()["status"] == "withdrawn"
     again = await agent(app, boss, "POST", f"{P}/{view['id']}/withdraw")
@@ -630,7 +631,7 @@ async def test_regular_leader_proposes_a_grant_for_its_own_session(
     before = await _rows(pool, q, (lead.id,))
     r = await agent(app, lead, "POST", P, json=own(lead, patch=patch))
     assert r.status_code == 201, r.text
-    view = r.json()
+    view = (await human(app, "GET", f"{M}/{r.json()['id']}")).json()
     assert (view["kind"], view["target_id"], view["target_name"]) == (
         "session",
         str(lead.id),
@@ -700,7 +701,7 @@ async def test_regular_leader_reads_revises_and_withdraws_only_its_own(
         json={"patch": {"inactivity": {"close_seconds": 7200}}},
     )
     assert r.status_code == 200, r.text
-    assert r.json()["revision"] == 2
+    assert r.json()["version"] == 2
     w = await agent(app, lead, "POST", f"{P}/{mine['id']}/withdraw")
     assert w.status_code == 200 and w.json()["status"] == "withdrawn"
 
@@ -763,7 +764,8 @@ async def test_leader_preset_proposal_scoped(app, pool, kube, preset, where, sta
     r = await agent(app, lead, "POST", P, json=body(target=target, patch=PLAIN_PATCH))
     if status == 201:
         assert r.status_code == 201, r.text
-        assert (r.json()["target_name"], r.json()["proposer_superleader"]) == ("infra", False)
+        full = (await human(app, "GET", f"{M}/{r.json()['id']}")).json()
+        assert (full["target_name"], full["proposer_superleader"]) == ("infra", False)
     else:
         assert_error(r, 403, "project_forbidden")
         assert await _rows(pool, "SELECT id FROM change_proposals") == []

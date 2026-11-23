@@ -38,10 +38,10 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel
 from starlette.responses import Response as StarletteResponse
 
+from agents_orchestrator.api import ack, schemas, session_spec, streams
 from agents_orchestrator.api import messages as messages_api
 from agents_orchestrator.api import presets as presets_api
 from agents_orchestrator.api import projects as projects_api
-from agents_orchestrator.api import schemas, session_spec, streams
 from agents_orchestrator.api import sessions as sessions_api
 from agents_orchestrator.api.agent import (
     ACTIVITY_DEFAULT_LIMIT,
@@ -58,7 +58,6 @@ from agents_orchestrator.api.agent import (
     normalise_all,
 )
 from agents_orchestrator.api.errors import ApiError, not_found, not_manageable
-from agents_orchestrator.api.session_labels import OwnLabelsView
 from agents_orchestrator.api.sessions import Cfg, Pool, Usage
 from agents_orchestrator.api.spec_edit import note_fields
 from agents_orchestrator.db import agents as agents_repo
@@ -426,19 +425,17 @@ ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
 # ---------------------------------------------------------------- projects (T-113)
 
 
-@router.post("/projects", status_code=201, response_model=schemas.ProjectView)
-async def create_project(
-    body: schemas.ProjectIn, request: Request, pool: Pool
-) -> schemas.ProjectView:
-    """Create a project, same body, answer and errors as the main-port route. The audit row
-    carries the field names only."""
+@router.post("/projects", status_code=201, response_model=schemas.WriteAck)
+async def create_project(body: schemas.ProjectIn, request: Request, pool: Pool) -> schemas.WriteAck:
+    """Create a project, same body and errors as the main-port route, answered as a `WriteAck`.
+    The audit row carries the field names only."""
     note_fields(request, ["slug", "name"])
-    return await projects_api.create(pool, body)
+    return ack.project_ack(await projects_api.create(pool, body))
 
 
 @router.patch(
     "/projects/{slug}",
-    response_model=schemas.ProjectView,
+    response_model=schemas.WriteAck,
     responses={
         403: FORBIDDEN,
         404: {"description": "not_found: no project has that slug"},
@@ -447,12 +444,12 @@ async def create_project(
 )
 async def update_project(
     slug: str, body: schemas.ProjectPatch, request: Request, pool: Pool
-) -> schemas.ProjectView:
-    """Rename, describe, archive or unarchive a project, same body, answer and errors as the
-    main-port route. An explicit null keeps the stored value and is still listed in the audit
-    row, which carries the set field names only."""
+) -> schemas.WriteAck:
+    """Rename, describe, archive or unarchive a project, same body and errors as the main-port
+    route, answered as a `WriteAck`. An explicit null keeps the stored value and is still listed
+    in the audit row, which carries the set field names only."""
     note_fields(request, sorted(body.model_fields_set))
-    return await projects_api.patch(pool, slug, body)
+    return ack.project_ack(await projects_api.patch(pool, slug, body))
 
 
 # ---------------------------------------------------------------- presets (O6)
@@ -511,12 +508,13 @@ async def list_sessions(
         )
 
 
-@router.post("/presets", status_code=201, response_model=schemas.PresetView)
+@router.post("/presets", status_code=201, response_model=schemas.WriteAck)
 async def create_preset(
     body: schemas.PresetIn, request: Request, pool: Pool, settings: Cfg
-) -> schemas.PresetView:
+) -> schemas.WriteAck:
     async with pool.connection() as conn:
-        return await presets_api.create(request, conn, settings, body, superleader=True)
+        view = await presets_api.create(request, conn, settings, body, superleader=True)
+    return ack.preset_ack(view)
 
 
 # leader gate: the presets of the caller's projects (decision 933)
@@ -542,18 +540,19 @@ async def get_preset(ref: str, request: Request, pool: Pool) -> schemas.PresetVi
         return await presets_api.get_one(conn, found.id)
 
 
-@router.put("/presets/{ref}", response_model=schemas.PresetView)
+@router.put("/presets/{ref}", response_model=schemas.WriteAck)
 async def replace_preset(
     ref: str, body: schemas.PresetIn, request: Request, pool: Pool, settings: Cfg
-) -> schemas.PresetView:
+) -> schemas.WriteAck:
     async with pool.connection() as conn:
         found = await writable_preset(conn, ref)
-        return await presets_api.replace(request, conn, settings, found.id, body, superleader=True)
+        view = await presets_api.replace(request, conn, settings, found.id, body, superleader=True)
+    return ack.preset_ack(view)
 
 
 @router.patch(
     "/presets/{ref}",
-    response_model=schemas.PresetView,
+    response_model=schemas.WriteAck,
     responses={
         403: WRITE_FORBIDDEN,
         404: {"description": "not_found: no preset has that name or id"},
@@ -565,10 +564,11 @@ async def replace_preset(
 )
 async def patch_preset(
     ref: str, body: schemas.PresetPatch, request: Request, pool: Pool, settings: Cfg
-) -> schemas.PresetView:
+) -> schemas.WriteAck:
     async with pool.connection() as conn:
         found = await writable_preset(conn, ref)
-        return await presets_api.patch(request, conn, settings, found.id, body)
+        view = await presets_api.patch(request, conn, settings, found.id, body)
+    return ack.preset_ack(view)
 
 
 @router.delete("/presets/{ref}", status_code=204, response_model=None)
@@ -579,16 +579,17 @@ async def delete_preset(ref: str, request: Request, pool: Pool) -> Response:
     return Response(status_code=204)
 
 
-@router.post("/presets/{ref}/copy", status_code=201, response_model=schemas.PresetView)
+@router.post("/presets/{ref}/copy", status_code=201, response_model=schemas.WriteAck)
 async def copy_preset(
     ref: str, request: Request, pool: Pool, body: schemas.CopyPreset | None = None
-) -> schemas.PresetView:
+) -> schemas.WriteAck:
     async with pool.connection() as conn:
         found = await writable_preset(conn, ref)
         body = body or schemas.CopyPreset()
-        return await presets_api.copy(
+        view = await presets_api.copy(
             conn, found.id, body.name, superleader=True, request=request, project=body.project
         )
+    return ack.preset_ack(view)
 
 
 @router.put("/presets/{ref}/vault/{entry_id}", response_model=schemas.VaultAttachView)
@@ -611,7 +612,7 @@ async def attach_vault(
     return schemas.VaultAttachView(**view.model_dump(), attachment_privileged=bool(view.privileged))
 
 
-@router.delete("/presets/{ref}/vault/{entry_id}", response_model=schemas.PresetView)
+@router.delete("/presets/{ref}/vault/{entry_id}", response_model=schemas.WriteAck)
 async def detach_vault(
     ref: str,
     entry_id: uuid.UUID,
@@ -619,12 +620,13 @@ async def detach_vault(
     pool: Pool,
     settings: Cfg,
     env: str | None = None,
-) -> schemas.PresetView:
+) -> schemas.WriteAck:
     """Remove every ref to the entry from a manageable preset, or only the one under preset env
     `?env=`; 404 `not_attached` when nothing matches."""
     async with pool.connection() as conn:
         found = await writable_preset(conn, ref)
-        return await presets_api.detach_vault(request, conn, settings, found.id, entry_id, env)
+        view = await presets_api.detach_vault(request, conn, settings, found.id, entry_id, env)
+    return ack.preset_ack(view)
 
 
 # ---------------------------------------------------------------- sessions (O7)
@@ -688,18 +690,18 @@ async def get_session(
 
 
 @session_router.patch(
-    "/sessions/{slug}", response_model=schemas.SessionView, dependencies=[SessionEditor]
+    "/sessions/{slug}", response_model=schemas.WriteAck, dependencies=[SessionEditor]
 )
 async def patch_session(
     slug: str, body: schemas.SessionSpecPatch, request: Request, pool: Pool, settings: Cfg
-) -> schemas.SessionView:
+) -> schemas.WriteAck:
     """RFC 7396 merge patch of a live session's spec: a superleader on its own or a manageable
     session, any other leader on its own. The source preset is never written."""
     agent, caller = caller_of(request)
     superleader = bool(caller.spec.session_messaging)
     async with pool.connection() as conn:
         target = await _writable_target(conn, slug, caller) if superleader else caller
-        return await session_spec.patch(
+        view = await session_spec.patch(
             request,
             conn,
             settings,
@@ -709,6 +711,7 @@ async def patch_session(
             caller_agent=agent,
             superleader=superleader,
         )
+    return ack.session_ack(view)
 
 
 @session_router.post(
@@ -741,14 +744,15 @@ async def withdraw_handover(
     return schemas.Withdrawn(withdrawn=withdrawn)
 
 
-@router.post("/sessions", status_code=201, response_model=schemas.SessionView)
+@router.post("/sessions", status_code=201, response_model=schemas.WriteAck)
 async def create_session(
     body: schemas.CreateSession, request: Request, pool: Pool, settings: Cfg, usage: Usage
-) -> schemas.SessionView:
+) -> schemas.WriteAck:
     """Same body and rules as the main port, usage gate included; the caller's session is
-    recorded as the creator and `created_by_service` stays empty."""
+    recorded as the creator and `created_by_service` stays empty. Answers the slug as a
+    `WriteAck`."""
     _, caller = caller_of(request)
-    return await sessions_api.create(
+    view = await sessions_api.create(
         pool,
         settings,
         body,
@@ -756,6 +760,7 @@ async def create_session(
         usage=usage,
         vault=request.app.state.vault,
     )
+    return ack.session_ack(view)
 
 
 def _discard_forbidden(reason: str, message: str) -> ApiError:
@@ -786,10 +791,10 @@ async def _leader_discard(
         return await sessions_api.discard(conn, target.id, settings, by=f"session {caller.slug}")
 
 
-@discard_router.delete("/sessions/{slug}", status_code=202, response_model=schemas.SessionView)
+@discard_router.delete("/sessions/{slug}", status_code=202, response_model=schemas.WriteAck)
 async def discard_session(
     slug: str, request: Request, pool: Pool, settings: Cfg, force: sessions_api.Force = False
-) -> schemas.SessionView:
+) -> schemas.WriteAck:
     """A superleader discards any session it may manage (`_writable_target`); `?force=true`
     abandons the target's owed pre-discard hooks, also when it is already deleting (a discard
     stuck on a hook receiver that is down). Any other leader discards an idle or finished
@@ -799,13 +804,14 @@ async def discard_session(
     force = sessions_api.force_flag(request, allowed=superleader)
     async with pool.connection() as conn:
         if not superleader:
-            return await _leader_discard(conn, slug, caller, settings)
+            return ack.session_ack(await _leader_discard(conn, slug, caller, settings))
         target = await _writable_target(conn, slug, caller)
         if target.id == caller.id:
             raise ApiError(422, "own_session", "a session cannot discard itself")
-        return await sessions_api.discard(
+        view = await sessions_api.discard(
             conn, target.id, settings, force=force, by=f"session {caller.slug}"
         )
+        return ack.session_ack(view)
 
 
 # ---------------------------------------------------------------- restart (O8)
@@ -1007,12 +1013,12 @@ async def session_commands(
 
 @router.put(
     "/sessions/{slug}/labels",
-    response_model=OwnLabelsView,
+    response_model=schemas.WriteAck,
     responses={403: WRITE_FORBIDDEN, 404: SESSION_NOT_FOUND},
 )
 async def set_session_labels(
     slug: str, body: schemas.SessionLabelsIn, request: Request, pool: Pool
-) -> OwnLabelsView:
+) -> schemas.WriteAck:
     """Replace the labels of the caller's own session or of a manageable one; labels are
     normalised and limited as on the main port."""
     _, caller = caller_of(request)
@@ -1020,7 +1026,7 @@ async def set_session_labels(
         target = await _writable_target(conn, slug, caller)
         session = await sessions_repo.set_labels(conn, target.id, body.labels)
     note_fields(request, ["labels"])
-    return OwnLabelsView(session_id=session.id, labels=session.labels)
+    return schemas.WriteAck(id=session.slug)
 
 
 @router.post(

@@ -10,31 +10,23 @@ taskboard relay there is no trigger-session refusal and no leader check (leader 
 
 from __future__ import annotations
 
-import uuid
-
 from fastapi import APIRouter
-from pydantic import BaseModel
 
 from agents_orchestrator.api.agent import Caller
 from agents_orchestrator.api.errors import ApiError
-from agents_orchestrator.api.schemas import SessionLabelsIn
+from agents_orchestrator.api.schemas import SessionLabelsIn, WriteAck
 from agents_orchestrator.api.sessions import Pool
 from agents_orchestrator.db import sessions as sessions_repo
 
 router = APIRouter(prefix="/agent/v1/session", tags=["agent"])
 
 
-class OwnLabelsView(BaseModel):
-    session_id: uuid.UUID
-    labels: list[str]
-
-
-@router.put("/labels", response_model=OwnLabelsView)
-async def set_own_labels(body: SessionLabelsIn, caller: Caller, pool: Pool) -> OwnLabelsView:
-    """Replace the calling session's labels."""
+@router.put("/labels", response_model=WriteAck)
+async def set_own_labels(body: SessionLabelsIn, caller: Caller, pool: Pool) -> WriteAck:
+    """Replace the calling session's labels; the answer is a `WriteAck` with its slug."""
     async with pool.connection() as conn:
         try:
             session = await sessions_repo.set_labels(conn, caller.session_id, body.labels)
         except sessions_repo.SessionNotFound:
             raise ApiError(404, "not_found", "session not found") from None
-    return OwnLabelsView(session_id=session.id, labels=session.labels)
+    return WriteAck(id=session.slug)

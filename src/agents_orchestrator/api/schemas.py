@@ -1030,6 +1030,18 @@ class ScaleRequest(BaseModel):
     replicas: int
 
 
+class WriteAck(BaseModel):
+    """The short answer an agent-port write gets instead of the full view (decision 926): the
+    target's id (a session by slug, a project by slug, a preset and a proposal by id), its new
+    version when it has one (proposal revision, session generation, relayed version) and its
+    status when it has one. The id keeps its JSON type (a proposal or relayed numeric id is a
+    number). The web routes keep the full views."""
+
+    id: str | int
+    version: int | None = None
+    status: str | None = None
+
+
 class ScaleResult(BaseModel):
     session_id: uuid.UUID
     replicas: int

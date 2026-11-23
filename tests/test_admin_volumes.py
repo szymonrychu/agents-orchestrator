@@ -288,7 +288,7 @@ async def test_create_files_a_proposal_and_the_users_approval_creates_the_volume
         app, boss, "POST", "/volumes", json={**BODY, "exclude": ["node_modules"], "labels": ["x"]}
     )
     assert r.status_code == 202, r.text
-    proposal = r.json()
+    proposal = (await main(app, "GET", f"/proposals/{r.json()['id']}")).json()
     assert proposal["kind"] == "volume_create"
     async with pool.connection() as conn:
         assert await volumes.by_name(conn, "fresh") is None
@@ -305,7 +305,8 @@ async def test_create_files_a_proposal_and_the_users_approval_creates_the_volume
 
 
 async def test_create_proposal_is_stale_when_the_name_is_taken_meanwhile(app, pool, boss):
-    proposal = (await agent(app, boss, "POST", "/volumes", json=BODY)).json()
+    filed = await agent(app, boss, "POST", "/volumes", json=BODY)
+    proposal = (await main(app, "GET", f"/proposals/{filed.json()['id']}")).json()
     await vol(pool, "fresh")
     done = await approve(app, proposal)
     assert_error(done, 409, "proposal_stale")

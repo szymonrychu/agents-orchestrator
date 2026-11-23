@@ -195,7 +195,8 @@ async def test_superleader_copy_validates_and_keeps_refs(pool, dsn, vault):
     async with agent_client(app, boss.leader_ip) as agent:
         r = await agent.post(f"{A}/src/copy", headers=headers(boss.id))
         assert r.status_code == 201, r.text
-        assert r.json()["spec"]["env"] == {"X": ref()}
+        got = await agent.get(f"{A}/{r.json()['id']}", headers=headers(boss.id))
+        assert got.json()["spec"]["env"] == {"X": ref()}
 
 
 async def test_reattach_pruned_on_save(http, pool):
@@ -264,7 +265,8 @@ async def test_privileged_preset_ref_change_allowed_for_superleader(pool, dsn, v
             json={"name": "priv", "spec": new, "labels": ["team-a"]},
         )
         assert r.status_code == 200, r.text
-        assert r.json()["spec"]["env"]["X"] == ref(OTHER)
+        got = await agent.get(f"{A}/priv", headers=headers(boss.id))
+        assert got.json()["spec"]["env"]["X"] == ref(OTHER)
     async with app.state.pool.connection() as conn:
         rows = await repo.vault_events(conn, uuid.UUID(r.json()["id"]))
     assert {x["actor"] for x in rows if x["data"]["env"] == "Y"} == {boss.slug}
