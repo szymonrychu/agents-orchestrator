@@ -2,13 +2,15 @@
 
 Each route maps 1:1 to an upstream admin route and is registered on an admin router, so a gate
 and the audit cover it: the superleader gate, except the `READER_ROUTES` (the reader gate: a
-superleader) and the room notes PUT (the notes writer gate).
+superleader), the `AGENT_ROUTES` (the agent gate: any agent; the history reads, decisions
+859-861) and the room notes PUT (the notes writer gate).
 The gate runs first, then the upstream must be configured
 (503 `upstream_unconfigured`), then the body is capped at 256 KiB (413 `payload_too_large`). The
 forwarded request carries only the upstream's service bearer and the caller's `X-Orch-Session`,
-`X-Orch-Slug` and `X-Orch-Projects` (see `forward`). `X-Orch-Projects` is `*` for a superleader
-(`scope.scope_of`, projects plan 3.3). The upstream
-status and JSON body come back unchanged, except for webhook credentials (D9, `credentials`
+`X-Orch-Slug` and `X-Orch-Projects` (see `forward`). `X-Orch-Projects` is the scope the gate
+admitted (`admin.caller_projects`): `*` for a superleader, else the caller session's projects;
+on the history reads agents-history filters on it (a session with no project only for `*`). The
+upstream status and JSON body come back unchanged, except for webhook credentials (D9, `credentials`
 below). A failed call or a non-JSON answer is 503 `upstream_unavailable`. The upstream validates
 the bodies.
 
@@ -51,7 +53,7 @@ answer (`api/chat_requests.py`).
 The room history read (`GET /chats/rooms/{room_id}/messages`) is read only and covers any room;
 there is no attachment fetch for the superleader.
 
-History is read-only for the superleader: three GET routes and no DELETE (deleting a stored
+History is read-only: three GET routes and no DELETE (deleting a stored
 session is for the user, through the web UI), so the router answers any other method 405 and
 nothing reaches the upstream. The session list is paged upstream by `before_id`; when a page was
 full the relay sends the upstream's next cursor in `X-Next-Before-Id`.
@@ -89,14 +91,16 @@ from agents_orchestrator.api import forward as forward_core
 from agents_orchestrator.api.admin import (
     FORBIDDEN,
     NotesWriter,
+    agent_router,
     caller_of,
+    caller_projects,
     notes_router,
     reader_router,
     router,
     touched,
 )
 from agents_orchestrator.api.errors import ApiError, not_found, not_manageable
-from agents_orchestrator.api.scope import projects_header
+from agents_orchestrator.api.scope import PROJECTS_HEADER, scope_value
 from agents_orchestrator.api.sessions import Cfg
 from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.db import sessions as sessions_repo
@@ -167,18 +171,23 @@ SERVICES: dict[str, tuple[str, str, str, list[tuple[str, str, int]]]] = {
     "usage": ("/usage", "/usage/v1", "usage admin relay", _USAGE),
 }
 STATE_ATTR = "admin_http"
-# The relay routes on the reader gate (a superleader; S-83 steps 6, 7 reshape it); every other
-# relay route stays superleader-only.
+# The relay routes on the reader gate (a superleader; S-83 step 7 reshapes it); every other
+# relay route stays superleader-only, except the agent gate's.
 READER_ROUTES: frozenset[tuple[str, str, str]] = frozenset(
     {
         ("connector", "GET", "/rooms"),
         ("connector", "GET", "/rooms/{room_id}"),
         ("connector", "GET", "/rooms/{room_id}/messages"),
         ("connector", "GET", "/rooms/{room_id}/notes"),
+        ("usage", "GET", "/history"),
+    }
+)
+# The relay routes on the agent gate: any agent, scoped upstream on X-Orch-Projects (859-861).
+AGENT_ROUTES: frozenset[tuple[str, str, str]] = frozenset(
+    {
         ("history", "GET", "/sessions"),
         ("history", "GET", "/sessions/{session_id}"),
         ("history", "GET", "/sessions/{session_id}/records"),
-        ("usage", "GET", "/history"),
     }
 )
 # The room notes update: the notes writer gate (decision 775).
@@ -359,13 +368,18 @@ async def _upstream_json(request: Request, settings: Settings, service: str, pat
         None,
         str(session.id),
         session.slug,
-        extra_headers=projects_header(session),
+        extra_headers=_scope_header(request),
     )
     if status == 404:
         raise not_found("object")
     if not 200 <= status < 300:
         raise ApiError(503, "upstream_unavailable", f"the {service} upstream answered {status}")
     return json.loads(content)
+
+
+def _scope_header(request: Request) -> dict[str, str]:
+    """`X-Orch-Projects` of the scope the gate admitted."""
+    return {PROJECTS_HEADER: scope_value(caller_projects(request))}
 
 
 def _bare(request: Request) -> Request:
@@ -547,7 +561,7 @@ def _handler(service: str, method: str, template: str) -> Callable[..., Awaitabl
             str(session.id),
             session.slug,
             empty_ok=True,
-            extra_headers=projects_header(session),
+            extra_headers=_scope_header(request),
         )
         if guard.ask_decision and status == 201:
             row = await chat_requests.on_created(request, settings, json.loads(content))
@@ -604,6 +618,8 @@ def _router_for(key: tuple[str, str, str]):
     update on the notes writer gate."""
     if key in READER_ROUTES:
         return reader_router
+    if key in AGENT_ROUTES:
+        return agent_router
     if key == NOTES_ROUTE:
         return notes_router
     return router

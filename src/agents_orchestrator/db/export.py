@@ -1,6 +1,7 @@
 """The JSONL history export a pre-discard hook receives (D15).
 
-One `session` record (`id`, `slug`, `spec`, `created_at`, the provenance `preset_id`,
+One `session` record (`id`, `slug`, `spec`, `created_at`, the `project` and `extra_projects`
+agents-history scopes reads on, the provenance `preset_id`,
 `preset_name`, `created_by_service`, `created_by_session`, the close request
 `close_requested_at`, `close_reason`, `close_kind` and `close_deadline_at`, and the inactivity
 `inactivity_reminded_at` and `last_update_at` (the api-written update stamp, not the computed
@@ -65,8 +66,9 @@ async def export_session_history(
     async with conn.transaction():
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
-                "SELECT id, slug, spec, created_at, preset_id, preset_name, created_by_service,"
-                " created_by_session, close_requested_at, close_reason,"
+                "SELECT id, slug, spec, created_at, project, extra_projects, preset_id,"
+                " preset_name, created_by_service, created_by_session, close_requested_at,"
+                " close_reason,"
                 " close_kind, close_deadline_at, inactivity_reminded_at, last_update_at"
                 " FROM sessions WHERE id = %s",
                 (session_id,),

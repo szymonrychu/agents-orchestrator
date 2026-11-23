@@ -42,9 +42,7 @@ def test_reader_routes_are_exactly_the_read_set_and_the_copy():
     assert set(_reader_routes()) == {
         ("GET", f"{p}/presets"),
         ("GET", f"{p}/presets/{{ref}}"),
-        ("GET", f"{p}/sessions"),
         ("GET", f"{p}/sessions/{{slug}}/activity"),
-        ("GET", f"{p}/sessions/{{slug}}/events"),
         ("GET", f"{p}/sessions/{{slug}}/messages"),
         ("GET", f"{p}/usage"),
         ("GET", f"{p}/usage/history"),
@@ -52,17 +50,12 @@ def test_reader_routes_are_exactly_the_read_set_and_the_copy():
         ("POST", f"{p}/backups/copy"),
         ("GET", f"{p}/backups/{{name:path}}/versions"),
         ("GET", f"{p}/backups/{{name:path}}/versions/{{version_id}}/manifest"),
-        ("GET", f"{p}/handoffs"),
-        ("GET", f"{p}/handoffs/{{id}}"),
         ("GET", f"{p}/volumes"),
         ("GET", f"{p}/volumes/{{volume_id}}"),
         ("GET", f"{p}/chats/rooms"),
         ("GET", f"{p}/chats/rooms/{{room_id}}"),
         ("GET", f"{p}/chats/rooms/{{room_id}}/messages"),
         ("GET", f"{p}/chats/rooms/{{room_id}}/notes"),
-        ("GET", f"{p}/history/sessions"),
-        ("GET", f"{p}/history/sessions/{{session_id}}"),
-        ("GET", f"{p}/history/sessions/{{session_id}}/records"),
     }
     assert [(m, r.path) for r in admin.notes_router.routes for m in r.methods] == [
         ("PUT", f"{p}/chats/rooms/{{room_id}}/notes/sections/{{section}}")

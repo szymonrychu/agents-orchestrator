@@ -105,7 +105,7 @@ async def test_unknown_slug_404(call, route):
     assert_error(await call(f"{S}/no-such-session/{route}"), 404, "not_found")
 
 
-@pytest.mark.parametrize("route", LIVE)
+@pytest.mark.parametrize("route", [r for r in LIVE if r != "events"])
 async def test_regular_leader_403(app, pool, route):
     leader = await hive(pool, "lv-leader")
     victim = await hive(pool, "lv-victim")

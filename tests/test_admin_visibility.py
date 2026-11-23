@@ -51,6 +51,7 @@ def own_routes() -> list[tuple[str, str]]:
             *admin.reader_router.routes,  # the reader reads and the copy
             *admin.notes_router.routes,
             *admin.discard_router.routes,
+            *admin.agent_router.routes,  # the scoped reads every agent makes
         ]
         if not r.path.startswith(prefixes)
         for m in r.methods - {"HEAD", "OPTIONS"}

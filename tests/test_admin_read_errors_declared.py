@@ -14,7 +14,7 @@ from agents_orchestrator.api.app import create_app
 S = f"{ADMIN_PREFIX}/sessions/{{slug}}"
 DECLARED: dict[tuple[str, str], set[int]] = {
     ("GET", f"{ADMIN_PREFIX}/meta"): {403},
-    ("GET", f"{ADMIN_PREFIX}/sessions"): {403},
+    ("GET", f"{ADMIN_PREFIX}/sessions"): set(),  # the agent gate admits any agent
     ("GET", f"{S}/activity"): {403, 404},
     ("GET", f"{S}/events"): {400, 403, 404},
     ("GET", f"{S}/messages"): {403, 404},

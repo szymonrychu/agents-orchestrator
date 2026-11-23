@@ -18,6 +18,7 @@ from test_api_sessions import assert_error
 from agents_orchestrator.api import admin, admin_backups, admin_specs, proposal_routes  # noqa: F401
 from agents_orchestrator.api.admin import (
     ADMIN_PREFIX,
+    require_agent,
     require_discarder,
     require_notes_writer,
     require_reader,
@@ -39,6 +40,8 @@ GATES = {
     id(admin.reader_router): require_reader,
     id(admin.notes_router): require_notes_writer,
     id(admin.discard_router): require_discarder,
+    # the reads every agent makes, scoped to its projects (S-83 step 6)
+    id(admin.agent_router): require_agent,
 }
 ROUTERS = (
     admin.router,
@@ -47,6 +50,7 @@ ROUTERS = (
     admin.reader_router,
     admin.notes_router,
     admin.discard_router,
+    admin.agent_router,
 )
 # GET /sessions/{slug} carries the session reader gate
 SESSION_READER_ROUTES = {("GET", f"{ADMIN_PREFIX}/sessions/{{slug}}")}
@@ -142,8 +146,9 @@ async def test_editor_gate_is_per_route_and_slug_stays_a_path_parameter(pool, ds
 
 
 async def test_gate_table_over_all_admin_routes(pool, dsn):
-    """A regular leader passes only the proposer gate; another agent of a regular hive is
-    refused there 403 not_leader."""
+    """A regular leader passes only the proposer gate, the agent gate and the session reader
+    gate (an unknown slug is then 404); another agent of a regular hive is refused 403
+    not_leader on the proposer gate and passes the agent gate."""
     app = create_app(make_settings(dsn), pool)
     plain = await alone(pool, "g-plain")
     member = await hive(pool, "g-member")
@@ -172,6 +177,13 @@ async def test_gate_table_over_all_admin_routes(pool, dsn):
                 async with client_for(app, member.member_ip) as http:
                     r = await http.request(method, path, json={}, headers=headers(member.id))
                 assert_error(r, 403, "not_leader")
+            elif router is admin.agent_router:
+                assert non_super.status_code not in (401, 403), (method, route.path)
+                async with client_for(app, member.member_ip) as http:
+                    r = await http.request(method, path, json={}, headers=headers(member.id))
+                assert r.status_code not in (401, 403), (method, route.path)
+            elif (method, route.path) in SESSION_READER_ROUTES:
+                assert_error(non_super, 404, "not_found")
             else:
                 assert_error(non_super, 403, "not_superleader")
             async with client_for(app, trigger.leader_ip) as http:
@@ -213,7 +225,7 @@ async def test_flag_does_not_bypass_gate(pool, dsn):
 
 @pytest.mark.parametrize(
     "router",
-    ROUTERS,
+    [r for r in ROUTERS if r is not admin.agent_router],  # the agent gate admits member pods
     ids=["superleader", "session_editor", "proposer", "reader", "notes_writer", "discarder"],
 )
 async def test_superleader_member_pod_refused(pool, dsn, router):

@@ -5,13 +5,20 @@ One gate covers `router`: `require_superleader` (the leader of a session with
 `not_leader`, decision 919). `session_router` (GET and PATCH
 `/sessions/{slug}`, POST `/sessions/{slug}/leadership/withdraw`) carries
 `require_session_editor` on each route instead, which also admits any other session's leader on
-its own slug (`require_session_reader`).
+its own slug; the GET carries `require_session_reader` (a superleader any slug, any other leader
+the sessions its `sessions_list` shows, decision 863).
 `reader_router` carries `require_reader` (a superleader): the
-reads and the backup copy. `notes_router` holds the room notes
+reads and the backup copy. `agent_router` carries `require_agent` (any agent, member, leader or
+superleader): the reads scoped to the caller's projects (S-83 decisions 859-868), filtered on
+`caller_projects`. `notes_router` holds the room notes
 update with `require_notes_writer` (decision 775). `discard_router` holds the session discard
 with `require_discarder` (any session's leader; the handler scopes a regular leader, decision
 942). Every admitted call is audited without values
 or bodies (D15): one log line and one `events` row the UI feed shows.
+
+Every gate records the caller's project scope (`caller_projects`): None (every project) for a
+superleader, the leader of a `session_messaging` session; the session's home and extra projects
+for anyone else, a member pod of a superleader session included (decision 919).
 """
 
 from __future__ import annotations
@@ -44,6 +51,7 @@ from agents_orchestrator.api.agent import (
     LocksOut,
     _leads,
     activity_lines,
+    is_superleader,
     locks_of,
     member_id,
     normalise_all,
@@ -67,10 +75,19 @@ _WRAPPER_SESSION = "admin"  # the events key of audit rows, which no wrapper ses
 
 
 def _admit(
-    request: Request, agent: agents_repo.Agent, session: sessions_repo.Session
+    request: Request,
+    agent: agents_repo.Agent,
+    session: sessions_repo.Session,
+    *,
+    leader: bool = True,
 ) -> sessions_repo.Session:
-    """Hand the admitted caller to the route and the audit."""
+    """Hand the admitted caller and its project scope (`caller_projects`) to the route and the
+    audit. `leader` says the gate checked the caller leads its session: only then does a
+    `session_messaging` session read every project (decision 919)."""
     request.state.admin_caller = (agent, session)
+    request.state.admin_projects = (
+        None if leader and session.spec.session_messaging else session.projects
+    )
     request.state.admin_secrets = []
     request.state.admin_vault = []
     return session
@@ -126,11 +143,26 @@ async def require_reader(request: Request, agent: Caller, pool: Pool) -> session
 
 
 async def require_session_reader(
-    request: Request, agent: Caller, pool: Pool, slug: str
+    request: Request, agent: Caller, pool: Pool
 ) -> sessions_repo.Session:
-    """GET /sessions/{slug}: `require_session_editor` (a superleader any slug, a leader its
-    own)."""
-    return await require_session_editor(request, agent, pool, slug)
+    """GET /sessions/{slug}: the leader of any session (403 not_leader for a member pod, a
+    superleader's included); the route narrows a non-superleader to its `sessions_list` set."""
+    async with pool.connection() as conn:
+        session = await sessions_repo.get(conn, agent.session_id)
+        assert session is not None
+        if not await _leads(conn, agent, session):
+            raise session_spec.not_leader()
+    return _admit(request, agent, session)
+
+
+async def require_agent(request: Request, agent: Caller, pool: Pool) -> sessions_repo.Session:
+    """Any agent (member, leader or superleader). The scope is every project only for a
+    superleader (`is_superleader`); anyone else reads its session's projects."""
+    async with pool.connection() as conn:
+        session = await sessions_repo.get(conn, agent.session_id)
+        assert session is not None
+        superleader = await is_superleader(conn, agent, session)
+    return _admit(request, agent, session, leader=superleader)
 
 
 async def require_discarder(request: Request, agent: Caller, pool: Pool) -> sessions_repo.Session:
@@ -157,6 +189,7 @@ Superleader = Depends(require_superleader)
 SessionEditor = Depends(require_session_editor)
 SessionReader = Depends(require_session_reader)
 Reader = Depends(require_reader)
+AgentReader = Depends(require_agent)
 NotesWriter = Depends(require_notes_writer)
 Discarder = Depends(require_discarder)
 
@@ -164,6 +197,16 @@ Discarder = Depends(require_discarder)
 def caller_of(request: Request):
     """The (agent, session) the gate admitted."""
     return request.state.admin_caller
+
+
+def caller_projects(request: Request) -> tuple[str, ...] | None:
+    """The project scope the gate admitted: None for every project (a superleader)."""
+    return request.state.admin_projects
+
+
+def in_scope(projects: tuple[str, ...] | None, session: sessions_repo.Session) -> bool:
+    """Whether `session` belongs (home or extra) to any of `projects`; always with None."""
+    return projects is None or not set(projects).isdisjoint(session.projects)
 
 
 def note_detail(request: Request, **detail: Any) -> None:
@@ -283,6 +326,10 @@ session_router = APIRouter(prefix=ADMIN_PREFIX, tags=["admin"], route_class=Admi
 # Every other admin route stays on `router` (the superleader gate).
 reader_router = APIRouter(
     prefix=ADMIN_PREFIX, tags=["admin"], route_class=AdminRoute, dependencies=[Reader]
+)
+# The reads every agent may make, scoped to its projects (S-83 decisions 859-868).
+agent_router = APIRouter(
+    prefix=ADMIN_PREFIX, tags=["admin"], route_class=AdminRoute, dependencies=[AgentReader]
 )
 # The room notes update carries the notes writer gate on its route (it reads `room_id`).
 notes_router = APIRouter(prefix=ADMIN_PREFIX, tags=["admin"], route_class=AdminRoute)
@@ -431,11 +478,10 @@ async def list_presets(pool: Pool) -> list[schemas.PresetView]:
         return await presets_api.list_all(conn)
 
 
-# reader gate (superleader until S-83 steps 6, 7)
-@reader_router.get(
-    "/sessions", response_model=list[schemas.SessionView], responses={403: FORBIDDEN}
-)
+# agent gate: the caller's projects (decision 862)
+@agent_router.get("/sessions", response_model=list[schemas.SessionView])
 async def list_sessions(
+    request: Request,
     pool: Pool,
     settings: Cfg,
     label: Annotated[list[str] | None, Query()] = None,
@@ -443,8 +489,9 @@ async def list_sessions(
     superleaders: Literal["include"] | None = None,
     session_slug: str | None = None,
 ) -> list[schemas.SessionView]:
-    """Every session, raw-spec and unmanageable ones included, as the redacted `SessionView`;
-    the main port's filters and errors. The slug filter is `session_slug`: the editor gate
+    """The sessions of the caller's projects (home or extra; every session for a superleader),
+    raw-spec and unmanageable ones included, as the redacted `SessionView`; the main port's
+    filters and errors narrow it further. The slug filter is `session_slug`: the editor gate
     invariant keeps a parameter named `slug` path-only."""
     async with pool.connection() as conn:
         return await sessions_api.list_views(
@@ -454,6 +501,7 @@ async def list_sessions(
             project=project,
             superleaders=superleaders == "include",
             slug=session_slug,
+            scope=caller_projects(request),
         )
 
 
@@ -561,19 +609,38 @@ async def detach_vault(
 # ---------------------------------------------------------------- sessions (O7)
 
 
-async def _readable_target(conn, slug: str, caller: sessions_repo.Session) -> sessions_repo.Session:
-    """Any session by slug (raw-spec ones too); 404 only when unknown. The route gate already
-    limits a non-superleader caller to its own slug."""
+async def _readable_target(
+    conn, slug: str, projects: tuple[str, ...] | None
+) -> sessions_repo.Session:
+    """A session by slug (raw-spec ones too) in the caller's `projects` (None: any); 404 when
+    unknown, 403 `project_forbidden` when it belongs to none of them."""
     session = await sessions_repo.get_by_slug(conn, slug)
     if session is None:
         raise not_found("session")
+    if not in_scope(projects, session):
+        raise project_forbidden()
     return session
+
+
+def project_forbidden() -> ApiError:
+    return ApiError(403, "project_forbidden", "the session is outside your projects")
+
+
+def _listed(caller: sessions_repo.Session, target: sessions_repo.Session) -> bool:
+    """Whether `sessions_list` shows `target` to a non-superleader `caller`, or it is the caller's
+    own (`sessions_repo.list_messaging_peers`: active, and in the caller's projects or a
+    superleader session)."""
+    if target.id == caller.id:
+        return True
+    return target.desired == "active" and (
+        bool(target.spec.session_messaging) or in_scope(caller.projects, target)
+    )
 
 
 async def _writable_target(conn, slug: str, caller: sessions_repo.Session) -> sessions_repo.Session:
     """The caller's own session, or one whose preset the superleader may manage; any other
     (unmanageable preset, no preset) is 403 `not_manageable`."""
-    session = await _readable_target(conn, slug, caller)
+    session = await _readable_target(conn, slug, None)
     if session.id != caller.id and (
         session.preset_id is None
         or session.preset_id not in await presets_repo.manageable_ids(conn)
@@ -589,12 +656,14 @@ async def _writable_target(conn, slug: str, caller: sessions_repo.Session) -> se
 async def get_session(
     slug: str, request: Request, pool: Pool, settings: Cfg
 ) -> schemas.SessionView:
-    """A superleader reads any session; any other leader its own."""
+    """A superleader reads any session; any other leader its own and every session its
+    `sessions_list` shows (decision 863), else 403 `project_forbidden`."""
     _, caller = caller_of(request)
     async with pool.connection() as conn:
-        return await sessions_api.one_view(
-            conn, await _readable_target(conn, slug, caller), settings
-        )
+        target = await _readable_target(conn, slug, None)
+        if caller_projects(request) is not None and not _listed(caller, target):
+            raise project_forbidden()
+        return await sessions_api.one_view(conn, target, settings)
 
 
 @session_router.patch(
@@ -819,19 +888,18 @@ async def session_activity(
     limit: Annotated[int, Query(ge=1, le=ACTIVITY_MAX_LIMIT)] = ACTIVITY_DEFAULT_LIMIT,
 ) -> Activity:
     """The agent-port activity digest of any session."""
-    _, caller = caller_of(request)
     async with pool.connection() as conn:
-        target = await _readable_target(conn, slug, caller)
+        target = await _readable_target(conn, slug, caller_projects(request))
         return await activity_lines(conn, target, peer, limit)
 
 
-# reader gate (superleader until S-83 steps 6, 7)
-@reader_router.get(
+# agent gate: the caller's projects (decision 865)
+@agent_router.get(
     "/sessions/{slug}/events",
     response_model=streams.EventsPage,
     responses={
         400: {"description": "bad_request: before_id and after_id are mutually exclusive"},
-        403: FORBIDDEN,
+        403: {"description": "project_forbidden: the session is outside your projects"},
         404: SESSION_NOT_FOUND,
     },
 )
@@ -845,10 +913,10 @@ async def session_events(
     agent_id: uuid.UUID | None = None,
     types: Annotated[list[str] | None, Query()] = None,
 ) -> streams.EventsPage:
-    """One page of any session's stored events, as the main port's events route (no SSE)."""
-    _, caller = caller_of(request)
+    """One page of the stored events of a session in the caller's projects, as the main port's
+    events route (no SSE)."""
     async with pool.connection() as conn:
-        target = await _readable_target(conn, slug, caller)
+        target = await _readable_target(conn, slug, caller_projects(request))
         return await streams.events_page(
             conn,
             target.id,
@@ -874,10 +942,9 @@ async def session_messages(
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> list[schemas.MessageView]:
     """The message queue of any session, with the main port's `status` filter."""
-    _, caller = caller_of(request)
     statuses = messages_api.parse_statuses(status)
     async with pool.connection() as conn:
-        target = await _readable_target(conn, slug, caller)
+        target = await _readable_target(conn, slug, caller_projects(request))
         rows = await views.list_messages(
             conn, target.id, statuses, limit, messages_api.DEFAULT_ATTEMPTS
         )
@@ -891,9 +958,9 @@ async def session_messages(
 )
 async def session_locks(slug: str, request: Request, pool: Pool) -> LocksOut:
     """The file locks held by the live agents of any session."""
-    _, caller = caller_of(request)
     async with pool.connection() as conn:
-        return await locks_of(conn, (await _readable_target(conn, slug, caller)).id)
+        target = await _readable_target(conn, slug, caller_projects(request))
+        return await locks_of(conn, target.id)
 
 
 @router.get(
@@ -908,9 +975,8 @@ async def session_commands(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> list[schemas.CommandView]:
     """The newest commands issued to the agents of any session."""
-    _, caller = caller_of(request)
     async with pool.connection() as conn:
-        target = await _readable_target(conn, slug, caller)
+        target = await _readable_target(conn, slug, caller_projects(request))
         rows = await views.list_commands(conn, target.id, limit)
     return [schemas.CommandView(**r) for r in rows]
 

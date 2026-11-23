@@ -72,13 +72,6 @@ async def test_admin_sessions_label_filter(pool, dsn):
     assert_error(await list_as(app, boss, label="bad label"), 422, "invalid_request")
 
 
-async def test_admin_sessions_regular_leader_403(pool, dsn):
-    app = create_app(make_settings(dsn), pool)
-    lead = await hive(pool, "rl-lead")
-    r = await list_as(app, lead)
-    assert r.status_code == 403, r.text
-
-
 async def test_admin_sessions_audit_row_present(pool, dsn):
     app = create_app(make_settings(dsn), pool)
     boss = await alone(pool, "au-boss", superleader=True)

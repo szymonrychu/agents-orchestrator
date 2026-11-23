@@ -1,7 +1,8 @@
-"""Superleader reads (reader gate) of the handoff history (S-68):
-the list of `agent_handoffs` rows and one row in full, with its text. Read only. `kind` is the
-row's trigger (strong, shutdown, voluntary).
-The `session` filter takes a session id or slug."""
+"""Reads (agent gate) of the handoff history (S-68, S-83 decisions 867, 868):
+the list of `agent_handoffs` rows and one row in full, with its text. Read only. Any agent reads
+the handoffs of the sessions in its projects (home or extra), a superleader every one; a handoff
+outside them is filtered from the list and 404 by id. `kind` is the row's trigger (strong,
+shutdown, voluntary). The `session` filter takes a session id or slug."""
 
 from __future__ import annotations
 
@@ -9,10 +10,10 @@ import uuid
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import Query
+from fastapi import Query, Request
 from pydantic import BaseModel
 
-from agents_orchestrator.api.admin import FORBIDDEN, reader_router
+from agents_orchestrator.api.admin import agent_router, caller_projects
 from agents_orchestrator.api.errors import ApiError
 from agents_orchestrator.api.sessions import Pool
 from agents_orchestrator.db import handoffs
@@ -40,13 +41,9 @@ class HandoffPage(BaseModel):
     has_more: bool
 
 
-# reader gate (superleader until S-83 steps 6, 7)
-@reader_router.get(
-    "/handoffs",
-    response_model=HandoffPage,
-    responses={403: FORBIDDEN, 404: _NOT_FOUND},
-)
+@agent_router.get("/handoffs", response_model=HandoffPage, responses={404: _NOT_FOUND})
 async def list_handoffs(
+    request: Request,
     pool: Pool,
     session: Annotated[str | None, Query(max_length=128)] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
@@ -63,20 +60,19 @@ async def list_handoffs(
                     raise ApiError(404, "not_found", "no session has that id or slug") from None
                 session_id = row.id
         rows, more = await handoffs.list_handoffs(
-            conn, session_id=session_id, limit=limit, before_id=before_id
+            conn,
+            session_id=session_id,
+            limit=limit,
+            before_id=before_id,
+            projects=caller_projects(request),
         )
     return HandoffPage(handoffs=[HandoffItem(**r) for r in rows], has_more=more)
 
 
-# reader gate (superleader until S-83 steps 6, 7)
-@reader_router.get(
-    "/handoffs/{id}",
-    response_model=HandoffDetail,
-    responses={403: FORBIDDEN, 404: _NOT_FOUND},
-)
-async def get_handoff(pool: Pool, id: int) -> HandoffDetail:
+@agent_router.get("/handoffs/{id}", response_model=HandoffDetail, responses={404: _NOT_FOUND})
+async def get_handoff(request: Request, pool: Pool, id: int) -> HandoffDetail:
     async with pool.connection() as conn:
-        row = await handoffs.get_handoff(conn, id)
+        row = await handoffs.get_handoff(conn, id, caller_projects(request))
     if row is None:
         raise ApiError(404, "handoff_not_found", "no handoff has that id")
     return HandoffDetail(**row)

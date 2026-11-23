@@ -76,10 +76,3 @@ async def test_handoffs_list_and_get(pool, dsn):
 async def test_handoffs_unknown_ids_are_404(pool, dsn):
     assert_error(await get(pool, dsn, f"{H}/999999"), 404, "handoff_not_found")
     assert_error(await get(pool, dsn, H, session="no-such-slug"), 404, "not_found")
-
-
-async def test_handoffs_forbidden_for_plain_session(pool, dsn):
-    _, ids = await seed(pool, "ho-plain", ["secretish"])
-    for path in (H, f"{H}/{ids[0]}"):
-        r = await get(pool, dsn, path, superleader=False)
-        assert_error(r, 403, "not_superleader")
