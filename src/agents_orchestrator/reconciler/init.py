@@ -102,7 +102,7 @@ def render_init_sh(slug: str, scripts: list[str]) -> str:
     lines = [
         f"# init scripts of session {slug}",
         "# run once at session start by agents-orchestrator; edits through the init scripts API"
-        " or the orchestrator_init_scripts_edit tool apply to the next session",
+        " or the orchestrator_init_scripts tool (action edit) apply to the next session",
     ]
     for n, script in enumerate(scripts, 1):
         lines += [f"# --- script {n} ---", script.rstrip("\n")]

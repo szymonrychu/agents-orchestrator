@@ -117,15 +117,8 @@ async def test_plugin_parity(pool, dsn):
     }
     transport = httpx.ASGITransport(app=app, client=(IP0, 4321))
     async with PluginHarness(OrchestratorPlugin, config=config, transport=transport) as h:
-        tools = {
-            t["name"].rsplit("_init", 1)[-1]: t
-            for t in await h.list_tools()
-            if "init_scripts" in t["name"]
-        }
-        got = await h.call("init_scripts_get")
-        edit = await h.call("init_scripts_edit", {"scripts": ["echo plugin"]})
-    assert ".agent-init/" in tools["_scripts_get"]["description"]
-    assert "next session" in tools["_scripts_edit"]["description"]
+        got = await h.call("init_scripts", {"action": "get"})
+        edit = await h.call("init_scripts", {"action": "edit", "scripts": ["echo plugin"]})
     assert not got.is_error, got.text
     assert got.structured["scripts"] == ["echo old"]
     assert got.structured["script_path"].endswith("/.agent-init/init.sh")

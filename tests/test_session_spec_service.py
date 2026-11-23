@@ -133,7 +133,7 @@ async def _refused(
     if code in ("human_only_field", "privileged_target"):
         assert exc.extra["proposable"] is True
     if code in ("human_only_field", "privileged_target"):
-        assert exc.message.endswith("; send it as a proposal: proposal_create")
+        assert exc.message.endswith("; send it as a proposal: proposal_put op create")
     assert await _row(pool, target.id) == before
     return exc
 

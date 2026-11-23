@@ -22,108 +22,44 @@ from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import SessionSpec
 from agents_orchestrator.tokens import SessionTokens
 
-HIVE_TOOLS = [
-    "me",
-    "activity",
-    "leadership_handover",
-    "handoff_submit",
-    "leadership_withdraw",
-    "lock_claim",
-    "lock_release",
-    "lock_list",
-    "lock_reassign",
-]
-SESSION_TOOLS = ["sessions_list"]
-INIT_SCRIPTS_TOOLS = ["init_scripts_get", "init_scripts_edit"]
-CHAT_TOOLS = [
-    "chat_rooms",
-    "chat_history", "chat_attachment_fetch", "chat_attachment_status",
-    "chat_notes_get", "chat_notes_update",
-]  # fmt: skip
-TASK_TOOLS = [
+# The section 4 matrix of S-83 (spec dreaming-in-hives), copied as literals so a code change cannot
+# pass by agreeing with itself: M member, L hive leader or solo session, S superleader leader pod.
+MEMBER = [
+    "me", "activity", "lock", "init_scripts", "sessions_list", "session_labels",
+    "session_events", "sessions_admin_list", "chat_history", "chat_notes",
     "task_create", "task_update", "task_list", "task_get", "task_comment",
-    "decision_ask", "decision_withdraw", "approval_ask", "approval_list",
-    "todo_set", "todo_update", "session_labels_set",
+    "decision_ask", "decision_withdraw", "approval_ask", "approval_list", "todo", "project",
+    "spec_list", "spec_get", "spec_create", "spec_update", "spec_pull", "spec_push",
+    "spec_comment", "spec_comments", "spec_queue",
+    "plan_get", "plan_set", "plan_step_next", "plan_steps_push", "plan_export",
+    "plan_questions_ask", "volumes", "volume_save", "history_search", "history_get", "handoffs",
 ]  # fmt: skip
-PROJECT_TOOLS = ["project_list", "project_summary"]
-SPEC_TOOLS = [
-    "spec_list", "spec_get", "spec_create", "spec_update", "spec_versions", "spec_comment",
-    "spec_comments", "spec_comment_resolve", "spec_pull", "spec_push",
-    "spec_queue_list",
+LEADER_ONLY = [
+    "handoff_submit", "scale", "session_send", "session_get", "session_patch",
+    "session_discard", "chat_rooms", "chat_attachment", "project_chat_read", "proposal_put",
+    "proposal_get", "preset_get", "usage", "self_close",
 ]  # fmt: skip
-PLAN_TOOLS = [
-    "plan_get", "plan_set", "plan_steps", "plan_step_get", "plan_step_add", "plan_step_edit",
-    "plan_step_deps", "plan_steps_order", "plan_step_next", "plan_step_update", "plan_gate",
-    "spec_section", "plan_steps_push", "plan_export", "plan_questions_ask",
+SUPERLEADER_ONLY = [
+    "leadership_withdraw", "spec_delete", "volume_attach", "volume_create", "vault_list",
+    "vault_attach", "preset_create", "preset_patch", "preset_delete", "preset_copy",
+    "preset_manageable_request", "session_create", "session_restart", "session_message_cancel",
+    "session_commands", "backups", "backups_copy", "webhook", "schedule", "chat_connector",
 ]  # fmt: skip
-VOLUME_TOOLS = ["volumes_status", "volume_save"]
-TAIL_TOOLS = [
-    *SESSION_TOOLS,
-    *INIT_SCRIPTS_TOOLS,
-    *CHAT_TOOLS,
-    *TASK_TOOLS,
-    *PROJECT_TOOLS,
-    *SPEC_TOOLS,
-    *PLAN_TOOLS,
-    *on_start.PROJECT_CHAT_TOOLS,
-    *VOLUME_TOOLS,
-]
-# Allowed before the pinned plugin ships them; add a name here when the allow-list leads the
-# plugin pin and remove it when the pin offers the tool (project room T-117 O9; project grants
-# T-120). The backups, handoff and room notes admin tools wait for the plugins release of PR #61
-# (S-68 steps 12 to 14).
-PLUGIN_PENDING: set[str] = {
-    "backups_list",
-    "backup_versions",
-    "backup_manifest",
-    "backups_copy",
-    "backups_cleanup_get",
-    "backups_cleanup_preview",
-    "backups_cleanup_set",
-    "handoffs_list",
-    "handoff_get",
-    "chat_admin_notes_get",
-    "chat_admin_notes_update",
+MATRIX = {
+    "M": set(MEMBER),
+    "L": {*MEMBER, *LEADER_ONLY},
+    "S": {*MEMBER, *LEADER_ONLY, *SUPERLEADER_ONLY} - {"self_close"},
 }
-ALONE_TOOLS = ["me", "handoff_submit", *TAIL_TOOLS]
-PROPOSAL = [
-    "proposal_create",
-    "proposal_revise",
-    "proposals_list",
-    "proposal_get",
-    "proposal_withdraw",
-]
-EDIT = ["session_get", "session_patch", *PROPOSAL]  # SESSION_EDIT_TOOLS, before CLOSE
-CLOSE = ["self_close"]  # offered last to every session without session_messaging
-ADMIN_TOOLS = [
-    "presets_list", "preset_get", "preset_create", "preset_replace", "preset_patch",
-    "preset_delete", "preset_copy", "session_get", "session_patch", "session_create",
-    "session_discard", "session_restart", "leadership_withdraw",
-    "agent_restart", "command_get", "webhooks_list", "webhook_get_meta", "webhook_create",
-    "webhook_update", "webhook_clone", "webhook_rotate", "webhook_delete",
-    "webhook_filters_set", "webhook_events", "webhook_event", "webhook_template_preview",
-    "schedules_list", "schedule_get", "schedule_create", "schedule_update", "schedule_delete",
-    "schedule_run", "schedule_runs", "schedule_runs_all", "schedule_run_get",
-    "schedule_preview", "chat_admin_rooms", "chat_room_settings", "chat_rules",
-    "chat_rule_add", "chat_rule_delete",
-    "chat_admin_room", "chat_admin_history", "chat_users", "chat_room_allow", "chat_open",
-    "chat_open_status",
-    "chat_open_confirm", "vault_list", "vault_attach", "vault_detach",
-    "history_search", "history_get",
-    "history_records", "usage_get", "project_create",
-    "session_projects_grant", "session_projects_revoke", "preset_projects_grant",
-    "preset_projects_revoke", "preset_manageable_request",
-    "sessions_admin_list", "session_activity", "session_events", "session_messages",
-    "session_locks", "session_commands", "meta_get", "backups_list", "backup_versions",
-    "backup_manifest", "backups_copy", "backups_cleanup_get", "backups_cleanup_preview",
-    "usage_history", "usage_sessions",
-    "session_labels_update", "session_scale", "session_lock_reassign", "session_message_cancel",
-    "project_update", "backups_cleanup_set", "spec_delete", "spec_suggestion_dismiss",
-    "spec_queue_move", "handoffs_list", "handoff_get", "chat_admin_notes_get",
-    "chat_admin_notes_update",
-    "volumes_list", "volume_get", "volume_attach", "volume_detach", "volume_create",
-    *PROPOSAL,
+MINDMAP = [
+    "mindmap_map", "mindmap_node", "mindmap_edge", "mindmap_direction", "mindmap_search",
+    "mindmap_traverse", "mindmap_link", "mindmap_task_nodes", "mindmap_note_put",
+    "mindmap_growth_area_update",
 ]  # fmt: skip
+# Listed before the pinned plugin ships them; add a name when the role lists lead the plugin pin
+# and remove it when the pin offers the tool. Empty at a release that ships every listed tool.
+PLUGIN_PENDING: set[str] = set()
+SUPERLEADER = {"replicas": 2, "max_replicas": 3, "session_messaging": True}
+
 SECRET = "s3cr3t-token-value"
 PLUGINS_REPO = "https://github.com/szymonrychu/any-mcp-tatara-plugins"
 PLUGINS_REF = Settings.model_fields["any_mcp_plugins_ref"].default
@@ -154,52 +90,73 @@ def entries(spec: SessionSpec, settings: Settings | None = None) -> dict:
     return {p["name"]: p for p in cfg.get("plugins", [])}
 
 
-def test_history_tools_are_read_and_search_only():
-    """The superleader reads and searches stored sessions; no tool deletes one (user decision)."""
-    history = [t for t in on_start.ADMIN_TOOLS if t.startswith("history_")]
-    assert history == ["history_search", "history_get", "history_records"]
-    assert not [t for t in on_start.ADMIN_TOOLS if "history" in t and "delete" in t]
-    assert on_start.ADMIN_TOOLS == ADMIN_TOOLS
-
-
-@pytest.mark.parametrize("messaging", [None, False, True])
-@pytest.mark.parametrize("static", [False, True])
-def test_alone_session_tools_entry(messaging, static):
-    """D11, D13: an alone session gets the session, init-scripts and chat tools; the admin tools
-    only with session_messaging."""
-    spec = SessionSpec(replicas=1, static=static, session_messaging=messaging)
-    expected = [*ALONE_TOOLS, *ADMIN_TOOLS] if messaging else [*ALONE_TOOLS, *EDIT, *CLOSE]
-    assert on_start.orchestrator_allow(spec) == expected
-    entry = entries(spec)["orchestrator"]
-    assert entry["source"] == RESERVED_SOURCE and "plugin" not in entry
-    assert entry["allow"] == expected
-    assert entry["config"]["hive"] is False
-    assert entry["config"]["max_replicas"] == 1
-    cfg = written_config(on_start.render_on_start(spec, make_settings(), "alpha"))
-    config = AnyMcpConfig.model_validate(cfg)
-    plugin = next(p for p in config.plugins if p.name == "orchestrator")
-    OrchestratorPlugin.Config.model_validate(plugin.config)
-
-
-@pytest.mark.parametrize("messaging", [None, False, True])
 @pytest.mark.parametrize(
-    "spec_fields,hive_allow",
+    "role,fields,leader",
     [
-        ({"replicas": 2, "static": True}, HIVE_TOOLS),
-        ({"replicas": 2}, [*HIVE_TOOLS, "scale"]),
-        ({"replicas": 1, "max_replicas": 3}, [*HIVE_TOOLS, "scale"]),
+        ("M", {"replicas": 2}, False),
+        ("M", SUPERLEADER, False),
+        ("L", {"replicas": 2}, True),
+        ("L", {"replicas": 1}, True),
+        ("S", SUPERLEADER, True),
+        ("S", {"replicas": 1, "session_messaging": True}, True),
     ],
+    ids=["hive-member", "superleader-member", "hive-leader", "solo", "superleader", "solo-sl"],
 )
-def test_hive_session_tools(messaging, spec_fields, hive_allow):
-    """D11, D13: hive tools, scale when scalable, then the session, init-scripts and chat tools,
-    then the admin tools only with session_messaging."""
-    spec = SessionSpec(session_messaging=messaging, **spec_fields)
-    allow = on_start.orchestrator_allow(spec)
-    # a superleader hive lists leadership_withdraw once, among its hive tools
-    admin = [t for t in ADMIN_TOOLS if t != "leadership_withdraw"]
-    assert allow == [*hive_allow, *TAIL_TOOLS, *(admin if messaging else [*EDIT, *CLOSE])]
-    assert len(allow) == len(set(allow))
-    assert entries(spec)["orchestrator"]["allow"] == allow
+def test_role_lists_match_matrix(role, fields, leader):
+    """Each pod role renders exactly its section 4 column; a solo session is L, a solo
+    superleader S; `scale` only where the session can scale."""
+    config = entries(SessionSpec(**fields))["orchestrator"]["config"]
+    listed = config["leader_tools"] if leader else config["member_tools"]
+    expected = set(MATRIX[role])
+    if role == "L" and not SessionSpec(**fields).scalable:
+        expected.discard("scale")
+    assert set(listed) == expected
+    assert len(listed) == len(set(listed))
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [{"replicas": 1}, {"replicas": 2}, {"replicas": 2, "static": True}, SUPERLEADER],
+    ids=["solo", "hive", "static-hive", "superleader"],
+)
+@pytest.mark.parametrize("mindmap", [False, True])
+def test_allow_is_union_and_config_carries_lists(fields, mindmap):
+    """The any-mcp allow is the union of both rendered lists, and the config carries both keys
+    (a role with no key would list every tool); mindmap tools join every list only when the
+    mindmap upstream is configured. The config validates against the pinned plugin."""
+    over = {"mindmap_url": "http://mm:8082", "mindmap_token": "t"} if mindmap else {}
+    entry = entries(SessionSpec(**fields), make_settings(**over))["orchestrator"]
+    member, leader = entry["config"]["member_tools"], entry["config"]["leader_tools"]
+    assert entry["allow"] == list(dict.fromkeys([*member, *leader]))
+    for listed in (member, leader):
+        assert (set(MINDMAP) <= set(listed)) is mindmap
+        assert bool(set(MINDMAP) & set(listed)) is mindmap
+    OrchestratorPlugin.Config.model_validate(entry["config"])
+
+
+def test_superleader_member_pod_gets_member_list():
+    """Decision 919: a member pod of a superleader session is not a superleader; its list is the
+    member list of any other hive, the admin tools only in the leader list."""
+    sl = entries(SessionSpec(**SUPERLEADER))["orchestrator"]["config"]
+    hive = entries(SessionSpec(replicas=2))["orchestrator"]["config"]
+    assert sl["member_tools"] == hive["member_tools"]
+    assert not set(SUPERLEADER_ONLY) & set(sl["member_tools"])
+    assert set(SUPERLEADER_ONLY) <= set(sl["leader_tools"])
+
+
+def test_plugins_ref_is_release():
+    """The plugin pin is the S-83 release (role lists, merged names) or later."""
+    major, minor, patch = (int(p) for p in PLUGINS_REF.removeprefix("v").split("."))
+    assert (major, minor, patch) >= (0, 62, 0)
+
+
+def test_role_lists_do_not_depend_on_creator():
+    """Who created the session does not change the rendered allow list."""
+    for fields in ({"replicas": 1}, {"replicas": 2}):
+        lists = {
+            s: rendered_allow(s, **fields) for s in (None, "agents-webhook", "agents-schedule")
+        }
+        assert len({tuple(v) for v in lists.values()}) == 1, lists
 
 
 def rendered_allow(created_by_service: str | None, **spec_fields) -> list[str]:
@@ -223,46 +180,15 @@ def rendered_allow(created_by_service: str | None, **spec_fields) -> list[str]:
     return next(p for p in plugins if p["name"] == "orchestrator")["allow"]
 
 
-def test_every_creator_gets_the_chat_tools():
-    """Who created the session does not change the allow list (an enabled flag is honoured)."""
-    for service in (None, "agents-webhook", "agents-schedule", "agents-matrix-connector"):
-        assert rendered_allow(service, replicas=1) == [*ALONE_TOOLS, *EDIT, *CLOSE], service
-        assert rendered_allow(service, replicas=2) == [
-            *HIVE_TOOLS,
-            "scale",
-            *TAIL_TOOLS,
-            *EDIT,
-            *CLOSE,
-        ], service
-
-
-def test_self_close_offered_to_alone_and_hive():
-    assert on_start.orchestrator_allow(SessionSpec())[-1] == "self_close"
-    assert on_start.orchestrator_allow(SessionSpec(replicas=2))[-1] == "self_close"
-
-
-def test_self_close_not_offered_to_superleaders():
-    for spec in (
-        SessionSpec(session_messaging=True),
-        SessionSpec(replicas=2, session_messaging=True),
-    ):
-        assert "self_close" not in on_start.orchestrator_allow(spec)
-
-
-def test_static_hive_has_no_scale_tool():
-    spec = SessionSpec(replicas=2, static=True)
-    assert on_start.orchestrator_allow(spec) == [*HIVE_TOOLS, *TAIL_TOOLS, *EDIT, *CLOSE]
-
-
 def test_hive_entry_and_allow():
     spec = SessionSpec(replicas=2, max_replicas=4, auto_compact_pct=70)
-    assert on_start.orchestrator_allow(spec) == [*HIVE_TOOLS, "scale", *TAIL_TOOLS, *EDIT, *CLOSE]
     entry = entries(spec)["orchestrator"]
+    member, leader = MEMBER, [*MEMBER, *LEADER_ONLY]
     assert entry == {
         "name": "orchestrator",
         "source": RESERVED_SOURCE,
         "namespace": "orchestrator",
-        "allow": [*HIVE_TOOLS, "scale", *TAIL_TOOLS, *EDIT, *CLOSE],
+        "allow": leader,
         "config": {
             "base_url": "${ORCH_AGENT_URL}",
             "token": "${ORCH_AGENT_TOKEN}",
@@ -273,6 +199,8 @@ def test_hive_entry_and_allow():
             "static": False,
             "hive": True,
             "auto_compact_pct": 70,
+            "member_tools": member,
+            "leader_tools": leader,
         },
     }
     cfg = written_config(on_start.render_on_start(spec, make_settings(), "alpha"))
@@ -400,36 +328,32 @@ def test_any_mcp_sources_rendered():
     assert cfg == {"plugins": [{"name": "tools", "source": sources[0]}]}
 
 
-async def test_allowed_tools_exist_in_plugin():
-    """Every tool name rendered or named to agents is offered by the pinned plugin."""
+async def _offered(config: dict) -> set[str]:
     from any_mcp.testing import PluginHarness
 
+    config = {**config, "base_url": "http://orch:8080", "token": "t", "session": "1", "agent": "a0"}
+    # without role list keys the plugin lists every tool it ships
+    config = {k: v for k, v in config.items() if k not in ("member_tools", "leader_tools")}
+    async with PluginHarness(OrchestratorPlugin, config=config) as h:
+        # the harness prefixes the class name; the rendered namespace is "orchestrator"
+        return {t["name"].removeprefix("orchestratorplugin_") for t in await h.list_tools()}
+
+
+async def test_released_plugin_offers_every_listed_tool():
+    """Every tool of every role list, and every tool name the orchestrator writes for agents, is
+    offered by the pinned plugin; nothing is pending at a release."""
     from agents_orchestrator.reconciler.init import render_init_sh
 
-    specs = (
-        SessionSpec(replicas=1),
-        SessionSpec(replicas=2, static=True),
-        SessionSpec(replicas=2, max_replicas=3),
-    )
-    offered: set[str] = set()
-    allowed: set[str] = set()
-    for spec in specs:
-        entry = entries(spec)["orchestrator"]
-        config = {
-            **entry["config"],
-            "base_url": "http://orch:8080",
-            "token": "t",
-            "session": "1",
-            "agent": "a0",
-        }
-        async with PluginHarness(OrchestratorPlugin, config=config) as h:
-            # the harness prefixes the class name; the rendered namespace is "orchestrator"
-            offered |= {t["name"].removeprefix("orchestratorplugin_") for t in await h.list_tools()}
-        allowed |= set(entry["allow"])
-    named = set(re.findall(r"orchestrator_[a-z_]+", render_init_sh("alpha", ["true"])))
-    assert named == {"orchestrator_init_scripts_edit"}
-    assert set(CHAT_TOOLS) <= allowed
-    assert allowed | {n.removeprefix("orchestrator_") for n in named} <= offered | PLUGIN_PENDING
+    assert not PLUGIN_PENDING
+    settings = make_settings(mindmap_url="http://mm:8082", mindmap_token="t")
+    listed: set[str] = set()
+    for fields in ({"replicas": 1}, {"replicas": 2}, SUPERLEADER):
+        entry = entries(SessionSpec(**fields), settings)["orchestrator"]
+        listed |= set(entry["allow"])
+    offered = await _offered(entry["config"])
+    named = set(re.findall(r"orchestrator_([a-z_]+)", render_init_sh("alpha", ["true"])))
+    assert named == {"init_scripts"}
+    assert listed | named <= offered | PLUGIN_PENDING
 
 
 def _fake_tools(tmp_path: Path) -> tuple[Path, Path]:
@@ -549,250 +473,24 @@ def test_config_write_failure_still_fails(tmp_path):
     assert _run_script(tmp_path).returncode != 0
 
 
-def test_golden_allowlist_superleader_leader_and_service_session():
-    """Golden rendered allowlists: the admin tools exactly when session_messaging
-    is on, whoever created the session; a plain leader never gets them."""
-    hive = [*HIVE_TOOLS, "scale", *TAIL_TOOLS]
-    admin = [t for t in ADMIN_TOOLS if t != "leadership_withdraw"]  # listed once, as a hive tool
-    assert rendered_allow(None, replicas=2, session_messaging=True) == [*hive, *admin]
-    assert rendered_allow(None, replicas=2) == [*hive, *EDIT, *CLOSE]
-    assert rendered_allow(None, replicas=2, session_messaging=False) == [*hive, *EDIT, *CLOSE]
-    assert rendered_allow("agents-webhook", replicas=2, session_messaging=True) == [
-        *hive,
-        *admin,
-    ]
-    assert rendered_allow("agents-webhook", replicas=2) == [*hive, *EDIT, *CLOSE]
-
-
-def test_every_session_may_read_and_patch_its_own_spec():
-    """session_get, session_patch and the five proposal tools (SESSION_EDIT_TOOLS) reach every
-    session, right before self_close; a superleader has them among its admin tools, each listed
-    exactly once."""
-    assert on_start.SESSION_EDIT_TOOLS == EDIT
-    for spec in (
-        SessionSpec(replicas=1),
-        SessionSpec(replicas=2),
-        SessionSpec(replicas=2, static=True),
-        SessionSpec(replicas=1, max_replicas=3),
-        SessionSpec(replicas=2, session_messaging=False),
-    ):
-        allow = on_start.orchestrator_allow(spec)
-        assert allow[-len(EDIT) - 1 :] == [*EDIT, *CLOSE], spec
-        assert [t for t in allow if t in EDIT] == EDIT, spec
-    for spec in (
-        SessionSpec(replicas=1, session_messaging=True),
-        SessionSpec(replicas=2, session_messaging=True),
-    ):
-        allow = on_start.orchestrator_allow(spec)
-        assert "session_patch" in on_start.ADMIN_TOOLS
-        assert [t for t in allow if t in EDIT] == EDIT, spec
-        assert len(allow) == len(set(allow)), spec
-
-
-def test_alone_session_gets_me_and_task_tools():
-    allow = on_start.orchestrator_allow(SessionSpec(replicas=1))
-    assert allow[0] == "me"
-    assert set(TASK_TOOLS) <= set(allow)
-    assert "activity" not in allow and "lock_claim" not in allow
-
-
-def test_alone_session_allow_is_the_literal_e2e_list():
-    """The kind e2e `ALONE_SESSION_TOOLS` literal, mirrored: spec tools follow `project_list`,
-    pending ones included (the plugin pin only filters them at load, never from the allow list)."""
-    allow = on_start.orchestrator_allow(SessionSpec(replicas=1))
-    assert allow == [
-        "me", "handoff_submit", "sessions_list", "init_scripts_get",
-        "init_scripts_edit",
-        "chat_rooms",
-        "chat_history", "chat_attachment_fetch", "chat_attachment_status",
-        "chat_notes_get", "chat_notes_update",
-        "task_create", "task_update", "task_list", "task_get", "task_comment",
-        "decision_ask", "decision_withdraw", "approval_ask", "approval_list",
-        "todo_set", "todo_update", "session_labels_set",
-        "project_list", "project_summary",
-        "spec_list", "spec_get", "spec_create", "spec_update", "spec_versions", "spec_comment",
-        "spec_comments", "spec_comment_resolve", "spec_pull", "spec_push",
-        "spec_queue_list",
-        "plan_get", "plan_set", "plan_steps", "plan_step_get", "plan_step_add", "plan_step_edit",
-        "plan_step_deps", "plan_steps_order", "plan_step_next", "plan_step_update", "plan_gate",
-        "spec_section", "plan_steps_push", "plan_export", "plan_questions_ask",
-        "project_chat_read",
-        "volumes_status", "volume_save",
-        "session_get", "session_patch", "proposal_create", "proposal_revise", "proposals_list",
-        "proposal_get", "proposal_withdraw", "self_close",
-    ]  # fmt: skip
-
-
-def test_entry_backup_tools_are_no_longer_granted():
-    for spec in (SessionSpec(), SessionSpec(replicas=2)):
-        allow = on_start.orchestrator_allow(spec)
-        assert "backup_save" not in allow and "backup_status" not in allow
-        assert {"volumes_status", "volume_save"} <= set(allow)
-
-
-def test_hive_session_gets_task_tools_once():
-    allow = on_start.orchestrator_allow(SessionSpec(replicas=2))
-    assert len(allow) == len(set(allow))
-    assert allow.count("me") == 1
-    assert all(allow.count(t) == 1 for t in TASK_TOOLS)
-
-
-def test_trigger_session_gets_task_tools_and_chat():
-    """No trigger refusal (leader decision): a trigger-created session has the task tools."""
-    allow = rendered_allow("agents-webhook", replicas=1)
-    assert set(TASK_TOOLS) <= set(allow)
-    assert set(CHAT_TOOLS) <= set(allow)
-
-
-def test_session_labels_set_in_allow_list():
-    assert "session_labels_set" in on_start.orchestrator_allow(SessionSpec(replicas=1))
-    assert "session_labels_set" in on_start.orchestrator_allow(SessionSpec(replicas=2))
-
-
-def test_every_session_allowlist_has_proposal_tools_once():
-    """Q10 B: the five proposal tools are admin tools and session edit tools: a superleader and
-    every other session (its leader proposes for its own session) get each exactly once."""
-    assert [t for t in on_start.ADMIN_TOOLS if "proposal" in t] == PROPOSAL
-    assert [t for t in on_start.SESSION_EDIT_TOOLS if "proposal" in t] == PROPOSAL
-    for spec in (
-        SessionSpec(replicas=1, session_messaging=True),
-        SessionSpec(replicas=1),
-        SessionSpec(replicas=2),
-        SessionSpec(replicas=2, static=True),
-    ):
-        allow = entries(spec)["orchestrator"]["allow"]
-        assert [t for t in allow if t in PROPOSAL] == PROPOSAL, spec
-
-
-async def test_admin_tools_exist_in_plugin():
-    """Every ADMIN_TOOLS name, rendered for a superleader session, is offered by the pinned
-    plugin (the specs of test_allowed_tools_exist_in_plugin never enable session_messaging)."""
-    from any_mcp.testing import PluginHarness
-
-    offered: set[str] = set()
-    for spec in (
-        SessionSpec(replicas=1, session_messaging=True),
-        SessionSpec(replicas=2, max_replicas=3, session_messaging=True),
-    ):
-        entry = entries(spec)["orchestrator"]
-        assert set(ADMIN_TOOLS) <= set(entry["allow"])
-        config = {**entry["config"], "base_url": "http://orch:8080", "token": "t", "session": "1"}
-        async with PluginHarness(OrchestratorPlugin, config={**config, "agent": "a0"}) as h:
-            offered |= {t["name"].removeprefix("orchestratorplugin_") for t in await h.list_tools()}
-        missing = set(entry["allow"]) - offered - PLUGIN_PENDING
-        assert not missing, (spec, sorted(missing))
-    assert set(on_start.ADMIN_TOOLS) <= offered | PLUGIN_PENDING
-
-
-def test_withdraw_offered_to_hives_and_superleaders():
-    """A leader withdraws its own pending handover; a superleader any manageable session's."""
-    assert "leadership_withdraw" in on_start.orchestrator_allow(SessionSpec(replicas=2))
-    assert "leadership_withdraw" in on_start.orchestrator_allow(SessionSpec(session_messaging=True))
-    assert "leadership_withdraw" not in on_start.orchestrator_allow(SessionSpec())
-
-
-def test_volume_create_is_granted_only_to_superleaders():
-    assert "volume_create" in on_start.orchestrator_allow(SessionSpec(session_messaging=True))
-    assert "volume_create" not in on_start.orchestrator_allow(SessionSpec(replicas=1))
-
-
-def test_project_create_is_superleader_only():
-    assert "project_create" in on_start.ADMIN_TOOLS
-    assert "project_create" not in on_start.PROJECT_TOOLS
-
-
-@pytest.mark.parametrize(
-    "fields",
-    [{}, {"replicas": 2}, {"replicas": 2, "session_messaging": True}],
-    ids=["alone", "hive", "superleader"],
-)
-def test_project_chat_tools_in_every_session(fields):
-    allow = on_start.orchestrator_allow(SessionSpec(**fields))
-    assert allow.count("project_chat_read") == 1
-    assert "project_chat_send" not in allow and "session_send" not in allow
-
-
-# Copied from on_start.MINDMAP_TOOLS on purpose; the plugin's mindmap module
-# (any-mcp-tatara-plugins) registers the same 19 names with the orchestrator_ prefix.
-MINDMAP = [
-    "mindmap_map_list", "mindmap_map_get", "mindmap_map_create", "mindmap_map_update",
-    "mindmap_node_get", "mindmap_node_history", "mindmap_search", "mindmap_traverse",
-    "mindmap_node_create", "mindmap_node_update", "mindmap_note_put",
-    "mindmap_growth_area_update", "mindmap_edge_create", "mindmap_edge_delete", "mindmap_link",
-    "mindmap_task_nodes", "mindmap_direction_list", "mindmap_direction_create",
-    "mindmap_direction_update",
-]  # fmt: skip
-
-
-@pytest.mark.parametrize(
-    "spec", [SessionSpec(replicas=1), SessionSpec(replicas=2), SessionSpec(session_messaging=True)]
-)
-def test_allow_with_and_without_mindmap(spec):
-    assert on_start.MINDMAP_TOOLS == MINDMAP
-    without = on_start.orchestrator_allow(spec, mindmap=False)
-    assert not set(MINDMAP) & set(without)
-    assert without == on_start.orchestrator_allow(spec, mindmap=False)
-    with_ = on_start.orchestrator_allow(spec, mindmap=True)
-    assert [t for t in with_ if t not in MINDMAP] == without
-    at = with_.index("project_chat_read") + 1
-    assert with_[at : at + len(MINDMAP)] == MINDMAP
-    assert len(with_) == len(set(with_))
-
-
-def test_entry_allow_follows_mindmap_available():
-    spec = SessionSpec(replicas=1)
-    assert not set(MINDMAP) & set(entries(spec)["orchestrator"]["allow"])
-    configured = make_settings(mindmap_url="http://mm:8082", mindmap_token="t")
-    allow = entries(spec, configured)["orchestrator"]["allow"]
-    assert allow == on_start.orchestrator_allow(spec, mindmap=True)
-
-
 # ---------------------------------------- the subagent reads (S-68)
 
-# Routes of the tools the pinned plugin does not ship yet (any-mcp-tatara-plugins PR #61).
-PENDING_ROUTES = {
-    "backups_list": ("GET", "/agent/v1/admin/backups"),
-    "backup_versions": ("GET", "/agent/v1/admin/backups/{name}/versions"),
-    "backup_manifest": ("GET", "/agent/v1/admin/backups/{name}/versions/{version}/manifest"),
-    "handoffs_list": ("GET", "/agent/v1/admin/handoffs"),
-    "handoff_get": ("GET", "/agent/v1/admin/handoffs/{id}"),
-    "chat_admin_notes_get": ("GET", "/agent/v1/admin/chats/rooms/{room_id}/notes"),
-    "volumes_status": ("GET", "/agent/v1/volumes"),
-    "volumes_list": ("GET", "/agent/v1/admin/volumes"),
-    "volume_get": ("GET", "/agent/v1/admin/volumes/{volume_id}"),
-}
 
-
-@pytest.mark.parametrize("replicas", [1, 2])
-def test_regular_session_gets_no_history_or_backup_tools_and_self_close_last(replicas):
-    allow = on_start.orchestrator_allow(SessionSpec(replicas=replicas))
-    for tool in ("history_search", "backups_copy", "chat_admin_notes_update", "handoffs_list"):
-        assert tool not in allow, tool
-    assert allow[-1] == "self_close"
-
-
-async def _plugin_routes() -> dict[str, tuple[str, str]]:
+async def _plugin_methods() -> dict[str, set[str]]:
+    """Every HTTP method each plugin tool may call: every op route of a merged tool."""
     from any_mcp.testing import PluginHarness
+    from any_mcp_tatara_orchestrator import _MERGED
 
     config = {"base_url": "http://orch:8080", "token": "t", "session": "1", "agent": "a0"}
     async with PluginHarness(OrchestratorPlugin, config={**config, "slug": "s"}) as h:
         plugin = h._loaded[0].instance
-        return {s.name: (s.http.method, s.http.path) for s in await plugin.load_tools() if s.http}
+        tools = await plugin.load_tools()
+    merged = {m.name: {r.method for r in m.ops.values()} for m in _MERGED.values()}
+    return {s.name: merged.get(s.name) or ({s.http.method} if s.http else set()) for s in tools}
 
 
 async def test_read_only_tools_map_to_read_routes():
-    """Every tool of READ_ONLY_TOOLS calls a GET route only (the plugin's binding, or the route
-    of a tool the pin does not ship yet); none is a write tool."""
-    routes = {**await _plugin_routes(), **PENDING_ROUTES}
+    """Every tool of READ_ONLY_TOOLS calls GET routes only, every op of a merged tool included."""
+    methods = await _plugin_methods()
     for tool in sorted(on_start.READ_ONLY_TOOLS):
-        assert tool in routes, tool
-        method, path = routes[tool]
-        assert method == "GET", (tool, method, path)
-    writes = re.compile(
-        r"_(update|create|set|push|send|ask|claim|next|save|copy|delete|patch|replace|edit"
-        r"|react|close|withdraw|resolve|comment|put|link|order|deps|add|move)$"
-    )
-    assert not [t for t in on_start.READ_ONLY_TOOLS if writes.search(t)]
-    assert not {"backups_copy", "chat_admin_notes_update", "self_close"} & (
-        on_start.READ_ONLY_TOOLS
-    )
+        assert methods.get(tool) == {"GET"}, (tool, methods.get(tool))

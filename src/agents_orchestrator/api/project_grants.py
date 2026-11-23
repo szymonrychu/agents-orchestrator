@@ -3,7 +3,7 @@ grant routes (`project_grant_routes`) and the review that applies a grant (`prop
 
 A session belongs to its home `project` plus its `extra_projects`, with full membership access
 in each (user answer Q5): tasks and specs (`X-Orch-Projects`), messaging peers, the project
-room, `project_list`, init-scripts preset writes and `vault_list`. A preset's extra projects are
+room, the `project` tool, init-scripts preset writes and `vault_list`. A preset's extra projects are
 copied to every session created from it. Vault pins keep one `project:` label, the preset's home
 project (secrets model invariant 7).
 """
@@ -80,7 +80,7 @@ async def check_set(conn, home: str, extras: Sequence[str], wanted: Sequence[str
 def granted_text(project: str, by: str) -> str:
     return (
         f"Your session now also belongs to project {project} ({by}): its tasks, specs, project "
-        "room and sessions are open to you as to its own members. See me and project_list."
+        "room and sessions are open to you as to its own members. See me and project."
     )
 
 

@@ -153,7 +153,10 @@ async def ensure_decision(
     key = row["task_key"]
     ask = {
         "question": _question(row),
-        "context": f"Requested by session {session.slug} with chat_open; room request {row['id']}.",
+        "context": (
+            f"Requested by session {session.slug} with chat_connector open;"
+            f" room request {row['id']}."
+        ),
         "options": [{"label": YES, "recommended": True}, {"label": NO}],
         "client_key": decision_key(row["id"], settings.connector_token),
     }

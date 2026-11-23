@@ -38,7 +38,7 @@ def test_guard_not_privileged_still_refuses_grant_turned_on():
     assert caught.value.status == 403
     assert caught.value.code == "human_only_field"
     assert caught.value.extra == {"fields": ["kube_cluster_access"], "proposable": True}
-    assert caught.value.message.endswith("; send it as a proposal: proposal_create")
+    assert caught.value.message.endswith("; send it as a proposal: proposal_put op create")
     assert request.state.preset_fields == ["kube_cluster_access"]
 
 
@@ -49,7 +49,7 @@ def test_guard_privileged_refuses_a_prompt_change_on_a_privileged_base():
         guard_agent_edit(base, {**base, "start_prompt": "b"}, request, privileged=True)
     assert caught.value.code == "privileged_target"
     assert caught.value.extra == {"fields": ["start_prompt"], "proposable": True}
-    assert caught.value.message.endswith("; send it as a proposal: proposal_create")
+    assert caught.value.message.endswith("; send it as a proposal: proposal_put op create")
     assert request.state.preset_fields == ["start_prompt"]
 
 
