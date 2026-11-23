@@ -26,20 +26,27 @@ class Full:
         return self._body
 
 
+# Preset sub-writes that answer their full result on purpose (step 10 MEMORY: the vault attach
+# marks `attachment_privileged`, the volume attach answers a preset or a proposal).
+_FULL_ON_PURPOSE = re.compile(r"/vault/[^/]+|/volumes/[^/]+")
+
+
 async def expand(method: str, path: str, response: Any, get: Any, app: Any = None) -> Any:
     """`get(path)` is the same caller's GET (a session is read through it, which the admin audit
-    logs); a preset is read on the unaudited main port of `app`. The response is returned
-    unchanged unless it is an ack of a preset or session write."""
+    logs); a preset is read on the unaudited main port of `app`. A non-write, a refused write, a
+    204 and a write that answers in full on purpose come back unchanged; any other 2xx preset or
+    session write must answer a `WriteAck` whose object reads back, else the helper fails the
+    test instead of handing the ack on as if it were the view."""
     path = path.split("?")[0]
     found = _PATH.match(path)
     if method not in _WRITES or found is None or not 200 <= response.status_code < 300:
         return response
-    try:
-        body = response.json()
-    except ValueError:
+    if response.status_code == 204 or _FULL_ON_PURPOSE.fullmatch(found.group(4) or ""):
         return response
-    if not isinstance(body, dict) or set(body) != _ACK:
-        return response
+    body = response.json()
+    assert isinstance(body, dict) and set(body) == _ACK, (
+        f"{method} {path} answered {response.status_code} without a WriteAck: {body}"
+    )
     if found.group(2) == "presets" and app is not None:
         from test_api_sessions import client_for
 
@@ -47,4 +54,5 @@ async def expand(method: str, path: str, response: Any, get: Any, app: Any = Non
             read = await main.get(f"/api/v1/presets/{body['id']}")
     else:
         read = await get(f"{found.group(1)}/{found.group(2)}/{body['id']}")
-    return Full(response, read.json()) if read.status_code == 200 else response
+    assert read.status_code == 200, f"the ack of {method} {path} does not read back: {read.text}"
+    return Full(response, read.json())

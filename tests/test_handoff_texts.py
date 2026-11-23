@@ -133,36 +133,46 @@ def test_return_text_resumes_with_next_first_and_renders_fields():
     assert "context was kept" in kept and "Resume now" not in kept
 
 
-RETRO = (
-    "Retro: record what you learned (room notes, mind map, skills; volume_save for changed"
-    " skills) before you hand off or close."
-)
+RETRO = "record what you learned (room notes, mind map, skills; volume_save for changed skills)"
 
 
 @pytest.mark.parametrize(
-    "text",
+    ("text", "then"),
     [
-        lambda: inactivity.close_text(
-            quiet_seconds=60,
-            deadline=datetime(2026, 11, 2, tzinfo=UTC),
-            grace_seconds=30,
-            chat=False,
-            taskboard=False,
-            workdir_saved=False,
+        (
+            lambda: inactivity.close_text(
+                quiet_seconds=60,
+                deadline=datetime(2026, 11, 2, tzinfo=UTC),
+                grace_seconds=30,
+                chat=False,
+                taskboard=False,
+                workdir_saved=False,
+            ),
+            "orchestrator_self_close",
         ),
-        lambda: inactivity.autoclose_text(
-            after_seconds=3600,
-            deadline=datetime(2026, 11, 2, tzinfo=UTC),
-            grace_seconds=30,
-            chat=False,
-            taskboard=False,
-            workdir_saved=False,
-            can_self_close=True,
+        (
+            lambda: inactivity.autoclose_text(
+                after_seconds=3600,
+                deadline=datetime(2026, 11, 2, tzinfo=UTC),
+                grace_seconds=30,
+                chat=True,
+                taskboard=True,
+                workdir_saved=True,
+                can_self_close=True,
+            ),
+            "orchestrator_self_close",
         ),
-        lambda: t.checklist("work", 2, hive=False),
-        lambda: t.checklist("chat", 2, hive=False),
+        (lambda: t.checklist("work", 1, hive=False), t.SUBMIT_TOOL),
+        (lambda: t.checklist("work", 2, hive=False), t.SUBMIT_TOOL),
+        (lambda: t.checklist("chat", 1, hive=False), t.SUBMIT_TOOL),
+        (lambda: t.checklist("chat", 2, hive=False), t.SUBMIT_TOOL),
     ],
-    ids=["close", "autoclose", "work", "chat"],
+    ids=["close", "autoclose", "work1", "work2", "chat1", "chat2"],
 )
-def test_retro_step_in_texts(text):
-    assert RETRO in text()
+def test_retro_step_in_texts(text, then):
+    """Decision 940: the retro step is one step of each list, before the closing call, and the
+    joins render clean punctuation."""
+    rendered = text()
+    assert RETRO in rendered
+    assert rendered.index(RETRO) < rendered.index(then)
+    assert not any(bad in rendered for bad in ("..", ".,", ".;"))

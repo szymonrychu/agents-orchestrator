@@ -394,7 +394,17 @@ async def _upstream_json(request: Request, settings: Settings, service: str, pat
         raise not_found("object")
     if not 200 <= status < 300:
         raise ApiError(503, "upstream_unavailable", f"the {service} upstream answered {status}")
-    return json.loads(content)
+    return _upstream_body(content, service)
+
+
+def _upstream_body(content: bytes, service: str) -> Any:
+    """An upstream 2xx answer as JSON; 502 `upstream_shape` when it is not JSON."""
+    try:
+        return json.loads(content)
+    except ValueError:
+        raise ApiError(
+            502, "upstream_shape", f"the {service} upstream answer is not JSON"
+        ) from None
 
 
 def _scope_header(request: Request) -> dict[str, str]:
@@ -661,13 +671,15 @@ def room_map(request: Request) -> room_projects.RoomMap:
 async def _room_in_scope(request: Request, settings: Settings) -> None:
     """403 `project_forbidden` unless the path's room belongs to one of the caller's projects (a
     superleader passes without a lookup). A room the upstream does not list is refused alike,
-    so the answer does not tell which rooms exist."""
+    so the answer does not tell which rooms exist. A write reads the room's binding fresh."""
     projects = caller_projects(request)
     if projects is None:
         return
     room_id = request.path_params["room_id"]
     entry = await room_map(request).entry(
-        room_id, lambda: _upstream_json(_bare(request), settings, "connector", "/rooms")
+        room_id,
+        lambda: _upstream_json(_bare(request), settings, "connector", "/rooms"),
+        fresh=request.method != "GET",
     )
     if entry is not None:
         async with request.app.state.pool.connection() as conn:
@@ -682,7 +694,7 @@ async def _rooms_in_scope(request: Request, status: int, content: bytes) -> byte
     unchanged). The answer also refreshes the room map when it lists every room."""
     if not (200 <= status < 300 and content):
         return content
-    rooms = json.loads(content)
+    rooms = _upstream_body(content, "connector")
     entries = room_projects.entries_of(rooms)
     if not request.query_params:
         room_map(request).replace(entries)

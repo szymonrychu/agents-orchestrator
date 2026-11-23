@@ -51,12 +51,18 @@ _ALLOWED = re.compile(
     rf"/tasks(?:|/{_KEY}(?:|/comments|/todo|/todo/{_ID}|/deps|/decisions"
     rf"|/decisions/{_ID}/withdraw|/approvals))"
 )
-# Relayed writes that keep the full upstream body (plan ruling on 925/926: the answer is shaped
-# where the plugin shapes it): every task write (the plugin's views.py ACKS read key, url, comments,
-# todo; plan_local.py reads the decision id), the spec create and document PUT (specs_local.py
-# spec_push), the steps push (plan_local.py reads keys) and the claimed step (the work itself).
-_KEPT_FULL = re.compile(
-    r"/tasks(?:/.*)?|/specs|/specs/S-[0-9]+/docs/.+|/specs/S-[0-9]+/steps(?:|/next)"
+# The relayed writes answered with a `WriteAck` (decision 926): the single-object writes whose
+# upstream answer is the written object's view (taskboard SpecDetail, SpecComment, Plan,
+# StepsVersion; every mindmap write). Every other write keeps the full upstream body (fail
+# closed): the task writes, the spec create and document PUT, the steps push and the claimed
+# step are shaped by the plugin itself (plan ruling on 925/926), and a collection answer such as
+# the queue move must not be cut down to an ack.
+_SPEC = r"/specs/S-[0-9]+"
+_ACKED = re.compile(
+    rf"{_SPEC}|{_SPEC}/comments(?:|/[0-9]+/resolve|/[0-9]+/dismiss)|{_SPEC}/plan"
+    rf"|{_SPEC}/steps/order"
+    r"|/maps(?:|/[^/]+(?:|/nodes|/directions|/links))|/nodes/[^/]+(?:|/growth-areas|/links)"
+    r"|/growth-areas/[^/]+|/directions/[^/]+|/edges|/knowledge/notes"
 )
 _APPROVALS = re.compile(r"/approvals")
 _SUMMARY = re.compile(r"/projects/summary")
@@ -166,11 +172,7 @@ async def relay(
         raise ApiError(503, "taskboard_unavailable", "taskboard relay upstream is unavailable")
     if request.method in _WRITES:
         await forward_core.touch_on_success(pool, own.id, status)
-    if (
-        request.method in _WRITES
-        and 200 <= status < 300
-        and not _KEPT_FULL.fullmatch(upstream_path)
-    ):
+    if request.method in _WRITES and 200 <= status < 300 and _ACKED.fullmatch(upstream_path):
         acked = ack_core.json_ack(content, upstream_path)
         if acked is not None:
             content = acked

@@ -19292,6 +19292,7 @@
     },
     "/agent/v1/sessions": {
       "get": {
+        "description": "Every other active session for a superleader (`is_superleader`: a member pod of its\nsession reads its own projects, decision 919), else those of the caller's projects plus\nevery superleader session.",
         "operationId": "sessions_list_agent_v1_sessions_get",
         "parameters": [
           {

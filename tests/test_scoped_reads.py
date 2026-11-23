@@ -250,3 +250,19 @@ async def test_agent_scope_star_only_for_superleader_leader_pod(pool, dsn, role)
     projects = await get(app, seats[role], "/agent/v1/projects")
     slugs = [p["slug"] for p in projects.json()]
     assert (len(slugs) > 2) == (role == "S")
+
+
+@pytest.mark.parametrize(
+    ("role", "sees_out"), [("M", False), ("L", False), ("SM", False), ("S", True)]
+)
+async def test_sessions_list_scope_follows_the_leader_check(pool, dsn, role, sees_out):
+    """GET /agent/v1/sessions lists every project only for the superleader's leader; a member pod
+    of a superleader session sees its own projects, like M and L (decision 919)."""
+    seats = await callers(pool)
+    tg = await targets(pool)
+    app = create_app(make_settings(dsn), pool)
+    r = await get(app, seats[role], "/agent/v1/sessions")
+    assert r.status_code == 200, r.text
+    slugs = {p["slug"] for p in r.json()["sessions"]}
+    assert tg["in"].slug in slugs
+    assert (tg["out"].slug in slugs) is sees_out
