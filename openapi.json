@@ -8973,11 +8973,18 @@
         "type": "object"
       },
       "WriteAck": {
-        "description": "The short answer an agent-port write gets instead of the full view (decision 926): the\ntarget's id (a session by slug, a project by slug, a preset and a proposal by id), its new\nversion when it has one (proposal revision, session generation, relayed version) and its\nstatus when it has one. The web routes keep the full views.",
+        "description": "The short answer an agent-port write gets instead of the full view (decision 926): the\ntarget's id (a session by slug, a project by slug, a preset and a proposal by id), its new\nversion when it has one (proposal revision, session generation, relayed version) and its\nstatus when it has one. The id keeps its JSON type (a proposal or relayed numeric id is a\nnumber). The web routes keep the full views.",
         "properties": {
           "id": {
-            "title": "Id",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "title": "Id"
           },
           "status": {
             "anyOf": [

@@ -17,26 +17,16 @@ from agents_orchestrator.api.app import create_app
 
 A = ADMIN_PREFIX
 RELAY_CASES = [
-    ("tasks", "POST", "/agent/v1/tasks", 201, {"key": "T-1", "title": "x", "status": "open"}),
-    ("tasks", "PATCH", "/agent/v1/tasks/T-1", 200, {"key": "T-1", "status": "done", "x": 1}),
-    ("tasks", "POST", "/agent/v1/tasks/T-1/comments", 201, {"id": 9, "body": "hi"}),
     ("specs", "PATCH", "/agent/v1/specs/S-2", 200, {"key": "S-2", "version": 4, "status": "draft"}),
-    ("specs", "PUT", "/agent/v1/specs/S-2/docs/plan.md", 201, {"path": "plan.md", "version": 3}),
+    ("specs", "POST", "/agent/v1/specs/S-2/comments", 201, {"id": 7, "status": "open"}),
     ("specs", "PUT", "/agent/v1/specs/S-2/plan", 200, {"goal": "g", "version": 5}),
     ("mindmap", "POST", "/agent/v1/mindmap/maps", 201, {"key": "M-1", "title": "t", "version": 1}),
     ("mindmap", "PATCH", "/agent/v1/mindmap/nodes/N-2", 200, {"key": "N-2", "status": "open"}),
 ]  # fmt: skip
 RELAY_EXPECT = {
-    "POST /agent/v1/tasks": {"id": "T-1", "version": None, "status": "open"},
-    "PATCH /agent/v1/tasks/T-1": {"id": "T-1", "version": None, "status": "done"},
-    "POST /agent/v1/tasks/T-1/comments": {"id": "9", "version": None, "status": None},
     "PATCH /agent/v1/specs/S-2": {"id": "S-2", "version": 4, "status": "draft"},
-    "PUT /agent/v1/specs/S-2/docs/plan.md": {"id": "plan.md", "version": 3, "status": None},
-    "PUT /agent/v1/specs/S-2/plan": {
-        "id": "/specs/S-2/plan",
-        "version": 5,
-        "status": None,
-    },
+    "POST /agent/v1/specs/S-2/comments": {"id": 7, "version": None, "status": "open"},
+    "PUT /agent/v1/specs/S-2/plan": {"id": "/specs/S-2/plan", "version": 5, "status": None},
     "POST /agent/v1/mindmap/maps": {"id": "M-1", "version": 1, "status": None},
     "PATCH /agent/v1/mindmap/nodes/N-2": {"id": "N-2", "version": None, "status": "open"},
 }
@@ -51,15 +41,31 @@ async def test_agent_write_routes_return_ack(monkeypatch, relay, method, path, s
     assert r.json() == RELAY_EXPECT[f"{method} {path}"]
 
 
+TASK = {"key": "T-1", "version": 3, "url": "u", "status": "open", "comments": [{"id": 9}]}
+DECISION = {"id": 12, "task_key": "T-1", "status": "open", "url": "u"}
+
+
 @pytest.mark.parametrize(
     ("method", "path", "upstream"),
     [
+        ("POST", "/agent/v1/tasks", TASK),
+        ("PATCH", "/agent/v1/tasks/T-1", TASK),
+        ("POST", "/agent/v1/tasks/T-1/comments", TASK),
+        ("PUT", "/agent/v1/tasks/T-1/todo", {**TASK, "todo": [{"id": "a1", "text": "t"}]}),
+        ("PATCH", "/agent/v1/tasks/T-1/todo/a1", TASK),
+        ("PUT", "/agent/v1/tasks/T-1/deps", TASK),
+        ("POST", "/agent/v1/tasks/T-1/decisions", DECISION),
+        ("POST", "/agent/v1/tasks/T-1/decisions/12/withdraw", {**DECISION, "status": "withdrawn"}),
+        ("POST", "/agent/v1/tasks/T-1/approvals", {**DECISION, "expires_at": "t"}),
+        ("POST", "/agent/v1/specs", {"key": "S-3", "name": "n", "version": 1, "status": "draft"}),
+        ("PUT", "/agent/v1/specs/S-2/docs/plan.md", {"path": "plan.md", "version": 3, "body": "b"}),
+        ("PUT", "/agent/v1/specs/S-2/steps", {"keys": ["S-2.1", "S-2.2"], "steps_version": 2}),
         ("POST", "/agent/v1/specs/S-2/steps/next", {"key": "S-2.1", "title": "do", "status": "a"}),
-        ("PUT", "/agent/v1/specs/S-2/steps", {"keys": ["S-2.1", "S-2.2"]}),
-        ("GET", "/agent/v1/tasks/T-1", {"key": "T-1", "title": "x", "status": "open"}),
     ],
 )  # fmt: skip
-async def test_relay_answers_that_carry_the_work_stay_whole(monkeypatch, method, path, upstream):
+async def test_plugin_shaped_relay_writes_return_full_body(monkeypatch, method, path, upstream):
+    """The plugin shapes these answers itself (views.py ACKS, specs_local, plan_local), so the
+    relay keeps the upstream body whole, numeric ids included."""
     rig = make_rig(monkeypatch)
     rig.upstream.reply = httpx.Response(200, json=upstream)
     r = await rig.call(method, path, json={})

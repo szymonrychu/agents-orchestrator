@@ -409,10 +409,14 @@ full view (S-83, decision 926); the web routes under `/api/v1` keep the full vie
   and `PUT /agent/v1/session/labels`. Ids: a preset and a proposal by id, a session and a project by slug;
   `version` is the proposal revision or the session generation; `status` is the proposal status, the session
   `desired` or the project `active`/`archived`.
-- The task, spec (plan, steps, documents, comments) and mindmap relays: a 2xx answer to a POST, PUT or PATCH
-  becomes the ack read from the upstream body (`key`, `id`, `path`, `slug` or `project`; `version`,
-  `revision` or `steps_version`; `status`). `steps/next` (the claimed step) and a body that names nothing
-  (`{"keys": [...]}` of a steps push) stay whole.
+- The spec (spec patch, plan, step edits and order, comments, queue) and mindmap relays: a 2xx answer to a
+  POST, PUT or PATCH becomes the ack read from the upstream body (`key`, `id`, `path`, `slug` or `project`,
+  keeping its JSON type; `version`, `revision` or `steps_version`; `status`). A body that names nothing stays
+  whole.
+- Kept whole, because the orchestrator plugin shapes these answers itself: every task relay write
+  (`/agent/v1/tasks...`: create, update, comments, todo, deps, decisions, withdraw, approvals), the spec
+  create `POST /agent/v1/specs`, the document `PUT /agent/v1/specs/{key}/docs/{path}`, the steps push
+  `PUT /agent/v1/specs/{key}/steps` and the claimed step `POST /agent/v1/specs/{key}/steps/next`.
 
 ## Projects
 

@@ -152,7 +152,7 @@ async def test_every_proposal_route_hides_what_the_caller_may_not_see(
     async with client_for(app, who.leader_ip) as http:
         r = await http.post("/agent/v1/admin/proposals", json=create, headers=headers(who.id))
     assert r.status_code == 201, r.text
-    proposal_id = int(r.json()["id"])
+    proposal_id = r.json()["id"]
     if hidden_by == "unmanageable_target":
         async with main_client(app) as main:
             r = await main.put(

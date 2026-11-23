@@ -21,7 +21,7 @@ def session_ack(view: schemas.SessionView) -> schemas.WriteAck:
 
 
 def proposal_ack(view: schemas.ProposalView) -> schemas.WriteAck:
-    return schemas.WriteAck(id=str(view.id), version=view.revision, status=view.status)
+    return schemas.WriteAck(id=view.id, version=view.revision, status=view.status)
 
 
 def project_ack(view: schemas.ProjectView) -> schemas.WriteAck:
@@ -41,7 +41,8 @@ def json_ack(content: bytes, fallback_id: str) -> bytes | None:
 
     A body that names no object, no version and no status (a list, `{"keys": [...]}`) is kept as
     it is: the agent needs what it carries. `fallback_id` (the request path) names the target when
-    the body has no id field, as a plan or a step order has none."""
+    the body has no id field, as a plan or a step order has none. The id keeps its upstream JSON
+    type (a number stays a number)."""
     try:
         payload = json.loads(content)
     except ValueError:
@@ -55,6 +56,6 @@ def json_ack(content: bytes, fallback_id: str) -> bytes | None:
     if named is None and version is None and status is None:
         return None
     ack = schemas.WriteAck(
-        id=str(named) if named is not None else fallback_id, version=version, status=status
+        id=fallback_id if named is None else named, version=version, status=status
     )
     return ack.model_dump_json().encode()

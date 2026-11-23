@@ -205,7 +205,7 @@ async def test_replay_answers_200_with_the_first_proposal(app, pool, kube, boss,
     first = await filed(app, boss, client_key="k1")
     r = await agent(app, boss, "POST", P, json=body(client_key="k1"))
     assert r.status_code == 200, r.text
-    assert r.json()["id"] == str(first["id"])
+    assert r.json()["id"] == first["id"]
     assert [(a["status"], a["secrets"]) for a in await audits(pool, boss.id)] == [
         (201, []),
         (200, []),
@@ -681,7 +681,7 @@ async def test_regular_leader_reads_revises_and_withdraws_only_its_own(
     await move_preset(pool, preset.id)
     mine = (await agent(app, lead, "POST", P, json=own(lead))).json()
     theirs = await filed(app, boss)
-    assert [str(v["id"]) for v in (await agent(app, lead, "GET", P)).json()] == [mine["id"]]
+    assert [v["id"] for v in (await agent(app, lead, "GET", P)).json()] == [mine["id"]]
     r = await agent(app, lead, "GET", f"{P}/{mine['id']}")
     assert r.status_code == 200 and r.json()["proposer_superleader"] is False
     unknown = await agent(app, lead, "GET", f"{P}/999999")
@@ -738,7 +738,7 @@ async def test_new_leader_after_a_handover_sees_the_session_proposals(app, pool,
     async with client_for(app, lead.member_ip) as http:
         listed = await http.get(P, headers=headers(lead.id))
         got = await http.get(f"{P}/{view['id']}", headers=headers(lead.id))
-    assert [str(v["id"]) for v in listed.json()] == [view["id"]]
+    assert [v["id"] for v in listed.json()] == [view["id"]]
     assert got.status_code == 200 and got.json()["proposer_slug"] == lead.slug
     old = await agent(app, lead, "GET", P)
     assert_error(old, 403, "not_leader")

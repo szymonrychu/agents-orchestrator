@@ -51,8 +51,13 @@ _ALLOWED = re.compile(
     rf"/tasks(?:|/{_KEY}(?:|/comments|/todo|/todo/{_ID}|/deps|/decisions"
     rf"|/decisions/{_ID}/withdraw|/approvals))"
 )
-# the one relayed write whose answer is the work itself (the claimed step), never acked
-_FULL_ANSWER = re.compile(r"/specs/S-[0-9]+/steps/next")
+# Relayed writes that keep the full upstream body (plan ruling on 925/926: the answer is shaped
+# where the plugin shapes it): every task write (the plugin's views.py ACKS read key, url, comments,
+# todo; plan_local.py reads the decision id), the spec create and document PUT (specs_local.py
+# spec_push), the steps push (plan_local.py reads keys) and the claimed step (the work itself).
+_KEPT_FULL = re.compile(
+    r"/tasks(?:/.*)?|/specs|/specs/S-[0-9]+/docs/.+|/specs/S-[0-9]+/steps(?:|/next)"
+)
 _APPROVALS = re.compile(r"/approvals")
 _SUMMARY = re.compile(r"/projects/summary")
 
@@ -164,7 +169,7 @@ async def relay(
     if (
         request.method in _WRITES
         and 200 <= status < 300
-        and not _FULL_ANSWER.fullmatch(upstream_path)
+        and not _KEPT_FULL.fullmatch(upstream_path)
     ):
         acked = ack_core.json_ack(content, upstream_path)
         if acked is not None:

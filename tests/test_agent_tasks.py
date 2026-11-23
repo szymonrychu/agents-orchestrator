@@ -354,7 +354,7 @@ async def test_task_touch_failure_does_not_fail_the_relay(monkeypatch, caplog):
     monkeypatch.setattr(sessions_repo, "touch_update", broken)
     rig.upstream.reply = httpx.Response(201, json={"key": "T-1"})
     r = await rig.call("POST", "/agent/v1/tasks", json={"title": "x"})
-    assert r.status_code == 201 and r.json() == {"id": "T-1", "version": None, "status": None}
+    assert r.status_code == 201 and r.json() == {"key": "T-1"}
     [record] = [r for r in caplog.records if r.name == "agents_orchestrator.api.forward"]
     assert record.levelno == logging.ERROR and record.exc_info is not None
     assert "could not stamp last_update_at" in record.getMessage()

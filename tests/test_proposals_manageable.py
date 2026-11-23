@@ -117,7 +117,7 @@ async def test_request_files_a_proposal_and_replays(app, boss, preset):
     }
     again = await _request(app, boss, str(preset.id), client_key="k1")
     assert again.status_code == 200, again.text
-    assert again.json()["id"] == str(proposal["id"])
+    assert again.json()["id"] == proposal["id"]
 
 
 async def test_request_refusals(pool, app, boss, preset):
