@@ -1166,38 +1166,48 @@ def test_render_pressure_only_for_default_image():
     assert "pressure" not in _guard_cfg(image="harbor.example/containers/ccw:0.14.0")
 
 
-def test_subagent_allowed_rendered_for_every_session(tmp_path, monkeypatch):
-    """User decision m1223: every session renders its own read tools (READ_ONLY_TOOLS within its
-    allow list) as `claude.subagent_allowed_tools`, never a write tool; the wrapper loads it."""
+# The section 4 role column a pod starts in: a hive pod starts as a member, a solo pod leads.
+SUBAGENT_CASES = {
+    "solo": ({"replicas": 1}, {"session_get", "chat_rooms", "preset_get", "usage"}, {"backups"}),
+    "hive": ({"replicas": 2}, {"history_search", "handoffs"}, {"session_get", "chat_rooms"}),
+    "superleader": ({"replicas": 1, "session_messaging": True}, {"backups", "session_get"}, set()),
+    "superleader-hive": (
+        {"replicas": 2, "session_messaging": True},
+        {"history_get"},
+        {"backups", "session_get"},
+    ),
+}
+
+
+@pytest.mark.parametrize("name", SUBAGENT_CASES)
+def test_subagent_list_is_read_only_intersect_role(name, tmp_path, monkeypatch):
+    """User decision m1223, S-83 5.1: `claude.subagent_allowed_tools` is READ_ONLY_TOOLS within
+    the pod's role list at pod start, never a write tool; the wrapper loads it."""
     prefix = "mcp__any-mcp__orchestrator_"
-    seen = {}
-    for name, spec in {
-        "alone": {"replicas": 1},
-        "hive": {"replicas": 2},
-        "superleader": {"replicas": 1, "session_messaging": True},
+    fields, present, absent = SUBAGENT_CASES[name]
+    session = make_session(**fields)
+    settings = make_settings(agent_api_url=AGENT_URL)
+    objs = render.render_session(session, settings, TOKENS)
+    cfg = config_of(objs)
+    tools = {t.removeprefix(prefix) for t in cfg["claude"]["subagent_allowed_tools"]}
+    assert tools <= on_start.READ_ONLY_TOOLS
+    assert present <= tools and not absent & tools, sorted(tools)
+    assert "task_list" in tools and "task_create" not in tools
+    assert cfg["claude"]["main_agent_only_tools"] == [prefix + "*"]
+    for key, value in {
+        "CCW_AUTH_TOKEN": TOKENS.auth,
+        "CLAUDE_CODE_OAUTH_TOKEN": "oauth",
+        "POD_NAME": "agent-alpha-0",
+        "ORCH_AGENT_URL": AGENT_URL,
+        "ORCH_AGENT_TOKEN": "agent-token",
+        "ORCH_SESSION_ID": "session-id",
     }.items():
-        session = make_session(**spec)
-        settings = make_settings(agent_api_url=AGENT_URL)
-        cfg = config_of(render.render_session(session, settings, TOKENS))
-        tools = cfg["claude"]["subagent_allowed_tools"]
-        allow = on_start.orchestrator_allow(session.spec, mindmap=settings.mindmap_available)
-        assert tools == sorted(prefix + t for t in on_start.READ_ONLY_TOOLS & set(allow)), name
-        assert all(t.removeprefix(prefix) in on_start.READ_ONLY_TOOLS for t in tools), name
-        assert prefix + "task_list" in tools and prefix + "task_create" not in tools, name
-        assert cfg["claude"]["main_agent_only_tools"] == [prefix + "*"]
-        seen[name] = {t.removeprefix(prefix) for t in tools}
-    assert "history_search" not in seen["alone"] | seen["hive"]
-    assert "history_search" in seen["superleader"]
-    monkeypatch.setenv("CCW_AUTH_TOKEN", TOKENS.auth)
-    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth")
-    monkeypatch.setenv("POD_NAME", "agent-alpha-0")
-    monkeypatch.setenv("ORCH_AGENT_URL", AGENT_URL)
-    monkeypatch.setenv("ORCH_AGENT_TOKEN", "agent-token")
-    monkeypatch.setenv("ORCH_SESSION_ID", "session-id")
-    objs = _render(make_session(replicas=1, session_messaging=True))
+        monkeypatch.setenv(key, value)
     path = tmp_path / "config.yaml"
     path.write_text(by_kind(objs)["ConfigMap"]["data"]["config.yaml"])
-    assert prefix + "history_get" in load_config(path).claude.subagent_allowed_tools
+    assert sorted(load_config(path).claude.subagent_allowed_tools) == sorted(
+        prefix + t for t in tools
+    )
 
 
 def test_subagent_allowed_absent_without_plugin_or_on_another_image():

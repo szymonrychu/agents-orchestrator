@@ -19,7 +19,7 @@ from agents_orchestrator.preset_policy import (
 )
 from agents_orchestrator.spec import SessionSpec
 
-_PROPOSE = "; send it as a proposal: proposal_create"
+_PROPOSE = "; send it as a proposal: proposal_put op create"
 
 
 def human_only_refused(paths: list[str]) -> ApiError:

@@ -422,7 +422,7 @@ async def test_render_init_job(pool, dsn, tmp_path):
     init_sh = cmd[4]
     assert "alpha" in init_sh.splitlines()[0]
     assert "run once at session start by agents-orchestrator" in init_sh
-    assert "orchestrator_init_scripts_edit" in init_sh and "next session" in init_sh
+    assert "orchestrator_init_scripts tool (action edit)" in init_sh and "next session" in init_sh
     assert f"# --- script 1 ---\n{scripts[0]}\n" in init_sh
     assert f"# --- script 2 ---\n{scripts[1]}" in init_sh
 

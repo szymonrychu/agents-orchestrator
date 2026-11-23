@@ -1032,7 +1032,10 @@ def _reviewed_text(p: repo.Proposal, decisions: Decisions) -> str:
             parts.append("approved as proposed: " + ", ".join(by["approved"]))
         if by["denied"]:
             parts.append("denied: " + ", ".join(by["denied"]))
-        return f"{_head(p)} needs rework: {'; '.join(parts)}; revise with proposal_revise {p.id}."
+        return (
+            f"{_head(p)} needs rework: {'; '.join(parts)};"
+            f" revise with proposal_put op revise id {p.id}."
+        )
     parts = []
     if by["approved"]:
         parts.append("applied " + ", ".join(by["approved"]))
@@ -1043,9 +1046,9 @@ def _reviewed_text(p: repo.Proposal, decisions: Decisions) -> str:
 
 _CLOSED_TEXT = {
     "stale": "is stale: the {kind} changed since this revision was based; nothing was applied."
-    " Revise it against the current {kind} with proposal_revise {id}.",
+    " Revise it against the current {kind} with proposal_put op revise id {id}.",
     "expired": "expired before it was reviewed; nothing was applied."
-    " File it again with proposal_create if it is still needed.",
+    " File it again with proposal_put op create if it is still needed.",
     "target_gone": "was closed: the {kind} no longer exists or is no longer open to changes from"
     " you; nothing was applied.",
 }

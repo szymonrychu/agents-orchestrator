@@ -211,7 +211,7 @@ def render_rollout_due(epoch: int, window_seconds: int) -> str:
     return (
         "<rollout-due>A new version of this hive is deployed and your pod is the last on the "
         "old one. Hand leadership over at your next natural boundary with "
-        f"orchestrator_leadership_handover(epoch={epoch}, reason=<state summary>). "
+        f"orchestrator_handoff_submit(handover=true, epoch={epoch}, reason=<state summary>). "
         f"After {round(window_seconds / 60)} minutes the orchestrator moves it at your next "
         "turn boundary once your background agents have reported.</rollout-due>"
     )

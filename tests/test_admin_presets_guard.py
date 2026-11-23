@@ -470,7 +470,7 @@ async def test_privileged_target_edit_is_403(call, human, seed, pool, boss, path
     assert_error(r, 403, "privileged_target")
     assert r.json()["error"]["fields"] == [path]
     assert r.json()["error"]["proposable"] is True
-    assert r.json()["error"]["message"].endswith("; send it as a proposal: proposal_create")
+    assert r.json()["error"]["message"].endswith("; send it as a proposal: proposal_put op create")
     assert (await human("GET", f"{M}/{pid}")).json() == before
     last = (await events(pool, boss.id))[-1]
     assert last["data"]["status"] == 403 and last["data"]["fields"] == [path]
@@ -684,7 +684,7 @@ async def test_privileged_target_human_only_refusal_is_proposable(call, seed, pa
     assert_error(r, 403, "human_only_field")
     assert r.json()["error"]["fields"] == [path]
     assert r.json()["error"]["proposable"] is True
-    assert r.json()["error"]["message"].endswith("; send it as a proposal: proposal_create")
+    assert r.json()["error"]["message"].endswith("; send it as a proposal: proposal_put op create")
 
 
 async def test_privileged_target_namespace_grant_growth_is_proposable(call, seed):

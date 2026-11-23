@@ -325,87 +325,29 @@ def on_start_any_mcp(configmap: dict[str, Any]) -> dict[str, Any]:
     return json.loads(match.group(2))
 
 
-HIVE_ONLY_TOOLS = {
-    "activity",
-    "leadership_withdraw",
-    "lock_claim",
-    "lock_release",
-    "lock_list",
-    "lock_reassign",
-    "scale",
-}
+# Never rendered for an alone session: only S withdraws, only a scalable hive scales.
+HIVE_ONLY_TOOLS = {"leadership_withdraw", "scale"}
 
 
+# The member list then the leader-only tools of an alone session (S-83 section 4, mindmap off).
 ALONE_SESSION_TOOLS = [
-    "me",
-    "handoff_submit",
-    "sessions_list",
-    "init_scripts_get",
-    "init_scripts_edit",
-    "chat_rooms",
-    "chat_history",
-    "chat_attachment_fetch",
-    "chat_attachment_status",
-    "chat_notes_get",
-    "chat_notes_update",
-    "task_create",
-    "task_update",
-    "task_list",
-    "task_get",
-    "task_comment",
-    "decision_ask",
-    "decision_withdraw",
-    "approval_ask",
-    "approval_list",
-    "todo_set",
-    "todo_update",
-    "session_labels_set",
-    "project_list",
-    "project_summary",
-    "spec_list",
-    "spec_get",
-    "spec_create",
-    "spec_update",
-    "spec_versions",
-    "spec_comment",
-    "spec_comments",
-    "spec_comment_resolve",
-    "spec_pull",
-    "spec_push",
-    "spec_queue_list",
-    "plan_get",
-    "plan_set",
-    "plan_steps",
-    "plan_step_get",
-    "plan_step_add",
-    "plan_step_edit",
-    "plan_step_deps",
-    "plan_steps_order",
-    "plan_step_next",
-    "plan_step_update",
-    "plan_gate",
-    "spec_section",
-    "plan_steps_push",
-    "plan_export",
-    "plan_questions_ask",
-    "project_chat_read",
-    "volumes_status",
-    "volume_save",
-    "session_get",
-    "session_patch",
-    "proposal_create",
-    "proposal_revise",
-    "proposals_list",
-    "proposal_get",
-    "proposal_withdraw",
-    "self_close",
-]
+    "me", "activity", "lock", "init_scripts", "sessions_list", "session_labels",
+    "session_events", "sessions_admin_list", "chat_history", "chat_notes",
+    "task_create", "task_update", "task_list", "task_get", "task_comment",
+    "decision_ask", "decision_withdraw", "approval_ask", "approval_list", "todo", "project",
+    "spec_list", "spec_get", "spec_create", "spec_update", "spec_pull", "spec_push",
+    "spec_comment", "spec_comments", "spec_queue",
+    "plan_get", "plan_set", "plan_step_next", "plan_steps_push", "plan_export",
+    "plan_questions_ask", "volumes", "volume_save", "history_search", "history_get", "handoffs",
+    "handoff_submit", "session_send", "session_get", "session_patch", "session_discard",
+    "chat_rooms", "chat_attachment", "project_chat_read", "proposal_put", "proposal_get",
+    "preset_get", "usage", "self_close",
+]  # fmt: skip
 
 
 def assert_alone_session_tools(configmap: dict[str, Any]) -> None:
-    """An alone session created by a user renders the orchestrator entry with exactly `me` and the
-    session, init-scripts, chat, task, project and spec tools, as a literal list so a code change
-    cannot pass by agreeing with itself."""
+    """An alone session created by a user renders the orchestrator entry with exactly the member
+    and leader tools, as a literal list so a code change cannot pass by agreeing with itself."""
     plugins = on_start_any_mcp(configmap).get("plugins", [])
     entry = next((p for p in plugins if p.get("name") == "orchestrator"), None)
     assert entry is not None, plugins

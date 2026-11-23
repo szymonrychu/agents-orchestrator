@@ -584,7 +584,7 @@ async def test_chat_skills_routes_404(monkeypatch):
 
 
 async def test_chat_tools_have_no_skills():
-    assert not [t for t in on_start.CHAT_TOOLS if "skill" in t]
+    assert not [t for t in on_start.SUPERLEADER_TOOLS + on_start.LEADER_TOOLS if "skill" in t]
 
 
 async def test_memory_member_refused(monkeypatch):
@@ -896,7 +896,7 @@ async def check_chat_tools_parity(target: Target) -> None:
     fake = target.fake
     async with target.plugin(target.leader_ip) as h:
         rooms = await h.call("chat_rooms")
-        notes0 = await h.call("chat_notes_get")
+        notes0 = await h.call("chat_notes", {"op": "get"})
     # the plugin's chat_notes_update still sends the whole-body PUT until the plugins pin moves
     # to the section release (S-79 step 7), so only the read goes through the plugin here
     for result in (rooms, notes0):
@@ -927,7 +927,7 @@ async def check_chat_tools_parity(target: Target) -> None:
     # only the leader's calls succeed
     fake.calls.clear()
     async with target.plugin(target.member_ip) as h:
-        for name, args in (("chat_rooms", {}), ("chat_notes_get", {})):
+        for name, args in (("chat_rooms", {}), ("chat_notes", {"op": "get"})):
             refused = await h.call(name, args)
             assert refused.is_error, name
             assert refused.structured["error"]["code"] == "not_leader", refused.text

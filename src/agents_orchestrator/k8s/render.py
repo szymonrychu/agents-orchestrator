@@ -30,7 +30,7 @@ from agents_orchestrator.k8s.labels import (
     volume_pod_label,
     workspace_pvc,
 )
-from agents_orchestrator.k8s.on_start import READ_ONLY_TOOLS, orchestrator_allow, render_on_start
+from agents_orchestrator.k8s.on_start import READ_ONLY_TOOLS, render_on_start, start_role_tools
 from agents_orchestrator.pressure_levels import compact_pct
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import (
@@ -524,7 +524,7 @@ CHAT_ENVELOPE_PROMPT = (
 VOLUME_SAVE_PROMPT = (
     "A volume mounted with backup_restore is saved when the last session releases it; to share "
     "files you changed in it sooner, call orchestrator_volume_save with the volume name "
-    "(orchestrator_volumes_status lists your volumes)."
+    "(orchestrator_volumes lists your volumes)."
 )
 
 
@@ -558,13 +558,14 @@ ORCHESTRATOR_TOOL_GLOB = ORCHESTRATOR_TOOL_PREFIX + "*"
 
 def subagent_allowed_tools(spec: SessionSpec, settings: Settings) -> list[str]:
     """The read-only orchestrator tools a subagent may call (user decision m1223), as the
-    wrapper's exact tool names: `READ_ONLY_TOOLS` within this session's own allow list, so every
-    session gets its own reads and never a write. Empty without the orchestrator plugin (no
-    agent API url) or on an image other than the default: the wrapper config is strict and only
-    the default image is known to take the key (wrapper 0.20.0)."""
+    wrapper's exact tool names: `READ_ONLY_TOOLS` within the pod's role list at pod start (S-83
+    5.1: a hive pod starts as a member, a solo pod leads), so every pod gets its own reads and
+    never a write; a leadership change does not touch it until the pod restarts. Empty without
+    the orchestrator plugin (no agent API url) or on an image other than the default: the wrapper
+    config is strict and only the default image is known to take the key (wrapper 0.20.0)."""
     if not settings.agent_api_url or not runs_default_image(spec, settings):
         return []
-    allowed = set(orchestrator_allow(spec, mindmap=settings.mindmap_available))
+    allowed = set(start_role_tools(spec, mindmap=settings.mindmap_available))
     return [ORCHESTRATOR_TOOL_PREFIX + t for t in sorted(READ_ONLY_TOOLS & allowed)]
 
 

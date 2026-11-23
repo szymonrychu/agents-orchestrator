@@ -109,7 +109,8 @@ async def test_open_asks_decision_as_caller(rig):
     assert decision["question"] == (
         "Open a Messenger chat with Jane Doe (facebook id 100012345) as Hermes?"
     )
-    assert "Requested by session rel-boss with chat_open; room request 5." in decision["context"]
+    context = "Requested by session rel-boss with chat_connector open; room request 5."
+    assert context in decision["context"]
     (attach,) = conn.sent("PUT", "/room-requests/5/decision")
     assert attach.json() == {"task_key": "T-1", "decision_id": decision["id"]}
     assert r.json()["decision_id"] == decision["id"]

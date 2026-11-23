@@ -297,7 +297,7 @@ async def test_any_rework_writes_nothing_and_records_every_verdict(
     assert text.startswith(f"Proposal P-{view.id} r1 (preset infra) needs rework: ")
     assert "wrapper.mcp_servers: pin the version" in text
     assert "approved as proposed: env.PLAIN" in text
-    assert f"proposal_revise {view.id}" in text
+    assert f"proposal_put op revise id {view.id}" in text
     await _assert_nowhere(pool, canary, done)
 
 
@@ -523,7 +523,7 @@ async def test_any_change_to_the_target_makes_approve_409_stale_then_revise_appl
     assert outcome == "stale"
     [(text, notice, _)] = await _notices(pool, boss.id)
     assert notice == "proposal"
-    assert "is stale" in text and f"proposal_revise {view.id}" in text
+    assert "is stale" in text and f"proposal_put op revise id {view.id}" in text
     # D2: the proposer re-bases; the new revision applies
     await _revise(pool, kube, settings, boss, view.id, patch={**MCP_PATCH, **PLAIN_PATCH})
     done = await _review(pool, kube, settings, view.id, 2, approve)

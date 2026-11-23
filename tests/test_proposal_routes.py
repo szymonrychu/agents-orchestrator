@@ -489,7 +489,7 @@ async def test_agent_port_has_no_review_route(app, pool, boss, preset):
         f"{P}/{{proposal_id}}/revise",
         f"{P}/{{proposal_id}}/withdraw",
     ]
-    tools = [*on_start.ADMIN_TOOLS, *on_start.SESSION_EDIT_TOOLS]
+    tools = [*on_start.SUPERLEADER_TOOLS, *on_start.LEADER_TOOLS]
     assert [t for t in tools if "review" in t.split("_")] == []
 
 

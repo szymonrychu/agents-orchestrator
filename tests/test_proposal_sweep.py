@@ -200,7 +200,7 @@ async def test_preset_edit_makes_an_open_proposal_stale_in_one_pass(
     await _sweep(pool)
     assert await _status(pool, pid) == "stale"
     [notice] = await _notices(pool, boss.id)
-    assert "stale" in notice and f"proposal_revise {pid}" in notice
+    assert "stale" in notice and f"proposal_put op revise id {pid}" in notice
     await _sweep(pool)
     assert len(await _notices(pool, boss.id)) == 1
 

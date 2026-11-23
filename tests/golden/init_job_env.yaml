@@ -59,8 +59,8 @@
           - '# init scripts of session alpha
 
             # run once at session start by agents-orchestrator; edits through the
-            init scripts API or the orchestrator_init_scripts_edit tool apply to the
-            next session
+            init scripts API or the orchestrator_init_scripts tool (action edit) apply
+            to the next session
 
             # --- script 1 ---
 
