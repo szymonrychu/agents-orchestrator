@@ -17,12 +17,14 @@ agent route fails CI until it is classified.
   upstream filters.
 - `superleader`: the superleader gate; unscoped by design. The admin relay (`admin_relay`)
   forwards send `X-Orch-Projects: *` for a superleader.
-- `reader`: the reader gate (`admin.require_reader`): a superleader only (S-83; step 7
-  reshapes it).
+- `reader`: the reader gate (`admin.require_reader`): a superleader only.
 - `agent`: the agent gate (`admin.require_agent`): any agent, reading the caller's projects
   (`admin.caller_projects`: every project for a superleader, its leader only; decisions
   859-868). History relays forward that scope as `X-Orch-Projects`.
-- `notes`: the room notes writer gate (`admin.require_notes_writer`): a superleader only.
+- `leader`: the leader gate (`admin.require_leader`): any session's leader, narrowed to its
+  projects (`admin.caller_projects`): the chat rooms list and room notes update (rooms of its
+  projects, `room_projects`), the preset read and the current usage window (decisions 869, 873,
+  933, 934).
 """
 
 from __future__ import annotations
@@ -31,7 +33,7 @@ from typing import Literal
 
 from agents_orchestrator.db import sessions as sessions_repo
 
-ScopeClass = Literal["own", "peers", "project", "superleader", "reader", "notes", "agent"]
+ScopeClass = Literal["own", "peers", "project", "superleader", "reader", "leader", "agent"]
 
 PROJECTS_HEADER = "X-Orch-Projects"
 ALL_PROJECTS = "*"
@@ -142,7 +144,7 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     # admin: the superleader gate, unscoped
     ("GET", f"{_ADMIN}/presets"): "reader",
     ("POST", f"{_ADMIN}/presets"): "superleader",
-    ("GET", f"{_ADMIN}/presets/{{ref}}"): "reader",
+    ("GET", f"{_ADMIN}/presets/{{ref}}"): "leader",
     ("PUT", f"{_ADMIN}/presets/{{ref}}"): "superleader",
     ("PATCH", f"{_ADMIN}/presets/{{ref}}"): "superleader",
     ("DELETE", f"{_ADMIN}/presets/{{ref}}"): "superleader",
@@ -178,7 +180,7 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("GET", f"{_ADMIN}/sessions/{{slug}}/locks"): "superleader",
     ("GET", f"{_ADMIN}/sessions/{{slug}}/commands"): "superleader",
     ("GET", f"{_ADMIN}/commands/{{command_id}}"): "superleader",
-    ("GET", f"{_ADMIN}/usage"): "reader",
+    ("GET", f"{_ADMIN}/usage"): "leader",
     ("POST", f"{_ADMIN}/projects"): "superleader",
     ("PATCH", f"{_ADMIN}/projects/{{slug}}"): "superleader",
     # superleader writes on any manageable session (T-120 slice 3)
@@ -218,13 +220,13 @@ AGENT_SCOPE: dict[tuple[str, str], ScopeClass] = {
     ("DELETE", f"{_ADMIN}/schedules/schedules/{{schedule_id}}"): "superleader",
     ("POST", f"{_ADMIN}/schedules/schedules/{{schedule_id}}/run"): "superleader",
     ("GET", f"{_ADMIN}/schedules/schedules/{{schedule_id}}/runs"): "superleader",
-    ("GET", f"{_ADMIN}/chats/rooms"): "reader",
+    ("GET", f"{_ADMIN}/chats/rooms"): "leader",
     ("GET", f"{_ADMIN}/chats/rooms/{{room_id}}"): "reader",
-    ("GET", f"{_ADMIN}/chats/rooms/{{room_id}}/messages"): "reader",
+    ("GET", f"{_ADMIN}/chats/rooms/{{room_id}}/messages"): "agent",
     ("PUT", f"{_ADMIN}/chats/rooms/{{room_id}}/settings"): "superleader",
     ("POST", f"{_ADMIN}/chats/rooms/{{room_id}}/allow"): "superleader",
-    ("GET", f"{_ADMIN}/chats/rooms/{{room_id}}/notes"): "reader",
-    ("PUT", f"{_ADMIN}/chats/rooms/{{room_id}}/notes/sections/{{section}}"): "notes",
+    ("GET", f"{_ADMIN}/chats/rooms/{{room_id}}/notes"): "agent",
+    ("PUT", f"{_ADMIN}/chats/rooms/{{room_id}}/notes/sections/{{section}}"): "leader",
     ("GET", f"{_ADMIN}/handoffs"): "agent",
     ("GET", f"{_ADMIN}/handoffs/{{id}}"): "agent",
     ("GET", f"{_ADMIN}/chats/users"): "superleader",

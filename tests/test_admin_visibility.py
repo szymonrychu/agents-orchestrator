@@ -49,7 +49,7 @@ def own_routes() -> list[tuple[str, str]]:
             *admin.session_router.routes,
             *proposal_routes.proposal_router.routes,
             *admin.reader_router.routes,  # the reader reads and the copy
-            *admin.notes_router.routes,
+            *admin.leader_router.routes,
             *admin.discard_router.routes,
             *admin.agent_router.routes,  # the scoped reads every agent makes
         ]

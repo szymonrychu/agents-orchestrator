@@ -10,8 +10,9 @@ the sessions its `sessions_list` shows, decision 863).
 `reader_router` carries `require_reader` (a superleader): the
 reads and the backup copy. `agent_router` carries `require_agent` (any agent, member, leader or
 superleader): the reads scoped to the caller's projects (S-83 decisions 859-868), filtered on
-`caller_projects`. `notes_router` holds the room notes
-update with `require_notes_writer` (decision 775). `discard_router` holds the session discard
+`caller_projects`. `leader_router` carries `require_leader` (any session's leader, scoped to
+its projects): the chat rooms list, the room notes update, the preset read and the current usage
+window (S-83 decisions 869, 873, 933, 934). `discard_router` holds the session discard
 with `require_discarder` (any session's leader; the handler scopes a regular leader, decision
 942). Every admitted call is audited without values
 or bodies (D15): one log line and one `events` row the UI feed shows.
@@ -137,8 +138,7 @@ async def require_session_editor(
 
 
 async def require_reader(request: Request, agent: Caller, pool: Pool) -> sessions_repo.Session:
-    """A superleader (`_superleader`; steps 6 and 7 of S-83 reshape the reader gate). Sits on
-    the routes of `reader_router`."""
+    """A superleader (`_superleader`). Sits on the routes of `reader_router`."""
     return await _superleader(request, agent, pool, "this admin route needs a superleader session")
 
 
@@ -177,12 +177,16 @@ async def require_discarder(request: Request, agent: Caller, pool: Pool) -> sess
     return _admit(request, agent, session)
 
 
-async def require_notes_writer(
-    request: Request, agent: Caller, pool: Pool, room_id: str
-) -> sessions_repo.Session:
-    """PUT /chats/rooms/{room_id}/notes/sections/{section}: a superleader (`_superleader`) on
-    any room."""
-    return await _superleader(request, agent, pool, "room notes need a superleader session")
+async def require_leader(request: Request, agent: Caller, pool: Pool) -> sessions_repo.Session:
+    """The leader of any session (else 403 `not_leader`, a superleader's member pod included). A
+    superleader reads every project, any other leader its session's projects (`caller_projects`);
+    the route narrows to them (S-83 decisions 869, 873, 933, 934)."""
+    async with pool.connection() as conn:
+        session = await sessions_repo.get(conn, agent.session_id)
+        assert session is not None
+        if not await _leads(conn, agent, session):
+            raise ApiError(403, "not_leader", "this admin route needs a session's leader")
+    return _admit(request, agent, session)
 
 
 Superleader = Depends(require_superleader)
@@ -190,7 +194,7 @@ SessionEditor = Depends(require_session_editor)
 SessionReader = Depends(require_session_reader)
 Reader = Depends(require_reader)
 AgentReader = Depends(require_agent)
-NotesWriter = Depends(require_notes_writer)
+Leader = Depends(require_leader)
 Discarder = Depends(require_discarder)
 
 
@@ -331,8 +335,10 @@ reader_router = APIRouter(
 agent_router = APIRouter(
     prefix=ADMIN_PREFIX, tags=["admin"], route_class=AdminRoute, dependencies=[AgentReader]
 )
-# The room notes update carries the notes writer gate on its route (it reads `room_id`).
-notes_router = APIRouter(prefix=ADMIN_PREFIX, tags=["admin"], route_class=AdminRoute)
+# The reads and the room notes update of any session's leader, scoped to its projects (S-83).
+leader_router = APIRouter(
+    prefix=ADMIN_PREFIX, tags=["admin"], route_class=AdminRoute, dependencies=[Leader]
+)
 # The session discard: a superleader, or a leader within its projects (decision 942).
 discard_router = APIRouter(
     prefix=ADMIN_PREFIX, tags=["admin"], route_class=AdminRoute, dependencies=[Discarder]
@@ -471,7 +477,7 @@ async def get_meta(settings: Cfg) -> schemas.Meta:
     return await sessions_api.meta(settings)
 
 
-# reader gate (superleader until S-83 steps 6, 7)
+# reader gate (superleader)
 @reader_router.get("/presets", response_model=list[schemas.PresetView])
 async def list_presets(pool: Pool) -> list[schemas.PresetView]:
     async with pool.connection() as conn:
@@ -513,11 +519,26 @@ async def create_preset(
         return await presets_api.create(request, conn, settings, body, superleader=True)
 
 
-# reader gate (superleader until S-83 steps 6, 7)
-@reader_router.get("/presets/{ref}", response_model=schemas.PresetView)
-async def get_preset(ref: str, pool: Pool) -> schemas.PresetView:
+# leader gate: the presets of the caller's projects (decision 933)
+@leader_router.get(
+    "/presets/{ref}",
+    response_model=schemas.PresetView,
+    responses={
+        403: {"description": "project_forbidden: the preset is outside your projects"},
+        404: {"description": "not_found: no preset has that name or id"},
+    },
+)
+async def get_preset(ref: str, request: Request, pool: Pool) -> schemas.PresetView:
+    """One preset, redacted as the main port answers it. A superleader reads any; any other
+    leader a preset whose project or extra projects overlap its own, else 403
+    `project_forbidden`."""
+    projects = caller_projects(request)
     async with pool.connection() as conn:
         found = await readable_preset(conn, ref)
+        if projects is not None and set(projects).isdisjoint(
+            (found.project, *found.extra_projects)
+        ):
+            raise ApiError(403, "project_forbidden", "the preset is outside your projects")
         return await presets_api.get_one(conn, found.id)
 
 
@@ -874,7 +895,7 @@ async def get_command(command_id: int, pool: Pool) -> schemas.CommandView:
 # ------------------------------------------------- live work of any session (T-120)
 
 
-# reader gate (superleader until S-83 steps 6, 7)
+# reader gate (superleader)
 @reader_router.get(
     "/sessions/{slug}/activity",
     response_model=Activity,
@@ -928,7 +949,7 @@ async def session_events(
         )
 
 
-# reader gate (superleader until S-83 steps 6, 7)
+# reader gate (superleader)
 @reader_router.get(
     "/sessions/{slug}/messages",
     response_model=list[schemas.MessageView],
@@ -1111,8 +1132,8 @@ async def cancel_session_message(
 # ---------------------------------------------------------------- usage
 
 
-# reader gate (superleader until S-83 steps 6, 7)
-@reader_router.get("/usage", response_model=schemas.UsageView)
+# leader gate: the current window (decision 934); history and sessions stay superleader
+@leader_router.get("/usage", response_model=schemas.UsageView)
 async def get_usage(usage: Usage) -> schemas.UsageView:
     """The account's five_hour and seven_day windows, read-only, from the same cached
     `UsageSource` the usage gate reads. An unconfigured or unreachable usage service answers

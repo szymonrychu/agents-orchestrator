@@ -10253,15 +10253,6 @@
         "operationId": "admin_connector_put_rooms_room_id_notes_sections_section",
         "parameters": [
           {
-            "in": "path",
-            "name": "room_id",
-            "required": true,
-            "schema": {
-              "title": "Room Id",
-              "type": "string"
-            }
-          },
-          {
             "in": "header",
             "name": "authorization",
             "required": false,
@@ -11338,6 +11329,7 @@
         ]
       },
       "get": {
+        "description": "One preset, redacted as the main port answers it. A superleader reads any; any other\nleader a preset whose project or extra projects overlap its own, else 403\n`project_forbidden`.",
         "operationId": "get_preset_agent_v1_admin_presets__ref__get",
         "parameters": [
           {
@@ -11392,6 +11384,12 @@
               }
             },
             "description": "Successful Response"
+          },
+          "403": {
+            "description": "project_forbidden: the preset is outside your projects"
+          },
+          "404": {
+            "description": "not_found: no preset has that name or id"
           },
           "422": {
             "content": {
