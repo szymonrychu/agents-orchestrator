@@ -83,7 +83,7 @@ async def test_scope_of_star_only_superleader(monkeypatch, superleader):
     )
     rig_.db.sessions[session.id] = session
     want = "*" if superleader else "a,b"
-    assert scope_of(session) == want
+    assert scope_of(session, leader=True) == want
     for method in ("GET", "POST"):
         rig_.upstream.seen.clear()
         body = {} if method == "GET" else {"json": {"title": "x"}}

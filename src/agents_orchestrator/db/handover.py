@@ -143,7 +143,7 @@ async def _fetch_decisions(
 
     async def one(session: sessions_repo.Session) -> list[OpenDecision] | None:
         try:
-            return await decisions(session.id, session.slug, scope_of(session))
+            return await decisions(session.id, session.slug, scope_of(session, leader=True))
         except Exception as exc:
             log.warning(
                 "handover: open decisions of %s unavailable: %s", session.id, type(exc).__name__
