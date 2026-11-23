@@ -140,5 +140,5 @@ async def test_idempotent_put(monkeypatch):
     assert first.status_code == second.status_code == 200
     assert first.json() == second.json()
     assert rig.labels(rig.session) == ["a", "b"]
-    cleared = await rig.put({"labels": []})
+    await rig.put({"labels": []})
     assert rig.labels(rig.session) == []
