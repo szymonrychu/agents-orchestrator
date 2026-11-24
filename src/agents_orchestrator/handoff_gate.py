@@ -13,25 +13,28 @@ from typing import Any, Protocol
 from agents_orchestrator.wrapper.models import Inflight
 
 UNREACHABLE = "inflight:unknown (wrapper unreachable)"
+#: The bare word that abandons or names every running subagent at once.
+SUBAGENT_ALL = "subagent"
 STOP_ADVICE = "finish it, stop it with TaskStop, or abandon it with a reason"
 
 
 def refusal_words(item_id: str, *, stored: bool = False) -> str:
-    """What to do about one blocking item, by the kind its id starts with (`stored`: the 409
-    gate, where only an abandon clears a scratch file; the 422 check also takes `results`)."""
+    """What to do about one blocking item, by the kind its id starts with. `stored` is the 409
+    gate (only finishing, stopping or an abandon clears it); otherwise the 422 check, where the
+    item is also cleared by naming it in in_flight (a scratch file: in results)."""
     kind, _, what = item_id.partition(":")
     if kind == "scratch":
-        path = what.split(" (", 1)[0]
+        path = what.removesuffix(" (pod-local, not persisted)")
         tail = "abandon it with a reason" if stored else "list it in results"
         return f"{path} is not persisted: move it under .scratchpad/<name>/ or {tail}"
-    if kind == "subagent":
-        who = what.removesuffix(" running")
+    if kind in ("task", "subagent"):
+        label = item_id if kind == "task" else f"subagent {what.removesuffix(' running')}"
+        if stored:
+            return f"{label} is running: {STOP_ADVICE}"
         return (
-            f"subagent(s) {who} running (name an id or the word subagent in in_flight): "
-            + STOP_ADVICE
+            f"{label} is not named in in_flight: list it there, or stop it with TaskStop, "
+            "or abandon it with a reason"
         )
-    if kind == "task":
-        return f"{item_id} is running: {STOP_ADVICE}"
     return f"{item_id} is still in flight: finish it or abandon it with a reason"
 
 
@@ -89,9 +92,8 @@ def items(inflight: Inflight | None) -> list[Item]:
         return [Item(UNREACHABLE)]
     out: list[Item] = []
     if inflight.subagents:
-        ids = inflight.subagent_ids
-        label = ",".join(ids) if ids else str(inflight.subagents)
-        out.append(Item(f"subagent:{label} running", ("subagent", *ids), kind="subagent"))
+        ids = inflight.subagent_ids or [str(inflight.subagents)]
+        out.extend(Item(f"subagent:{i} running", (i,), kind="subagent") for i in ids)
     out.extend(_task(t) for t in inflight.background_tasks)
     for w in inflight.worktrees:
         out.extend(_worktree(w))
@@ -105,7 +107,7 @@ def items(inflight: Inflight | None) -> list[Item]:
 
 def _covers(abandoned: str, item: Item) -> bool:
     name = abandoned.strip()
-    if name == item.id or name in item.keys:
+    if name == item.id or name in item.keys or (name == SUBAGENT_ALL and item.kind == "subagent"):
         return True
     if item.path is None or not name:
         return False

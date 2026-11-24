@@ -96,29 +96,41 @@ def test_subagent_abandoned_by_bare_word_whatever_the_count():
     assert got.clear and got.abandoned[0]["item"] == "subagent:3 running"
 
 
+TWO = Inflight(subagents=2, subagent_ids=["a1", "b2"])
+NAMED = (
+    "is not named in in_flight: list it there, or stop it with TaskStop, "
+    "or abandon it with a reason"
+)
+RUNNING = "is running: finish it, stop it with TaskStop, or abandon it with a reason"
+
+
 @pytest.mark.parametrize(
-    ("inflight", "expected"),
+    ("inflight", "stored", "expected"),
     [
         (
-            Inflight(scratch=[{"path": "/tmp/claude-1/n.md"}]),
-            "/tmp/claude-1/n.md is not persisted: move it under .scratchpad/<name>/ "
+            Inflight(scratch=[{"path": "/tmp/c (1)/n.md"}]),
+            False,
+            "/tmp/c (1)/n.md is not persisted: move it under .scratchpad/<name>/ "
             "or list it in results",
         ),
         (
-            Inflight(background_tasks=[{"id": "bf3a"}]),
-            "task:bf3a is running: finish it, stop it with TaskStop, or abandon it with a reason",
+            Inflight(scratch=[{"path": "/tmp/c (1)/n.md"}]),
+            True,
+            "/tmp/c (1)/n.md is not persisted: move it under .scratchpad/<name>/ "
+            "or abandon it with a reason",
         ),
-        (
-            Inflight(subagents=2, subagent_ids=["a1", "b2"]),
-            "subagent(s) a1,b2 running (name an id or the word subagent in in_flight): "
-            "finish it, stop it with TaskStop, or abandon it with a reason",
-        ),
+        (Inflight(background_tasks=[{"id": "bf3a"}]), False, f"task:bf3a {NAMED}"),
+        (Inflight(background_tasks=[{"id": "bf3a"}]), True, f"task:bf3a {RUNNING}"),
+        (TWO, False, f"subagent a1 {NAMED}"),
+        (TWO, True, f"subagent a1 {RUNNING}"),
     ],
 )
-def test_refusal_words_by_kind(inflight, expected):
-    assert handoff_gate.refusal_words(handoff_gate.items(inflight)[0].id) == expected
+def test_refusal_words_by_kind_and_stage(inflight, stored, expected):
+    item = handoff_gate.items(inflight)[0]
+    assert handoff_gate.refusal_words(item.id, stored=stored) == expected
 
 
-def test_subagent_ids_name_and_abandon_the_item():
-    inflight = Inflight(subagents=2, subagent_ids=["a1", "b2"])
-    assert handoff_gate.evaluate(inflight, [ab("b2")]).clear
+def test_abandoning_one_subagent_id_leaves_the_other_blocking():
+    got = handoff_gate.evaluate(TWO, [ab("b2")])
+    assert got.waiting_on == ["subagent:a1 running"]
+    assert handoff_gate.evaluate(TWO, [ab("subagent")]).clear
