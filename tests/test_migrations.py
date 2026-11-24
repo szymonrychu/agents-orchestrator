@@ -1576,7 +1576,6 @@ def test_session_close_columns_apply_after_a_database_already_at_0027(empty_dsn,
         "0060",
         "0061",
         "0062",
-        "0063",
     ]
     assert {"close_requested_at", "close_reason"} <= _columns(empty_dsn, "sessions")
 
@@ -2203,7 +2202,7 @@ def test_0041_applies_after_a_database_that_already_holds_0042(empty_dsn, tmp_pa
         if not f.name.startswith("0041_"):
             shutil.copy(f, tmp_path / f.name)
     assert run_migrations(empty_dsn, tmp_path)[-9:] == [
-        "0054", "0055", "0056", "0057", "0058", "0059", "0060", "0061", "0062", "0063",
+        "0055", "0056", "0057", "0058", "0059", "0060", "0061", "0062", "0063",
     ]  # fmt: skip
     assert run_migrations(empty_dsn) == ["0041"]
     assert run_migrations(empty_dsn) == []
