@@ -13,10 +13,26 @@ from typing import Any, Protocol
 from agents_orchestrator.wrapper.models import Inflight
 
 UNREACHABLE = "inflight:unknown (wrapper unreachable)"
-SCRATCH_HINT = (
-    "move the files you need into the shared workdir scratchpad (.scratchpad/<name>/) "
-    "or abandon them with a reason"
-)
+STOP_ADVICE = "finish it, stop it with TaskStop, or abandon it with a reason"
+
+
+def refusal_words(item_id: str, *, stored: bool = False) -> str:
+    """What to do about one blocking item, by the kind its id starts with (`stored`: the 409
+    gate, where only an abandon clears a scratch file; the 422 check also takes `results`)."""
+    kind, _, what = item_id.partition(":")
+    if kind == "scratch":
+        path = what.split(" (", 1)[0]
+        tail = "abandon it with a reason" if stored else "list it in results"
+        return f"{path} is not persisted: move it under .scratchpad/<name>/ or {tail}"
+    if kind == "subagent":
+        who = what.removesuffix(" running")
+        return (
+            f"subagent(s) {who} running (name an id or the word subagent in in_flight): "
+            + STOP_ADVICE
+        )
+    if kind == "task":
+        return f"{item_id} is running: {STOP_ADVICE}"
+    return f"{item_id} is still in flight: finish it or abandon it with a reason"
 
 
 class AbandonLike(Protocol):
@@ -73,7 +89,9 @@ def items(inflight: Inflight | None) -> list[Item]:
         return [Item(UNREACHABLE)]
     out: list[Item] = []
     if inflight.subagents:
-        out.append(Item(f"subagent:{inflight.subagents} running", ("subagent",), kind="subagent"))
+        ids = inflight.subagent_ids
+        label = ",".join(ids) if ids else str(inflight.subagents)
+        out.append(Item(f"subagent:{label} running", ("subagent", *ids), kind="subagent"))
     out.extend(_task(t) for t in inflight.background_tasks)
     for w in inflight.worktrees:
         out.extend(_worktree(w))

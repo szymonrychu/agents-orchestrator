@@ -94,7 +94,8 @@ async def test_submit_409_in_flight_lists_scratch(pool, dsn, inflight):
     err = r.json()["error"]
     assert (r.status_code, err["code"]) == (409, "in_flight")
     assert err["waiting_on"] == ["scratch:/tmp/claude-1/notes.md (pod-local, not persisted)"]
-    assert ".scratchpad/<name>/" in err["message"] and "abandon" in err["message"]
+    assert "notes.md is not persisted: move it under .scratchpad/<name>/" in err["message"]
+    assert "still running" not in err["message"]
 
 
 async def test_submit_abandon_clears_the_gate(pool, dsn, inflight):

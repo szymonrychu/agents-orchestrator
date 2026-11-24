@@ -265,6 +265,7 @@ class Inflight(_Model):
     are carried to the successor and never block."""
 
     subagents: int = 0
+    subagent_ids: list[str] = Field(default_factory=list)
     background_tasks: list[dict[str, Any]] = Field(default_factory=list)
     crons: list[dict[str, Any]] = Field(default_factory=list)
     worktrees: list[dict[str, Any]] = Field(default_factory=list)

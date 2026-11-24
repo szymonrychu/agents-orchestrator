@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from agents_orchestrator import handoff_gate
 from agents_orchestrator.api.schemas import Abandon
 from agents_orchestrator.wrapper.models import Inflight
@@ -92,3 +94,31 @@ def test_subagent_abandoned_by_bare_word_whatever_the_count():
     abandon = [Abandon(item="subagent", why="its result is not needed any more")]
     got = handoff_gate.evaluate(inflight, abandon)
     assert got.clear and got.abandoned[0]["item"] == "subagent:3 running"
+
+
+@pytest.mark.parametrize(
+    ("inflight", "expected"),
+    [
+        (
+            Inflight(scratch=[{"path": "/tmp/claude-1/n.md"}]),
+            "/tmp/claude-1/n.md is not persisted: move it under .scratchpad/<name>/ "
+            "or list it in results",
+        ),
+        (
+            Inflight(background_tasks=[{"id": "bf3a"}]),
+            "task:bf3a is running: finish it, stop it with TaskStop, or abandon it with a reason",
+        ),
+        (
+            Inflight(subagents=2, subagent_ids=["a1", "b2"]),
+            "subagent(s) a1,b2 running (name an id or the word subagent in in_flight): "
+            "finish it, stop it with TaskStop, or abandon it with a reason",
+        ),
+    ],
+)
+def test_refusal_words_by_kind(inflight, expected):
+    assert handoff_gate.refusal_words(handoff_gate.items(inflight)[0].id) == expected
+
+
+def test_subagent_ids_name_and_abandon_the_item():
+    inflight = Inflight(subagents=2, subagent_ids=["a1", "b2"])
+    assert handoff_gate.evaluate(inflight, [ab("b2")]).clear

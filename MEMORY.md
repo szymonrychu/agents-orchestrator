@@ -830,3 +830,8 @@ in the namespace, so an attached vault value is exposed to it. Decision: attach 
 - Migration 0062 withdraws active preset/session proposals whose current revision 0060 left with no item.
 - `tests/ack_expand.expand` fails the test when a 2xx preset or session write answers no `WriteAck` or the acked object does not read back (204 and the vault/volume sub-writes, full on purpose, pass through).
 - 2026-11-23 (S-83 final review): any-mcp-tatara-plugins pin bumped v0.62.0 to v0.63.0 and then v0.64.0 (v0.63.0 fix-only: plugin PRs #77 and #78; v0.64.0 adds schedule session_overrides; no tool-name changes), in pyproject, uv.lock, settings default and test.
+
+## 2026-11-24 actionable handoff refusal texts (S-88, T-708)
+- Refusals are kind-aware (`handoff_gate.refusal_words`, by the item id prefix), used by the 422 `_reason_words` and the 409 `in_flight` message: scratch "is not persisted: move it under .scratchpad/<name>/ or list it in results" (409: "or abandon it with a reason", since only an abandon clears the gate there), tasks "is running: finish it, stop it with TaskStop, or abandon it with a reason", subagents name their ids. Why: agents saw "still running" for scratch files and a bare subagent count with no way out (live evidence in S-88 research). `SCRATCH_HINT` is removed (folded into the scratch wording).
+- `Inflight.subagent_ids` (already sent by the wrapper `/inflight`) is read; the subagent item id becomes `subagent:<ids> running` and each id is an `in_flight`/abandon key beside the bare word `subagent`.
+- Test updated because it asserted the old wording: `test_submit_409_in_flight_lists_scratch` (message check).
