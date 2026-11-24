@@ -75,6 +75,7 @@ def test_stored_caps_1_to_4_raised_to_5_others_untouched(empty_dsn, tmp_path):
     assert run_migrations(empty_dsn) == [
         "0053", "0054", "0055", "0056", "0057", "0058", "0059", "0060", "0061",
         "0062",
+        "0063",
     ]  # fmt: skip
     with psycopg.connect(empty_dsn) as c:
         for name, want in EXPECTED.items():

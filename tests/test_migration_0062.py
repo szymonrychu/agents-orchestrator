@@ -46,7 +46,7 @@ def test_migration_0062_withdraws_active_proposals_left_empty(empty_dsn, tmp_pat
             "with_items": _proposal(c, "preset", ("replicas",)),
             "closed": _proposal(c, "preset", (), status="denied"),
         }
-    assert run_migrations(empty_dsn) == ["0062"]
+    assert run_migrations(empty_dsn) == ["0062", "0063"]
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         rows = {
             pid: rest

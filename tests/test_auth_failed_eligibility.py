@@ -32,7 +32,7 @@ async def test_claim_skips_auth_failed_agent(pool):
 
     c = await insert_session(pool, spec={"replicas": 2})
     failed = await queue_agent(pool, c["id"], free_ago=100, ordinal=0)
-    live = await queue_agent(pool, c["id"], free_ago=1, ordinal=1, state="busy")
+    live = await queue_agent(pool, c["id"], free_ago=1, ordinal=1, state="booting")
     await _fail(pool, failed["id"])
     await _enqueue(pool, c["id"], "u")
     assert await _claim(pool) is None

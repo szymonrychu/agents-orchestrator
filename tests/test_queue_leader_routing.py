@@ -71,10 +71,10 @@ async def test_untargeted_goes_to_leader(pool):
     assert claim.agent_id != other["id"]
 
 
-async def test_busy_leader_holds_untargeted_only(pool):
+async def test_unavailable_leader_holds_untargeted_only(pool):
     c = await insert_session(pool)
     member = await _agent(pool, c["id"], free_ago=10, ordinal=0)
-    leader = await _agent(pool, c["id"], free_ago=10, ordinal=1, state="busy")
+    leader = await _agent(pool, c["id"], free_ago=10, ordinal=1, state="booting")
     await _lead(pool, c["id"], leader["id"])
     first = await _enqueue(pool, c["id"], "u1")
     second = await _enqueue(pool, c["id"], "u2")
@@ -129,7 +129,7 @@ async def test_new_leader_after_handover(pool):
 async def test_held_untargeted_backoff_does_not_starve_targeted(pool):
     c = await insert_session(pool)
     member = await _agent(pool, c["id"], free_ago=10, ordinal=0)
-    leader = await _agent(pool, c["id"], free_ago=10, ordinal=1, state="busy")
+    leader = await _agent(pool, c["id"], free_ago=10, ordinal=1, state="booting")
     await _lead(pool, c["id"], leader["id"])
     await _enqueue(pool, c["id"], "u1")
     waiting = await _enqueue(pool, c["id"], "u2")

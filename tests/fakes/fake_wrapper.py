@@ -871,6 +871,8 @@ class FakeWrapper:
             if ses.state != "ready" and ses.state != "busy":
                 raise _Err(503, "dead", f"the session is {ses.state}")
             lane = body.get("lane", "regular")
+            if ses.state == "busy" and lane == "idle":
+                raise _Err(409, "busy", "a turn is already running")
             text, metadata = body.get("text"), body.get("metadata", {})
             if not isinstance(text, str) or not isinstance(metadata, dict):
                 raise _Err(422, "invalid_request", "text must be a string, metadata an object")

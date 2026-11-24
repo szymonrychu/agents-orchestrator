@@ -59,7 +59,7 @@ def test_migration_0060_strips_retrospective(empty_dsn, tmp_path, table):
             )
         else:
             pid = _proposal(c)
-    assert run_migrations(empty_dsn) == ["0060", "0061", "0062"]
+    assert run_migrations(empty_dsn) == ["0060", "0061", "0062", "0063"]
     with psycopg.connect(empty_dsn, autocommit=True) as c:
         if table == "proposals":
             base = c.execute("SELECT base FROM change_proposal_revisions").fetchone()[0]
