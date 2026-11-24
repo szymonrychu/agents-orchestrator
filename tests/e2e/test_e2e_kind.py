@@ -3598,12 +3598,23 @@ def test_strong_path_solo_cycle(api: httpx.Client, baseline: dict) -> None:
         cid = c["id"]
         (agent,) = ready_agents(api, cid, 1)
         pod, aid = agent["pod_name"], agent["id"]
-        post_message(api, cid, "ramp to l2")
+        ramp = post_message(api, cid, "ramp to l2")
         wait_level_delivered(api, cid, aid, 2)
         wait_for("an open pressure cycle", lambda: (pressure_of(pod) or {}).get("phase"), 60, 2)
+        wait_for("the ramp turn", lambda: turn_completed(message(api, ramp)), TURN_TIMEOUT, 1)
 
         status, body = submit_handoff(pod, doing="[thumbs-up]", done=[], next=[], in_flight=[])
         assert status == 422 and body["error"]["code"] == "handoff_rejected", (status, body)
+
+        # The idle agent at L2 with nothing running gets its one nudge turn. Messages no longer
+        # wait for agent_free, so "background watcher" sent now could be typed into the tail of
+        # that turn (the fake claude then keeps it in its input box and the watcher never runs):
+        # let the nudge turn end first.
+        def nudge_done() -> bool:
+            rows = notice_messages(api, cid, "handoff_nudge")
+            return bool(rows) and turn_completed(message(api, rows[-1]["id"]))
+
+        wait_for("the nudge turn", nudge_done, STRONG_TIMEOUT, 1)
 
         mid = post_message(api, cid, "background watcher")
         wait_for("the watcher turn", lambda: turn_completed(message(api, mid)), TURN_TIMEOUT, 1)
