@@ -150,14 +150,14 @@ async def test_post_keeps_its_lane_and_attachments_unprefixed(pool, dsn):
             f"{C}/{session['id']}/messages",
             json={
                 "text": "go",
-                "lane": "priority",
+                "lane": "interrupt",
                 "attachments": [{"name": "a.txt", "mime": "text/plain", "data_b64": "aGk="}],
             },
         )
         assert r.status_code == 202, r.text
         got = (await http.get(f"/api/v1/messages/{r.json()['message_id']}")).json()
     assert got["text"] == "go"
-    assert got["lane"] == "priority"
+    assert got["lane"] == "interrupt"
     assert [a["name"] for a in got["attachments"]] == ["a.txt"]
 
 
@@ -178,7 +178,7 @@ async def _others(pool, session_id, other_agent_id) -> list[int]:
             conn, session_id, "peer", sender_session_id=uuid.uuid4(), sender_slug="boss"
         )
         idle = await q.enqueue_message(conn, session_id, "idle", lane="idle")
-        prio = await q.enqueue_message(conn, session_id, "prio", lane="priority")
+        prio = await q.enqueue_message(conn, session_id, "prio", lane="interrupt")
         targeted = await q.enqueue_message(conn, session_id, "to-a1", other_agent_id)
         notice = await q.enqueue_message(
             conn, session_id, "handover", other_agent_id, notice="handover"
@@ -249,7 +249,7 @@ async def test_verifying_carrier_holds_the_session(pool):
     sid = (await insert_session(pool))["id"]
     await _ready_agent(pool, sid)
     carrier = await _carrier(pool, sid, status="verifying")
-    await insert_message(pool, sid, text="later", lane="priority")
+    await insert_message(pool, sid, text="later", lane="interrupt")
     assert await _claim(pool) is None
     async with pool.connection() as conn:
         await conn.execute("UPDATE messages SET status = 'sent' WHERE id = %s", (carrier,))
@@ -264,7 +264,7 @@ async def test_carrier_in_backoff_holds_the_session(pool):
         cur = await conn.execute("SELECT now() + interval '1 hour'")
         later = (await cur.fetchone())[0]
     await _carrier(pool, sid, not_before=later)
-    await insert_message(pool, sid, text="later", lane="priority")
+    await insert_message(pool, sid, text="later", lane="interrupt")
     assert await _claim(pool) is None
 
 
@@ -289,7 +289,7 @@ async def test_failed_or_cancelled_carrier_releases_and_a_retry_holds_again(pool
     sid2 = (await insert_session(pool))["id"]
     await _ready_agent(pool, sid2)
     cancelled = await _carrier(pool, sid2)
-    other = (await insert_message(pool, sid2, text="other", lane="priority"))["id"]
+    other = (await insert_message(pool, sid2, text="other", lane="interrupt"))["id"]
     assert await _call(pool, q.cancel_message, cancelled)
     claim = await _claim(pool)
     assert claim is not None and claim.message_id == other
@@ -300,7 +300,7 @@ async def test_gate_is_per_session(pool):
     free_sid = (await insert_session(pool))["id"]
     await _ready_agent(pool, free_sid)
     await _carrier(pool, gated_sid)  # no agent yet: the carrier waits, the session is held
-    await insert_message(pool, gated_sid, text="held", lane="priority")
+    await insert_message(pool, gated_sid, text="held", lane="interrupt")
     plain = (await insert_message(pool, free_sid, text="plain", lane="regular"))["id"]
     claim = await _claim(pool)
     assert claim is not None and claim.message_id == plain

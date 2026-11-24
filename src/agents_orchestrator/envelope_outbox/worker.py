@@ -300,7 +300,7 @@ class EnvelopeRelay:
                             handled=list(row["handled"] or []),
                             hop=hop,
                             envelope_ref=envelope_ref(row),
-                            allow_priority=False,
+                            allow_interrupt=False,
                         )
                         fields: dict[str, Any] = {"message_id": sent.message_id}
                     elif row["kind"] == "agent":

@@ -3558,7 +3558,7 @@
             "enum": [
               "idle",
               "regular",
-              "priority"
+              "interrupt"
             ],
             "title": "Lane",
             "type": "string"
@@ -4379,7 +4379,7 @@
             "enum": [
               "idle",
               "regular",
-              "priority"
+              "interrupt"
             ],
             "title": "Lane",
             "type": "string"
@@ -5792,7 +5792,7 @@
             "enum": [
               "idle",
               "regular",
-              "priority"
+              "interrupt"
             ],
             "title": "Lane",
             "type": "string"

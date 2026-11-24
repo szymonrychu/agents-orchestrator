@@ -29,6 +29,7 @@ KEY = "k" * 32
 
 def make_settings(dsn: str, **kw) -> Settings:
     kw.setdefault("retry_backoff_base_seconds", 0.2)
+    kw.setdefault("live_retry_delay_seconds", 0.2)
     kw.setdefault("retry_backoff_max_seconds", 0.2)
     return Settings(database_url=dsn, master_key=KEY, **kw)
 
@@ -517,19 +518,19 @@ async def test_idle_lane_waits_for_agent_free(env):
     assert env.fake.received_turns == 0
 
 
-async def test_regular_and_priority_bypass_agent_free(env):
+async def test_regular_and_interrupt_bypass_agent_free(env):
     agent = await env.agent()
     env.fake.set_session_state("busy")
     await env.set_free(agent["id"], 0, "busy")  # the agent is mid-turn
     reg = await env.msg(text="regular", lane="regular")
-    pri = await env.msg(text="priority", lane="priority")
+    pri = await env.msg(text="interrupt", lane="interrupt")
     d = env.dispatcher()
     await d.drain()
     await d.aclose()
     assert (await env.message(reg["id"]))["status"] == "sent"
     assert (await env.message(pri["id"]))["status"] == "sent"
-    assert env.fake.turn_texts == ["regular", "priority"]
-    assert env.fake.turn_lanes == ["regular", "priority"]
+    assert env.fake.turn_texts == ["regular", "interrupt"]
+    assert env.fake.turn_lanes == ["regular", "interrupt"]
 
 
 async def test_idle_head_does_not_block_a_later_regular_message(env):
@@ -552,11 +553,11 @@ async def test_lane_is_sent_to_the_wrapper(env):
     assert env.fake.turn_lanes == ["idle"]
 
 
-async def test_dialog_open_requeues_with_busy_backoff(env):
+async def test_dialog_open_requeues_after_the_live_retry_delay(env):
     agent = await env.agent()
     m = await env.msg(lane="regular")
     env.fake.set_turn_status(409, "dialog_open")
-    d = env.dispatcher(retry_backoff_base_seconds=1.0, retry_backoff_max_seconds=3.0)
+    d = env.dispatcher(live_retry_delay_seconds=1.0)
     await d.drain()
     row = (
         await env.rows(
@@ -577,7 +578,7 @@ async def test_dialog_open_requeues_with_busy_backoff(env):
 
 async def test_booting_and_busy_409_requeue_without_an_attempt(env):
     await env.agent()
-    m = await env.msg(lane="priority")
+    m = await env.msg(lane="interrupt")
     d = env.dispatcher()
     for code in ("booting", "busy"):
         env.fake.set_turn_status(409, code)
@@ -598,13 +599,13 @@ async def test_dead_409_is_retried_with_backoff(env):
     assert (row["status"], row["attempts"]) == ("queued", 1)
 
 
-async def test_live_lane_409_requeue_backs_off_exponentially_and_is_bounded(env):
+async def test_live_lane_409_requeue_waits_a_fixed_short_delay(env):
     await env.agent()
-    m = await env.msg(lane="priority")
-    env.fake.set_turn_status(409, "busy")
-    d = env.dispatcher(retry_backoff_base_seconds=1.0, retry_backoff_max_seconds=3.0)
+    m = await env.msg(lane="regular")
+    env.fake.set_turn_status(409, "dialog_open")
+    d = env.dispatcher(live_retry_delay_seconds=3.0)
     gaps = []
-    for _ in range(4):
+    for _ in range(3):
         await env.exec("UPDATE messages SET not_before = NULL WHERE id=%s", (m["id"],))
         await d.drain()
         row = (
@@ -616,10 +617,23 @@ async def test_live_lane_409_requeue_backs_off_exponentially_and_is_bounded(env)
         )[0]
         assert (row["status"], row["attempts"]) == ("queued", 0)
         gaps.append(round(float(row["gap"])))
-    await d.drain()  # inside the backoff: not claimed again
+    await d.drain()  # inside the delay: not claimed again
     await d.aclose()
-    assert gaps == [1, 2, 3, 3]
-    assert env.fake.received_turns == 0
+    assert gaps == [3, 3, 3]
+
+
+async def test_refused_regular_message_does_not_stall_later_ones(env):
+    await env.agent()
+    first = await env.msg(text="first", lane="regular")
+    later = await env.msg(text="later", lane="regular")
+    await env.exec(
+        "UPDATE messages SET not_before = now() + interval '1 hour' WHERE id=%s", (first["id"],)
+    )
+    d = env.dispatcher()
+    await d.drain()
+    await d.aclose()
+    assert (await env.message(later["id"]))["status"] == "sent"
+    assert (await env.message(first["id"]))["status"] == "queued"
 
 
 async def test_idle_lane_409_requeue_has_no_backoff(env):

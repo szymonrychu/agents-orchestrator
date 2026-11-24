@@ -347,8 +347,8 @@ async def test_turn_metadata_and_turn_records():
     }
     await c.submit_turn("s", "hi")
     assert json.loads(reqs[1].content) == {"text": "hi", "lane": "regular"}
-    await c.submit_turn("s", "hi", lane="priority")
-    assert json.loads(reqs[2].content)["lane"] == "priority"
+    await c.submit_turn("s", "hi", lane="interrupt")
+    assert json.loads(reqs[2].content)["lane"] == "interrupt"
     turns = await c.list_turns("s")
     assert turns[0].turn_id == "t1" and turns[0].state == "running"
     t = await c.get_turn("s", "t1")
@@ -541,7 +541,7 @@ async def test_open_download_errors():
         await client(boom).open_download("ses_1", "x")
 
 
-async def test_priority_send_carries_message_id_and_its_own_timeout():
+async def test_send_carries_message_id_and_timeout_override():
     seen = {}
 
     def h(r):
@@ -550,18 +550,18 @@ async def test_priority_send_carries_message_id_and_its_own_timeout():
         return httpx.Response(202, json={"turn_id": "t", "state": "running"})
 
     c = client(h, send_timeout=3.0)
-    out = await c.submit_turn("s", "x", {"orch_message_id": 9}, "priority", "orch-9", 40.0)
+    out = await c.submit_turn("s", "x", {"orch_message_id": 9}, "interrupt", "orch-9", 40.0)
     assert isinstance(out, TurnAccepted) and out.turn_id == "t"
-    assert seen["body"]["message_id"] == "orch-9" and seen["body"]["lane"] == "priority"
+    assert seen["body"]["message_id"] == "orch-9" and seen["body"]["lane"] == "interrupt"
     assert seen["timeout"] == 40.0
     await c.submit_turn("s", "x", {}, "regular")
     assert "message_id" not in seen["body"] and seen["timeout"] == 3.0
 
 
-async def test_pending_priority_answer_is_ambiguous():
+async def test_pending_answer_is_ambiguous():
     # a retry the wrapper matched to a delivery still interrupting: the turn is not running yet
     c = client(lambda r: httpx.Response(202, json={"turn_id": "t", "state": "pending"}))
-    out = await c.submit_turn("s", "x", {}, "priority", "orch-1")
+    out = await c.submit_turn("s", "x", {}, "interrupt", "orch-1")
     assert isinstance(out, Ambiguous) and "pending" in out.reason
 
 

@@ -36,13 +36,13 @@ async def session_send_core(
     handled: list[int],
     hop: int,
     envelope_ref: str | None = None,
-    allow_priority: bool = True,
+    allow_interrupt: bool = True,
 ) -> Sent:
     """Queue `text` to the leader of `target_slug` as `own`; returns the message id and the
     handled ids. `hop` is the hop of the caller's current turn (0 when it delivered no session
     message); the queued message carries hop + 1."""
-    if lane == "priority" and not allow_priority:
-        raise ApiError(422, "lane_forbidden", "an envelope cannot use the priority lane")
+    if lane == "interrupt" and not allow_interrupt:
+        raise ApiError(422, "lane_forbidden", "an envelope cannot use the interrupt lane")
     async with conn.transaction():
         if not await leadership.leads(conn, agent.session_id, agent.id, alone=own.spec.alone):
             raise ApiError(403, "not_leader", "only the leader of a session can send to another")

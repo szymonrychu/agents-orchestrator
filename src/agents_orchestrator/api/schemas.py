@@ -733,7 +733,7 @@ class Meta(BaseModel):
     credential: MetaCredential
 
 
-Lane = Literal["idle", "regular", "priority"]
+Lane = Literal["idle", "regular", "interrupt"]
 MessageStatus = Literal["queued", "dispatching", "verifying", "sent", "failed", "cancelled"]
 # an orchestrator-written message; null for every other message
 Notice = Literal[

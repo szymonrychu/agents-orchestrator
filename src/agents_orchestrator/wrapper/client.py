@@ -181,8 +181,8 @@ class WrapperClient:
         timeout: float | None = None,
         attachments: Sequence[StoredAttachment] = (),
     ) -> SubmitOutcome:
-        """`message_id` makes a priority send idempotent: the wrapper answers a repeat with
-        the turn the first send started. `timeout` overrides the send timeout (priority).
+        """`message_id` makes a interrupt send idempotent: the wrapper answers a repeat with
+        the turn the first send started. `timeout` overrides the send timeout (interrupt).
         `attachments` become files under `.attachments/<message_id>/` in the agent workdir."""
         body: dict[str, Any] = {"text": text, "lane": lane}
         if metadata is not None:
@@ -221,7 +221,7 @@ class WrapperClient:
             except (ValueError, KeyError, TypeError):
                 return Ambiguous(f"{status} without a turn_id")
             if isinstance(body, dict) and body.get("state") == "pending":
-                # a retried priority send whose first send is still interrupting: the turn
+                # a retried interrupt send whose first send is still interrupting: the turn
                 # is not running yet, so the verifier decides once it starts or is dropped
                 return Ambiguous(f"{status} turn {turn_id} pending")
             return TurnAccepted(turn_id)

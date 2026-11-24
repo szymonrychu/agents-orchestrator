@@ -501,7 +501,7 @@ FOR UPDATE OF a SKIP LOCKED
 """
 
 
-# The regular and priority lanes bypass agent_free (D2): any ready agent of the session, an idle
+# The regular and interrupt lanes bypass agent_free (D2): any ready agent of the session, an idle
 # one first (longest free), because the wrapper takes the message mid-turn and answers 409
 # booting, dead, busy or dialog_open itself.
 _PICK_LIVE = f"""
@@ -580,7 +580,7 @@ async def _handover_pending(conn: psycopg.AsyncConnection, session_id: uuid.UUID
 
 
 def _lane_class(lane: str) -> str:
-    """Idle messages wait for agent_free; regular and priority bypass it (D2): FIFO per class."""
+    """Idle messages wait for agent_free; regular and interrupt bypass it (D2): FIFO per class."""
     return "idle" if lane == "idle" else "live"
 
 
@@ -719,6 +719,8 @@ async def _claim_in_session(conn: psycopg.AsyncConnection, session_id: uuid.UUID
                 continue
             if target is None:
                 if row["waiting"]:
+                    if cls == "live":
+                        continue  # a refused live head retries alone, never stalls later ones
                     if leader_id is None:
                         stalled.add(cls)  # an untargeted head in backoff holds its lane class
                     else:
@@ -878,27 +880,20 @@ async def mark_sent(conn: psycopg.AsyncConnection, id: int, turn_id: str) -> boo
     return row is not None
 
 
-async def requeue(
-    conn: psycopg.AsyncConnection,
-    id: int,
-    backoff_base: float = 0.0,
-    backoff_max: float = 0.0,
-) -> bool:
+async def requeue(conn: psycopg.AsyncConnection, id: int, delay: float = 0.0) -> bool:
     """409 busy/booting/dialog_open: back to queued, no attempt counted.
 
-    A regular or priority message is not gated by agent_free, so it also waits a bounded
-    exponential backoff (`backoff_base * 2^requeues`, at most `backoff_max`) and cannot be
-    re-claimed in a hot loop. An idle message is gated by agent_free and gets none.
+    A regular or interrupt message is not gated by agent_free, so it waits a short fixed
+    `delay` (no growth: the wrapper takes it as soon as it can) and cannot be re-claimed in a
+    hot loop. An idle message is gated by agent_free and gets none.
     """
     row = await _transition(
         conn,
         "UPDATE messages SET status = 'queued', heartbeat_at = NULL,"
-        " not_before = CASE WHEN lane = 'idle' OR %(base)s <= 0 THEN NULL ELSE now() +"
-        " make_interval(secs => least(%(base)s * power(2, least(busy_requeues, 20)), %(max)s))"
-        " END,"
-        " busy_requeues = CASE WHEN lane = 'idle' THEN busy_requeues ELSE busy_requeues + 1 END"
+        " not_before = CASE WHEN lane = 'idle' OR %(delay)s <= 0 THEN NULL ELSE now() +"
+        " make_interval(secs => %(delay)s) END"
         " WHERE id = %(id)s AND status = 'dispatching' RETURNING session_id",
-        {"id": id, "base": backoff_base, "max": backoff_max},
+        {"id": id, "delay": delay},
     )
     return row is not None
 
