@@ -67,6 +67,16 @@ def test_unreferenced_subagent_rejected():
     assert check(body(in_flight=["one subagent reviewing the diff"]), inflight=inflight) == []
 
 
+def test_each_subagent_id_needs_its_own_whole_word_reference():
+    inflight = Inflight(subagents=2, subagent_ids=["a1", "b2"])
+    got = check(body(in_flight=["a10 reviewing, a1 checking"]), inflight=inflight)
+    assert got == ["unreferenced:subagent:b2 running"]
+    assert check(body(in_flight=["a10 reviewing"]), inflight=inflight) == [
+        "unreferenced:subagent:a1 running",
+        "unreferenced:subagent:b2 running",
+    ]
+
+
 def test_abandoned_task_needs_no_reference():
     inflight = Inflight(background_tasks=[{"id": "bf3a", "description": "CI watch"}])
     gone = [Abandon(item="bf3a", why="the PR was closed, nothing to watch")]

@@ -13,10 +13,29 @@ from typing import Any, Protocol
 from agents_orchestrator.wrapper.models import Inflight
 
 UNREACHABLE = "inflight:unknown (wrapper unreachable)"
-SCRATCH_HINT = (
-    "move the files you need into the shared workdir scratchpad (.scratchpad/<name>/) "
-    "or abandon them with a reason"
-)
+#: The bare word that abandons or names every running subagent at once.
+SUBAGENT_ALL = "subagent"
+STOP_ADVICE = "finish it, stop it with TaskStop, or abandon it with a reason"
+
+
+def refusal_words(item_id: str, *, stored: bool = False) -> str:
+    """What to do about one blocking item, by the kind its id starts with. `stored` is the 409
+    gate (only finishing, stopping or an abandon clears it); otherwise the 422 check, where the
+    item is also cleared by naming it in in_flight (a scratch file: in results)."""
+    kind, _, what = item_id.partition(":")
+    if kind == "scratch":
+        path = what.removesuffix(" (pod-local, not persisted)")
+        tail = "abandon it with a reason" if stored else "list it in results"
+        return f"{path} is not persisted: move it under .scratchpad/<name>/ or {tail}"
+    if kind in ("task", "subagent"):
+        label = item_id if kind == "task" else f"subagent {what.removesuffix(' running')}"
+        if stored:
+            return f"{label} is running: {STOP_ADVICE}"
+        return (
+            f"{label} is not named in in_flight: list it there, or stop it with TaskStop, "
+            "or abandon it with a reason"
+        )
+    return f"{item_id} is still in flight: finish it or abandon it with a reason"
 
 
 class AbandonLike(Protocol):
@@ -73,7 +92,8 @@ def items(inflight: Inflight | None) -> list[Item]:
         return [Item(UNREACHABLE)]
     out: list[Item] = []
     if inflight.subagents:
-        out.append(Item(f"subagent:{inflight.subagents} running", ("subagent",), kind="subagent"))
+        ids = inflight.subagent_ids or [str(inflight.subagents)]
+        out.extend(Item(f"subagent:{i} running", (i,), kind="subagent") for i in ids)
     out.extend(_task(t) for t in inflight.background_tasks)
     for w in inflight.worktrees:
         out.extend(_worktree(w))
@@ -87,7 +107,7 @@ def items(inflight: Inflight | None) -> list[Item]:
 
 def _covers(abandoned: str, item: Item) -> bool:
     name = abandoned.strip()
-    if name == item.id or name in item.keys:
+    if name == item.id or name in item.keys or (name == SUBAGENT_ALL and item.kind == "subagent"):
         return True
     if item.path is None or not name:
         return False

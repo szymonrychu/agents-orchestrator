@@ -529,7 +529,7 @@ def _reason_words(reason: str) -> str:
     if kind == "missing":
         return f"the field {what} is empty"
     if kind == "unreferenced":
-        return f"{what} is still running but no in_flight entry names it (list it or abandon it)"
+        return handoff_gate.refusal_words(what)
     return _REJECT_WORDS.get(reason, reason)
 
 
@@ -617,18 +617,12 @@ async def handoff_submit(
             handled = await session_messaging.mark_handled(conn, agent.session_id, body.handled)
             if not gate.clear:
                 await handoffs.record_gate_block(conn, row.id, snapshot)
-                hint = (
-                    f" For scratch files: {handoff_gate.SCRATCH_HINT}."
-                    if any(w.startswith("scratch:") for w in gate.waiting_on)
-                    else ""
-                )
                 refusal = ApiError(
                     409,
                     "in_flight",
                     "the handoff is stored but work is still in flight: "
-                    + ", ".join(gate.waiting_on)
-                    + ". Finish each, or abandon it with a reason, then submit again."
-                    + hint,
+                    + "; ".join(handoff_gate.refusal_words(w, stored=True) for w in gate.waiting_on)
+                    + ". Then submit again.",
                     extra={"waiting_on": gate.waiting_on},
                 )
     if refusal is not None:

@@ -7,6 +7,7 @@ did not abandon). `check_text` is the length and text-ratio part alone (the shut
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from agents_orchestrator import handoff_gate
@@ -50,7 +51,9 @@ def check(
         if handoff_gate.abandon_for(item, abandon) is not None:
             continue
         names = (item.id, *item.keys, *([item.path] if item.path else []))
+        if item.kind == "subagent":
+            names = (*names, handoff_gate.SUBAGENT_ALL)
         mentioned = with_results if item.kind == "scratch" else in_flight
-        if not any(n.lower() in mentioned for n in names if n):
+        if not any(re.search(rf"(?<!\w){re.escape(n)}(?!\w)", mentioned, re.I) for n in names if n):
             reasons.append(f"unreferenced:{item.id}")
     return reasons
