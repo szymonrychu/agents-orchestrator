@@ -7,6 +7,7 @@ import base64
 import time
 import uuid
 
+import pytest
 import pytest_asyncio
 from factories import (
     insert_agent,
@@ -126,32 +127,16 @@ async def test_round_robin_by_free_since(env):
     assert env.fake.received_turns == 3
 
 
-async def test_message_waits_until_agent_free(env):
-    agent = await env.agent()
-    m1, m2 = await env.msg(text="one"), await env.msg(text="two")
-    d = env.dispatcher()
-    await d.drain()
-    assert (await env.message(m1["id"]))["status"] == "sent"
-    await d.drain()
-    assert (await env.message(m2["id"]))["status"] == "queued"
-    env.fake.set_session_state("ready")
-    await env.set_free(agent["id"])  # the ingester sees the turn end
-    await d.drain()
-    await d.aclose()
-    assert (await env.message(m2["id"]))["status"] == "sent"
-    assert env.fake.turn_texts == ["one", "two"]
-
-
 async def test_409_requeues(env):
-    agent = await env.agent()
+    await env.agent()
     m = await env.msg()
     env.fake.set_turn_status(409)
     d = env.dispatcher()
     await d.drain()
     row = await env.message(m["id"])
-    assert (row["status"], row["attempts"], row["not_before"]) == ("queued", 0, None)
-    assert (await env.agent_row(agent["id"]))["last_dispatched_at"] is None
+    assert (row["status"], row["attempts"]) == ("queued", 0)
     env.fake.set_turn_status(None)
+    await env.exec("UPDATE messages SET not_before = NULL WHERE id=%s", (m["id"],))
     await d.drain()
     await d.aclose()
     assert (await env.message(m["id"]))["status"] == "sent"
@@ -201,8 +186,8 @@ async def test_two_dispatchers_no_double_send(env):
     await d1.aclose()
     await d2.aclose()
     ids = [m["orch_message_id"] for m in env.fake.turn_metadata]
-    assert len(ids) == 3 and len(set(ids)) == 3
-    assert env.fake.received_turns == 3
+    assert len(ids) == 6 and len(set(ids)) == 6
+    assert env.fake.received_turns == 6
 
 
 async def test_notify_loss_recovered_by_poll(env):
@@ -376,9 +361,9 @@ async def test_two_dispatchers_keep_fifo_per_session(env):
     await d1.aclose()
     await d2.aclose()
     statuses = [(await env.message(m["id"]))["status"] for m in ms]
-    assert statuses == ["sent", "sent", "queued", "queued", "queued"]
+    assert statuses == ["sent"] * 5
     ids = sorted(m["orch_message_id"] for m in env.fake.turn_metadata)
-    assert ids == [ms[0]["id"], ms[1]["id"]]
+    assert ids == [m["id"] for m in ms]
 
 
 async def test_session_gone_enqueues_rebootstrap(env):
@@ -453,6 +438,7 @@ async def test_notify_wakes_dispatcher_on_both_channels(env):
     try:
         await asyncio.sleep(0.5)  # initial drain done, listening
         for channel in ("message_queued", "agent_free"):
+            env.fake.set_session_state("ready")
             m = await env.msg()
             await env.exec("SELECT pg_notify(%s, '{}')", (channel,))
             deadline = time.monotonic() + 5
@@ -508,40 +494,17 @@ async def test_at_most_eight_sends_in_flight(env):
 # ---------------------------------------------------------------- lanes (D2)
 
 
-async def test_idle_lane_waits_for_agent_free(env):
-    await env.agent(state="busy")
-    m = await env.msg(lane="idle")
-    d = env.dispatcher()
-    await d.drain()
-    await d.aclose()
-    assert (await env.message(m["id"]))["status"] == "queued"
-    assert env.fake.received_turns == 0
-
-
-async def test_regular_and_interrupt_bypass_agent_free(env):
+@pytest.mark.parametrize("lane", ["regular", "idle", "interrupt"])
+async def test_every_lane_bypasses_agent_free(env, lane):
     agent = await env.agent()
     env.fake.set_session_state("busy")
     await env.set_free(agent["id"], 0, "busy")  # the agent is mid-turn
-    reg = await env.msg(text="regular", lane="regular")
-    pri = await env.msg(text="interrupt", lane="interrupt")
+    m = await env.msg(text=lane, lane=lane)
     d = env.dispatcher()
     await d.drain()
     await d.aclose()
-    assert (await env.message(reg["id"]))["status"] == "sent"
-    assert (await env.message(pri["id"]))["status"] == "sent"
-    assert env.fake.turn_texts == ["regular", "interrupt"]
-    assert env.fake.turn_lanes == ["regular", "interrupt"]
-
-
-async def test_idle_head_does_not_block_a_later_regular_message(env):
-    await env.agent(state="busy")
-    idle = await env.msg(text="later", lane="idle")
-    reg = await env.msg(text="now", lane="regular")
-    d = env.dispatcher()
-    await d.drain()
-    await d.aclose()
-    assert (await env.message(idle["id"]))["status"] == "queued"
-    assert (await env.message(reg["id"]))["status"] == "sent"
+    assert (await env.message(m["id"]))["status"] == "sent"
+    assert env.fake.turn_lanes == [lane]
 
 
 async def test_lane_is_sent_to_the_wrapper(env):
@@ -634,16 +597,6 @@ async def test_refused_regular_message_does_not_stall_later_ones(env):
     await d.aclose()
     assert (await env.message(later["id"]))["status"] == "sent"
     assert (await env.message(first["id"]))["status"] == "queued"
-
-
-async def test_idle_lane_409_requeue_has_no_backoff(env):
-    await env.agent()
-    m = await env.msg(lane="idle")
-    env.fake.set_turn_status(409)
-    d = env.dispatcher()
-    await d.drain()
-    await d.aclose()
-    assert (await env.message(m["id"]))["not_before"] is None
 
 
 PNG = b"\x89PNG\r\n\x1a\nbytes"

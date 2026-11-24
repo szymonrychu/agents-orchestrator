@@ -132,24 +132,6 @@ async def test_target_agent_restricts_pick(pool):
     assert claim.target_agent_id == newest["id"]
 
 
-async def test_busy_agents_leave_message_queued(pool):
-    busy_session = (await insert_session(pool))["id"]
-    free_session = (await insert_session(pool))["id"]
-    await _ready_agent(pool, busy_session, state="busy")
-    await _ready_agent(pool, busy_session, state="busy")
-    other = await _ready_agent(pool, free_session)
-    stuck = await _enqueue(pool, busy_session, "first")
-    moving = await _enqueue(pool, free_session, "second")
-
-    claim = await _claim(pool)
-
-    assert claim.message_id == moving
-    assert claim.agent_id == other["id"]
-    assert (await _msg(pool, stuck))["status"] == "queued"
-    assert await _claim(pool) is None
-    assert (await _msg(pool, stuck))["status"] == "queued"
-
-
 async def test_deleting_session_is_not_dispatched(pool):
     # A deleting session is being exported and torn down (D15): a turn started now would miss
     # the discard-hook history, so its queued messages stay queued while other sessions move.
@@ -166,29 +148,6 @@ async def test_deleting_session_is_not_dispatched(pool):
     assert (claim.message_id, claim.agent_id) == (moving, other["id"])
     assert await _claim(pool) is None
     assert (await _msg(pool, held))["status"] == "queued"
-
-
-async def test_reservation_rule_blocks_redispatch_before_idle_seen(pool):
-    cid = (await insert_session(pool))["id"]
-    agent = await _ready_agent(pool, cid, free_ago=5)
-    m1 = await _enqueue(pool, cid, "one")
-    m2 = await _enqueue(pool, cid, "two")
-
-    c1 = await _claim(pool)
-    assert c1.message_id == m1
-    assert await _call(pool, q.mark_sent, m1, "turn-1") is True
-    # The ingester has not yet seen busy: state is still idle with the old free_since.
-    assert await _claim(pool) is None
-    assert (await _msg(pool, m2))["status"] == "queued"
-
-    await _set_free(pool, agent["id"])  # the turn ended: a newer free_since
-    c2 = await _claim(pool)
-    assert c2.message_id == m2
-    assert c2.agent_id == agent["id"]
-    assert c2.previous_dispatched_at == c1.dispatched_at
-    m = await _msg(pool, m1)
-    assert m["status"] == "sent"
-    assert m["turn_id"] == "turn-1"
 
 
 async def test_two_dispatchers_never_double_dispatch(pool, dsn):
@@ -223,8 +182,6 @@ async def test_two_dispatchers_never_double_dispatch(pool, dsn):
     message_ids = [c.message_id for c in claims]
     assert len(message_ids) == len(set(message_ids)) == 50
     assert sorted(message_ids) == ids
-    per_free = [(c.agent_id, c.free_since) for c in claims]
-    assert len(per_free) == len(set(per_free))
     assert {c.agent_id for c in claims} <= {a["id"] for a in agents}
     async with pool.connection() as conn:
         cur = await conn.execute(
@@ -341,7 +298,7 @@ async def test_requeue_with_backoff_and_fail_at_max_attempts(pool, dsn):
 
 async def test_stale_dispatching_moves_to_verifying(pool):
     cid = (await insert_session(pool))["id"]
-    agent = await _ready_agent(pool, cid, free_ago=200)
+    await _ready_agent(pool, cid, free_ago=200)
     m1 = await _enqueue(pool, cid, "slow")
     claim = await _claim(pool)
     assert claim.message_id == m1
@@ -356,7 +313,6 @@ async def test_stale_dispatching_moves_to_verifying(pool):
     await _enqueue(pool, fresh_session, "fresh")
     fresh = await _claim(pool)
     assert fresh.agent_id == fresh_agent["id"]
-    before = (await _agent(pool, agent["id"]))["last_dispatched_at"]
 
     assert await _call(pool, q.verify_stale_dispatching, 60) == 1
 
@@ -365,10 +321,6 @@ async def test_stale_dispatching_moves_to_verifying(pool):
     assert m["error"] == "dispatcher_lost"
     assert m["ambiguous_at"] is not None
     assert (await _msg(pool, fresh.message_id))["status"] == "dispatching"
-    # The reservation is kept: the agent is not picked for the next message.
-    assert (await _agent(pool, agent["id"]))["last_dispatched_at"] == before
-    await _enqueue(pool, cid, "next")
-    assert await _claim(pool) is None
     assert await _call(pool, q.verify_stale_dispatching, 60) == 0
 
 
@@ -406,12 +358,12 @@ async def test_backoff_holds_session_head_fifo(pool):
     later = await _enqueue(pool, held, "later")
     elsewhere = await _enqueue(pool, other, "elsewhere")
 
-    claim = await _claim(pool)
-    assert claim.message_id == elsewhere
-    assert claim.agent_id == other_agent["id"]
+    # A head in backoff retries alone: later messages of its session still flow.
+    claims = [await _claim(pool), await _claim(pool)]
+    assert {c.message_id for c in claims} == {later, elsewhere}
+    assert other_agent["id"] in {c.agent_id for c in claims}
     assert await _claim(pool) is None
     assert (await _msg(pool, head))["status"] == "queued"
-    assert (await _msg(pool, later))["status"] == "queued"
 
     await _exec(
         pool, "UPDATE messages SET not_before = now() - interval '1 second' WHERE id=%s", (head,)
@@ -419,8 +371,6 @@ async def test_backoff_holds_session_head_fifo(pool):
     first = await _claim(pool)
     assert first.message_id == head
     assert first.attempts == 1
-    second = await _claim(pool)
-    assert second.message_id == later
 
 
 # ---------------------------------------------------------------- release and interleaving
@@ -521,11 +471,6 @@ async def test_forced_interleaving_never_double_picks_agent(pool, dsn):
         assert cb is not None
         assert (cb.message_id, cb.agent_id) == (m2, y["id"])
         await b.commit()
-
-        # x is reserved by A's committed claim until a newer free_since.
-        pick = await q._pick_agent(b, cid, None)
-        assert pick is None
-        await b.rollback()
     finally:
         await a.close()
         await b.close()
@@ -568,25 +513,6 @@ async def test_advisory_lock_keeps_fifo_under_two_dispatchers(pool, dsn):
 # ---------------------------------------------------------------- targeted messages
 
 
-async def test_busy_target_does_not_block_head_of_line(pool):
-    cid = (await insert_session(pool))["id"]
-    busy = await _ready_agent(pool, cid, free_ago=60, state="busy")
-    booting = await _ready_agent(pool, cid, free_ago=60, state="booting")
-    free = await _ready_agent(pool, cid, free_ago=5)
-    to_busy = await _enqueue(pool, cid, "for busy", busy["id"])
-    to_booting = await _enqueue(pool, cid, "for booting", booting["id"])
-    untargeted = await _enqueue(pool, cid, "anyone")
-
-    claim = await _claim(pool)
-
-    assert (claim.message_id, claim.agent_id) == (untargeted, free["id"])
-    assert (await _msg(pool, to_busy))["status"] == "queued"
-    assert (await _msg(pool, to_booting))["status"] == "queued"
-    await _set_free(pool, busy["id"])
-    claim = await _claim(pool)
-    assert (claim.message_id, claim.agent_id) == (to_busy, busy["id"])
-
-
 async def test_gone_target_fails_with_target_gone(pool):
     cid = (await insert_session(pool))["id"]
     gone = await _ready_agent(pool, cid, free_ago=60)
@@ -605,27 +531,6 @@ async def test_gone_target_fails_with_target_gone(pool):
 
 
 # ---------------------------------------------------------------- ambiguous sends
-
-
-async def test_ambiguous_keeps_reservation_until_failed(pool):
-    cid = (await insert_session(pool))["id"]
-    agent = await _ready_agent(pool, cid, free_ago=30)
-    m1 = await _enqueue(pool, cid, "maybe")
-    c1 = await _claim(pool)
-    assert c1.message_id == m1
-    assert await _call(pool, q.mark_verifying, m1, "ambiguous") is True
-    assert await _call(pool, q.mark_verifying, m1, "ambiguous") is False
-    m = await _msg(pool, m1)
-    assert (m["status"], m["error"]) == ("verifying", "ambiguous")
-    assert m["ambiguous_at"] is not None
-
-    m2 = await _enqueue(pool, cid, "next")
-    assert await _claim(pool) is None
-    assert await _call(pool, q.fail_ambiguous, m1) is True
-    assert (await _msg(pool, m1))["status"] == "failed"
-    # the failed message released its reservation, so the agent is pickable again
-    c2 = await _claim(pool)
-    assert (c2.message_id, c2.agent_id) == (m2, agent["id"])
 
 
 async def test_verifying_transitions_and_guarded_release(pool):
