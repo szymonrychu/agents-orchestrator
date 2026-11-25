@@ -353,6 +353,7 @@ async def test_agent_not_wedged_after_failed_send(env):
 
 
 async def test_two_dispatchers_keep_fifo_per_session(env):
+    env.fake.busy_refuses_idle = True
     for _ in range(2):
         await env.agent()
     ms = [await env.msg(text=f"m{i}") for i in range(5)]

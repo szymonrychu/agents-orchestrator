@@ -298,6 +298,8 @@ class FakeWrapper:
         self.turn_texts: list[str] = []
         self.turn_metadata: list[dict[str, Any]] = []
         self.turn_lanes: list[str] = []
+        self.queued_messages: list[str] = []
+        self.busy_refuses_idle = False  # knob: answer 409 busy to an idle send on a running turn
         self.turn_message_ids: list[str | None] = []  # the message_id of every POST /turns
         # the `attachments` of every POST /turns that reached the workdir (None when absent)
         self.turn_attachments: list[list[dict[str, Any]] | None] = []
@@ -871,11 +873,21 @@ class FakeWrapper:
             if ses.state != "ready" and ses.state != "busy":
                 raise _Err(503, "dead", f"the session is {ses.state}")
             lane = body.get("lane", "regular")
-            if ses.state == "busy" and lane == "idle":
-                raise _Err(409, "busy", "a turn is already running")
             text, metadata = body.get("text"), body.get("metadata", {})
             if not isinstance(text, str) or not isinstance(metadata, dict):
                 raise _Err(422, "invalid_request", "text must be a string, metadata an object")
+            if ses.state == "busy" and lane == "idle" and self.busy_refuses_idle:
+                raise _Err(409, "busy", "a turn is already running")
+            if ses.state == "busy" and lane == "idle" and ses.current_turn_id:
+                # wrapper 0.24.1: the text is typed into the running turn, no new turn starts
+                self.queued_messages.append(text)
+                return {
+                    "turn_id": ses.current_turn_id,
+                    "state": "running",
+                    "lane": lane,
+                    "queued": True,
+                    "message_id": body.get("message_id") or self._new_id("msg-"),
+                }
             message_id = body.get("message_id")
             self.turn_message_ids.append(message_id)
             self._write_turn_files(ses, body.get("files"))
