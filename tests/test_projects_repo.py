@@ -49,6 +49,7 @@ def test_existing_presets_and_sessions_land_in_default(empty_dsn, tmp_path):
         "0060",
         "0061",
         "0062",
+        "0063",
     ]  # fmt: skip
     with psycopg.connect(empty_dsn) as c:
         assert {r[0] for r in c.execute("SELECT project FROM presets")} == {"default"}

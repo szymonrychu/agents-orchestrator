@@ -945,7 +945,7 @@ def test_client_commands_rendered_without_agent_commands():
 
 
 def test_interrupt_settle_comes_from_the_orchestrator_setting():
-    # The priority send timeout is derived from this value, so the wrapper must run with it.
+    # The interrupt send timeout is derived from this value, so the wrapper must run with it.
     cfg = config_of(render.render_session(make_session(), make_settings(), TOKENS))
     assert cfg["sessions"]["interrupt_settle_seconds"] == 20
     settings = make_settings(wrapper_interrupt_settle_seconds=7)

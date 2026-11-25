@@ -166,7 +166,7 @@ async def test_a_session_stored_with_the_removed_backup_key_still_hands_over(env
 
 
 async def test_compacted_leader_takes_next_message(env):
-    leader = await env.agent(0, state="busy")
+    leader = await env.agent(0, state="booting")
     await env.agent(1, free_ago=100)
     await env.lead(leader["id"])
     await env.exec(
@@ -176,7 +176,7 @@ async def test_compacted_leader_takes_next_message(env):
     stop, task = await running(env)
     try:
         status = (await env.rows("SELECT status FROM messages WHERE id=%s", (message["id"],)))[0]
-        assert status["status"] == "queued"  # the leader is busy
+        assert status["status"] == "queued"  # the leader is not ready
         assert (await env.leader())["agent_id"] == leader["id"]
         # what the ingester does when the turn ends
         await env.exec(

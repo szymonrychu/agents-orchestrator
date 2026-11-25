@@ -298,6 +298,8 @@ class FakeWrapper:
         self.turn_texts: list[str] = []
         self.turn_metadata: list[dict[str, Any]] = []
         self.turn_lanes: list[str] = []
+        self.queued_messages: list[str] = []
+        self.busy_refuses_idle = False  # knob: answer 409 busy to an idle send on a running turn
         self.turn_message_ids: list[str | None] = []  # the message_id of every POST /turns
         # the `attachments` of every POST /turns that reached the workdir (None when absent)
         self.turn_attachments: list[list[dict[str, Any]] | None] = []
@@ -306,8 +308,6 @@ class FakeWrapper:
         self._create_gate: asyncio.Event | None = None
         self._create_step = "mise_install"
         self.create_entered = asyncio.Event()
-        self._priority_hold = 0.0
-        self._priority_ids: dict[str, str] = {}
         self._status_code: str | None = None
         self.last_turn_id = ""
         self._ids = 0
@@ -639,11 +639,6 @@ class FakeWrapper:
         """Record the turn, then answer after `seconds` (a client timeout sees a started turn)."""
         self._delay = seconds
 
-    def hold_priority(self, seconds: float) -> None:
-        """A priority send holds its answer this long (the wrapper's interrupt), its turn
-        listed `pending` meanwhile, as the wrapper does."""
-        self._priority_hold = seconds
-
     def disable_pressure(self, disabled: bool = True) -> None:
         """Answer 409 pressure_disabled, as a wrapper with pressure.enabled false."""
         self.pressure_enabled = not disabled
@@ -878,29 +873,28 @@ class FakeWrapper:
             if ses.state != "ready" and ses.state != "busy":
                 raise _Err(503, "dead", f"the session is {ses.state}")
             lane = body.get("lane", "regular")
-            if ses.state == "busy" and lane == "idle":
-                raise _Err(409, "busy", "a turn is already running")
             text, metadata = body.get("text"), body.get("metadata", {})
             if not isinstance(text, str) or not isinstance(metadata, dict):
                 raise _Err(422, "invalid_request", "text must be a string, metadata an object")
+            if ses.state == "busy" and lane == "idle" and self.busy_refuses_idle:
+                raise _Err(409, "busy", "a turn is already running")
+            if ses.state == "busy" and lane == "idle" and ses.current_turn_id:
+                # wrapper 0.24.1: the text is typed into the running turn, no new turn starts
+                self.queued_messages.append(text)
+                return {
+                    "turn_id": ses.current_turn_id,
+                    "state": "running",
+                    "lane": lane,
+                    "queued": True,
+                    "message_id": body.get("message_id") or self._new_id("msg-"),
+                }
             message_id = body.get("message_id")
             self.turn_message_ids.append(message_id)
-            known = self._priority_ids.get(message_id) if lane == "priority" else None
-            if known is not None:  # the wrapper's idempotent priority retry
-                turn = ses.turns[known]
-                return {"turn_id": known, "state": turn.state, "duplicate": True}
             self._write_turn_files(ses, body.get("files"))
             attachments = body.get("attachments")
             self._write_turn_attachments(ses, message_id, attachments)
             self.turn_attachments.append(attachments)
             turn = _Turn(self._new_id("turn-"), text, metadata, _now())
-            if lane == "priority" and message_id is not None:
-                self._priority_ids[message_id] = turn.turn_id
-            if lane == "priority" and self._priority_hold:
-                turn.state = "pending"
-                ses.turns[turn.turn_id] = turn
-                await asyncio.sleep(self._priority_hold)
-                turn.state = "running"
             ses.turns[turn.turn_id] = turn
             ses.current_turn_id = turn.turn_id
             ses.stop_texts = []

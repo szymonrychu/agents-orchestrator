@@ -258,13 +258,18 @@ async def test_send_lane_defaults_to_regular_and_is_stored(pool, dsn):
     boss = await hive(pool, "s-boss", superleader=True)
     plain = await alone(pool, "s-alone")
     lanes = {}
-    for lane in (None, "idle", "regular", "priority"):
+    for lane in (None, "idle", "regular", "interrupt"):
         extra = {} if lane is None else {"lane": lane}
         r = await _send(app, boss, plain.slug, f"m {lane}", **extra)
         assert r.status_code == 202, r.text
         (row,) = await _rows(pool, "id = %s", (r.json()["message_id"],))
         lanes[lane] = row["lane"]
-    assert lanes == {None: "regular", "idle": "idle", "regular": "regular", "priority": "priority"}
+    assert lanes == {
+        None: "regular",
+        "idle": "idle",
+        "regular": "regular",
+        "interrupt": "interrupt",
+    }
     bad = await _send(app, boss, plain.slug, "x", lane="urgent")
     assert bad.status_code == 422
 

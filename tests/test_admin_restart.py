@@ -105,7 +105,7 @@ async def test_own_session_restart_claims_and_notes_once(call, pool, boss):
     assert len(notes) == 1  # one for the session, not one per agent
     assert "self-initiated" in notes[0]["text"].lower()
     assert "600" in notes[0]["text"]
-    assert notes[0]["lane"] == "priority"
+    assert notes[0]["lane"] == "interrupt"
 
 
 async def test_second_own_restart_inside_the_window_is_refused(call, pool, boss):

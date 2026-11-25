@@ -587,20 +587,13 @@ def test_usage_numeric_overrides(monkeypatch):
     assert (s.usage_quota_default, s.usage_cache_seconds, s.usage_timeout_seconds) == (90, 60, 1.5)
 
 
-def test_priority_send_timeout_covers_the_wrapper_interrupt_budget():
-    from agents_orchestrator.settings import PRIORITY_HOLD_SLACK_SECONDS
-
-    s = Settings(database_url="postgresql://x", master_key="k" * 32)
-    assert s.wrapper_interrupt_settle_seconds == 20
-    # two interrupts (each up to one settle wait) and the flushed-queue wait in between
-    assert s.priority_send_timeout_seconds == 15 + 3 * 20 + PRIORITY_HOLD_SLACK_SECONDS
-    s = Settings(
-        database_url="postgresql://x",
-        master_key="k" * 32,
-        wrapper_send_timeout_seconds=5,
-        wrapper_interrupt_settle_seconds=2,
+def test_wrapper_interrupt_settle_default_and_negative_rejected():
+    assert (
+        Settings(
+            database_url="postgresql://x", master_key="k" * 32
+        ).wrapper_interrupt_settle_seconds
+        == 20
     )
-    assert s.priority_send_timeout_seconds == 5 + 3 * 2 + PRIORITY_HOLD_SLACK_SECONDS
     with pytest.raises(SettingsError):
         Settings(
             database_url="postgresql://x", master_key="k" * 32, wrapper_interrupt_settle_seconds=-1

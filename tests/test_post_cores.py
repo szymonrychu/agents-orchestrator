@@ -31,7 +31,7 @@ async def _count(pool, table: str) -> int:
 @pytest.mark.parametrize(
     ("case", "code"),
     [
-        ("priority", "lane_forbidden"),
+        ("interrupt", "lane_forbidden"),
         ("not_found", "not_found"),
         ("self", "self_send"),
         ("hop", "hop_limit"),
@@ -42,8 +42,8 @@ async def test_session_send_core_refusal_writes_nothing(pool, dsn, case, code):
     a = await hive(pool, "core-a")
     kwargs = {"lane": "regular", "hop": 0, "target": "core-b"}
     await hive(pool, "core-b")
-    if case == "priority":
-        kwargs["lane"] = "priority"
+    if case == "interrupt":
+        kwargs["lane"] = "interrupt"
     elif case == "not_found":
         kwargs["target"] = "core-nobody"
     elif case == "self":
@@ -63,7 +63,7 @@ async def test_session_send_core_refusal_writes_nothing(pool, dsn, case, code):
                 lane=kwargs["lane"],
                 handled=[],
                 hop=kwargs["hop"],
-                allow_priority=False,
+                allow_interrupt=False,
             )
     assert exc.value.code == code
     assert await _rows(pool) == []

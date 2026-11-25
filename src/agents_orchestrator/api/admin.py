@@ -835,7 +835,7 @@ async def _self_restart(conn, settings: Settings, caller: sessions_repo.Session)
 async def _hold_note(conn, caller: sessions_repo.Session, text: str) -> int:
     """The self-restart note, held until the restart commands finished (the pod is gone by
     then), so the old pod cannot take it and the hive cannot send it twice."""
-    return await q.enqueue_message(conn, caller.id, text, lane="priority", held=True)
+    return await q.enqueue_message(conn, caller.id, text, lane="interrupt", held=True)
 
 
 def _self_note(what: str, settings: Settings) -> str:

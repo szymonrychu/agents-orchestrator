@@ -391,12 +391,6 @@ class Dispatcher:
                     )
                 metadata["orch_sender_session"] = claim.sender_slug
             message_id: str | None = None
-            timeout: float | None = None
-            if claim.lane == "priority":
-                # The wrapper holds a priority send through its interrupt; the same message id
-                # on every send makes a re-send answer the turn the first one started.
-                message_id = f"orch-{claim.message_id}"
-                timeout = s.priority_send_timeout_seconds
             attachments = claim.attachments
             if attachments:
                 # The wrapper writes the files under .attachments/<message_id>/, so every
@@ -415,7 +409,7 @@ class Dispatcher:
                     metadata,
                     claim.lane,
                     message_id,
-                    timeout,
+                    None,
                     attachments,
                 )
             finally:
@@ -436,9 +430,7 @@ class Dispatcher:
                 conn, claim.agent_id, claim.previous_dispatched_at, claimed_at=claim.dispatched_at
             )
             if isinstance(outcome, Busy | DialogOpen):
-                await queue.requeue(
-                    conn, mid, s.retry_backoff_base_seconds, s.retry_backoff_max_seconds
-                )
+                await queue.requeue(conn, mid, s.live_retry_delay_seconds)
             elif isinstance(outcome, ConfigError):
                 await queue.fail_message(conn, mid, "config_error")
             elif isinstance(outcome, Rejected):

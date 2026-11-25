@@ -251,13 +251,13 @@ async def test_post_message_lane_defaults_to_regular_and_round_trips(http, pool)
     url = f"/api/v1/sessions/{cl['id']}/messages"
     default = (await http.post(url, json={"text": "a"})).json()["message_id"]
     assert (await http.get(f"/api/v1/messages/{default}")).json()["lane"] == "regular"
-    for lane in ("idle", "regular", "priority"):
+    for lane in ("idle", "regular", "interrupt"):
         r = await http.post(url, json={"text": lane, "lane": lane})
         assert r.status_code == 202, r.text
         got = (await http.get(f"/api/v1/messages/{r.json()['message_id']}")).json()
         assert got["lane"] == lane
     listed = (await http.get(url)).json()
-    assert {m["lane"] for m in listed} == {"idle", "regular", "priority"}
+    assert {m["lane"] for m in listed} == {"idle", "regular", "interrupt"}
 
 
 async def test_post_message_rejects_unknown_lane(http, pool):

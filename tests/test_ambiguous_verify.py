@@ -326,27 +326,7 @@ async def test_matches_on_message_id_not_any_turn(env):
     assert (row["status"], row["turn_id"]) == ("sent", own_turn)
 
 
-# ---------------------------------------------------------------- priority double delivery
-
-
-async def test_priority_delayed_interrupt_longer_than_send_timeout_is_sent(env):
-    """The wrapper holds a priority send through its interrupt, longer than the plain send
-    timeout: the priority lane waits for the wrapper's interrupt budget instead."""
-    await env.agent()
-    m = await insert_message(env.pool, env.cid, text="urgent", lane="priority")
-    env.fake.hold_priority(1.0)  # twice ORCH_WRAPPER_SEND_TIMEOUT_SECONDS (0.5)
-    d = env.dispatcher(wrapper_interrupt_settle_seconds=0.2)
-    assert d.settings.priority_send_timeout_seconds > 1.0
-    await d.drain()
-    await d.aclose()
-    row = await env.message(m["id"])
-    assert (row["status"], row["turn_id"], row["error"]) == ("sent", env.fake.last_turn_id, None)
-    assert row["ambiguous_at"] is None  # never ambiguous
-    assert env.fake.received_turns == 1
-    assert env.fake.turn_message_ids == [f"orch-{m['id']}"]
-
-
-async def test_pending_priority_turn_is_never_requeued(env):
+async def test_pending_turn_is_never_requeued(env):
     """A turn the wrapper lists `pending` (its interrupt still running) is in progress: the
     verifier neither requeues it past the settle window nor resolves it before it starts."""
     agent = await env.agent()
@@ -363,31 +343,6 @@ async def test_pending_priority_turn_is_never_requeued(env):
     row = await env.message(m["id"])
     assert (row["status"], row["turn_id"]) == ("sent", turn_id)
     assert env.fake.received_turns == 1
-
-
-async def test_retried_priority_send_with_the_same_message_id_delivers_once(env):
-    """A priority message sent again (a requeue after a lost answer) carries the same
-    message_id, so the wrapper answers the turn the first send started."""
-    await env.agent()
-    m = await insert_message(env.pool, env.cid, text="urgent", lane="priority")
-    env.fake.reset_connection_after_receive()  # the turn is recorded, the answer is lost
-    d = env.dispatcher()
-    await d.drain()
-    first = env.fake.last_turn_id
-    env.fake.reset_connection_after_receive(False)
-    # as if a verifier had wrongly concluded that it never started
-    await env.exec(
-        "UPDATE messages SET status = 'queued', ambiguous_at = NULL, error = NULL,"
-        " agent_id = NULL, turn_id = NULL WHERE id=%s",
-        (m["id"],),
-    )
-    await env.exec("UPDATE agents SET last_dispatched_at = NULL")
-    await d.drain()
-    await d.aclose()
-    row = await env.message(m["id"])
-    assert (row["status"], row["turn_id"]) == ("sent", first)
-    assert env.fake.received_turns == 1  # delivered once
-    assert env.fake.turn_message_ids == [f"orch-{m['id']}"] * 2
 
 
 def test_readme_documents_delivery_and_retries():

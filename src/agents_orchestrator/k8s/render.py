@@ -633,7 +633,7 @@ def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
             "idle_timeout_seconds": 0,
             "ask_user_question": "deny",
             "restart_continue_prompt": _escape(settings.default_restart_continue_prompt),
-            # the priority send timeout is derived from it (Settings.priority_send_timeout_seconds)
+            # used by the wrapper's interrupt
             "interrupt_settle_seconds": settings.wrapper_interrupt_settle_seconds,
             "commands": {
                 "client": list(CLIENT_COMMANDS),

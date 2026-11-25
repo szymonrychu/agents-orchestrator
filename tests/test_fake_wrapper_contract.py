@@ -23,7 +23,6 @@ from fakes.real_wrapper import RealWrapper
 
 from agents_orchestrator.wrapper import (
     Ambiguous,
-    Busy,
     ConfigError,
     DialogState,
     Gone,
@@ -168,16 +167,21 @@ async def test_turn_lifecycle_events(leg: Leg) -> None:
     }
 
 
-async def test_busy_session_returns_409(leg: Leg) -> None:
+async def test_idle_lane_on_running_turn_queues_into_it(leg: Leg) -> None:
     sid = await leg.create()
     first = await leg.submit(sid, SLOW, lane="idle")
     assert first.status_code == 202
     turn_id = first.json()["turn_id"]
     assert first.json()["state"] == "running"
     second = await leg.submit(sid, "again", lane="idle")
-    assert second.status_code == 409
-    assert second.json()["error"]["code"] == "busy"
-    assert isinstance(await leg.client().submit_turn(sid, "again", lane="idle"), Busy)
+    assert second.status_code == 202
+    body = second.json()
+    assert body["turn_id"] == turn_id  # typed into the running turn, no new turn
+    assert body["state"] == "running"
+    assert body["queued"] is True
+    assert body["message_id"]
+    outcome = await leg.client().submit_turn(sid, "again", lane="idle")
+    assert outcome == TurnAccepted(turn_id)
     await leg.finish(sid, turn_id)
 
 
