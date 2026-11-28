@@ -134,7 +134,7 @@ jobs:
         run: helm push "agents-orchestrator-$VERSION.tgz" "$CHART_REPO"
 
   release:
-    needs: [lint, test, images, chart, e2e, chart-publish]
+    needs: [lint, test, test-critical, images, chart, e2e, chart-publish]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

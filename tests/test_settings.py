@@ -1,3 +1,5 @@
+import ipaddress
+
 import pytest
 
 from agents_orchestrator.settings import DiscardHook, Settings, SettingsError
@@ -50,3 +52,41 @@ def test_discard_hook_token_hidden_in_repr(monkeypatch):
     assert hook is not None and hook.token == "t0k3n"
     assert "t0k3n" not in repr(settings) and "t0k3n" not in str(settings)
     assert "t0k3n" not in repr(hook) and "t0k3n" not in str(hook)
+
+
+def test_master_key_from_file(monkeypatch, tmp_path):
+    f = tmp_path / "key"
+    f.write_text("f" * 40 + "\n")
+    monkeypatch.setenv("ORCH_MASTER_KEY", "e" * 40)
+    monkeypatch.setenv("ORCH_MASTER_KEY_FILE", str(f))
+    assert Settings().require_master_key() == "f" * 40
+
+
+def test_master_key_from_env_and_required(monkeypatch):
+    with pytest.raises(SettingsError, match="ORCH_MASTER_KEY"):
+        Settings().require_master_key()
+    monkeypatch.setenv("ORCH_MASTER_KEY", "e" * 32)
+    assert Settings().require_master_key() == "e" * 32
+
+
+def test_master_key_too_short_rejected(monkeypatch, tmp_path):
+    monkeypatch.setenv("ORCH_MASTER_KEY", "short")
+    with pytest.raises(SettingsError, match="ORCH_MASTER_KEY"):
+        Settings()
+    monkeypatch.delenv("ORCH_MASTER_KEY")
+    f = tmp_path / "key"
+    f.write_text("  " + "x" * 31 + "  \n")
+    monkeypatch.setenv("ORCH_MASTER_KEY_FILE", str(f))
+    with pytest.raises(SettingsError, match="ORCH_MASTER_KEY"):
+        Settings()
+
+
+def test_allowed_cidrs_parsed_and_bad_entry_rejected(monkeypatch):
+    monkeypatch.setenv("ORCH_ALLOWED_CIDRS", "10.0.0.0/8, 192.168.1.0/24")
+    assert Settings().allowed_networks() == [
+        ipaddress.ip_network("10.0.0.0/8"),
+        ipaddress.ip_network("192.168.1.0/24"),
+    ]
+    monkeypatch.setenv("ORCH_ALLOWED_CIDRS", "10.0.0.0/8,nonsense")
+    with pytest.raises(SettingsError, match="ORCH_ALLOWED_CIDRS"):
+        Settings()

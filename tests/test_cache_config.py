@@ -44,3 +44,24 @@ def test_api_secret_not_in_repr():
         cache_s3_api_access_key_id="id", cache_s3_api_secret_access_key="TOPSECRETAPIVALUE"
     )
     assert "TOPSECRETAPIVALUE" not in repr(s)
+
+
+def test_s3_role_helpers():
+    bare = _settings()
+    assert not bare.reconciler_s3_configured and not bare.api_s3_configured
+    on = _settings(cache_s3_bucket="b", cache_s3_access_key_id="a", cache_s3_secret_access_key="s")
+    assert on.reconciler_s3_configured is True
+    assert on.api_s3_configured is False  # the api needs its own pair
+    both = _settings(
+        cache_s3_bucket="b",
+        cache_s3_access_key_id="a",
+        cache_s3_secret_access_key="s",
+        cache_s3_api_access_key_id="ai",
+        cache_s3_api_secret_access_key="as",
+    )
+    assert both.api_s3_configured is True
+    assert both.api_s3_credentials() == ("ai", "as")
+    assert both.reconciler_s3_credentials() == ("a", "s")
+    assert not _settings(
+        cache_s3_api_access_key_id="ai", cache_s3_api_secret_access_key="as"
+    ).api_s3_configured  # no bucket
