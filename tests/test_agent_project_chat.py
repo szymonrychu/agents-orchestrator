@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from factories import insert_session, set_agent_status
 from psycopg.rows import dict_row
 from test_agent_session_messaging import Sess, _app, _delivered, _exec, _rows, hive
@@ -16,6 +17,8 @@ from test_queue_leader_routing import _agent, _changed
 
 from agents_orchestrator.db import queue as q
 from agents_orchestrator.db import sessions as sessions_repo
+
+pytestmark = pytest.mark.critical
 
 PATH = "/agent/v1/project/messages"
 

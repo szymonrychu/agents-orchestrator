@@ -19,6 +19,8 @@ from agents_orchestrator.api.app import create_app
 from agents_orchestrator.api.scope import scope_of
 from agents_orchestrator.spec import SessionSpec
 
+pytestmark = pytest.mark.critical
+
 
 async def call(app, caller: Sess, method: str, path: str, **kw):
     async with client_for(app, caller.leader_ip) as http:

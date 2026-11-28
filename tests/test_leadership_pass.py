@@ -23,6 +23,8 @@ from agents_orchestrator.dispatcher import Dispatcher
 from agents_orchestrator.dispatcher.loop import CHANNELS
 from agents_orchestrator.settings import Settings
 
+pytestmark = pytest.mark.critical
+
 # ---------------------------------------------------------------- helpers
 
 

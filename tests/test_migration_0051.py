@@ -6,6 +6,8 @@ import pytest
 
 from agents_orchestrator.db.migrate import MIGRATIONS_DIR, run_migrations
 
+pytestmark = pytest.mark.critical
+
 LEGACY_OPEN = ("notified", "extended", "requested", "handed", "discussing", "clearing", "returning")
 
 

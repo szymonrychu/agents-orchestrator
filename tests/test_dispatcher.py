@@ -25,6 +25,8 @@ from agents_orchestrator.settings import Settings
 from agents_orchestrator.tokens import derive_tokens
 from agents_orchestrator.wrapper.client import WrapperClient
 
+pytestmark = pytest.mark.critical
+
 KEY = "k" * 32
 
 

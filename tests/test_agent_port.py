@@ -16,6 +16,8 @@ from agents_orchestrator.api.allowlist import PortGate, SourceAllowlist
 from agents_orchestrator.api.app import create_app
 from agents_orchestrator.settings import Settings
 
+pytestmark = pytest.mark.critical
+
 DB = "postgresql://u:p@h/db"
 
 

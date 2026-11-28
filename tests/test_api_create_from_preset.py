@@ -13,6 +13,8 @@ from test_api_sessions import assert_error, client_for, make_settings
 from agents_orchestrator.api import sessions as api_sessions
 from agents_orchestrator.api.app import create_app
 
+pytestmark = pytest.mark.critical
+
 DEFAULT_ID = "00000000-0000-0000-0000-000000000001"
 C = "/api/v1/sessions"
 P = "/api/v1/presets"

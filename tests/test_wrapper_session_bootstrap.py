@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 import pytest_asyncio
 from factories import insert_command, set_agent_status
 from fakes.fake_kube import FakeKube
@@ -20,6 +21,8 @@ from agents_orchestrator.spec import SessionSpec
 from agents_orchestrator.tokens import tokens_for
 from agents_orchestrator.wrapper.client import WrapperClient
 from agents_orchestrator.wrapper.models import WrapperError
+
+pytestmark = pytest.mark.critical
 
 KEY = "k" * 32
 IMAGE = "harbor.example/containers/claude-code-wrapper:ca2ddf3"

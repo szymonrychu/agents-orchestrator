@@ -11,6 +11,8 @@ from agents_orchestrator.api.app import create_app
 from agents_orchestrator.db import status
 from agents_orchestrator.wrapper import Snapshot
 
+pytestmark = pytest.mark.critical
+
 
 async def _fail(pool, agent_id, reason="revoked") -> None:
     async with pool.connection() as conn:

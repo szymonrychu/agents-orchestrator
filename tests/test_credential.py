@@ -4,6 +4,8 @@ import pytest
 
 from agents_orchestrator.credential import notice_key, notice_text, phase
 
+pytestmark = pytest.mark.critical
+
 E = datetime(2027, 10, 23, tzinfo=UTC)
 
 

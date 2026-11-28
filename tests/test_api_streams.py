@@ -23,6 +23,8 @@ from agents_orchestrator.db import events as ev
 from agents_orchestrator.db import sessions
 from agents_orchestrator.db.pool import notify
 
+pytestmark = pytest.mark.critical
+
 
 class Served:
     def __init__(self, app, base_url: str):

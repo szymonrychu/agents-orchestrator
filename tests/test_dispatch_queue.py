@@ -13,6 +13,8 @@ from factories import insert_agent, insert_message, insert_session, set_agent_st
 
 from agents_orchestrator.db import queue as q
 
+pytestmark = pytest.mark.critical
+
 # ---------------------------------------------------------------- helpers
 
 

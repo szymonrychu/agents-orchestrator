@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 
+import pytest
 import pytest_asyncio
 from factories import insert_agent, insert_message, insert_session, set_agent_status
 from fakes.fake_wrapper import FakeWrapper
@@ -21,6 +22,8 @@ from agents_orchestrator.dispatcher.verify import Verifier
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.tokens import derive_tokens
 from agents_orchestrator.wrapper.client import WrapperClient
+
+pytestmark = pytest.mark.critical
 
 KEY = "k" * 32
 SETTLE = 1.0

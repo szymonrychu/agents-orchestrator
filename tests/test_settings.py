@@ -2,6 +2,8 @@ import pytest
 
 from agents_orchestrator.settings import DiscardHook, Settings, SettingsError
 
+pytestmark = pytest.mark.critical
+
 DB = "postgresql://u:p@h/db"
 
 

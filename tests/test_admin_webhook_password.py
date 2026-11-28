@@ -21,6 +21,8 @@ from test_admin_relay import (
 )
 from test_api_sessions import assert_error
 
+pytestmark = pytest.mark.critical
+
 ENDPOINTS = UPSTREAM_PREFIX["webhook"] + "/endpoints"
 ISSUING = {
     "create": ("POST", "/endpoints", 201),

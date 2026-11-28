@@ -2,8 +2,11 @@ import shutil
 import uuid
 
 import psycopg
+import pytest
 
 from agents_orchestrator.db.migrate import MIGRATIONS_DIR, run_migrations
+
+pytestmark = pytest.mark.critical
 
 T0 = "2026-11-20 10:00:00+00"
 

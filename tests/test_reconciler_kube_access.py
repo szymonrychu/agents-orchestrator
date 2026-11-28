@@ -32,6 +32,8 @@ from agents_orchestrator.reconciler import Reconciler
 from agents_orchestrator.reconciler.loop import DISCARD_ORDER, obj_key
 from agents_orchestrator.settings import Settings
 
+pytestmark = pytest.mark.critical
+
 ROLES = frozenset({"view", "edit", "cluster-admin"})
 NS = {
     "kube_namespace_access_namespaces": ["media", "games"],

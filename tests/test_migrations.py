@@ -23,6 +23,8 @@ from psycopg.types.json import Jsonb
 from agents_orchestrator.db.migrate import MIGRATIONS_DIR, run_migrations
 from agents_orchestrator.db.pool import listen, notify
 
+pytestmark = pytest.mark.critical
+
 TABLES = {
     "sessions",
     "agents",

@@ -20,6 +20,8 @@ from agents_orchestrator.db.migrate import run_migrations
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import SessionSpec, without_legacy_backup
 
+pytestmark = pytest.mark.critical
+
 GOLDEN = Path(__file__).parent / "golden" / "backup_migration"
 CASES = sorted(p for p in GOLDEN.glob("*.json") if not p.name.startswith("unmapped_"))
 UNMAPPED = sorted(GOLDEN.glob("unmapped_*.json"))

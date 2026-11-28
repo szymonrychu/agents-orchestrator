@@ -3,6 +3,7 @@ extra projects has the access of a member of each, read live on every request (n
 
 from __future__ import annotations
 
+import pytest
 from factories import two_project_fixture
 from test_agent_project_chat import PATH as ROOM
 from test_agent_scope import _client, _projects, _taskboard_app
@@ -14,6 +15,8 @@ from agents_orchestrator.api.scope import PROJECTS_HEADER, scope_of
 from agents_orchestrator.api.session_limits import may_message
 from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.db import sessions as sessions_repo
+
+pytestmark = pytest.mark.critical
 
 
 async def _grant(pool, session_id, *projects: str) -> None:

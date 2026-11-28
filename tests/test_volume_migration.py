@@ -13,6 +13,8 @@ from test_api_backups import settings_for
 from agents_orchestrator.db import backups, volumes
 from agents_orchestrator.db import migrate_volumes as mv
 
+pytestmark = pytest.mark.critical
+
 PRE = "workspace-cache/"
 
 

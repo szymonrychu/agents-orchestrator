@@ -45,6 +45,8 @@ from agents_orchestrator.settings import Settings, SettingsError
 from agents_orchestrator.spec import SessionSpec
 from agents_orchestrator.tokens import tokens_for
 
+pytestmark = pytest.mark.critical
+
 KEY = "k" * 32
 IMAGE = "harbor.example/containers/claude-code-wrapper:ca2ddf3"
 GUARDED = ("PersistentVolumeClaim", "ConfigMap", "Service", "StatefulSet")

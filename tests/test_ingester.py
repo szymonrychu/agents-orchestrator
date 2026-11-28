@@ -35,6 +35,8 @@ from agents_orchestrator.spec import SessionSpec
 from agents_orchestrator.tokens import derive_tokens
 from agents_orchestrator.wrapper import Snapshot, WrapperClient
 
+pytestmark = pytest.mark.critical
+
 MASTER_KEY = "k" * 40
 OLD_SINCE = "2001-02-03T04:05:06+00:00"
 

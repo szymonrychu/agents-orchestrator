@@ -26,6 +26,8 @@ from agents_orchestrator.db import export
 from agents_orchestrator.db import sessions as sessions_repo
 from agents_orchestrator.k8s import render
 
+pytestmark = pytest.mark.critical
+
 C = "/api/v1/sessions"
 P = "/api/v1/presets"
 A = f"{ADMIN_PREFIX}/presets"

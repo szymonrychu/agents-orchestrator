@@ -11,6 +11,8 @@ from agents_orchestrator.spec import (
     SessionSpec,
 )
 
+pytestmark = pytest.mark.critical
+
 DB = "postgresql://x/y"
 
 

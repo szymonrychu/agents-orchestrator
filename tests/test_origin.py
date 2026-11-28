@@ -12,6 +12,8 @@ from agents_orchestrator.api.app import create_app
 from agents_orchestrator.api.origin import OriginAllowlist, require_allowed_origin
 from agents_orchestrator.settings import Settings, SettingsError
 
+pytestmark = pytest.mark.critical
+
 DB = "postgresql://u:p@h/db"
 
 

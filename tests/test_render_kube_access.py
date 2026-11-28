@@ -19,6 +19,8 @@ from agents_orchestrator.reconciler.init import render_init_job
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import KUBE_TIERS
 
+pytestmark = pytest.mark.critical
+
 TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount"
 KUBE_ENV = {"KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT"}
 KUBE_KINDS = {"ServiceAccount", "ClusterRoleBinding", "RoleBinding"}

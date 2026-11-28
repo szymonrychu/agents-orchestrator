@@ -12,6 +12,8 @@ from agents_orchestrator.db import presets as presets_repo
 from agents_orchestrator.db import proposals
 from agents_orchestrator.db.migrate import MIGRATIONS_DIR, run_migrations
 
+pytestmark = pytest.mark.critical
+
 MIGRATION = MIGRATIONS_DIR / "0038_change_proposals.sql"
 TTL = 7 * 24 * 3600
 

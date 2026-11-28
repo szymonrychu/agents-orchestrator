@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
 import pytest_asyncio
 from factories import insert_agent, insert_session, set_agent_status
 from psycopg.rows import dict_row
@@ -12,6 +13,8 @@ from test_dispatcher import make_env
 from agents_orchestrator.db import project_posts, session_messaging
 from agents_orchestrator.db import queue as q
 from agents_orchestrator.dispatcher.session_frame import frame, project_post, relay_notice
+
+pytestmark = pytest.mark.critical
 
 
 async def _exec(pool, query: str, params: tuple = ()) -> None:

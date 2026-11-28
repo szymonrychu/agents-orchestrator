@@ -7,6 +7,7 @@ import asyncio
 import time
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from factories import insert_agent, insert_event, insert_session, set_agent_status
 from psycopg.rows import dict_row
 
@@ -14,6 +15,8 @@ from agents_orchestrator.db import handoffs, handover
 from agents_orchestrator.db.queue import message_attachments
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.taskboard_client import OpenDecision
+
+pytestmark = pytest.mark.critical
 
 BUDGET = 16384
 OUTPUT = 500

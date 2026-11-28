@@ -34,6 +34,8 @@ from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import SessionSpec
 from agents_orchestrator.tokens import derive_tokens
 
+pytestmark = pytest.mark.critical
+
 KEY = secrets.token_hex(16)
 AGENT_PORT, MAIN_PORT, SERVICE_PORT = 8001, 8000, 8002
 CHAT_URL = "http://chat.test:9001"

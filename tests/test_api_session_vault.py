@@ -23,6 +23,8 @@ from agents_orchestrator.api.admin import ADMIN_PREFIX
 from agents_orchestrator.api.app import create_app
 from agents_orchestrator.db import presets as presets_repo
 
+pytestmark = pytest.mark.critical
+
 C = "/api/v1/sessions"
 ENTRY = "11111111-1111-4111-8111-111111111111"
 NOTE = "22222222-2222-4222-8222-222222222222"

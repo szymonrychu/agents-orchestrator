@@ -5,6 +5,7 @@ taskboard relay forwards `X-Orch-Projects` computed by the orchestrator, never t
 from __future__ import annotations
 
 import httpx
+import pytest
 from factories import two_project_fixture
 from fastapi.routing import APIRoute
 from test_api_agent import AGENT_PORT, headers, make_settings
@@ -15,6 +16,8 @@ from agents_orchestrator.api.app import create_app
 from agents_orchestrator.api.scope import AGENT_SCOPE, PROJECTS_HEADER, scope_of
 from agents_orchestrator.db import sessions as sessions_repo
 from agents_orchestrator.settings import Settings
+
+pytestmark = pytest.mark.critical
 
 TB_URL = "http://taskboard.test:9002"
 
