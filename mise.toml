@@ -44,10 +44,6 @@ uv run pytest -m integration
 description = "kind e2e: build and load the images, install the chart, helm test, run tests/e2e"
 run = "scripts/e2e.sh"
 
-[tasks."test:chart"]
-description = "Run the Helm chart render tests"
-run = "uv run pytest tests/test_chart_*.py -q"
-
 [tasks."lint:chart"]
 description = "helm lint the chart with the CI values"
 run = "helm lint chart/agents-orchestrator -f chart/agents-orchestrator/ci/lint-values.yaml"
