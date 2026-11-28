@@ -68,7 +68,7 @@ async def validated(spec: SessionSpec, settings: Settings, session: repo.Session
     return await run_in_threadpool(check_spec, spec, settings, session.spec)
 
 
-async def patch(
+async def patch(  # noqa: C901, PLR0915
     request: Request,
     conn: psycopg.AsyncConnection,
     settings: Settings,

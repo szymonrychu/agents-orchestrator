@@ -8,10 +8,9 @@ pytestmark = pytest.mark.critical
 
 
 def _seed(c):
-    sid = c.execute(
+    return c.execute(
         "INSERT INTO sessions (id, slug, spec) VALUES (gen_random_uuid(), 's', '{}') RETURNING id"
     ).fetchone()[0]
-    return sid
 
 
 def _row(c, sid, **kw):

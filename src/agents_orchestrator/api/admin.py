@@ -422,7 +422,7 @@ ADMIN_VISIBILITY: dict[tuple[str, str], str] = {
 }
 
 
-# ---------------------------------------------------------------- projects (T-113)
+# ---------------------------------------------------------------- projects: T-113
 
 
 @router.post("/projects", status_code=201, response_model=schemas.WriteAck)
@@ -452,7 +452,7 @@ async def update_project(
     return ack.project_ack(await projects_api.patch(pool, slug, body))
 
 
-# ---------------------------------------------------------------- presets (O6)
+# ---------------------------------------------------------------- presets: O6
 
 
 async def readable_preset(conn, ref: str) -> presets_repo.Preset:
@@ -629,7 +629,7 @@ async def detach_vault(
     return ack.preset_ack(view)
 
 
-# ---------------------------------------------------------------- sessions (O7)
+# ---------------------------------------------------------------- sessions: O7
 
 
 async def _readable_target(
@@ -814,7 +814,7 @@ async def discard_session(
         return ack.session_ack(view)
 
 
-# ---------------------------------------------------------------- restart (O8)
+# ---------------------------------------------------------------- restart: O8
 
 
 async def _self_restart(conn, settings: Settings, caller: sessions_repo.Session) -> None:

@@ -404,7 +404,7 @@ async def list_sessions(
         )
 
 
-async def create(
+async def create(  # noqa: C901, PLR0912
     pool,
     settings: Settings,
     body: schemas.CreateSession,

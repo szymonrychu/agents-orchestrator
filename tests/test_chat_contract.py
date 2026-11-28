@@ -115,7 +115,7 @@ def documented_statuses() -> dict[tuple[str, str], list[int]]:
     }
 
 
-async def test_fake_chat_matches_vendored_schema():
+async def test_fake_chat_matches_vendored_schema():  # noqa: PLR0915
     fake = FakeChat(CHAT_TOKEN)
     seen: set[tuple[str, str, int]] = set()
 

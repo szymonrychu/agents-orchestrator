@@ -79,8 +79,7 @@ async def preset(pool, kube, canary):
     """A privileged manageable preset with a plain TOKEN."""
     spec = {"docker": True, "env": {"TOKEN": {"value": "token"}, "PLAIN": {"value": "plain"}}}
     async with pool.connection() as conn:
-        found = await presets_repo.create(conn, "infra", spec, superleader_manageable=True)
-    return found
+        return await presets_repo.create(conn, "infra", spec, superleader_manageable=True)
 
 
 async def agent(app, who: Sess, method: str, path: str, **kw):

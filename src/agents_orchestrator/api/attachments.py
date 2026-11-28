@@ -33,7 +33,7 @@ def _bad(message: str) -> ApiError:
     return ApiError(422, "invalid_attachment", message)
 
 
-def _check_content(name: str, mime: str, data: bytes) -> None:
+def _check_content(name: str, mime: str, data: bytes) -> None:  # noqa: C901
     ok = True
     if mime == "image/png":
         ok = data.startswith(_PNG)
@@ -59,7 +59,7 @@ def _check_content(name: str, mime: str, data: bytes) -> None:
         raise _bad(f"attachment {name!r} does not hold {mime} content")
 
 
-def decode(
+def decode(  # noqa: C901
     items: list[schemas.MessageAttachment], settings: Settings
 ) -> list[queue.StoredAttachment]:
     """Validate and decode the attachments of one request; sizes are checked before decoding."""

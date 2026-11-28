@@ -241,7 +241,7 @@ async def test_discard_order_and_remaining_wait():
     assert f"RoleBinding/{sa}-edit" in await r._remaining(session.slug)
 
 
-# ---------------------------------------------------------------- converge and discard (DB, CI)
+# ---------------------------------------------------------------- converge and discard: DB, CI
 
 
 @pytest_asyncio.fixture

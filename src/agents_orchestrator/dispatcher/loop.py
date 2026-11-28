@@ -198,7 +198,7 @@ class Dispatcher:
                     )
             await self._drain_handoffs(conn)
 
-    async def _drain_handoffs(self, conn: Any) -> None:
+    async def _drain_handoffs(self, conn: Any) -> None:  # noqa: C901
         """Right after the leadership passes: the context-pressure handoff pass for every session
         with a limit subject or an open row (`handoff.handoff_sessions`), at most once per
         HANDOFF_INTERVAL_SECONDS. One failing session is logged and never holds up the others;
@@ -342,7 +342,7 @@ class Dispatcher:
         sender = await sessions_repo.get(conn, sender_row["sender_session_id"])
         return sender is None or await may_message(conn, sender, receiver, self.settings)
 
-    async def _send(self, claim: queue.Claim) -> None:
+    async def _send(self, claim: queue.Claim) -> None:  # noqa: C901, PLR0912, PLR0915
         s = self.settings
         if not claim.agent_url:
             outcome: Any = Unavailable("agent has no url")

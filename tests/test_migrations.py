@@ -289,7 +289,7 @@ async def test_notify_listen_roundtrip(dsn, pool):
     await stream.aclose()
 
 
-async def test_listen_reconnects_after_connection_killed(dsn, pool):
+async def test_listen_reconnects_after_connection_killed(dsn, pool):  # noqa: C901
     stream = listen(dsn, ["orch_rc"], initial_backoff=0.05, max_backoff=0.2)
     got: list = []
 

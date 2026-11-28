@@ -285,7 +285,7 @@ def _configure_backup(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _cmd_backup(args: argparse.Namespace) -> int:
+def _cmd_backup(args: argparse.Namespace) -> int:  # noqa: C901, PLR0911
     import asyncio
 
     import psycopg

@@ -259,7 +259,7 @@ def _at_least(live: Any, desired: Any) -> bool:
         return False
 
 
-def drift(desired: Any, live: Any, path: str = "") -> str | None:
+def drift(desired: Any, live: Any, path: str = "") -> str | None:  # noqa: C901, PLR0911
     """The path of the first field of `desired` the live object does not hold, or None.
 
     Maps compare key by key and extra live keys (server defaults, status, metadata the API

@@ -38,7 +38,7 @@ class FakeApi:
         self.stream_ok = stream_ok
         self.turn_status = turn_status
 
-    def handler(self, request: httpx.Request) -> httpx.Response:
+    def handler(self, request: httpx.Request) -> httpx.Response:  # noqa: C901, PLR0911
         m, path = request.method, request.url.path
         self.calls.append((m, path))
         body = json.loads(request.content) if request.content else None

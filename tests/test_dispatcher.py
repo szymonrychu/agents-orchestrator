@@ -494,7 +494,7 @@ async def test_at_most_eight_sends_in_flight(env):
     assert env.fake.received_turns + sum(f.received_turns for f in fakes) == 10
 
 
-# ---------------------------------------------------------------- lanes (D2)
+# ---------------------------------------------------------------- lanes: D2
 
 
 @pytest.mark.parametrize("lane", ["regular", "idle", "interrupt"])

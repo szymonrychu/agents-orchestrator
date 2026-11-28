@@ -439,7 +439,7 @@ def _render_texts(user: dict[str, Any], session: Session) -> None:
             holder[key] = rendering.render_text(holder[key], context)
 
 
-def _apply_wrapper(cfg: dict[str, Any], wrapper: WrapperSettings, session: Session) -> None:
+def _apply_wrapper(cfg: dict[str, Any], wrapper: WrapperSettings, session: Session) -> None:  # noqa: C901, PLR0912
     """Merge `spec.wrapper` into the config after the reserved entries, which stay first."""
     user = wrapper.model_dump(mode="json", exclude_none=True)
     _render_texts(user, session)
@@ -569,7 +569,7 @@ def subagent_allowed_tools(spec: SessionSpec, settings: Settings) -> list[str]:
     return [ORCHESTRATOR_TOOL_PREFIX + t for t in sorted(READ_ONLY_TOOLS & allowed)]
 
 
-def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:
+def _ccw_config(session: Session, settings: Settings) -> dict[str, Any]:  # noqa: C901
     spec = session.spec
     kube_env = KUBE_PASSTHROUGH_ENV if kube_granted(spec, settings) else ()
     docker_env = ()

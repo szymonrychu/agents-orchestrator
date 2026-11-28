@@ -897,7 +897,7 @@ async def test_chat_tools_parity(monkeypatch):
     await check_chat_tools_parity(memory_target(monkeypatch))
 
 
-# ------------------------------------------------------------------- DB-backed (CI, Docker)
+# ------------------------------------------------------------------- DB-backed: CI, Docker
 
 
 async def test_leader_only_and_identity_db(pool, dsn, monkeypatch):

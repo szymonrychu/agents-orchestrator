@@ -732,7 +732,7 @@ async def withdraw(
     return await get_view(conn, settings, proposal_id, proposer=caller.id)
 
 
-async def _stale(conn, proposal: repo.Proposal) -> bool:
+async def _stale(conn, proposal: repo.Proposal) -> bool:  # noqa: PLR0911
     """Read-only (never changes state): the live preset or session differs from the current
     revision's (a gone one reads stale). A schedule is never read upstream here (module
     docstring): the review compares."""
@@ -1205,7 +1205,7 @@ async def _locked_target(conn, preset_id: uuid.UUID, hold: bool) -> presets_repo
     raise ApiError(409, "conflict", "the preset moved to another project meanwhile; retry")
 
 
-async def _review_locked(
+async def _review_locked(  # noqa: C901, PLR0911, PLR0912
     request: Request, conn, settings: Settings, proposal_id: int, body: schemas.ReviewIn
 ) -> _Done:
     """Plan 3.5 steps 1-8 inside the caller's transaction. A raised error rolls everything back;
@@ -1269,7 +1269,7 @@ async def _record(conn, p: repo.Proposal, decisions: Decisions, to: str, done: _
     return done
 
 
-async def _review_schedule(
+async def _review_schedule(  # noqa: C901, PLR0911
     request: Request, conn, settings: Settings, p: repo.Proposal, decisions: Decisions
 ) -> _Done:
     """Plan 3.5, schedules (no shared transaction): read the schedule, compare its `updated_at`
@@ -1320,7 +1320,7 @@ class _SessionChanged(Exception):
     """The locked session no longer matches the revision's fingerprint."""
 
 
-async def _review_session(
+async def _review_session(  # noqa: PLR0911
     conn, settings: Settings, p: repo.Proposal, decisions: Decisions
 ) -> _Done:
     """Plan 3.5, sessions: the preset steps with the session row, written by `replace_spec`
@@ -1378,7 +1378,7 @@ async def _apply_session(
     await sessions_repo.replace_spec(conn, session.id, stored, filled, recheck)
 
 
-async def _review_projects(conn, p: repo.Proposal, decisions: Decisions) -> _Done:
+async def _review_projects(conn, p: repo.Proposal, decisions: Decisions) -> _Done:  # noqa: C901
     """Plan 3.5 for a project grant (T-120): the approved projects are held active first (lock
     order: project rows, then the target row; 422 `project_archived` rolls the review back and
     the proposal stays open), then the target row is locked, its fingerprint compared, and the

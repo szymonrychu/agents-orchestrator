@@ -270,7 +270,7 @@ class FakeChat:
                 return (method, template), match
         raise AssertionError(f"the vendored document has no {call.method} {call.path}")
 
-    def _handle(self, call: Call) -> tuple[int, Any]:
+    def _handle(self, call: Call) -> tuple[int, Any]:  # noqa: PLR0911
         key, match = self._route(call)
         if not self._authorised(call):
             return self._error(key, 401, "unauthorized", "a valid agent token is required")

@@ -320,7 +320,7 @@ async def test_sweep_steps_without_secret_steps(pool, monkeypatch):
         assert not hasattr(proposal_sweep, gone), gone
 
 
-# ---------------------------------------------------------------- lifespan (F10)
+# ---------------------------------------------------------------- lifespan: F10
 
 
 async def test_sweeper_task_starts_ticks_and_stops_cleanly_in_the_lifespan(
@@ -355,7 +355,7 @@ async def test_sweeper_task_starts_ticks_and_stops_cleanly_in_the_lifespan(
     assert failed == []  # and no pass failed
 
 
-# ---------------------------------------------------------------- preset_manageable (S-66)
+# ---------------------------------------------------------------- preset_manageable: S-66
 
 
 async def _manageable_request(pool, boss, preset_id) -> int:

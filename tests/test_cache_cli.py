@@ -57,8 +57,7 @@ class _Recorder:
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
-        response = self._respond(request)
-        return response
+        return self._respond(request)
 
     @property
     def transport(self) -> httpx.MockTransport:

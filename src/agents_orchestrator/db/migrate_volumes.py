@@ -186,7 +186,7 @@ async def _unique(conn: psycopg.AsyncConnection, base: str, taken: set[str]) -> 
         n += 1
 
 
-async def _seed(
+async def _seed(  # noqa: C901
     conn: psycopg.AsyncConnection,
     preset_id: uuid.UUID,
     names: list[str],

@@ -322,7 +322,7 @@ async def get_one(conn, preset_id: uuid.UUID) -> schemas.PresetView:
     return _view(preset)
 
 
-async def replace(
+async def replace(  # noqa: C901
     request: Request,
     conn,
     settings: Settings,
@@ -536,7 +536,7 @@ async def _edit_refs(
     raise ApiError(409, "conflict", "the preset changed since it was read; retry")
 
 
-async def edit_volumes(
+async def edit_volumes(  # noqa: C901
     request: Request,
     conn,
     settings: Settings,
@@ -633,7 +633,7 @@ def _merged_body(stored: repo.Preset, body: schemas.PresetPatch) -> schemas.Pres
     )
 
 
-async def patch(
+async def patch(  # noqa: C901
     request: Request, conn, settings: Settings, preset_id: uuid.UUID, body: schemas.PresetPatch
 ) -> schemas.PresetView:
     """Merge-patch a preset for the superleader: the patch is applied to the stored spec, so

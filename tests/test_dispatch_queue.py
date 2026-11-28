@@ -642,7 +642,7 @@ async def test_transitions_notify(pool, dsn):
 # ---------------------------------------------------------------- commands and checks
 
 
-async def test_commands_and_checks_lifecycle(pool):
+async def test_commands_and_checks_lifecycle(pool):  # noqa: PLR0915
     cid = (await insert_session(pool))["id"]
     agent = await _ready_agent(pool, cid)
     async with pool.connection() as conn:

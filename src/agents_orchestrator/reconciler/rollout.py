@@ -231,7 +231,7 @@ class Replacer:
             await self._replace_one(session, pods, agents, rollout, leader, single, now, overdue)
         return rollout.status()
 
-    async def _replace_one(
+    async def _replace_one(  # noqa: PLR0911
         self,
         session: Session,
         pods: dict[int, Obj],

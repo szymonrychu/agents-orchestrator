@@ -621,7 +621,7 @@ class _Pass:
         )
         return RESET_EVENTS[found["type"]] if found is not None else None
 
-    async def close_reason(
+    async def close_reason(  # noqa: C901, PLR0911
         self, row: handoffs.Handoff, subject: dict | None, facts: dict
     ) -> tuple[str, str] | None:
         """(phase, reason) to close the row with, or None."""
@@ -919,7 +919,7 @@ class _Pass:
         elif (row.inflight or {}).get("waiting_on"):
             await self.store_inflight(row, snap)  # its blockers are done: the policy says so
 
-    async def clearing(self, row: handoffs.Handoff, facts: dict) -> None:
+    async def clearing(self, row: handoffs.Handoff, facts: dict) -> None:  # noqa: C901
         state = await _one(
             self.conn,
             _CLEAR_STATE,

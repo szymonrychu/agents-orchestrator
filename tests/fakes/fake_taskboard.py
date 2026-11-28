@@ -28,7 +28,7 @@ class FakeTaskboard:
     created: list[dict[str, Any]] = field(default_factory=list)
     comments: list[dict[str, Any]] = field(default_factory=list)
 
-    def handler(self, request: httpx.Request) -> httpx.Response:
+    def handler(self, request: httpx.Request) -> httpx.Response:  # noqa: C901, PLR0911
         self.calls.append(request)
         if self.down:
             raise httpx.ConnectError("refused", request=request)

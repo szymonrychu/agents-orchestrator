@@ -761,7 +761,7 @@ class FakeWrapper:
         self._ids += 1
         return f"{prefix}{self._ids:012x}"
 
-    def _build_app(self) -> FastAPI:
+    def _build_app(self) -> FastAPI:  # noqa: C901, PLR0915
         app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
         @app.exception_handler(_Err)
@@ -855,7 +855,7 @@ class FakeWrapper:
             return ses.snapshot()
 
         @app.post("/v1/sessions/{session_id}/turns", status_code=202)
-        async def submit_turn(session_id: str, request: Request) -> Any:
+        async def submit_turn(session_id: str, request: Request) -> Any:  # noqa: C901
             self._auth(request)
             ses = self._get(session_id)
             body = await self._json_body(request)

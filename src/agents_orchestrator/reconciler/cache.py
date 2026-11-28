@@ -479,7 +479,7 @@ class CacheRunner:
         run = {**run, "job": name}
         return await self._write(session, key, run), run
 
-    async def _observe(
+    async def _observe(  # noqa: PLR0911
         self, session: Session, key: str, run: dict[str, Any]
     ) -> tuple[Session, dict[str, Any]]:
         ns, name = self.settings.namespace, job_name(session.slug, key)

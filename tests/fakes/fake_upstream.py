@@ -153,7 +153,7 @@ class FakeUpstream:
         await send({"type": "http.response.body", "body": raw})
 
 
-def sample(doc: dict[str, Any], schema: dict[str, Any]) -> Any:
+def sample(doc: dict[str, Any], schema: dict[str, Any]) -> Any:  # noqa: C901, PLR0911, PLR0912
     """A minimal instance of `schema` (required properties only), for canned valid answers."""
     if "$ref" in schema:
         node: Any = doc

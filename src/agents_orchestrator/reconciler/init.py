@@ -268,7 +268,7 @@ class InitRunner:
         await self._write(session, init)
         return init
 
-    async def _observe(self, session: Session, init: dict[str, Any]) -> dict[str, Any]:
+    async def _observe(self, session: Session, init: dict[str, Any]) -> dict[str, Any]:  # noqa: PLR0911
         ns, name = self.settings.namespace, init_job_name(session.slug)
         job = await self.kube.get_job(ns, name)
         if job is None:

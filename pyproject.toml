@@ -67,3 +67,7 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+extend-select = ["C90", "PLR0911", "PLR0912", "PLR0915", "RET", "ERA"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
