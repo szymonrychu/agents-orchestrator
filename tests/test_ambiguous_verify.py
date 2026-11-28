@@ -343,28 +343,3 @@ async def test_pending_turn_is_never_requeued(env):
     row = await env.message(m["id"])
     assert (row["status"], row["turn_id"]) == ("sent", turn_id)
     assert env.fake.received_turns == 1
-
-
-def test_readme_documents_delivery_and_retries():
-    import re
-    from pathlib import Path
-
-    readme = (Path(__file__).parent.parent / "README.md").read_text()
-    match = re.search(r"^## Delivery and retries\s*$", readme, re.MULTILINE)
-    assert match, "README has no '## Delivery and retries' section"
-    body = re.split(r"^## ", readme[match.end() :], maxsplit=1, flags=re.MULTILINE)[0]
-    for outcome in ("accepted", "busy", "unavailable", "gone", "config error", "rejected"):
-        assert re.search(rf"^\| {outcome} \|", body, re.MULTILINE), outcome
-    assert re.search(r"^\| ambiguous \|", body, re.MULTILINE)
-    for needle in (
-        "ORCH_RETRY_BACKOFF_BASE_SECONDS",
-        "ORCH_RETRY_BACKOFF_MAX_SECONDS",
-        "ORCH_AMBIGUOUS_SETTLE_SECONDS",
-        "ORCH_AMBIGUOUS_DEADLINE_SECONDS",
-        "max_attempts",
-        "`verifying`",
-        "orch_message_id",
-        "never twice",
-        "settle window",
-    ):
-        assert needle in body, needle

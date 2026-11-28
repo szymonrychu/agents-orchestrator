@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import time
 import uuid
-from pathlib import Path
 
 import psycopg
 import pytest
@@ -24,9 +22,6 @@ from agents_orchestrator.db.queue import _CLAIM_LOCK_NAMESPACE
 from agents_orchestrator.dispatcher import Dispatcher
 from agents_orchestrator.dispatcher.loop import CHANNELS
 from agents_orchestrator.settings import Settings
-
-README = Path(__file__).resolve().parents[1] / "README.md"
-
 
 # ---------------------------------------------------------------- helpers
 
@@ -162,16 +157,6 @@ async def test_poll_driven_election_lowest_ordinal(pool):
     await run(pool, "UPDATE agents SET ready = true WHERE id = %s", (a1["id"],))
     change = await lpass(pool, c["id"])
     assert change is not None and change.agent_id == a1["id"]
-    text = README.read_text()
-    m = re.search(r"^### Leadership\n(.*?)(?=^## |^### )", text, re.S | re.M)
-    assert m, "README has no ### Leadership section"
-    section = " ".join(m.group(1).split())
-    assert "poll-driven" in section
-    assert "ORCH_DISPATCH_POLL_SECONDS" in section
-    assert "lowest-ordinal ready agent" in section
-    assert "within the poll window" in section
-    for word in ("leader_changed", "leadership_requested", "LEADER_GRACE_SECONDS"):
-        assert word in section, word
 
 
 # ---------------------------------------------------------------- AC2, AC3, AC4

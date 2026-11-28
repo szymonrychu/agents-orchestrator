@@ -6,8 +6,8 @@ from __future__ import annotations
 
 import httpx
 from factories import two_project_fixture
+from fastapi.routing import APIRoute
 from test_api_agent import AGENT_PORT, headers, make_settings
-from test_readme_api import _walk
 
 from agents_orchestrator.api import admin, proposal_routes
 from agents_orchestrator.api.allowlist import is_agent_path
@@ -17,6 +17,15 @@ from agents_orchestrator.db import sessions as sessions_repo
 from agents_orchestrator.settings import Settings
 
 TB_URL = "http://taskboard.test:9002"
+
+
+def _walk(router, prefix: str = ""):
+    """(path, methods) of every route; FastAPI includes routers lazily, so descend into them."""
+    for route in router.routes:
+        if isinstance(route, APIRoute):
+            yield prefix + route.path, route.methods
+        elif hasattr(route, "original_router"):
+            yield from _walk(route.original_router, prefix + route.include_context.prefix)
 
 
 def agent_routes() -> set[tuple[str, str]]:

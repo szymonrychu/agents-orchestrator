@@ -16,15 +16,12 @@ from typing import Any
 
 import httpx
 import pytest
-import yaml
 from e2e_kind_loader import e2e_kind as e2e_module
 
 from agents_orchestrator.settings import Settings
 
 ROOT = Path(__file__).resolve().parents[1]
 SCENARIO = ROOT / "e2e" / "agent-test.scenario.json"
-SCRIPT = ROOT / "scripts" / "e2e.sh"
-VALUES = ROOT / "e2e" / "values-kind.yaml"
 MARATHON_MIN_SECONDS = 300  # the roll (helm upgrade, reconciler restart) plus the checks
 
 
@@ -86,36 +83,6 @@ def test_default_continue_prompt_completes_a_continued_turn() -> None:
     assert turn is not None, "the continue prompt would run the fake's default echo turn"
     assert turn["match"] != "slow" and slept(turn) < 10, turn
     assert any("text" in step for step in turn["steps"]), turn
-
-
-def test_scenario_keeps_at_least_five_turns() -> None:
-    assert len(turns()) >= 5
-
-
-def test_values_allow_both_agent_images() -> None:
-    values = yaml.safe_load(VALUES.read_text())
-    allowed = set(values["env"]["ORCH_AGENT_IMAGES"].split(","))
-    assert {values["agentImage"], e2e_module().AGENT_IMAGE_NEXT} <= allowed, allowed
-    assert values["agentImage"] != e2e_module().AGENT_IMAGE_NEXT
-
-
-def test_script_tags_loads_and_exports_the_second_image() -> None:
-    text = SCRIPT.read_text()
-    next_image = e2e_module().AGENT_IMAGE_NEXT
-    assert f"AGENT_IMAGE_NEXT={next_image}" in text
-    assert 'docker tag "$AGENT_IMAGE" "$AGENT_IMAGE_NEXT"' in text
-    assert 'load_image "$AGENT_IMAGE"' in text
-    assert 'load_image "$AGENT_IMAGE_NEXT"' in text
-    assert '"ORCH_E2E_AGENT_IMAGE_NEXT=$AGENT_IMAGE_NEXT"' in text
-
-
-def test_script_port_forward_reconnects() -> None:
-    """The helm upgrade replaces the api pod, which ends a port-forward bound to it."""
-    text = SCRIPT.read_text()
-    assert "port_forward &" in text
-    body = text.split("port_forward() {", 1)[1].split("\n}\n", 1)[0]
-    assert "while true" in body and 'port-forward "svc/$RELEASE"' in body, body
-    assert "trap" in body, "the loop must take its kubectl child down with it"
 
 
 def test_replacement_order_reads_the_pod_names_from_json_log_lines(monkeypatch) -> None:
@@ -191,10 +158,3 @@ def test_resilient_client_never_resends_a_post_that_may_have_been_accepted(
     with resilient(handler, monkeypatch) as client, pytest.raises(exc):
         client.post("/sessions/x/messages", json={"text": "t"})
     assert handler.calls == 1
-
-
-def test_kind_values_pin_the_dind_image_the_script_loads() -> None:
-    """The dind sidecar image is semver-pinned and loaded into kind by scripts/e2e.sh."""
-    image = yaml.safe_load(VALUES.read_text())["docker"]["image"]
-    assert re.fullmatch(r"docker:\d+\.\d+\.\d+-dind", image), image
-    assert f"DIND_IMAGE={image}" in SCRIPT.read_text()

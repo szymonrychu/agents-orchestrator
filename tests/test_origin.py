@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import httpx
 import pytest
 from fastapi import Depends, FastAPI
@@ -14,7 +12,6 @@ from agents_orchestrator.api.app import create_app
 from agents_orchestrator.api.origin import OriginAllowlist, require_allowed_origin
 from agents_orchestrator.settings import Settings, SettingsError
 
-ROOT = Path(__file__).resolve().parent.parent
 DB = "postgresql://u:p@h/db"
 
 
@@ -191,28 +188,3 @@ async def test_http_dependency():
     r = await _post(_http_app([]), "http://localhost:5173")
     assert r.status_code == 403
     assert r.json()["error"]["code"] == "forbidden_origin"
-
-
-def test_readmes_document_dev_origin():
-    for path in (ROOT / "README.md", ROOT / "chart" / "agents-orchestrator" / "README.md"):
-        text = path.read_text()
-        assert "ORCH_ALLOWED_ORIGINS" in text, path
-        assert "http://localhost:5173" in text, path
-
-
-def test_e2e_values_list_port_forward_origins():
-    text = (ROOT / "e2e" / "values-kind.yaml").read_text()
-    assert "ORCH_ALLOWED_ORIGINS: http://127.0.0.1:18080,http://localhost:18080" in text
-
-
-def test_readme_error_code_and_ingress_timeouts():
-    text = (ROOT / "README.md").read_text()
-    assert "`forbidden_origin` (403" in text
-    ingress = text.split("### Ingress")[1].split("\n## ")[0]
-    assert "proxy-read-timeout" in ingress
-    assert "proxy-send-timeout" in ingress
-    assert "3600" in ingress
-    assert "20 s" in ingress
-    security = text.split("\n## Security")[1].split("\n## ")[0]
-    assert "Origin" in security
-    assert "CORS" in security

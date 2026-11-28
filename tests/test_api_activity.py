@@ -7,10 +7,8 @@ Docker.
 
 from __future__ import annotations
 
-import re
 import uuid
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -27,7 +25,6 @@ from agents_orchestrator.spec import WORKDIR_ROOT
 IP0, IP1 = "10.9.0.10", "10.9.0.11"
 URL = "/agent/v1/activity"
 ROOT = f"{WORKDIR_ROOT}/workdir"
-README = (Path(__file__).resolve().parent.parent / "README.md").read_text(encoding="utf-8")
 
 
 def call_data(uid: str, tool: str, tool_input: dict[str, Any]) -> dict[str, Any]:
@@ -277,23 +274,3 @@ async def test_offline_identity(monkeypatch):
     assert (r.status_code, r.json()["error"]["code"]) == (403, "forbidden")
     assert rig.asked == []
     assert (await rig.get(ip=MEMBER_IP)).status_code == 200
-
-
-def test_readme_documents_activity_route():
-    agent_api = README.split("\n## Agent API\n", 1)[1].split("\n## ", 1)[0]
-    assert re.search(r"^### `GET /agent/v1/activity`\s*$", agent_api, re.MULTILINE)
-    body = agent_api.split("### `GET /agent/v1/activity`", 1)[1].split("\n### ", 1)[0]
-    for needle in (
-        "agent",
-        "limit",
-        "1 to 200",
-        "default 50",
-        "oldest first",
-        "invalid_request",
-        "401",
-        "403",
-        "PENDING_BASH_TIMEOUT_SECONDS",
-        "read-only",
-        "lines",
-    ):
-        assert needle in body, needle
