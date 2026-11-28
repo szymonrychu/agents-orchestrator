@@ -361,7 +361,7 @@ async def list(conn: psycopg.AsyncConnection, *, project: str | None = None) -> 
     )
 
 
-async def update(
+async def update(  # noqa: C901, PLR0912
     conn: psycopg.AsyncConnection,
     id: uuid.UUID,
     *,

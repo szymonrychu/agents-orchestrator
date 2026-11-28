@@ -77,7 +77,7 @@ async def readyz(request: Request):
     return JSONResponse({"status": "ready"})
 
 
-def create_app(
+def create_app(  # noqa: PLR0915
     settings: Settings,
     pool: AsyncConnectionPool | None = None,
     stream_poll_seconds: float = streams.DEFAULT_POLL_SECONDS,

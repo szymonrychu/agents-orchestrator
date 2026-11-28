@@ -3,9 +3,12 @@ messages it answered or that need no answer; whatever is not marked carries over
 
 from __future__ import annotations
 
+import pytest
 from factories import insert_message
 from test_agent_session_messaging import _app, _exec, _rows, _send, alone, hive
 from test_api_agent import client_for, headers
+
+pytestmark = pytest.mark.critical
 
 
 async def incoming(pool, session, sender, *, notice: str | None = None) -> int:

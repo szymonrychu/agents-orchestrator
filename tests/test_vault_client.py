@@ -21,6 +21,8 @@ from agents_orchestrator.api.vault_client import (
     vault_of,
 )
 
+pytestmark = pytest.mark.critical
+
 ENTRY = uuid.UUID("11111111-1111-4111-8111-111111111111")
 SESSION = uuid.UUID("22222222-2222-4222-8222-222222222222")
 TOKEN = "vault-service-token"

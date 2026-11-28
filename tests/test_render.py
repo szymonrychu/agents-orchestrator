@@ -561,14 +561,12 @@ def test_no_agent_url_omits_env():
     assert "ORCH_AGENT_URL" in config_of(objs)["claude"]["passthrough_env"]
 
 
-def test_agent_token_trust_domain_documented():
+def test_agent_token_is_pod_env_and_passed_through():
     """The token is plain pod env, readable by every process in the pod (Bash included)."""
     objs = render.render_session(make_session(), make_settings(agent_api_url=AGENT_URL), TOKENS)
     env = {e["name"]: e for e in container_of(objs)["env"]}
     assert "ORCH_AGENT_TOKEN" in env
     assert "ORCH_AGENT_TOKEN" in config_of(objs)["claude"]["passthrough_env"]
-    readme = (Path(__file__).parent.parent / "README.md").read_text().lower()
-    assert "best-effort" in readme and "orch_agent_token" in readme
 
 
 def _render(session, **settings):

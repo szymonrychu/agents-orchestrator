@@ -8,12 +8,15 @@ import uuid
 
 import httpx
 import psycopg
+import pytest
 from factories import insert_session
 from test_api_sessions import assert_error, client_for, make_settings
 from test_api_streams import open_sse, srv  # noqa: F401  (srv is a fixture)
 
 from agents_orchestrator.api.app import create_app
 from agents_orchestrator.db import sessions as sessions_repo
+
+pytestmark = pytest.mark.critical
 
 SERVICE_TOKEN = "s3cret-close-service-token"
 

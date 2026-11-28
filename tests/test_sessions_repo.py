@@ -21,6 +21,8 @@ from agents_orchestrator.db.sessions import SessionExists
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import SessionSpec, SpecInvalid, validate_slug, validate_spec
 
+pytestmark = pytest.mark.critical
+
 
 def _settings(**kw) -> Settings:
     kw.setdefault("database_url", "postgresql://x/y")

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
 import pytest_asyncio
 from factories import insert_agent, insert_session
 from test_api_sessions import assert_error, client_for, make_settings
 
 from agents_orchestrator.api.app import create_app
+
+pytestmark = pytest.mark.critical
 
 
 @pytest_asyncio.fixture

@@ -155,7 +155,7 @@ class Run:
                     await handoffs.record_gate_block(conn, row.id, snap)
                 self.trace.append(f"submit row {row.id} clear={gate.clear}")
 
-    async def event(self, name: str) -> None:
+    async def event(self, name: str) -> None:  # noqa: C901, PLR0912, PLR0915
         self.trace.append(name)
         agent_id = await self.subject()
         sid = self.session["id"]

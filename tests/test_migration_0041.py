@@ -7,6 +7,8 @@ import pytest
 
 from agents_orchestrator.db.migrate import MIGRATIONS_DIR, run_migrations
 
+pytestmark = pytest.mark.critical
+
 FILE = MIGRATIONS_DIR / "0041_vault_refs.sql"
 
 

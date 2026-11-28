@@ -24,6 +24,10 @@ run = "uv run ruff check . && uv run ruff format --check ."
 description = "Format and autofix"
 run = "uv run ruff format . && uv run ruff check --fix ."
 
+[tasks."test:critical"]
+description = "Run the critical fast lane"
+run = "uv run pytest -m \"critical and not integration and not e2e\""
+
 [tasks."test:integration"]
 description = "Run tests that need a real wrapper image (builds the test agent image when ORCH_TEST_WRAPPER_IMAGE is unset)"
 run = """
@@ -39,10 +43,6 @@ uv run pytest -m integration
 [tasks."test:e2e"]
 description = "kind e2e: build and load the images, install the chart, helm test, run tests/e2e"
 run = "scripts/e2e.sh"
-
-[tasks."test:chart"]
-description = "Run the Helm chart render tests"
-run = "uv run pytest tests/test_chart_*.py -q"
 
 [tasks."lint:chart"]
 description = "helm lint the chart with the CI values"

@@ -24,6 +24,8 @@ from agents_orchestrator.db import sessions as repo
 from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import SessionSpec
 
+pytestmark = pytest.mark.critical
+
 PEER = ("10.1.2.3", 5555)
 
 

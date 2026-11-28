@@ -59,7 +59,7 @@ def _tail(path: Path, lines: int = 80) -> str:
 
 
 @pytest.fixture(scope="session", autouse=True)
-def kind_environment() -> Iterator[None]:
+def kind_environment() -> Iterator[None]:  # noqa: C901
     """Bring up the kind environment with scripts/e2e.sh unless the script is running us."""
     if os.environ.get("ORCH_E2E_API_URL"):
         yield

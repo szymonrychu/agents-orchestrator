@@ -7,6 +7,8 @@ from fakes.fake_kube import FakeKube
 
 from agents_orchestrator.k8s.kube import Forbidden
 
+pytestmark = pytest.mark.critical
+
 
 def rb(namespace: str, role: str, name: str = "agent-x-1-read") -> dict:
     return {

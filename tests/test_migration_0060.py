@@ -7,6 +7,8 @@ from psycopg.types.json import Jsonb
 from agents_orchestrator.db.migrate import MIGRATIONS_DIR, run_migrations
 from agents_orchestrator.spec import load_stored_spec
 
+pytestmark = pytest.mark.critical
+
 
 def _upto_0059(dsn, tmp_path):
     for path in MIGRATIONS_DIR.glob("*.sql"):

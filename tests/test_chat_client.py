@@ -11,6 +11,8 @@ from fakes.fake_chat import FakeChat
 from agents_orchestrator.chat_client import ChatUnavailable, room_notes
 from agents_orchestrator.settings import Settings
 
+pytestmark = pytest.mark.critical
+
 SESSION = uuid.uuid4()
 TOKEN = "CANARY-chat-token"
 

@@ -223,7 +223,7 @@ def _merge_into(temp: Path, target: Path) -> None:
     shutil.rmtree(temp, ignore_errors=True)
 
 
-def _restore_one(
+def _restore_one(  # noqa: C901
     entry: Mapping[str, Any],
     client: httpx.Client,
     state_dir: Path | None,

@@ -29,6 +29,8 @@ from agents_orchestrator.api.admin import (
 from agents_orchestrator.api.app import create_app
 from agents_orchestrator.api.proposal_routes import require_proposer
 
+pytestmark = pytest.mark.critical
+
 GET_PRESETS = f"{ADMIN_PREFIX}/presets"
 
 

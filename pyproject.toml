@@ -53,10 +53,13 @@ packages = ["src/agents_orchestrator"]
 pythonpath = ["src", "tests"]
 asyncio_mode = "auto"
 markers = [
+    "unit: in-process test, no external service",
     "integration: needs a real wrapper image",
     "e2e: needs kind",
+    "live: real external service",
+    "critical: critical-path behaviour (mise run test:critical)",
 ]
-addopts = "-q -m 'not integration and not e2e'"
+addopts = "-q --strict-markers -m 'not integration and not e2e'"
 
 [tool.ruff]
 line-length = 100
@@ -64,3 +67,7 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+extend-select = ["C90", "PLR0911", "PLR0912", "PLR0915", "RET", "ERA"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10

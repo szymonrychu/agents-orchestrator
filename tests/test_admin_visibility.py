@@ -24,6 +24,8 @@ from agents_orchestrator.api import (  # noqa: F401
 from agents_orchestrator.api.admin import ADMIN_VISIBILITY
 from agents_orchestrator.api.app import create_app
 
+pytestmark = pytest.mark.critical
+
 PRESET_BODY = {"name": "hidden", "spec": {}}
 BODIES = {
     ("PUT", "/agent/v1/admin/presets/{ref}"): PRESET_BODY,

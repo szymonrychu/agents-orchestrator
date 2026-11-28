@@ -550,7 +550,7 @@ def _rejected(reasons: list[str], rejects: int) -> ApiError:
     response_model=schemas.HandoffAccepted,
     summary="Submit your handoff once your work is safe to hand over",
 )
-async def handoff_submit(
+async def handoff_submit(  # noqa: C901, PLR0912, PLR0915
     body: schemas.HandoffSubmitIn, request: Request, agent: Caller, pool: Pool, settings: Cfg
 ) -> schemas.HandoffAccepted:
     """Check order: hive leader and epoch, an open row (reused; a voluntary one is opened only

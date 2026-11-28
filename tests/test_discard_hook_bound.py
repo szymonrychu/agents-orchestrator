@@ -194,7 +194,7 @@ async def test_hook_success_after_failures_is_the_normal_path(pool, dsn, tmp_pat
     assert env.kube.names("PersistentVolumeClaim") == []  # delivered: nothing retained
 
 
-async def test_each_hook_has_its_own_give_up_window(pool, dsn, tmp_path):
+async def test_each_hook_has_its_own_give_up_window(pool, dsn, tmp_path):  # noqa: PLR0915
     """Hook A (settings) fails for most of the window, then recovers; hook B (the session's own
     URL) then fails for the first time. B gets a full window of its own, never A's leftover."""
     env = Env(pool, dsn, tmp_path, discard_hook_give_up_seconds=1800)

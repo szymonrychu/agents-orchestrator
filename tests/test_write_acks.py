@@ -17,6 +17,8 @@ from test_mindmap_relay import rig_for
 from agents_orchestrator.api.admin import ADMIN_PREFIX
 from agents_orchestrator.api.app import create_app
 
+pytestmark = pytest.mark.critical
+
 A = ADMIN_PREFIX
 RELAY_CASES = [
     ("specs", "PATCH", "/agent/v1/specs/S-2", 200, {"key": "S-2", "version": 4, "status": "draft"}),

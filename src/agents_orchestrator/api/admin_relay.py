@@ -557,12 +557,12 @@ def _next_cursor(request: Request, guard: Guard, status: int, content: bytes) ->
     return {NEXT_CURSOR_HEADER: str(min(ids))}
 
 
-def _handler(service: str, method: str, template: str) -> Callable[..., Awaitable[Response]]:
+def _handler(service: str, method: str, template: str) -> Callable[..., Awaitable[Response]]:  # noqa: C901
     _, upstream_prefix, _, _ = SERVICES[service]
     issuing = service == "webhook" and (method, template) in _ISSUING
     guard = GUARDS[(service, method, template)]
 
-    async def relay(request: Request, settings: Cfg) -> Response:
+    async def relay(request: Request, settings: Cfg) -> Response:  # noqa: C901, PLR0912
         _, session = caller_of(request)
         target = upstream_target(settings, service)
         body = None

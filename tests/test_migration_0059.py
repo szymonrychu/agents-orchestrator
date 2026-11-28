@@ -4,6 +4,8 @@ import pytest
 
 from agents_orchestrator.db.migrate import run_migrations
 
+pytestmark = pytest.mark.critical
+
 
 def _session(c):
     return c.execute(

@@ -13,6 +13,8 @@ from factories import insert_agent, insert_message, insert_session, set_agent_st
 
 from agents_orchestrator.db import queue as q
 
+pytestmark = pytest.mark.critical
+
 # ---------------------------------------------------------------- helpers
 
 
@@ -640,7 +642,7 @@ async def test_transitions_notify(pool, dsn):
 # ---------------------------------------------------------------- commands and checks
 
 
-async def test_commands_and_checks_lifecycle(pool):
+async def test_commands_and_checks_lifecycle(pool):  # noqa: PLR0915
     cid = (await insert_session(pool))["id"]
     agent = await _ready_agent(pool, cid)
     async with pool.connection() as conn:

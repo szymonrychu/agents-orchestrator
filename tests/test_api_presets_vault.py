@@ -20,6 +20,8 @@ from agents_orchestrator.api.admin import ADMIN_PREFIX
 from agents_orchestrator.api.app import create_app
 from agents_orchestrator.db import presets as repo
 
+pytestmark = pytest.mark.critical
+
 P = "/api/v1/presets"
 A = f"{ADMIN_PREFIX}/presets"
 ENTRY = "11111111-1111-4111-8111-111111111111"

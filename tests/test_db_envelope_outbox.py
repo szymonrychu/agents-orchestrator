@@ -1,10 +1,13 @@
 import asyncio
 
+import pytest
 from factories import insert_agent, insert_session
 
 from agents_orchestrator.db import envelope_outbox as outbox
 from agents_orchestrator.db.envelope_outbox import Row
 from agents_orchestrator.db.pool import listen
+
+pytestmark = pytest.mark.critical
 
 
 async def _seed(pool):

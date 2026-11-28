@@ -8,6 +8,8 @@ from pydantic import ValidationError
 from agents_orchestrator.settings import Settings, SettingsError
 from agents_orchestrator.spec import KUBE_TIERS, SessionSpec, SpecInvalid, validate_spec
 
+pytestmark = pytest.mark.critical
+
 DB = "postgresql://u:p@h/db"
 
 

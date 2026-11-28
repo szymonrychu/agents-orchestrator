@@ -26,6 +26,8 @@ from agents_orchestrator.db import export
 from agents_orchestrator.db import sessions as sessions_repo
 from agents_orchestrator.k8s import render
 
+pytestmark = pytest.mark.critical
+
 C = "/api/v1/sessions"
 P = "/api/v1/presets"
 A = f"{ADMIN_PREFIX}/presets"
@@ -123,7 +125,7 @@ async def table_texts(pool) -> list[tuple[str, str]]:
     return out
 
 
-async def test_vault_canary_never_leaks(pool, dsn, caplog):
+async def test_vault_canary_never_leaks(pool, dsn, caplog):  # noqa: PLR0915
     caplog.set_level(logging.DEBUG)
     vault = CanaryVault()
     settings = agent_settings(dsn).model_copy(

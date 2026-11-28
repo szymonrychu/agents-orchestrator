@@ -13,6 +13,7 @@ import uuid
 from typing import Any
 
 import httpx
+import pytest
 from factories import insert_message, set_agent_status
 from fakes.fake_chat import FakeChat
 from test_agent_chat import CHAT_TOKEN, CHAT_URL
@@ -23,6 +24,8 @@ from test_api_sessions import assert_error
 from agents_orchestrator.api import chat_relay
 from agents_orchestrator.api.app import create_app
 from agents_orchestrator.db import queue, session_messaging
+
+pytestmark = pytest.mark.critical
 
 ROOM = "!room:hs"
 MESSAGES = "POST /chat/v1/messages"

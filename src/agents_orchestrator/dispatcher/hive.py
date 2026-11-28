@@ -814,7 +814,7 @@ def _off(state: HiveState, target: _PressureTarget, exc: WrapperError) -> bool:
     return True
 
 
-async def _push_policy(
+async def _push_policy(  # noqa: C901
     target: _PressureTarget,
     state: HiveState,
     client_factory: ClientFactory,
@@ -910,7 +910,7 @@ async def _push_pressure(
     return sum(taken)
 
 
-async def push_once(
+async def push_once(  # noqa: C901
     pool: AsyncConnectionPool,
     settings: Settings,
     client_factory: ClientFactory,

@@ -427,7 +427,7 @@ _LIMIT_LIVE = (
 )
 
 
-async def _judge(
+async def _judge(  # noqa: PLR0911
     conn: psycopg.AsyncConnection,
     session_id: uuid.UUID,
     req: dict,
@@ -494,7 +494,7 @@ def _voluntary(req: dict) -> bool:
     return req["kind"] == "handover" and req["reason"] not in handoffs.FORCED_REASONS
 
 
-async def leadership_pass(
+async def leadership_pass(  # noqa: C901, PLR0912, PLR0915
     conn: psycopg.AsyncConnection, session_id: uuid.UUID, policy: PassPolicy = DEFAULT_POLICY
 ) -> LeaderChange | None:
     """Elect, apply queued requests, hand over (scale-down, lost): one lock.

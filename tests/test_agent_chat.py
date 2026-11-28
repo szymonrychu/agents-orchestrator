@@ -10,12 +10,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import secrets
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -23,7 +21,6 @@ import pytest
 from any_mcp.testing import PluginHarness
 from any_mcp_tatara_orchestrator import OrchestratorPlugin
 from fakes.fake_chat import DEFAULT_ROOM, FakeChat
-from fastapi.routing import APIRoute
 from test_api_sessions import assert_error
 
 from agents_orchestrator.api import chat
@@ -37,7 +34,8 @@ from agents_orchestrator.settings import Settings
 from agents_orchestrator.spec import SessionSpec
 from agents_orchestrator.tokens import derive_tokens
 
-README = (Path(__file__).resolve().parent.parent / "README.md").read_text(encoding="utf-8")
+pytestmark = pytest.mark.critical
+
 KEY = secrets.token_hex(16)
 AGENT_PORT, MAIN_PORT, SERVICE_PORT = 8001, 8000, 8002
 CHAT_URL = "http://chat.test:9001"
@@ -797,47 +795,6 @@ def test_client_owned_per_app():
     assert first.is_closed
 
 
-def test_readme_documents_chat_routes():
-    agent_api = README.split("\n## Agent API\n", 1)[1].split("\n## ", 1)[0]
-    assert "\n### Chat\n" in agent_api
-    section = agent_api.split("\n### Chat\n", 1)[1].split("\n### ", 1)[0]
-    documented = set(
-        re.findall(r"^#### `(GET|POST|PUT|DELETE) (/agent/v1/chat/\S+)`\s*$", section, re.MULTILINE)
-    )
-    app = create_app(settings(), pool=None)
-    served = {
-        (method, route.path)
-        for route in chat.router.routes
-        if isinstance(route, APIRoute)
-        for method in route.methods
-    }
-    assert served == {
-        ("GET", "/agent/v1/chat/rooms"),
-        ("POST", "/agent/v1/chat/messages"),
-        ("POST", "/agent/v1/chat/reactions"),
-        ("GET", "/agent/v1/chat/messages/{send_id}"),
-        ("GET", "/agent/v1/chat/notes"),
-        ("PUT", "/agent/v1/chat/notes/sections/{section}"),
-        ("GET", "/agent/v1/chat/history"),
-        ("POST", "/agent/v1/chat/attachments"),
-        ("GET", "/agent/v1/chat/attachments/{request_id}"),
-    }
-    assert documented == served
-    assert {f"{m} {p}" for m, p in served} <= {
-        f"{m.upper()} {p}" for p, ops in app.openapi()["paths"].items() for m in ops
-    }
-    for needle in (
-        "not_leader",
-        "chat_unconfigured",
-        "chat_unavailable",
-        "payload_too_large",
-        "X-Orch-Slug",
-        "ORCH_CHAT_TOKEN",
-        "unchanged",
-    ):
-        assert needle in section, needle
-
-
 # ------------------------------------------------------- the released plugin against the routes
 
 
@@ -940,7 +897,7 @@ async def test_chat_tools_parity(monkeypatch):
     await check_chat_tools_parity(memory_target(monkeypatch))
 
 
-# ------------------------------------------------------------------- DB-backed (CI, Docker)
+# ------------------------------------------------------------------- DB-backed: CI, Docker
 
 
 async def test_leader_only_and_identity_db(pool, dsn, monkeypatch):

@@ -94,7 +94,7 @@ def _entry(mode: str, name: str, exclude: list[str]) -> dict[str, Any]:
     return entry
 
 
-def map_cache(
+def map_cache(  # noqa: PLR0911
     cache: dict[str, Any] | None, preset: PresetLike | None, *, is_preset: bool
 ) -> list[dict[str, Any]] | None:
     """The `backup` entries of one stored `cache` block, or None for no backup at all.
@@ -250,7 +250,7 @@ def _rewrite(spec: dict[str, Any], preset: PresetLike | None, is_preset: bool):
     return new, old, entries, True
 
 
-def collect(conn: psycopg.Connection, *, only_cache: bool) -> Report:
+def collect(conn: psycopg.Connection, *, only_cache: bool) -> Report:  # noqa: C901
     """Map every stored preset and session; `only_cache` skips rows with no cache to rewrite."""
     report = Report()
     with conn.cursor(row_factory=dict_row) as cur:

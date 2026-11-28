@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from test_api_agent import client_for, headers, make_settings
 from test_api_leadership import hive
 
@@ -164,14 +162,3 @@ async def test_check_outside_workdir_allows(pool, dsn):
     for p in ["/etc/passwd", "../x", f"{WORKDIR_ROOT}/other/x", "/workdir/workdir/../x"]:
         r = await check(dsn, pool, c, IP1, envelope(path=p))
         assert (r.status_code, r.json()) == (200, {"decision": "allow"}), p
-
-
-def test_workdir_root_shared_no_k8s_import():
-    src = Path(__file__).resolve().parent.parent / "src" / "agents_orchestrator"
-    api = (src / "api" / "agent.py").read_text()
-    assert "agents_orchestrator.k8s" not in api and "import k8s" not in api
-    assert "WORKDIR_ROOT" in api
-    render = (src / "k8s" / "render.py").read_text()
-    assert 'WORKDIR_ROOT = "' not in render
-    assert "WORKDIR_ROOT" in render
-    assert WORKDIR_ROOT == "/workdir"

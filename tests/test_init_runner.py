@@ -238,7 +238,7 @@ async def test_edit_after_run_never_reruns(env):
     assert init["scripts_hash"] == init_scripts_hash(scripts)
 
 
-async def test_crash_and_failure_reasons(env):
+async def test_crash_and_failure_reasons(env):  # noqa: PLR0915
     # crashed between the running write and the create: the next tick creates the Job
     a = await env.session("alpha", init_scripts=["echo a"])
     await env.tick()
@@ -374,7 +374,7 @@ async def test_init_gate_shapes():
     assert timeout.message == "init failed: timeout"
 
 
-async def test_render_init_job(pool, dsn, tmp_path):
+async def test_render_init_job(pool, dsn, tmp_path):  # noqa: PLR0915
     env = Env(pool, dsn, image_pull_secret="harbor-pull")
     scripts = ["echo first > first.txt", 'echo "second $FOO"\necho err >&2']
     c = await env.session(

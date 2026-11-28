@@ -22,6 +22,8 @@ from agents_orchestrator.api.app import create_app
 from agents_orchestrator.db import presets as repo
 from agents_orchestrator.db import sessions as sessions_repo
 
+pytestmark = pytest.mark.critical
+
 P = "/api/v1/presets"
 A = f"{ADMIN_PREFIX}/presets"
 HARBOR = "44444444-4444-4444-8444-444444444444"

@@ -18,6 +18,8 @@ from agents_orchestrator.api.app import create_app
 from agents_orchestrator.settings import Settings, SettingsError
 from agents_orchestrator.tokens import derive_tokens
 
+pytestmark = pytest.mark.critical
+
 DB = "postgresql://u:p@h/db"
 DEFAULT_ID = "00000000-0000-0000-0000-000000000001"
 TOKEN = "s3cret-webhook-token-value"

@@ -9,6 +9,8 @@ from pydantic import ValidationError
 
 from agents_orchestrator.spec import VAULT_REFS_MAX, SessionSpec
 
+pytestmark = pytest.mark.critical
+
 U1 = "0b8f6f2e-3c1d-4f7e-9a55-1c2d3e4f5a6b"
 U2 = "9d1c7a10-aaaa-4bbb-8ccc-0123456789ab"
 

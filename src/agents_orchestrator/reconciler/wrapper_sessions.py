@@ -126,7 +126,7 @@ class WrapperSessionBootstrapper:
                 if aclose is not None:
                     await aclose()
 
-    async def _bootstrap(self, client: Any, agent: Agent, spec: SessionSpec) -> str | None:
+    async def _bootstrap(self, client: Any, agent: Agent, spec: SessionSpec) -> str | None:  # noqa: C901
         if spec.wrapper is not None and spec.wrapper.managed_settings is not None:
             try:  # every bootstrap: the wrapper keeps no overlay across restarts
                 await client.put_managed_settings(spec.wrapper.managed_settings)
@@ -183,7 +183,7 @@ class WrapperSessionBootstrapper:
                 conn, agent.id, snap.wrapper_session_id, snap.created_at, resumed=resumed
             )
 
-    async def _pick(
+    async def _pick(  # noqa: C901
         self, client: Any, agent: Agent, listed: list[Snapshot], spec: SessionSpec
     ) -> tuple[Snapshot, bool]:
         """The session to record and whether it was resumed."""

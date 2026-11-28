@@ -389,7 +389,7 @@ class Reconciler:
                 log.exception("reconcile of session %s failed", session.slug)
                 await self._record_error(session, exc)
 
-    async def pre_discard(self, session: Session) -> bool:
+    async def pre_discard(self, session: Session) -> bool:  # noqa: C901
         """The gate before a discard deletes anything (D15): True lets the deletion proceed.
 
         Every owed hook (`_owed_hooks`: the settings hook, then the session's own URL, minus
@@ -570,7 +570,7 @@ class Reconciler:
 
     # ------------------------------------------------------------------ an active session
 
-    async def _converge(self, session: Session) -> None:
+    async def _converge(self, session: Session) -> None:  # noqa: C901, PLR0915
         ns, slug = self.settings.namespace, session.slug
         if not self.settings.agent_api_url and session.id not in self._warned_no_agent_url:
             self._warned_no_agent_url.add(session.id)
@@ -1154,7 +1154,7 @@ class Reconciler:
             async with self.pool.connection() as conn:
                 await queue.complete_command(conn, cmd.id, status, result)
 
-    async def _rebootstrap(self, cmd: queue.Command) -> tuple[str, dict[str, Any]]:
+    async def _rebootstrap(self, cmd: queue.Command) -> tuple[str, dict[str, Any]]:  # noqa: PLR0911
         async with self.pool.connection() as conn:
             agent = await agents_repo.get_agent(conn, cmd.agent_id)
             session = await sessions.get(conn, cmd.session_id)

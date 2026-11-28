@@ -10,6 +10,8 @@ from test_render import TOKENS, config_of, container_of, make_session, make_sett
 from agents_orchestrator.k8s import render
 from agents_orchestrator.reconciler.init import render_init_job
 
+pytestmark = pytest.mark.critical
+
 ENTRY = "11111111-1111-4111-8111-111111111111"
 REF = {"vault": ENTRY, "env": "TOKEN"}
 SECRET_PIN = {"secret": f"vault-{ENTRY}-v3", "key": "TOKEN", "version": 3}

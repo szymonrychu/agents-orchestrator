@@ -260,7 +260,7 @@ class _AgentStream:
             self.last_seq = env.seq
         return projected
 
-    async def _project(self, conn: Any, env: Envelope) -> _Projected:
+    async def _project(self, conn: Any, env: Envelope) -> _Projected:  # noqa: C901, PLR0912, PLR0915
         ref, data = self.ref, env.data
         if env.type in _ACTIVITY:
             await status.mark_activity(conn, ref.agent_id, env.ts)

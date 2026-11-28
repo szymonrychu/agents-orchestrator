@@ -83,7 +83,7 @@ async def _expire(pool: AsyncConnectionPool) -> None:
     await _each(pool, await _read(pool, repo.due), "expire", act)
 
 
-async def _live(conn: AsyncConnection, p: repo.Proposal) -> str | None:
+async def _live(conn: AsyncConnection, p: repo.Proposal) -> str | None:  # noqa: PLR0911
     """The live fingerprint of the preset or session a proposal targets; None when the preset is
     deleted or no longer superleader-manageable (a regular leader's: outside its projects; a
     manageable request: only deleted), or the session purged or being deleted."""

@@ -8,6 +8,8 @@ import pytest
 from agents_orchestrator.settings import Settings, SettingsError
 from agents_orchestrator.tokens import SessionTokens, derive_tokens, tokens_for
 
+pytestmark = pytest.mark.critical
+
 KEY = b"k" * 32
 CID = UUID("11111111-1111-1111-1111-111111111111")
 OTHER = UUID("22222222-2222-2222-2222-222222222222")

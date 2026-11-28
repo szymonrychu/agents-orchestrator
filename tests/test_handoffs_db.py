@@ -8,6 +8,8 @@ from factories import insert_agent, insert_session
 
 from agents_orchestrator.db import handoffs, queue
 
+pytestmark = pytest.mark.critical
+
 
 async def _agent(pool):
     session = await insert_session(pool)

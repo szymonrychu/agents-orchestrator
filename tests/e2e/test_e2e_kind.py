@@ -1423,7 +1423,7 @@ def test_delete_default_preset_refused(api: httpx.Client) -> None:
     assert api.get(f"/presets/{default['id']}").status_code == 200
 
 
-# ------------------------------------------------------------------ scaling (D1-D4)
+# ------------------------------------------------------------------ scaling: D1-D4
 
 HASH_ANNOTATION = "agents.szymonrichert.pl/config-hash"
 SCALE_SLUG_PREFIX = "e2e-scale"
@@ -1934,7 +1934,7 @@ def test_session_without_init_scripts_skipped(api: httpx.Client, baseline: dict)
         assert view["status"]["init"]["state"] == "skipped", view["status"]
 
 
-# ------------------------------------------------------------------ configuration (A6)
+# ------------------------------------------------------------------ configuration: A6
 
 HOOK_FILE = "hook-ran.txt"
 HOOK_TIMEOUT = 120

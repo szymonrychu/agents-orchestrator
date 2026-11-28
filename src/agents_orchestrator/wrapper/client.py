@@ -212,7 +212,7 @@ class WrapperClient:
         return self._map_submit(resp)
 
     @staticmethod
-    def _map_submit(resp: httpx.Response) -> SubmitOutcome:
+    def _map_submit(resp: httpx.Response) -> SubmitOutcome:  # noqa: C901, PLR0911
         status = resp.status_code
         if 200 <= status < 300:
             try:

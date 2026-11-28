@@ -1028,7 +1028,7 @@ def _config_plugin_names(config: dict[str, Any]) -> set[str]:
     return {e["name"] for e in plugins if isinstance(e, dict) and isinstance(e.get("name"), str)}
 
 
-def _template_problems(spec: SessionSpec) -> list[str]:
+def _template_problems(spec: SessionSpec) -> list[str]:  # noqa: C901
     """One message per spec text field whose Jinja template does not validate or render."""
     fields: list[tuple[str, str, rendering.Surface]] = [
         (f"init_scripts[{i}]", script, "init_script") for i, script in enumerate(spec.init_scripts)
@@ -1066,7 +1066,7 @@ def _template_problems(spec: SessionSpec) -> list[str]:
     return errors
 
 
-def validate_spec(spec: SessionSpec, settings: Settings, stored: SessionSpec | None = None) -> None:
+def validate_spec(spec: SessionSpec, settings: Settings, stored: SessionSpec | None = None) -> None:  # noqa: C901, PLR0912, PLR0915
     """Validate a spec.
 
     `stored` stays for the preset PUT: a model, effort or image that has since left the settings

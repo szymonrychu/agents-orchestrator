@@ -646,7 +646,7 @@ async def _start_prompt_gate(conn: psycopg.AsyncConnection, session_id: uuid.UUI
     )
 
 
-async def _claim_in_session(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Claim | None:
+async def _claim_in_session(conn: psycopg.AsyncConnection, session_id: uuid.UUID) -> Claim | None:  # noqa: C901, PLR0912, PLR0915
     """Claim the pending start prompt alone, else a queued handover notice, else scan the queued
     messages in id order.
 

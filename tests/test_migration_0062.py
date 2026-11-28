@@ -1,9 +1,12 @@
 import shutil
 
 import psycopg
+import pytest
 from psycopg.types.json import Jsonb
 
 from agents_orchestrator.db.migrate import MIGRATIONS_DIR, run_migrations
+
+pytestmark = pytest.mark.critical
 
 
 def _upto_0061(dsn, tmp_path):

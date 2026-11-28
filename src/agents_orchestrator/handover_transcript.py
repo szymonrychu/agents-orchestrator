@@ -107,7 +107,7 @@ def _call_line(data: Mapping[str, Any]) -> str:
     return f"- tool {_esc(tool)}: {_one_line(detail, CALL_CHARS)}".rstrip(": ")
 
 
-def _body_line(row: Mapping[str, Any], output_chars: int) -> str | None:
+def _body_line(row: Mapping[str, Any], output_chars: int) -> str | None:  # noqa: C901, PLR0911
     kind, data = row["type"], row.get("data") or {}
     if kind == "gap":
         return "[ingest gap: events are missing here]"

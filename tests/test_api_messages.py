@@ -20,6 +20,8 @@ from test_api_sessions import assert_error, client_for, make_settings
 
 from agents_orchestrator.api.app import create_app
 
+pytestmark = pytest.mark.critical
+
 
 @pytest_asyncio.fixture
 async def http(pool, dsn):

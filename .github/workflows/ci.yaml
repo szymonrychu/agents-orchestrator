@@ -22,6 +22,14 @@ jobs:
       - uses: jdx/mise-action@v2
       - run: mise run test
 
+  test-critical:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - run: mise run install
+      - run: mise run test:critical
+
   images:
     needs: [lint, test, e2e]
     runs-on: ubuntu-latest
@@ -60,7 +68,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v2
       - run: mise run lint:chart
-      - run: uv run pytest tests/test_chart_*.py -q
 
   e2e:
     needs: [chart]
@@ -127,7 +134,7 @@ jobs:
         run: helm push "agents-orchestrator-$VERSION.tgz" "$CHART_REPO"
 
   release:
-    needs: [lint, test, images, chart, e2e, chart-publish]
+    needs: [lint, test, test-critical, images, chart, e2e, chart-publish]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -147,7 +154,7 @@ jobs:
       - name: Compute version
         id: version
         run: |
-          version="$(python3 scripts/next_version.py)"
+          version="$(pipx run --spec 'git+https://github.com/szymonrychu/agents-common@v0.23.0' next-version)"
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - uses: regclient/actions/regctl-installer@dd58ad94f76adb73d8ac1bf75ed25f01545d5b32 # main as of 2026-10-25
         if: steps.version.outputs.version != ''
