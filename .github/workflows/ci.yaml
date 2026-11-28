@@ -154,7 +154,7 @@ jobs:
       - name: Compute version
         id: version
         run: |
-          version="$(python3 scripts/next_version.py)"
+          version="$(pipx run --spec 'git+https://github.com/szymonrychu/agents-common@v0.23.0' next-version)"
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - uses: regclient/actions/regctl-installer@dd58ad94f76adb73d8ac1bf75ed25f01545d5b32 # main as of 2026-10-25
         if: steps.version.outputs.version != ''
